@@ -7,7 +7,6 @@ __pycache__/
 venv/
 env/
 .venv/
-.env
 
 # ==========================================
 # 2. DEPENDÊNCIAS FRONTEND (React / Node)
@@ -24,8 +23,7 @@ yarn-error.log*
 # 3. DADOS LOCAIS E RELATÓRIOS (Projeto Nexus)
 # ==========================================
 # Ignorar o banco de dados local para não sobrescrever a produção
-nexus_local.db
-nexus_local.db-journal
+
 
 # Ignorar os relatórios gerados pelos scripts
 *.csv
