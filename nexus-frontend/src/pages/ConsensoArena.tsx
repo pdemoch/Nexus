@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import { useState, useMemo, useEffect, useCallback, Fragment } from 'react';
 import {
   useReactTable,
   getCoreRowModel,
@@ -7,11 +7,12 @@ import {
   getSortedRowModel,
   SortingState
 } from '@tanstack/react-table';
-import { Check, TrendingUp, Filter, Loader2, ChevronDown, ChevronUp, ArrowUpDown, ArrowUp, ArrowDown, Lock, Clock, Search } from 'lucide-react';
+import { Check, TrendingUp, Filter, Loader2, ChevronDown, ChevronUp, ArrowUpDown, ArrowUp, ArrowDown, Lock, Clock, Search, X } from 'lucide-react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor));
+const formatVolume = (val: number) => Math.round(val).toLocaleString('pt-BR');
 
 export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }) {
   const isExecutivo = usuarioSessao?.funcao === 'Executivo';
@@ -38,6 +39,11 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     axios.get('http://localhost:8000/api/v1/consensus/filtros', {
       params: { gerente_nome: usuarioSessao?.gerente_nome } 
     }).then(res => setOpcoesBusca(res.data)).catch(console.error);
+
+    axios.get('http://localhost:8000/api/v1/consensus/status', {
+      params: { origem: 'Check-Inicial' }
+    }).then(res => setIsTopDownFechado(res.data.is_topdown_fechado)).catch(console.error);
+
   }, [usuarioSessao]);
 
   const fetchData = useCallback(async () => {
@@ -77,7 +83,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
 
     try {
       await axios.post(`http://localhost:8000/api/v1/consensus/micro/congelar?nome_responsavel=${nomeResponsavel}`, { origem_ajuste: "Nexus UI", ajustes });
-      alert("🔒 Ciclo Bottom-Up gravado e congelado com sucesso!");
+      alert("🔒 Ciclo Comercial gravado e congelado com sucesso!");
       setCelulasEditadas({});
       fetchData();
     } catch (e: any) { 
@@ -88,14 +94,15 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   const clientesUnicos = useMemo(() => [...new Set(dadosBrutos.map(d => d.razaosocial).filter(Boolean))].sort(), [dadosBrutos]);
   const dadosFiltrados = useMemo(() => clienteFiltro === "TODOS" ? dadosBrutos : dadosBrutos.filter(d => d.razaosocial === clienteFiltro), [dadosBrutos, clienteFiltro]);
 
-  const totaisFaturamento = useMemo(() => {
-    const totais: Record<string, number> = {};
-    dadosFiltrados.forEach(row => { row.meses.forEach((m: any) => { totais[m.mes_banco] = 0; }); });
+  const totaisGerais = useMemo(() => {
+    const totais: Record<string, { vol: number, fat: number }> = {};
+    dadosFiltrados.forEach(row => { row.meses.forEach((m: any) => { totais[m.mes_banco] = { vol: 0, fat: 0 }; }); });
     dadosFiltrados.forEach(row => {
       row.meses.forEach((mes: any) => {
         const edicao = celulasEditadas[row.chave_matriz]?.[mes.mes_banco];
         const volumeFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : mes.vol_ajustado));
-        totais[mes.mes_banco] += volumeFinal * mes.pmv; 
+        totais[mes.mes_banco].vol += volumeFinal;
+        totais[mes.mes_banco].fat += volumeFinal * mes.pmv; 
       });
     });
     return totais;
@@ -117,6 +124,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   };
 
   const isTelaBloqueada = isCicloFechado || !isTopDownFechado;
+  const qtdEdicoes = Object.keys(celulasEditadas).length;
 
   const columns = useMemo(() => {
     if (dadosBrutos.length === 0) return [];
@@ -158,19 +166,23 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           const valorInteiro = Math.round(Number(valorReal));
           const baseIA = Math.round(Number(dadosMes?.vol_ia || 0));
           const isChanged = valorInteiro !== baseIA;
+          const faturamentoPrevisto = valorInteiro * (dadosMes?.pmv || 0);
 
           return (
-            <div className="flex flex-col w-24 gap-1">
+            <div className="flex flex-col w-28 gap-1">
               <span className="text-[9px] text-gray-400 font-black opacity-60 uppercase text-center tracking-widest">
-                Ref. IA: {baseIA.toLocaleString('pt-BR')}
+                Ref. IA: {formatVolume(baseIA)}
               </span>
               <input
                 type="number" disabled={isTelaBloqueada} value={valorInteiro === 0 ? '' : valorInteiro} placeholder="0"
                 onChange={(e) => meta.updateCell(row.chave_matriz, m.mes_banco, e.target.value, (dadosMes?.pmv || 0))}
-                className={`text-sm text-center font-black p-2.5 rounded-xl outline-none border-2 transition-all
+                className={`text-sm text-center font-black p-2.5 rounded-xl outline-none border-2 transition-all w-full
                   ${isTelaBloqueada ? 'cursor-not-allowed opacity-50 bg-gray-100 border-gray-200 text-gray-500' 
                   : isChanged ? 'bg-blue-50 border-blue-200 text-blue-700 shadow-sm' : 'bg-gray-50 border-transparent text-gray-700 focus:bg-white focus:border-gray-200'}`}
               />
+              <span className="text-[10px] font-black text-emerald-600 text-center pr-1 tracking-tight">
+                {formatMoeda(faturamentoPrevisto)}
+              </span>
             </div>
           );
         }
@@ -199,21 +211,22 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     return (
       <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
         <Loader2 className="w-8 h-8 animate-spin text-blue-500 mb-4" />
-        <span className="text-slate-400 font-black text-xs tracking-widest uppercase">A iniciar Consenso de Vendas...</span>
+        <span className="text-slate-400 font-black text-xs tracking-widest uppercase">A iniciar Visão Comercial...</span>
       </div>
     );
   }
 
+  // --- A ESTRUTURA AGORA ESTÁ 100% LIVRE PARA O SCROLL NATIVO ---
   return (
-    <div className="flex h-full w-full bg-[#f8fafc] overflow-hidden p-6 font-sans min-h-screen">
-      <div className="flex-1 flex flex-col relative pb-20">
+    <div className="w-full bg-[#f8fafc] font-sans min-h-screen">
+      <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative pb-24">
         
         {(!isTopDownFechado && (nomeResponsavel || isExecutivo)) && (
           <div className="mb-4 bg-orange-100 border border-orange-200 text-orange-800 p-4 rounded-[24px] flex items-center gap-3 shadow-sm">
             <div className="bg-orange-200 p-2 rounded-full"><Clock className="w-5 h-5 text-orange-700" /></div>
             <div>
-              <h4 className="font-black text-sm uppercase tracking-widest">Aguardando Diretoria (Top-Down)</h4>
-              <p className="text-sm font-medium opacity-80">A tela está em modo leitura. Só poderá fazer os seus ajustes de Consenso após o fechamento da meta executiva.</p>
+              <h4 className="font-black text-sm uppercase tracking-widest">Aguardando Visão Gerencial (Top-Down)</h4>
+              <p className="text-sm font-medium opacity-80">A tela está em modo leitura. Só poderá fazer os seus ajustes após o fechamento da meta executiva.</p>
             </div>
           </div>
         )}
@@ -274,146 +287,148 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                   </div>
               ) : !isTopDownFechado ? (
                   <div className="flex items-center gap-2 bg-orange-100 text-orange-700 px-6 py-3 rounded-2xl text-sm font-black tracking-widest uppercase border border-orange-200 cursor-not-allowed h-full">
-                      <Lock className="w-4 h-4" /> Aguardando Top-Down
+                      <Lock className="w-4 h-4" /> Aguardando Visão Gerencial
                   </div>
               ) : (
-                  <button onClick={handleCongelarCiclo} className="flex items-center gap-2 bg-rose-500 hover:bg-rose-400 text-white px-6 py-3 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-rose-500/30 transition-all h-full">
-                      Gravar Ciclo Definitivo
-                  </button>
+                  <div className="flex items-center gap-3 h-full">
+                    {qtdEdicoes > 0 && (
+                      <button onClick={() => setCelulasEditadas({})} className="flex items-center gap-1 text-xs font-black text-rose-500 hover:text-rose-700 transition tracking-widest uppercase px-4 py-3 rounded-2xl hover:bg-rose-50">
+                        <X className="w-4 h-4" /> Descartar {qtdEdicoes} Edições
+                      </button>
+                    )}
+                    <button onClick={handleCongelarCiclo} className="flex items-center gap-2 bg-rose-500 hover:bg-rose-400 text-white px-6 py-3 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-rose-500/30 transition-all h-full">
+                        {qtdEdicoes > 0 ? 'Gravar e Congelar Ciclo' : 'Gravar Ciclo Definitivo'}
+                    </button>
+                  </div>
               )}
             </div>
           )}
         </div>
 
-        <div className="bg-white rounded-[45px] shadow-2xl border border-gray-100 overflow-hidden flex-1 overflow-y-auto relative">
+        {/* TABELA LIVRE PARA ROLAR COM A TELA */}
+        <div className="bg-white rounded-[40px] shadow-2xl border border-gray-100 overflow-hidden relative">
           {dadosFiltrados.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-4 py-20">
+            <div className="flex flex-col items-center justify-center text-slate-400 gap-4 py-20">
               <Search className="w-12 h-12 opacity-20" />
               <p className="font-bold tracking-widest uppercase text-sm text-center px-4">
                 {isExecutivo ? "Nenhum dado encontrado para a sua carteira." : "Selecione um vendedor ou regional e clique em Buscar."}
               </p>
             </div>
           ) : (
-          <table className="w-full text-left border-collapse">
-            <thead className="sticky top-0 bg-white/95 backdrop-blur-xl z-10 border-b border-gray-100 shadow-sm">
-              {table.getHeaderGroups().map(hg => (
-                <tr key={hg.id}>
-                  {hg.headers.map(header => (
-                    <th key={header.id} className={`px-8 py-6 text-[10px] font-black text-gray-400 uppercase tracking-widest ${header.column.getCanSort() ? 'cursor-pointer select-none hover:bg-blue-50/50 transition-colors group' : ''}`} onClick={header.column.getToggleSortingHandler()}>
-                      <div className="flex items-center gap-2">
-                        {flexRender(header.column.columnDef.header, header.getContext())}
-                        {header.column.getCanSort() && (
-                          <span className="text-gray-300 transition-colors">
-                            {{ asc: <ArrowUp className="w-4 h-4 text-blue-500" />, desc: <ArrowDown className="w-4 h-4 text-blue-500" /> }[header.column.getIsSorted() as string] ?? <ArrowUpDown className="w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity" />}
-                          </span>
-                        )}
-                      </div>
-                    </th>
-                  ))}
-                </tr>
-              ))}
-            </thead>
-            
-            <tbody>
-              {table.getRowModel().rows.map(row => (
-                <React.Fragment key={row.id}>
-                  <tr className={`border-b border-gray-50 transition-colors ${row.getIsExpanded() ? 'bg-blue-50/40' : 'hover:bg-blue-50/10'}`}>
-                    {row.getVisibleCells().map(cell => <td key={cell.id} className="px-8 py-3">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}
-                  </tr>
-                  
-                  {row.getIsExpanded() && (
-                    <tr>
-                      <td colSpan={table.getAllColumns().length} className="bg-gray-50/50 p-8 border-b border-gray-100">
-                        <div className="bg-white rounded-[40px] p-8 shadow-inner border border-gray-100 animate-in fade-in duration-500">
-                          <div className="flex justify-between items-center mb-6">
-                             <div className="flex gap-4">
-                               <h3 className="text-lg font-black text-gray-900 uppercase tracking-tighter">
-                                 Histórico Específico (Cliente: <span className="text-blue-600">{row.original.razaosocial}</span>)
-                               </h3>
-                             </div>
-                          </div>
-
-                          <div className="h-[200px] w-full -ml-4">
-                            {loadingGrafico === row.original.chave_matriz ? (
-                              <div className="h-full flex items-center justify-center text-blue-600"><Loader2 className="animate-spin w-8 h-8" /></div>
-                            ) : (
-                              <ResponsiveContainer width="100%" height="100%">
-                                <LineChart data={
-                                    (dadosGraficoCache[row.original.chave_matriz] || []).map((p: any) => {
-                                        const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
-                                        const edicao = celulasEditadas[row.original.chave_matriz]?.[p.data_iso];
-                                        const valConsenso = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
-                                        return { ...p, Consenso: valConsenso !== null ? valConsenso : p.Consenso };
-                                    })
-                                }>
-                                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                                  <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900}} axisLine={false} tickLine={false} />
-                                  <YAxis tick={{fontSize: 10}} axisLine={false} tickLine={false} />
-                                  <Tooltip contentStyle={{borderRadius: '20px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)'}} />
-                                  <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900'}} />
-                                  
-                                  <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={4} dot={{r: 3, fill: '#0f172a'}} connectNulls={false} />
-                                  <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
-                                  <Line type="monotone" dataKey="Consenso" name="Consenso Bottom-Up" stroke="#10b981" strokeWidth={5} dot={{r: 6, fill: '#10b981', strokeWidth: 2, stroke: '#fff'}} connectNulls={false} />
-                                </LineChart>
-                              </ResponsiveContainer>
-                            )}
-                          </div>
+          <div className="overflow-x-auto pb-4">
+            <table className="w-full text-left border-collapse">
+              <thead className="sticky top-0 bg-white/95 backdrop-blur-xl z-10 border-b border-gray-100 shadow-sm">
+                {table.getHeaderGroups().map(hg => (
+                  <tr key={hg.id}>
+                    {hg.headers.map(header => (
+                      <th key={header.id} className={`px-8 py-6 text-[10px] font-black text-gray-400 uppercase tracking-widest ${header.column.getCanSort() ? 'cursor-pointer select-none hover:bg-blue-50/50 transition-colors group' : ''}`} onClick={header.column.getToggleSortingHandler()}>
+                        <div className="flex items-center gap-2">
+                          {flexRender(header.column.columnDef.header, header.getContext())}
+                          {header.column.getCanSort() && (
+                            <span className="text-gray-300 transition-colors">
+                              {{ asc: <ArrowUp className="w-4 h-4 text-blue-500" />, desc: <ArrowDown className="w-4 h-4 text-blue-500" /> }[header.column.getIsSorted() as string] ?? <ArrowUpDown className="w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity" />}
+                            </span>
+                          )}
                         </div>
-                      </td>
+                      </th>
+                    ))}
+                  </tr>
+                ))}
+              </thead>
+              
+              <tbody>
+                {table.getRowModel().rows.map(row => (
+                  <Fragment key={row.id}>
+                    <tr className={`border-b border-gray-50 transition-colors ${row.getIsExpanded() ? 'bg-blue-50/40' : 'hover:bg-blue-50/10'}`}>
+                      {row.getVisibleCells().map(cell => <td key={cell.id} className="px-8 py-3">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}
                     </tr>
-                  )}
-                </React.Fragment>
-              ))}
-            </tbody>
+                    
+                    {row.getIsExpanded() && (
+                      <tr>
+                        <td colSpan={table.getAllColumns().length} className="bg-gray-50/50 p-8 border-b border-gray-100">
+                          <div className="bg-white rounded-[40px] p-8 shadow-inner border border-gray-100 animate-in fade-in duration-500">
+                            <div className="flex justify-between items-center mb-6">
+                               <div className="flex gap-4">
+                                 <h3 className="text-lg font-black text-gray-900 uppercase tracking-tighter">
+                                   Histórico Específico (Cliente: <span className="text-blue-600">{row.original.razaosocial}</span>)
+                                 </h3>
+                               </div>
+                            </div>
 
-            <tfoot className="sticky bottom-0 bg-slate-900 text-white z-20 shadow-[0_-20px_40px_rgba(0,0,0,0.2)]">
-              <tr>
-                {table.getHeaderGroups()[0].headers.map(header => {
-                  if (header.id === 'expander') return <td key={header.id} className="px-8 py-5"></td>;
-                  if (header.id === 'info') return (
-                    <td key={header.id} className="px-8 py-5 text-right">
-                      <div className="flex flex-col">
-                        <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Meta de Receita</span>
-                        <span className="font-bold text-sm text-white">TOTAL S&OP (R$)</span>
-                      </div>
-                    </td>
-                  );
-                  
-                  if (header.id.startsWith('mes_')) {
-                    const mesBanco = header.id.replace('mes_', '');
-                    return (
-                      <td key={header.id} className="px-8 py-5">
-                        <div className="bg-slate-800/80 inline-block px-3 py-1.5 rounded-xl border border-slate-700/50">
-                          <span className="font-black text-emerald-400 text-[13px] tracking-tight">
-                            {formatMoeda(totaisFaturamento[mesBanco] || 0)}
-                          </span>
+                            <div className="h-[200px] w-full -ml-4">
+                              {loadingGrafico === row.original.chave_matriz ? (
+                                <div className="h-full flex items-center justify-center text-blue-600"><Loader2 className="animate-spin w-8 h-8" /></div>
+                              ) : (
+                                <ResponsiveContainer width="100%" height="100%">
+                                  <LineChart data={
+                                      (dadosGraficoCache[row.original.chave_matriz] || []).map((p: any) => {
+                                          const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
+                                          const edicao = celulasEditadas[row.original.chave_matriz]?.[p.data_iso];
+                                          const valConsenso = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
+                                          return { ...p, Consenso: valConsenso !== null ? valConsenso : p.Consenso };
+                                      })
+                                  }>
+                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                    <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900}} axisLine={false} tickLine={false} />
+                                    <YAxis tick={{fontSize: 10}} axisLine={false} tickLine={false} />
+                                    <Tooltip contentStyle={{borderRadius: '20px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)'}} />
+                                    <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900'}} />
+                                    
+                                    <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={4} dot={{r: 3, fill: '#0f172a'}} connectNulls={false} />
+                                    <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
+                                    <Line type="monotone" dataKey="Consenso" name="Visão Comercial" stroke="#10b981" strokeWidth={5} dot={{r: 6, fill: '#10b981', strokeWidth: 2, stroke: '#fff'}} connectNulls={false} />
+                                  </LineChart>
+                                </ResponsiveContainer>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                ))}
+              </tbody>
+
+              <tfoot className="bg-slate-900 text-white">
+                <tr>
+                  {table.getHeaderGroups()[0].headers.map(header => {
+                    if (header.id === 'expander') return <td key={header.id} className="px-8 py-5"></td>;
+                    if (header.id === 'info') return (
+                      <td key={header.id} className="px-8 py-5 text-right">
+                        <div className="flex flex-col">
+                          <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Meta de Receita</span>
+                          <span className="font-bold text-sm text-white">TOTAL COMERCIAL</span>
                         </div>
                       </td>
                     );
-                  }
-                  return <td key={header.id} className="px-8 py-5"></td>;
-                })}
-              </tr>
-            </tfoot>
+                    
+                    if (header.id.startsWith('mes_')) {
+                      const mesBanco = header.id.replace('mes_', '');
+                      const totalVol = totaisGerais[mesBanco]?.vol || 0;
+                      const totalFat = totaisGerais[mesBanco]?.fat || 0;
+                      return (
+                        <td key={header.id} className="px-8 py-5">
+                          <div className="flex flex-col items-center justify-center min-w-[100px]">
+                            <span className="font-black text-white">
+                               {formatVolume(totalVol)} <span className="text-[9px] text-slate-400">CX</span>
+                            </span>
+                            <span className="font-black text-emerald-400 text-[13px] tracking-tight mt-0.5">
+                              {formatMoeda(totalFat)}
+                            </span>
+                          </div>
+                        </td>
+                      );
+                    }
+                    return <td key={header.id} className="px-8 py-5"></td>;
+                  })}
+                </tr>
+              </tfoot>
 
-          </table>
+            </table>
+          </div>
           )}
         </div>
       </div>
-
-      {!isTelaBloqueada && Object.keys(celulasEditadas).length > 0 && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50">
-          <div className="bg-blue-600 text-white px-12 py-5 rounded-full shadow-[0_20px_50px_rgba(37,99,235,0.4)] flex items-center gap-10 border border-blue-500 animate-in slide-in-from-bottom-10">
-            <div className="text-sm font-black tracking-widest uppercase flex items-center gap-3">
-              <span className="bg-white text-blue-600 px-3 py-1 rounded-lg text-xl">{Object.keys(celulasEditadas).length}</span> SKUs
-            </div>
-            <div className="h-8 w-[2px] bg-blue-400/50" />
-            <button onClick={() => setCelulasEditadas({})} className="text-xs font-black text-blue-200 hover:text-white transition tracking-widest uppercase">Descartar</button>
-            <button onClick={handleCongelarCiclo} className="bg-white text-blue-700 hover:bg-gray-50 px-8 py-3 rounded-full text-xs font-black transition-all shadow-lg tracking-widest uppercase">Gravar e Congelar</button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

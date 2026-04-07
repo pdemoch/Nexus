@@ -7,7 +7,7 @@ import {
   getSortedRowModel,
   SortingState
 } from '@tanstack/react-table';
-import { Loader2, ChevronDown, ChevronUp, ArrowUpDown, ArrowUp, ArrowDown, Activity, BrainCircuit, ShieldCheck, Check, Hash, Search, Filter, Download, Unlock } from 'lucide-react';
+import { Loader2, ChevronDown, ChevronUp, ArrowUpDown, ArrowUp, ArrowDown, Activity, BrainCircuit, ShieldCheck, Check, Hash, Search, Filter, Download } from 'lucide-react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import * as XLSX from 'xlsx';
@@ -94,17 +94,6 @@ export default function TopDownArena() {
       alert(e.response?.data?.detail || "Erro ao processar rateio."); 
     } finally { 
       setIsProcessing(false); 
-    }
-  };
-
-  const handleReabrirCiclo = async () => {
-    if (!window.confirm("Ordem Reversa: Você está prestes a reabrir o Top-Down. Certifique-se de que todos os Vendedores e o S&OP Global estejam destrancados. Continuar?")) return;
-    try {
-      await axios.post('http://localhost:8000/api/v1/consensus/macro/reabrir');
-      alert("✅ Top-Down Reaberto!");
-      fetchData();
-    } catch (e: any) {
-      alert("Erro: " + (e.response?.data?.detail || e.message));
     }
   };
 
@@ -244,8 +233,8 @@ export default function TopDownArena() {
   }
 
   return (
-    <div className="flex h-full w-full bg-[#f8fafc] overflow-hidden p-6 font-sans min-h-screen">
-      <div className="flex-1 flex flex-col relative pb-20">
+    <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
+      <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative">
         
         {/* CABEÇALHO */}
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 bg-white p-6 rounded-[32px] shadow-sm border border-gray-100">
@@ -254,15 +243,10 @@ export default function TopDownArena() {
           </h1>
           <div className="flex items-center gap-4">
             {isCicloFechado ? (
-                <>
-                  <button onClick={handleReabrirCiclo} className="flex items-center gap-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 px-6 py-3.5 rounded-2xl text-xs font-black tracking-widest uppercase transition-all">
-                      <Unlock className="w-4 h-4" /> Reabrir
-                  </button>
-                  <div className="flex items-center gap-2 bg-slate-800 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-slate-800/20">
-                      <Check className="w-5 h-5 text-emerald-400" />
-                      Ciclo Congelado
-                  </div>
-                </>
+                <div className="flex items-center gap-2 bg-slate-800 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-slate-800/20">
+                    <Check className="w-5 h-5 text-emerald-400" />
+                    Ciclo Congelado
+                </div>
             ) : (
                 <button onClick={handleCongelarCiclo} disabled={isProcessing} className="flex items-center gap-2 bg-rose-500 hover:bg-rose-400 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-rose-500/30 transition-all disabled:opacity-50">
                     {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : <ShieldCheck className="w-5 h-5" />}
@@ -310,126 +294,128 @@ export default function TopDownArena() {
            </div>
         </div>
 
-        {/* TABELA DE DADOS E GRÁFICOS (EXPANDED ROW) */}
-        <div className="bg-white rounded-[45px] shadow-2xl border border-gray-100 overflow-hidden flex-1 overflow-y-auto relative">
-          <table className="w-full text-left border-collapse">
-            <thead className="sticky top-0 bg-white/95 backdrop-blur-xl z-10 border-b border-gray-100 shadow-sm">
-              {table.getHeaderGroups().map(hg => (
-                <tr key={hg.id}>
-                  {hg.headers.map(header => (
-                    <th key={header.id} className={`px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest ${header.column.getCanSort() ? 'cursor-pointer hover:bg-slate-50 transition-colors' : ''}`} onClick={header.column.getToggleSortingHandler()}>
-                      <div className="flex items-center gap-2">
-                        {flexRender(header.column.columnDef.header, header.getContext())}
-                        {header.column.getCanSort() && (
-                          <span className="text-slate-300">
-                            {{ asc: <ArrowUp className="w-4 h-4 text-slate-500" />, desc: <ArrowDown className="w-4 h-4 text-slate-500" /> }[header.column.getIsSorted() as string] ?? <ArrowUpDown className="w-4 h-4 opacity-30" />}
-                          </span>
-                        )}
-                      </div>
-                    </th>
-                  ))}
-                </tr>
-              ))}
-            </thead>
-            
-            <tbody>
-              {table.getRowModel().rows.map(row => (
-                <React.Fragment key={row.id}>
-                  <tr className={`border-b border-gray-50 transition-colors ${row.getIsExpanded() ? 'bg-slate-50/60' : 'hover:bg-slate-50/30'}`}>
-                    {row.getVisibleCells().map(cell => (
-                      <td key={cell.id} className="px-8 py-4">
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                      </td>
+        {/* TABELA DE DADOS E GRÁFICOS (SCROLL NATIVO) */}
+        <div className="bg-white rounded-[40px] shadow-2xl border border-gray-100 overflow-hidden relative">
+          <div className="overflow-x-auto pb-4">
+            <table className="w-full text-left border-collapse">
+              <thead className="bg-white border-b-2 border-gray-100 shadow-sm">
+                {table.getHeaderGroups().map(hg => (
+                  <tr key={hg.id}>
+                    {hg.headers.map(header => (
+                      <th key={header.id} className={`px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest ${header.column.getCanSort() ? 'cursor-pointer hover:bg-slate-50 transition-colors' : ''}`} onClick={header.column.getToggleSortingHandler()}>
+                        <div className="flex items-center gap-2">
+                          {flexRender(header.column.columnDef.header, header.getContext())}
+                          {header.column.getCanSort() && (
+                            <span className="text-slate-300">
+                              {{ asc: <ArrowUp className="w-4 h-4 text-slate-500" />, desc: <ArrowDown className="w-4 h-4 text-slate-500" /> }[header.column.getIsSorted() as string] ?? <ArrowUpDown className="w-4 h-4 opacity-30" />}
+                            </span>
+                          )}
+                        </div>
+                      </th>
                     ))}
                   </tr>
-                  
-                  {row.getIsExpanded() && (
-                    <tr>
-                      <td colSpan={table.getAllColumns().length} className="bg-slate-50/50 p-8 border-b border-gray-100">
-                        <div className="bg-white rounded-[40px] p-8 shadow-inner border border-gray-100 animate-in fade-in duration-500">
-                          
-                          <div className="flex justify-between items-start mb-6 px-2">
-                             <div className="flex flex-col gap-3">
-                               <h3 className="text-lg font-black text-slate-800 uppercase tracking-tighter">
-                                 Curva Consolidada Brasil (Real x Diretoria)
-                               </h3>
-                               <div className="flex gap-4">
-                                  <div className="flex items-center gap-2 bg-slate-100 text-slate-700 px-4 py-2 rounded-2xl border border-slate-200 shadow-sm">
-                                    <BrainCircuit className="w-5 h-5"/>
-                                    <span className="text-xs font-black uppercase tracking-widest">
-                                      Modelo: {row.original.modelo_vencedor || 'IA Padrão'}
-                                    </span>
-                                  </div>
-                                  <div className="flex items-center gap-2 bg-emerald-50 text-emerald-700 px-4 py-2 rounded-2xl border border-emerald-100 shadow-sm">
-                                    <ShieldCheck className="w-5 h-5"/>
-                                    <span className="text-xs font-black uppercase tracking-widest">
-                                      Acurácia: {row.original.acuracia_ia || 0}%
-                                    </span>
-                                  </div>
-                               </div>
-                             </div>
-                          </div>
-
-                          <div className="h-[250px] w-full -ml-4">
-                            {loadingGrafico === row.original.produto ? (
-                              <div className="h-full flex items-center justify-center text-slate-800"><Loader2 className="animate-spin w-8 h-8" /></div>
-                            ) : (
-                              <ResponsiveContainer width="100%" height="100%">
-                                <LineChart data={
-                                    (dadosGraficoCache[row.original.produto] || []).map((p: any) => {
-                                        const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
-                                        const edicao = celulasEditadas[row.original.produto]?.[p.data_iso];
-                                        const valDiretoria = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
-                                        return { ...p, Consenso: valDiretoria !== null ? valDiretoria : p.Consenso };
-                                    })
-                                }>
-                                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                                  <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900}} axisLine={false} tickLine={false} />
-                                  <YAxis tick={{fontSize: 10}} axisLine={false} tickLine={false} />
-                                  <Tooltip contentStyle={{borderRadius: '20px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)'}} />
-                                  <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900'}} />
-                                  <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={4} dot={{r: 3, fill: '#0f172a'}} connectNulls={false} />
-                                  <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
-                                  <Line type="monotone" dataKey="Consenso" name="Meta Top-Down" stroke="#3b82f6" strokeWidth={5} dot={{r: 6, fill: '#3b82f6', strokeWidth: 2, stroke: '#fff'}} connectNulls={false} />
-                                </LineChart>
-                              </ResponsiveContainer>
-                            )}
-                          </div>
-                        </div>
-                      </td>
+                ))}
+              </thead>
+              
+              <tbody>
+                {table.getRowModel().rows.map(row => (
+                  <React.Fragment key={row.id}>
+                    <tr className={`border-b border-gray-50 transition-colors ${row.getIsExpanded() ? 'bg-slate-50/60' : 'hover:bg-slate-50/30'}`}>
+                      {row.getVisibleCells().map(cell => (
+                        <td key={cell.id} className="px-8 py-4">
+                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                        </td>
+                      ))}
                     </tr>
-                  )}
-                </React.Fragment>
-              ))}
-            </tbody>
-            
-            <tfoot className="sticky bottom-0 bg-slate-900 text-white z-20 shadow-[0_-20px_40px_rgba(0,0,0,0.2)]">
-              <tr>
-                {table.getHeaderGroups()[0].headers.map(header => {
-                  if (header.id === 'expander' || header.id === 'pmv_base') return <td key={header.id} className="px-8 py-5"></td>;
-                  if (header.id === 'info') return (
-                    <td key={header.id} className="px-8 py-5 text-right">
-                      <div className="flex flex-col">
-                        <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Receita Consolidada</span>
-                        <span className="font-bold text-sm text-white">TOTAL NA TELA (R$)</span>
-                      </div>
-                    </td>
-                  );
-                  if (header.id.startsWith('mes_')) {
-                    const mesBanco = header.id.replace('mes_', '');
-                    return (
-                      <td key={header.id} className="px-8 py-5">
-                        <div className="bg-slate-800/80 inline-block px-3 py-1.5 rounded-xl border border-slate-700/50">
-                          <span className="font-black text-emerald-400 text-[13px] tracking-tight">{formatMoeda(totaisFaturamento[mesBanco] || 0)}</span>
+                    
+                    {row.getIsExpanded() && (
+                      <tr>
+                        <td colSpan={table.getAllColumns().length} className="bg-slate-50/50 p-8 border-b border-gray-100">
+                          <div className="bg-white rounded-[40px] p-8 shadow-inner border border-gray-100 animate-in fade-in duration-500">
+                            
+                            <div className="flex justify-between items-start mb-6 px-2">
+                               <div className="flex flex-col gap-3">
+                                 <h3 className="text-lg font-black text-slate-800 uppercase tracking-tighter">
+                                   Curva Consolidada Brasil (Real x Gerencial)
+                                 </h3>
+                                 <div className="flex gap-4">
+                                    <div className="flex items-center gap-2 bg-slate-100 text-slate-700 px-4 py-2 rounded-2xl border border-slate-200 shadow-sm">
+                                      <BrainCircuit className="w-5 h-5"/>
+                                      <span className="text-xs font-black uppercase tracking-widest">
+                                        Modelo: {row.original.modelo_vencedor || 'IA Padrão'}
+                                      </span>
+                                    </div>
+                                    <div className="flex items-center gap-2 bg-emerald-50 text-emerald-700 px-4 py-2 rounded-2xl border border-emerald-100 shadow-sm">
+                                      <ShieldCheck className="w-5 h-5"/>
+                                      <span className="text-xs font-black uppercase tracking-widest">
+                                        Acurácia: {row.original.acuracia_ia || 0}%
+                                      </span>
+                                    </div>
+                                 </div>
+                               </div>
+                            </div>
+
+                            <div className="h-[250px] w-full -ml-4">
+                              {loadingGrafico === row.original.produto ? (
+                                <div className="h-full flex items-center justify-center text-slate-800"><Loader2 className="animate-spin w-8 h-8" /></div>
+                              ) : (
+                                <ResponsiveContainer width="100%" height="100%">
+                                  <LineChart data={
+                                      (dadosGraficoCache[row.original.produto] || []).map((p: any) => {
+                                          const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
+                                          const edicao = celulasEditadas[row.original.produto]?.[p.data_iso];
+                                          const valDiretoria = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
+                                          return { ...p, Consenso: valDiretoria !== null ? valDiretoria : p.Consenso };
+                                      })
+                                  }>
+                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                    <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900}} axisLine={false} tickLine={false} />
+                                    <YAxis tick={{fontSize: 10}} axisLine={false} tickLine={false} />
+                                    <Tooltip contentStyle={{borderRadius: '20px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)'}} />
+                                    <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900'}} />
+                                    <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={4} dot={{r: 3, fill: '#0f172a'}} connectNulls={false} />
+                                    <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
+                                    <Line type="monotone" dataKey="Consenso" name="Meta Gerencial" stroke="#3b82f6" strokeWidth={5} dot={{r: 6, fill: '#3b82f6', strokeWidth: 2, stroke: '#fff'}} connectNulls={false} />
+                                  </LineChart>
+                                </ResponsiveContainer>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                ))}
+              </tbody>
+              
+              <tfoot className="bg-slate-900 text-white">
+                <tr>
+                  {table.getHeaderGroups()[0].headers.map(header => {
+                    if (header.id === 'expander' || header.id === 'pmv_base') return <td key={header.id} className="px-8 py-5"></td>;
+                    if (header.id === 'info') return (
+                      <td key={header.id} className="px-8 py-5 text-right">
+                        <div className="flex flex-col">
+                          <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Receita Consolidada</span>
+                          <span className="font-bold text-sm text-white">TOTAL NA TELA (R$)</span>
                         </div>
                       </td>
                     );
-                  }
-                  return <td key={header.id} className="px-8 py-5"></td>;
-                })}
-              </tr>
-            </tfoot>
-          </table>
+                    if (header.id.startsWith('mes_')) {
+                      const mesBanco = header.id.replace('mes_', '');
+                      return (
+                        <td key={header.id} className="px-8 py-5">
+                          <div className="bg-slate-800/80 inline-block px-3 py-1.5 rounded-xl border border-slate-700/50">
+                            <span className="font-black text-emerald-400 text-[13px] tracking-tight">{formatMoeda(totaisFaturamento[mesBanco] || 0)}</span>
+                          </div>
+                        </td>
+                      );
+                    }
+                    return <td key={header.id} className="px-8 py-5"></td>;
+                  })}
+                </tr>
+              </tfoot>
+            </table>
+          </div>
         </div>
       </div>
     </div>
