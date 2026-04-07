@@ -18,10 +18,7 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
 
   return (
     <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col h-full shadow-2xl relative z-50">
-      <div className="p-6">
-        <img src="https://www.lineaalimentos.com.br/media/wysiwyg/icones/logo-linea-headline.png" alt="Linea" className="h-8 brightness-0 invert" />
-      </div>
-
+      
       {/* PERFIL DO USUÁRIO LOGADO */}
       <div className="px-6 pb-6 mb-4 border-b border-slate-800">
         <div className="flex items-center gap-3 bg-slate-800 p-3 rounded-2xl border border-slate-700">

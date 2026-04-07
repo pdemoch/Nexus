@@ -98,9 +98,7 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
         <div className="absolute inset-0 bg-gradient-to-br from-indigo-900/50 to-slate-900 z-0"></div>
         <div className="absolute -top-40 -right-40 w-96 h-96 bg-indigo-500 rounded-full blur-[120px] opacity-20"></div>
         
-        <div className="relative z-10">
-          <img src="https://www.lineaalimentos.com.br/media/wysiwyg/icones/logo-linea-headline.png" alt="Linea" className="h-12 brightness-0 invert" />
-        </div>
+        
         
         <div className="relative z-10 mb-20">
           <h1 className="text-5xl font-black text-white tracking-tighter mb-6 leading-tight">
