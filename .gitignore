@@ -21,15 +21,10 @@ yarn-debug.log*
 yarn-error.log*
 
 # ==========================================
-# 3. DADOS LOCAIS E RELATÓRIOS (Projeto Nexus)
-# ==========================================
-# Ignorar o banco de dados local para não sobrescrever a produção
-
-
-# ==========================================
-# 4. CONFIGURAÇÕES DE IDE E SISTEMA OPERACIONAL
+# 3. CONFIGURAÇÕES DE IDE E SISTEMA OPERACIONAL
 # ==========================================
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+nexus_local.db
