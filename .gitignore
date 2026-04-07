@@ -1,0 +1,40 @@
+# ==========================================
+# 1. AMBIENTE VIRTUAL E CACHE PYTHON (Backend)
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+.env
+
+# ==========================================
+# 2. DEPENDÊNCIAS FRONTEND (React / Node)
+# ==========================================
+node_modules/
+dist/
+build/
+.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ==========================================
+# 3. DADOS LOCAIS E RELATÓRIOS (Projeto Nexus)
+# ==========================================
+# Ignorar o banco de dados local para não sobrescrever a produção
+nexus_local.db
+nexus_local.db-journal
+
+# Ignorar os relatórios gerados pelos scripts
+*.csv
+!SOP_Nexus_BottomUp_Granular_*.csv # (Se quiser manter algum template, coloque ! na frente)
+
+# ==========================================
+# 4. CONFIGURAÇÕES DE IDE E SISTEMA OPERACIONAL
+# ==========================================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,437 @@
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import {
+  useReactTable,
+  getCoreRowModel,
+  flexRender,
+  getExpandedRowModel,
+  getSortedRowModel,
+  SortingState
+} from '@tanstack/react-table';
+import { Loader2, ChevronDown, ChevronUp, ArrowUpDown, ArrowUp, ArrowDown, Activity, BrainCircuit, ShieldCheck, Check, Hash, Search, Filter, Download, Unlock } from 'lucide-react';
+import axios from 'axios';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import * as XLSX from 'xlsx';
+
+const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor));
+
+export default function TopDownArena() {
+  const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [celulasEditadas, setCelulasEditadas] = useState<any>({});
+  const [expanded, setExpanded] = useState({});
+  const [sorting, setSorting] = useState<SortingState>([]);
+  const [isCicloFechado, setIsCicloFechado] = useState(false);
+  
+  const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
+  const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  const [busca, setBusca] = useState('');
+  const [categoriaSelecionada, setCategoriaSelecionada] = useState('TODAS');
+  const [segmentoSelecionado, setSegmentoSelecionado] = useState('TODOS');
+
+  const fetchData = useCallback(async () => {
+    try {
+      const [res, statusRes] = await Promise.all([
+        axios.get('http://localhost:8000/api/v1/consensus/macro'),
+        axios.get('http://localhost:8000/api/v1/consensus/status', { params: { origem: 'Top-Down' } })
+      ]);
+      setDadosBrutos(res.data.dados || []);
+      setIsCicloFechado(statusRes.data.is_topdown_fechado);
+    } catch (e) { 
+      console.error("Erro ao carregar Top-Down:", e); 
+    } finally { 
+      setIsLoading(false); 
+    }
+  }, []);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  const handleExportExcel = (isSnapshot = false) => {
+    if (dadosFiltrados.length === 0) return alert("Não há dados na tela para exportar.");
+    const dadosExcel = dadosFiltrados.map(row => {
+      const linha: any = {
+        "CÓDIGO SKU": row.produto, "DESCRIÇÃO": row.descricao, "CATEGORIA": row.categoria,
+        "SEGMENTO": row.segmento, "MODELO IA": row.modelo_vencedor, "ACURÁCIA IA (%)": row.acuracia_ia,
+        "PMV PONDERADO (R$)": row.meses[0]?.pmv || 0
+      };
+      row.meses.forEach((m: any) => {
+        const edicao = celulasEditadas[row.produto]?.[m.mes_banco];
+        const volFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : m.vol_ajustado));
+        linha[`${m.mes_str} (Base IA)`] = Math.round(Number(m.vol_ia));
+        linha[`${m.mes_str} (Top-Down)`] = volFinal;
+      });
+      return linha;
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet(dadosExcel);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Top_Down_Consenso");
+    worksheet['!cols'] = [{ wch: 15 }, { wch: 40 }, { wch: 20 }, { wch: 20 }, { wch: 20 }, { wch: 15 }, { wch: 18 }];
+    
+    const fileName = `SOP_Nexus_TopDown_${isSnapshot ? 'CONGELADO' : 'DRAFT'}_${new Date().toISOString().split('T')[0]}.xlsx`;
+    XLSX.writeFile(workbook, fileName);
+  };
+
+  const handleCongelarCiclo = async () => {
+    if (!window.confirm("Atenção: Ao gravar e assinar o ciclo Executivo, a meta será rateada para toda a operação. Deseja continuar?")) return;
+    setIsProcessing(true);
+    
+    const ajustes: any[] = [];
+    Object.entries(celulasEditadas).forEach(([produto, meses]: any) => {
+      Object.entries(meses).forEach(([mes, val]: any) => {
+        ajustes.push({ produto: produto, mes_projetado: mes, novo_volume: val.novo_volume === '' ? 0 : val.novo_volume });
+      });
+    });
+
+    try {
+      handleExportExcel(true); 
+      await axios.post('http://localhost:8000/api/v1/consensus/macro/congelar', { origem_ajuste: "Top-Down", ajustes });
+      alert("🔒 Ciclo Top-Down congelado e rateado com sucesso!");
+      setCelulasEditadas({});
+      fetchData(); 
+    } catch (e: any) { 
+      alert(e.response?.data?.detail || "Erro ao processar rateio."); 
+    } finally { 
+      setIsProcessing(false); 
+    }
+  };
+
+  const handleReabrirCiclo = async () => {
+    if (!window.confirm("Ordem Reversa: Você está prestes a reabrir o Top-Down. Certifique-se de que todos os Vendedores e o S&OP Global estejam destrancados. Continuar?")) return;
+    try {
+      await axios.post('http://localhost:8000/api/v1/consensus/macro/reabrir');
+      alert("✅ Top-Down Reaberto!");
+      fetchData();
+    } catch (e: any) {
+      alert("Erro: " + (e.response?.data?.detail || e.message));
+    }
+  };
+
+  const categoriasUnicas = useMemo(() => Array.from(new Set(dadosBrutos.map(d => d.categoria).filter(Boolean))).sort(), [dadosBrutos]);
+  const segmentosUnicos = useMemo(() => Array.from(new Set(dadosBrutos.map(d => d.segmento).filter(Boolean))).sort(), [dadosBrutos]);
+
+  const dadosFiltrados = useMemo(() => dadosBrutos.filter(d => 
+    (d.produto + ' ' + d.descricao).toLowerCase().includes(busca.toLowerCase()) &&
+    (categoriaSelecionada === 'TODAS' || d.categoria === categoriaSelecionada) &&
+    (segmentoSelecionado === 'TODOS' || d.segmento === segmentoSelecionado)
+  ), [dadosBrutos, busca, categoriaSelecionada, segmentoSelecionado]);
+
+  const totaisFaturamento = useMemo(() => {
+    const totais: Record<string, number> = {};
+    dadosFiltrados.forEach(row => row.meses.forEach((m: any) => totais[m.mes_banco] = 0));
+    dadosFiltrados.forEach(row => row.meses.forEach((mes: any) => {
+      const edicao = celulasEditadas[row.produto]?.[mes.mes_banco];
+      const volumeFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : mes.vol_ajustado));
+      totais[mes.mes_banco] += volumeFinal * mes.pmv;
+    }));
+    return totais;
+  }, [dadosFiltrados, celulasEditadas]);
+
+  const toggleRow = async (row: any) => {
+    const isExpanding = !row.getIsExpanded();
+    const chave = row.original.produto;
+    
+    if (isExpanding && !dadosGraficoCache[chave]) {
+      setLoadingGrafico(chave);
+      try {
+        const res = await axios.get('http://localhost:8000/api/v1/consensus/macro/grafico', { params: { produto: chave } });
+        setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
+      } catch (e) { console.error(e); }
+      finally { setLoadingGrafico(null); }
+    }
+    row.toggleExpanded();
+  };
+
+  const columns = useMemo(() => {
+    if (dadosFiltrados.length === 0) return [];
+    
+    const baseCols: any[] = [
+      {
+        id: 'expander', enableSorting: false, header: () => null,
+        cell: ({ row }: any) => (
+          <button onClick={() => toggleRow(row)} className="p-2 hover:bg-slate-100 rounded-xl transition-all">
+            {row.getIsExpanded() ? <ChevronUp className="w-5 h-5 text-slate-800" /> : <ChevronDown className="w-5 h-5 text-slate-400" />}
+          </button>
+        ),
+      },
+      {
+        id: 'info', header: 'SKU (Visão Brasil)',
+        accessorFn: (row: any) => row.descricao,
+        cell: (info: any) => (
+          <div className="flex flex-col py-1">
+            <span className="font-bold text-gray-900 text-sm truncate max-w-[320px]">{info.row.original.descricao}</span>
+            <span className="text-[10px] text-gray-400 font-black uppercase tracking-widest">{info.row.original.produto}</span>
+          </div>
+        )
+      },
+      {
+        id: 'pmv_base', header: 'PMV Ponderado',
+        accessorFn: (row: any) => row.meses[0]?.pmv || 0,
+        cell: (info: any) => (
+          <div className="flex flex-col py-1">
+            <span className="font-bold text-slate-700 text-[13px] bg-slate-100 px-3 py-1.5 rounded-lg inline-block w-max border border-slate-200">
+              {formatMoeda(info.getValue())}
+            </span>
+          </div>
+        )
+      }
+    ];
+
+    const mesesMap = new Map();
+    dadosFiltrados.forEach(r => r.meses.forEach((m: any) => mesesMap.set(m.mes_banco, m)));
+    
+    Array.from(mesesMap.values()).sort((a: any, b: any) => a.mes_banco.localeCompare(b.mes_banco)).forEach((m: any) => {
+      baseCols.push({
+        id: `mes_${m.mes_banco}`, header: m.mes_str,
+        accessorFn: (row: any) => row.meses.find((rm: any) => rm.mes_banco === m.mes_banco)?.vol_ajustado || 0,
+        cell: (info: any) => {
+          const row = info.row.original;
+          const dadosMes = row.meses.find((rm: any) => rm.mes_banco === m.mes_banco);
+          const meta = info.table.options.meta as any;
+          const edicao = meta.celulasEditadas[row.produto]?.[m.mes_banco];
+          
+          const valorReal = edicao !== undefined ? edicao.novo_volume : (dadosMes?.vol_ajustado || 0);
+          const valorInteiro = Math.round(Number(valorReal));
+          const baseIA = Math.round(Number(dadosMes?.vol_ia || 0));
+          const isChanged = valorInteiro !== baseIA;
+          const faturamentoPrevisto = valorInteiro * (dadosMes?.pmv || 0);
+
+          return (
+            <div className="flex flex-col w-28 gap-1">
+              <span className="text-[9px] text-slate-400 font-black opacity-60 uppercase text-center tracking-widest">
+                Base IA: {baseIA.toLocaleString('pt-BR')}
+              </span>
+              <input
+                type="number" disabled={isCicloFechado} value={valorInteiro === 0 ? '' : valorInteiro} placeholder="0"
+                onChange={(e) => meta.updateCell(row.produto, m.mes_banco, e.target.value)}
+                className={`text-sm text-center font-black p-2.5 rounded-xl outline-none border-2 transition-all w-full
+                  ${isCicloFechado ? 'cursor-not-allowed opacity-50 bg-slate-100 border-gray-200' : isChanged ? 'bg-slate-800 border-slate-700 text-white shadow-md' : 'bg-gray-50 border-transparent text-gray-800 focus:bg-white focus:border-slate-300'}`}
+              />
+              <span className="text-[10px] font-black text-emerald-600 text-center pr-1 tracking-tight">
+                {formatMoeda(faturamentoPrevisto)}
+              </span>
+            </div>
+          );
+        }
+      });
+    });
+    return baseCols;
+  }, [dadosFiltrados, isCicloFechado]);
+
+  const table = useReactTable({
+    data: dadosFiltrados, columns, state: { expanded, sorting },
+    onExpandedChange: setExpanded, onSortingChange: setSorting,
+    getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel(), getSortedRowModel: getSortedRowModel(),
+    meta: {
+      celulasEditadas,
+      updateCell: (chave: string, mes: string, val: string) => {
+        if (isCicloFechado) return;
+        const v = val === '' ? '' : Math.round(Number(val));
+        const finalV = Number.isNaN(v as any) && val !== '' ? 0 : v;
+        setCelulasEditadas((prev: any) => ({ ...prev, [chave]: { ...(prev[chave] || {}), [mes]: { novo_volume: finalV } } }));
+      }
+    }
+  });
+
+  if (isLoading) {
+    return (
+      <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
+        <Loader2 className="w-8 h-8 animate-spin text-indigo-500 mb-4" />
+        <span className="text-slate-400 font-black text-xs tracking-widest uppercase">Iniciando Visão Executiva...</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full w-full bg-[#f8fafc] overflow-hidden p-6 font-sans min-h-screen">
+      <div className="flex-1 flex flex-col relative pb-20">
+        
+        {/* CABEÇALHO */}
+        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 bg-white p-6 rounded-[32px] shadow-sm border border-gray-100">
+          <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
+            <Activity className="w-8 h-8 text-slate-800" /> REVISÃO EXECUTIVA (TOP-DOWN)
+          </h1>
+          <div className="flex items-center gap-4">
+            {isCicloFechado ? (
+                <>
+                  <button onClick={handleReabrirCiclo} className="flex items-center gap-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 px-6 py-3.5 rounded-2xl text-xs font-black tracking-widest uppercase transition-all">
+                      <Unlock className="w-4 h-4" /> Reabrir
+                  </button>
+                  <div className="flex items-center gap-2 bg-slate-800 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-slate-800/20">
+                      <Check className="w-5 h-5 text-emerald-400" />
+                      Ciclo Congelado
+                  </div>
+                </>
+            ) : (
+                <button onClick={handleCongelarCiclo} disabled={isProcessing} className="flex items-center gap-2 bg-rose-500 hover:bg-rose-400 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-rose-500/30 transition-all disabled:opacity-50">
+                    {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : <ShieldCheck className="w-5 h-5" />}
+                    Gravar Ciclo Definitivo
+                </button>
+            )}
+          </div>
+        </div>
+
+        {/* BARRA DE FILTROS */}
+        <div className="flex flex-col md:flex-row gap-4 mb-6">
+           <div className="bg-slate-900 text-white px-8 py-4 rounded-[24px] flex items-center gap-4 shadow-lg flex-shrink-0">
+             <div className="bg-slate-800 p-2 rounded-full"><Hash className="w-6 h-6 text-indigo-400" /></div>
+             <div>
+               <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-0.5">Skus na Tela</p>
+               <p className="text-2xl font-black leading-none">{dadosFiltrados.length}</p>
+             </div>
+           </div>
+
+           <div className="flex-1 bg-white p-3 rounded-[24px] shadow-sm border border-gray-100 flex flex-col md:flex-row items-center gap-3">
+             <div className="flex-1 flex items-center gap-3 px-4 bg-slate-50 rounded-xl border border-slate-100 w-full">
+               <Search className="w-5 h-5 text-slate-400" />
+               <input 
+                 type="text" placeholder="Buscar por código ou descrição do SKU..." value={busca} onChange={e => setBusca(e.target.value)}
+                 className="w-full bg-transparent py-3 text-sm font-bold text-slate-800 outline-none placeholder:text-slate-400"
+               />
+             </div>
+             <div className="flex items-center gap-2 px-4 bg-slate-50 rounded-xl border border-slate-100 w-full md:w-auto">
+               <Filter className="w-4 h-4 text-slate-400" />
+               <select value={categoriaSelecionada} onChange={e => setCategoriaSelecionada(e.target.value)} className="bg-transparent py-3 text-sm font-bold text-slate-700 outline-none cursor-pointer">
+                 <option value="TODAS">TODAS AS CATEGORIAS</option>
+                 {categoriasUnicas.map(c => <option key={c as string} value={c as string}>{c as string}</option>)}
+               </select>
+             </div>
+             <div className="flex items-center gap-2 px-4 bg-slate-50 rounded-xl border border-slate-100 w-full md:w-auto">
+               <Filter className="w-4 h-4 text-slate-400" />
+               <select value={segmentoSelecionado} onChange={e => setSegmentoSelecionado(e.target.value)} className="bg-transparent py-3 text-sm font-bold text-slate-700 outline-none cursor-pointer">
+                 <option value="TODOS">TODOS OS SEGMENTOS</option>
+                 {segmentosUnicos.map(s => <option key={s as string} value={s as string}>{s as string}</option>)}
+               </select>
+             </div>
+             <button onClick={() => handleExportExcel(false)} className="flex items-center gap-2 bg-slate-100 hover:bg-indigo-50 text-slate-700 px-6 py-3 rounded-xl text-xs font-black tracking-widest uppercase transition-all border border-slate-200 ml-auto whitespace-nowrap">
+                <Download className="w-4 h-4" /> Exportar
+             </button>
+           </div>
+        </div>
+
+        {/* TABELA DE DADOS E GRÁFICOS (EXPANDED ROW) */}
+        <div className="bg-white rounded-[45px] shadow-2xl border border-gray-100 overflow-hidden flex-1 overflow-y-auto relative">
+          <table className="w-full text-left border-collapse">
+            <thead className="sticky top-0 bg-white/95 backdrop-blur-xl z-10 border-b border-gray-100 shadow-sm">
+              {table.getHeaderGroups().map(hg => (
+                <tr key={hg.id}>
+                  {hg.headers.map(header => (
+                    <th key={header.id} className={`px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest ${header.column.getCanSort() ? 'cursor-pointer hover:bg-slate-50 transition-colors' : ''}`} onClick={header.column.getToggleSortingHandler()}>
+                      <div className="flex items-center gap-2">
+                        {flexRender(header.column.columnDef.header, header.getContext())}
+                        {header.column.getCanSort() && (
+                          <span className="text-slate-300">
+                            {{ asc: <ArrowUp className="w-4 h-4 text-slate-500" />, desc: <ArrowDown className="w-4 h-4 text-slate-500" /> }[header.column.getIsSorted() as string] ?? <ArrowUpDown className="w-4 h-4 opacity-30" />}
+                          </span>
+                        )}
+                      </div>
+                    </th>
+                  ))}
+                </tr>
+              ))}
+            </thead>
+            
+            <tbody>
+              {table.getRowModel().rows.map(row => (
+                <React.Fragment key={row.id}>
+                  <tr className={`border-b border-gray-50 transition-colors ${row.getIsExpanded() ? 'bg-slate-50/60' : 'hover:bg-slate-50/30'}`}>
+                    {row.getVisibleCells().map(cell => (
+                      <td key={cell.id} className="px-8 py-4">
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </td>
+                    ))}
+                  </tr>
+                  
+                  {row.getIsExpanded() && (
+                    <tr>
+                      <td colSpan={table.getAllColumns().length} className="bg-slate-50/50 p-8 border-b border-gray-100">
+                        <div className="bg-white rounded-[40px] p-8 shadow-inner border border-gray-100 animate-in fade-in duration-500">
+                          
+                          <div className="flex justify-between items-start mb-6 px-2">
+                             <div className="flex flex-col gap-3">
+                               <h3 className="text-lg font-black text-slate-800 uppercase tracking-tighter">
+                                 Curva Consolidada Brasil (Real x Diretoria)
+                               </h3>
+                               <div className="flex gap-4">
+                                  <div className="flex items-center gap-2 bg-slate-100 text-slate-700 px-4 py-2 rounded-2xl border border-slate-200 shadow-sm">
+                                    <BrainCircuit className="w-5 h-5"/>
+                                    <span className="text-xs font-black uppercase tracking-widest">
+                                      Modelo: {row.original.modelo_vencedor || 'IA Padrão'}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-2 bg-emerald-50 text-emerald-700 px-4 py-2 rounded-2xl border border-emerald-100 shadow-sm">
+                                    <ShieldCheck className="w-5 h-5"/>
+                                    <span className="text-xs font-black uppercase tracking-widest">
+                                      Acurácia: {row.original.acuracia_ia || 0}%
+                                    </span>
+                                  </div>
+                               </div>
+                             </div>
+                          </div>
+
+                          <div className="h-[250px] w-full -ml-4">
+                            {loadingGrafico === row.original.produto ? (
+                              <div className="h-full flex items-center justify-center text-slate-800"><Loader2 className="animate-spin w-8 h-8" /></div>
+                            ) : (
+                              <ResponsiveContainer width="100%" height="100%">
+                                <LineChart data={
+                                    (dadosGraficoCache[row.original.produto] || []).map((p: any) => {
+                                        const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
+                                        const edicao = celulasEditadas[row.original.produto]?.[p.data_iso];
+                                        const valDiretoria = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
+                                        return { ...p, Consenso: valDiretoria !== null ? valDiretoria : p.Consenso };
+                                    })
+                                }>
+                                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                  <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900}} axisLine={false} tickLine={false} />
+                                  <YAxis tick={{fontSize: 10}} axisLine={false} tickLine={false} />
+                                  <Tooltip contentStyle={{borderRadius: '20px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)'}} />
+                                  <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900'}} />
+                                  <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={4} dot={{r: 3, fill: '#0f172a'}} connectNulls={false} />
+                                  <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
+                                  <Line type="monotone" dataKey="Consenso" name="Meta Top-Down" stroke="#3b82f6" strokeWidth={5} dot={{r: 6, fill: '#3b82f6', strokeWidth: 2, stroke: '#fff'}} connectNulls={false} />
+                                </LineChart>
+                              </ResponsiveContainer>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              ))}
+            </tbody>
+            
+            <tfoot className="sticky bottom-0 bg-slate-900 text-white z-20 shadow-[0_-20px_40px_rgba(0,0,0,0.2)]">
+              <tr>
+                {table.getHeaderGroups()[0].headers.map(header => {
+                  if (header.id === 'expander' || header.id === 'pmv_base') return <td key={header.id} className="px-8 py-5"></td>;
+                  if (header.id === 'info') return (
+                    <td key={header.id} className="px-8 py-5 text-right">
+                      <div className="flex flex-col">
+                        <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Receita Consolidada</span>
+                        <span className="font-bold text-sm text-white">TOTAL NA TELA (R$)</span>
+                      </div>
+                    </td>
+                  );
+                  if (header.id.startsWith('mes_')) {
+                    const mesBanco = header.id.replace('mes_', '');
+                    return (
+                      <td key={header.id} className="px-8 py-5">
+                        <div className="bg-slate-800/80 inline-block px-3 py-1.5 rounded-xl border border-slate-700/50">
+                          <span className="font-black text-emerald-400 text-[13px] tracking-tight">{formatMoeda(totaisFaturamento[mesBanco] || 0)}</span>
+                        </div>
+                      </td>
+                    );
+                  }
+                  return <td key={header.id} className="px-8 py-5"></td>;
+                })}
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
