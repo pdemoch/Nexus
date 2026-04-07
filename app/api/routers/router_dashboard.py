@@ -14,6 +14,7 @@ from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, Co
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["S&OP Global Dashboard"])
 
+# --- Utilitários ---
 def get_current_cycle() -> str:
     return datetime.date.today().strftime("%m/%Y")
 
@@ -39,6 +40,7 @@ async def carregar_dashboard_global(db: Session = Depends(get_db)):
         ciclo = get_current_cycle()
         m_plus_2, m_plus_4 = get_projection_window()
 
+        # --- GATEKEEPER ---
         status_global = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
         is_global_fechado = status_global.status == 'Fechado' if status_global else False
         
@@ -63,9 +65,8 @@ async def carregar_dashboard_global(db: Session = Depends(get_db)):
 
         pendentes = [v for v in v_ativos if v not in v_fechados]
 
-        can_reopen = False
         if is_global_fechado:
-            is_locked, lock_message, can_reopen = True, "Plano Oficial Publicado", True
+            is_locked, lock_message = True, "Plano Oficial Publicado"
         elif not is_td_fechado:
             is_locked, lock_message = True, "Aguardando Diretoria (Top-Down)"
         elif pendentes:
@@ -73,6 +74,7 @@ async def carregar_dashboard_global(db: Session = Depends(get_db)):
         else:
             is_locked, lock_message = False, "Publicar Demanda Oficial"
             
+        # --- BUSCA DE DADOS ---
         resultados = db.query(
             FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('vol_ia'),
@@ -103,7 +105,12 @@ async def carregar_dashboard_global(db: Session = Depends(get_db)):
                 "vol_irrestrito": int(r.vol_final or 0), "pmv": pmv_real
             })
 
-        return {"status": "success", "is_locked": is_locked, "can_reopen": can_reopen, "lock_message": lock_message, "dados": dados_formatados}
+        return {
+            "status": "success", 
+            "is_locked": is_locked, 
+            "lock_message": lock_message, 
+            "dados": dados_formatados
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -153,18 +160,6 @@ async def aprovar_dashboard_global(payload: PayloadAprovarGlobal, db: Session = 
         else: 
             registro.status = 'Fechado'
         db.commit()
-        return {"status": "success"}
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/reabrir")
-async def reabrir_dashboard_global(db: Session = Depends(get_db)):
-    try:
-        registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == get_current_cycle(), ControleCiclo.origem == 'S&OP-Final').first()
-        if registro:
-            registro.status = 'Aberto'
-            db.commit()
         return {"status": "success"}
     except Exception as e:
         db.rollback()

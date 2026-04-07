@@ -1,13 +1,15 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useReactTable, getCoreRowModel, flexRender, getExpandedRowModel, getSortedRowModel, SortingState } from '@tanstack/react-table';
-import { Loader2, ChevronDown, ChevronRight, Save, Layers, Package, Users, ArrowUpDown, ArrowUp, ArrowDown, TrendingUp, ChevronLast, Lock, Download, Unlock } from 'lucide-react';
+import { Loader2, ChevronDown, ChevronRight, Save, Layers, Package, Users, ArrowUpDown, ArrowUp, ArrowDown, TrendingUp, ChevronLast, Lock, Download, BarChart2 } from 'lucide-react';
 import axios from 'axios';
-import { ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer } from 'recharts';
+import { ComposedChart, AreaChart, Area, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer } from 'recharts';
 
 const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor));
 const formatVolume = (val: number) => Math.round(val).toLocaleString('pt-BR');
 
-const EditableCell = ({ initialValue, onSave, isChanged, depth, isLocked }: any) => {
+const calcVar = (atual: number, base: number) => base > 0 ? ((atual - base) / base) * 100 : 0;
+
+const EditableCell = ({ initialValue, onSave, isChanged, isLocked }: any) => {
   const safeInt = initialValue === 0 ? '' : Math.round(Number(initialValue));
   const [value, setValue] = useState<any>(safeInt);
   
@@ -15,7 +17,7 @@ const EditableCell = ({ initialValue, onSave, isChanged, depth, isLocked }: any)
   const onBlur = () => { if (value !== (initialValue===0?'':Math.round(Number(initialValue)))) onSave(value === '' ? 0 : value); };
 
   if (isLocked) {
-    return <div className="w-24 text-center text-sm font-black p-3 text-slate-500">{initialValue === 0 ? '-' : Math.round(Number(initialValue)).toLocaleString('pt-BR')}</div>;
+    return <div className="w-full text-center text-sm font-black p-2 text-slate-600 bg-slate-50 border border-slate-200 rounded-lg">{initialValue === 0 ? '-' : Math.round(Number(initialValue)).toLocaleString('pt-BR')}</div>;
   }
 
   return (
@@ -23,8 +25,8 @@ const EditableCell = ({ initialValue, onSave, isChanged, depth, isLocked }: any)
       type="number" value={value} placeholder="0" disabled={isLocked}
       onChange={e => setValue(e.target.value === '' ? '' : Math.round(Number(e.target.value)))}
       onBlur={onBlur} onKeyDown={e => e.key === 'Enter' && onBlur()}
-      className={`w-28 text-center text-sm font-black p-3 rounded-xl border-2 transition-all shadow-sm outline-none
-        ${isChanged ? 'bg-emerald-50 border-emerald-500 text-emerald-800' : depth === 1 ? 'bg-white border-slate-100 hover:border-slate-300 focus:border-indigo-500' : 'bg-transparent border-transparent text-slate-500 hover:border-slate-300 focus:bg-white focus:border-indigo-500'}`}
+      className={`w-full text-center text-sm font-black p-2 rounded-lg border-2 transition-all shadow-sm outline-none
+        ${isChanged ? 'bg-emerald-50 border-emerald-500 text-emerald-800' : 'bg-white border-slate-200 hover:border-slate-300 focus:border-indigo-500 text-slate-800'}`}
     />
   );
 };
@@ -36,7 +38,6 @@ export default function GlobalDashboard() {
   const [isProcessing, setIsProcessing] = useState(false);
   
   const [isLocked, setIsLocked] = useState(false); 
-  const [canReopen, setCanReopen] = useState(false);
   const [lockMessage, setLockMessage] = useState('Publicar Demanda Oficial');
   
   const [expanded, setExpanded] = useState({});
@@ -48,7 +49,6 @@ export default function GlobalDashboard() {
       const res = await axios.get(`http://localhost:8000/api/v1/dashboard/global?t=${new Date().getTime()}`);
       setIsLocked(res.data.is_locked); 
       setLockMessage(res.data.lock_message || 'Publicar Demanda Oficial');
-      setCanReopen(res.data.can_reopen || false);
       
       const clientesMap = new Map();
       const mesesSet = new Set<string>();
@@ -87,24 +87,35 @@ export default function GlobalDashboard() {
 
   const getMetricasNode = useCallback((node: any, mes: string, editadas: any): any => {
     if (node.tipo === 'cliente') {
-      const val = editadas[`cliente|${node.id}|${mes}`] ?? node.meses[mes]?.vol_irrestrito ?? 0;
-      const volInt = Math.round(Number(val));
+      const pmv = node.meses[mes]?.pmv || 0;
+      const valFinal = editadas[`cliente|${node.id}|${mes}`] ?? node.meses[mes]?.vol_irrestrito ?? 0;
+      
+      const vol = Math.round(Number(valFinal));
+      const ia = Math.round(Number(node.meses[mes]?.vol_ia || 0));
+      const td = Math.round(Number(node.meses[mes]?.vol_td || 0));
+      const bu = Math.round(Number(node.meses[mes]?.vol_bu || 0));
+
       return { 
-        vol: volInt, fat: volInt * (node.meses[mes]?.pmv || 0), 
-        ia: Math.round(Number(node.meses[mes]?.vol_ia || 0)), 
-        td: Math.round(Number(node.meses[mes]?.vol_td || 0)), 
-        bu: Math.round(Number(node.meses[mes]?.vol_bu || 0)) 
+        vol, fat: vol * pmv, 
+        ia, fat_ia: ia * pmv, 
+        td, fat_td: td * pmv, 
+        bu, fat_bu: bu * pmv 
       };
     }
     const somaFilhos = node.children.reduce((acc: any, c: any) => {
       const r = getMetricasNode(c, mes, editadas);
-      return { vol: acc.vol + r.vol, fat: acc.fat + r.fat, ia: acc.ia + r.ia, td: acc.td + r.td, bu: acc.bu + r.bu };
-    }, { vol: 0, fat: 0, ia: 0, td: 0, bu: 0 });
+      return { 
+        vol: acc.vol + r.vol, fat: acc.fat + r.fat, 
+        ia: acc.ia + r.ia, fat_ia: acc.fat_ia + r.fat_ia, 
+        td: acc.td + r.td, fat_td: acc.fat_td + r.fat_td, 
+        bu: acc.bu + r.bu, fat_bu: acc.fat_bu + r.fat_bu 
+      };
+    }, { vol: 0, fat: 0, ia: 0, fat_ia: 0, td: 0, fat_td: 0, bu: 0, fat_bu: 0 });
 
     if (node.tipo === 'produto') {
-      const valEdit = editadas[`produto|${node.chave_produto}|${mes}`];
-      if (valEdit !== undefined) {
-        const novoV = Math.round(Number(valEdit));
+      const editKey = `produto|${node.chave_produto}|${mes}`;
+      if (editadas[editKey] !== undefined) {
+        const novoV = Math.round(Number(editadas[editKey]));
         return { ...somaFilhos, vol: novoV, fat: somaFilhos.vol > 0 ? (novoV / somaFilhos.vol) * somaFilhos.fat : 0 };
       }
     }
@@ -146,31 +157,26 @@ export default function GlobalDashboard() {
     }
   };
 
-  const handleReopen = async () => {
-    if (!window.confirm("Ordem Reversa: Tem certeza que deseja reabrir o ciclo S&OP Final? Isso permitirá destravar os Vendedores no Gerenciamento.")) return;
-    try {
-      await axios.post('http://localhost:8000/api/v1/dashboard/reabrir');
-      alert("✅ S&OP Global Reaberto!");
-      fetchData();
-    } catch (e: any) {
-      alert("Erro ao reabrir: " + (e.response?.data?.detail || e.message));
-    }
-  };
-
-  const handleManualExport = () => {
-    window.open('http://localhost:8000/api/v1/dashboard/export', '_blank');
-  };
-
   const stats = useMemo(() => {
     const dataMes: any[] = mesesUnicos.map(m => {
-      let mTot = { ia: 0, td: 0, bu: 0, final: 0, fat: 0 };
+      let mTot = { ia: 0, fat_ia: 0, td: 0, fat_td: 0, bu: 0, fat_bu: 0, final: 0, fat: 0 };
       arvoreDados.forEach(cat => {
         const r = getMetricasNode(cat, m, celulasEditadas);
-        mTot.ia += r.ia; mTot.td += r.td; mTot.bu += r.bu; mTot.final += r.vol; mTot.fat += r.fat;
+        mTot.ia += r.ia; mTot.fat_ia += r.fat_ia;
+        mTot.td += r.td; mTot.fat_td += r.fat_td;
+        mTot.bu += r.bu; mTot.fat_bu += r.fat_bu;
+        mTot.final += r.vol; mTot.fat += r.fat;
       });
       return { mesLabel: m.split('-').reverse().slice(1).join('/'), ...mTot };
     });
-    const glob = dataMes.reduce((acc, curr) => ({ ia: acc.ia + curr.ia, td: acc.td + curr.td, bu: acc.bu + curr.bu, final: acc.final + curr.final, fat: acc.fat + curr.fat }), { ia: 0, td: 0, bu: 0, final: 0, fat: 0 });
+    
+    const glob = dataMes.reduce((acc, curr) => ({ 
+      ia: acc.ia + curr.ia, fat_ia: acc.fat_ia + curr.fat_ia, 
+      td: acc.td + curr.td, fat_td: acc.fat_td + curr.fat_td, 
+      bu: acc.bu + curr.bu, fat_bu: acc.fat_bu + curr.fat_bu, 
+      final: acc.final + curr.final, fat: acc.fat + curr.fat 
+    }), { ia: 0, fat_ia: 0, td: 0, fat_td: 0, bu: 0, fat_bu: 0, final: 0, fat: 0 });
+    
     return { dataMes, glob };
   }, [arvoreDados, mesesUnicos, celulasEditadas, getMetricasNode]);
 
@@ -205,10 +211,9 @@ export default function GlobalDashboard() {
       cols.push({
         id: `mes_${m}`, accessorFn: (row: any) => getMetricasNode(row, m, celulasEditadas).vol,
         header: ({ column }: any) => (
-          <button onClick={() => column.toggleSorting()} className="flex items-center justify-center gap-2 w-full text-center bg-slate-900 text-white py-2 px-4 rounded-xl text-[11px] font-black tracking-widest hover:bg-slate-800 transition-colors">
+          <div className="flex items-center justify-center bg-slate-900 text-white py-2 px-4 rounded-xl text-[11px] font-black tracking-widest w-[160px]">
             {m.split('-').reverse().slice(1).join('/')}
-            {column.getIsSorted() ? (column.getIsSorted() === 'asc' ? <ArrowUp className="w-3 h-3 text-emerald-400"/> : <ArrowDown className="w-3 h-3 text-rose-400"/>) : <ArrowUpDown className="w-3 h-3 opacity-30"/>}
-          </button>
+          </div>
         ),
         cell: ({ row }: any) => {
           const res = getMetricasNode(row.original, m, celulasEditadas);
@@ -219,19 +224,42 @@ export default function GlobalDashboard() {
           const editKey = isCliente ? `cliente|${row.original.id}|${m}` : isProduto ? `produto|${row.original.chave_produto}|${m}` : '';
           const isChanged = celulasEditadas[editKey] !== undefined;
 
-          if (isCategoria) return <div className="text-center font-black text-slate-900 py-3 border-b-4 border-indigo-100 bg-slate-50/50 rounded-t-xl">{formatVolume(res.vol)}</div>;
+          if (isCategoria) {
+            return (
+              <div className="flex flex-col items-center py-2 min-w-[160px] bg-slate-50/50 rounded-xl border-b-4 border-indigo-100">
+                <span className="font-black text-slate-900">{formatVolume(res.vol)} <span className="text-[9px] text-slate-400">CX</span></span>
+                <span className="text-[10px] font-bold text-emerald-600">{formatMoeda(res.fat)}</span>
+              </div>
+            );
+          }
 
           return (
-            <div className="flex flex-col items-center justify-center gap-1 group">
-              <EditableCell initialValue={res.vol} isChanged={isChanged} depth={row.depth} isLocked={isLocked} onSave={(newVal: number) => setCelulasEditadas((p: any) => ({ ...p, [editKey]: newVal }))} />
-              
-              <div className="flex gap-2 text-[9px] font-black tracking-widest uppercase opacity-0 group-hover:opacity-100 transition-opacity mt-1">
-                 <span className="text-slate-400" title="Proposta Bottom-Up">BU: {formatVolume(res.bu)}</span>
+            <div className="flex flex-col items-center justify-center gap-1.5 min-w-[160px] bg-white p-2 rounded-xl border border-slate-100 shadow-sm hover:shadow-md transition-all group">
+              <div className="w-full flex items-center justify-between gap-2">
+                <EditableCell initialValue={res.vol} isChanged={isChanged} depth={row.depth} isLocked={isLocked} onSave={(newVal: number) => setCelulasEditadas((p: any) => ({ ...p, [editKey]: newVal }))} />
+                {isProduto && !isLocked && (
+                  <button onClick={() => handleDistribuirVolume(row.original, m)} className="p-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded-lg transition-colors" title="Ratear Volume">
+                    <ChevronLast className="w-4 h-4 rotate-90" />
+                  </button>
+                )}
               </div>
-
-              {isProduto && !isLocked && (
-                <button onClick={() => handleDistribuirVolume(row.original, m)} className="p-1 hover:bg-indigo-100 text-indigo-600 rounded-lg transition-colors mt-1"><ChevronLast className="w-4 h-4 rotate-90" /></button>
-              )}
+              <span className="text-[10px] font-black text-emerald-600">{formatMoeda(res.fat)}</span>
+              
+              {/* VISÃO COMPARATIVA DE CENÁRIOS TRAVADOS */}
+              <div className="grid grid-cols-3 w-full border-t border-slate-100 pt-1 mt-1">
+                 <div className="flex flex-col items-center justify-center border-r border-slate-100 px-1" title="Sinal IA">
+                    <span className="text-[7px] font-black text-slate-400 uppercase tracking-tighter">IA</span>
+                    <span className="text-[9px] font-bold text-slate-600">{formatVolume(res.ia)}</span>
+                 </div>
+                 <div className="flex flex-col items-center justify-center border-r border-slate-100 px-1" title="Top-Down">
+                    <span className="text-[7px] font-black text-blue-400 uppercase tracking-tighter">TD</span>
+                    <span className="text-[9px] font-bold text-blue-700">{formatVolume(res.td)}</span>
+                 </div>
+                 <div className="flex flex-col items-center justify-center px-1" title="Bottom-Up">
+                    <span className="text-[7px] font-black text-amber-400 uppercase tracking-tighter">BU</span>
+                    <span className="text-[9px] font-bold text-amber-600">{formatVolume(res.bu)}</span>
+                 </div>
+              </div>
             </div>
           );
         }
@@ -268,14 +296,8 @@ export default function GlobalDashboard() {
           </div>
           
           <div className="flex items-center gap-4">
-            {isLocked && canReopen && (
-              <button onClick={handleReopen} className="flex items-center gap-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 px-6 py-5 rounded-[24px] text-xs font-black tracking-widest uppercase transition-all shadow-sm">
-                  <Unlock className="w-5 h-5" /> Reabrir Global
-              </button>
-            )}
-
             <button 
-              onClick={handleManualExport}
+              onClick={() => window.open('http://localhost:8000/api/v1/dashboard/export', '_blank')}
               className="flex items-center gap-2 px-6 py-5 rounded-[24px] text-xs font-black transition-all border-2 border-slate-200 text-slate-600 hover:bg-white hover:border-slate-300 shadow-sm tracking-widest uppercase"
             >
               <Download className="w-5 h-5" /> Exportar
@@ -295,50 +317,86 @@ export default function GlobalDashboard() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-8 mb-12">
+        {/* CARDS DE KPI (COM VARIAÇÕES) */}
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6 mb-10">
           {[
-            { label: 'IA Base', val: stats.glob.ia, color: 'text-slate-400', border: 'border-slate-200' },
-            { label: 'Diretoria (Top-Down)', val: stats.glob.td, color: 'text-blue-600', border: 'border-blue-200' },
-            { label: 'Vendas (Bottom-Up)', val: stats.glob.bu, color: 'text-amber-500', border: 'border-amber-200' },
-            { label: 'Oficial S&OP Final', val: stats.glob.final, color: 'text-emerald-600', border: 'border-emerald-500', sub: formatMoeda(stats.glob.fat), highlight: true }
+            { label: 'IA Pura (Travado)', vol: stats.glob.ia, fat: stats.glob.fat_ia, varNum: 0, color: 'text-slate-500', border: 'border-slate-200' },
+            { label: 'Diretoria (Travado)', vol: stats.glob.td, fat: stats.glob.fat_td, varNum: calcVar(stats.glob.fat_td, stats.glob.fat_ia), color: 'text-blue-600', border: 'border-blue-200' },
+            { label: 'Vendas (Travado)', vol: stats.glob.bu, fat: stats.glob.fat_bu, varNum: calcVar(stats.glob.fat_bu, stats.glob.fat_td), color: 'text-amber-500', border: 'border-amber-200' },
+            { label: 'Oficial S&OP Final', vol: stats.glob.final, fat: stats.glob.fat, varNum: calcVar(stats.glob.fat, stats.glob.fat_bu), color: 'text-emerald-600', border: 'border-emerald-500', highlight: true }
           ].map((c, i) => (
-            <div key={i} className={`bg-white p-10 rounded-[48px] shadow-sm border-2 ${c.border} transition-all ${c.highlight ? 'ring-4 ring-emerald-500/10' : ''}`}>
-              <p className={`text-[11px] font-black uppercase tracking-widest mb-3 ${c.color}`}>{c.label}</p>
-              <h3 className="text-4xl font-black text-slate-900">{formatVolume(c.val)} <span className="text-xs text-slate-400 font-bold">CX</span></h3>
-              {c.sub && <div className="mt-5 flex items-center gap-2 text-emerald-700 font-black text-sm bg-emerald-50 px-4 py-2 rounded-2xl w-fit"><TrendingUp className="w-4 h-4" /> {c.sub}</div>}
+            <div key={i} className={`bg-white p-8 rounded-[40px] shadow-sm border-2 ${c.border} flex flex-col justify-between transition-all ${c.highlight ? 'ring-4 ring-emerald-500/10' : ''}`}>
+              <div className="flex justify-between items-start mb-4">
+                 <p className={`text-[10px] font-black uppercase tracking-widest ${c.color}`}>{c.label}</p>
+                 {i > 0 && (
+                   <div className={`px-2 py-1 rounded-lg text-[10px] font-black flex items-center gap-1 ${c.varNum > 0 ? 'bg-emerald-50 text-emerald-600' : c.varNum < 0 ? 'bg-rose-50 text-rose-600' : 'bg-slate-50 text-slate-500'}`}>
+                     {c.varNum > 0 ? <TrendingUp className="w-3 h-3"/> : c.varNum < 0 ? <TrendingUp className="w-3 h-3 rotate-180"/> : null}
+                     {c.varNum > 0 ? '+' : ''}{c.varNum.toFixed(1)}% vs anterior
+                   </div>
+                 )}
+              </div>
+              <div>
+                 <h3 className="text-3xl font-black text-slate-900 mb-1">{formatVolume(c.vol)} <span className="text-[10px] text-slate-400 font-bold uppercase">Caixas</span></h3>
+                 <div className={`text-sm font-black flex items-center gap-1.5 ${c.highlight ? 'text-emerald-600' : 'text-slate-500'}`}>
+                    R$ {formatMoeda(c.fat).replace('R$', '').trim()} Previsto
+                 </div>
+              </div>
             </div>
           ))}
         </div>
 
-        <div className="bg-white p-10 lg:p-16 rounded-[64px] shadow-sm border border-slate-100 mb-12 h-[600px]">
-          <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={stats.dataMes} margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
-              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-              <XAxis dataKey="mesLabel" tick={{fontSize: 14, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
-              <YAxis yAxisId="left" tickFormatter={v => formatVolume(v)} tick={{fontSize: 12, fill: '#94a3b8'}} axisLine={false} tickLine={false} />
-              <YAxis yAxisId="right" orientation="right" tickFormatter={v => `R$${(v/1e6).toFixed(1)}M`} tick={{fontSize: 12, fontWeight: 900, fill: '#0f172a'}} axisLine={false} tickLine={false} />
-              <RechartsTooltip formatter={(v: any, n: any) => [n === 'fat' ? formatMoeda(v) : formatVolume(v), n === 'fat' ? 'RECEITA' : n.toUpperCase()]} contentStyle={{borderRadius: '32px', border: 'none', boxShadow: '0 40px 80px rgba(0,0,0,0.15)', padding: '20px'}} />
-              <Legend verticalAlign="top" height={60} iconType="circle" />
-              <Bar yAxisId="left" dataKey="td" name="Diretoria (TD)" fill="#3b82f6" radius={[12, 12, 0, 0]} barSize={40} />
-              <Bar yAxisId="left" dataKey="bu" name="Vendas (BU)" fill="#f59e0b" radius={[12, 12, 0, 0]} barSize={40} />
-              <Bar yAxisId="left" dataKey="final" name="S&OP Final" fill="#10b981" radius={[12, 12, 0, 0]} barSize={40} />
-              <Line yAxisId="right" type="monotone" dataKey="fat" name="Receita" stroke="#0f172a" strokeWidth={6} dot={{r: 8, fill: '#0f172a', strokeWidth: 4, stroke: '#fff'}} />
-            </ComposedChart>
-          </ResponsiveContainer>
+        {/* GRÁFICOS: FATURAMENTO E VOLUME */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-10">
+          <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100 h-[400px] flex flex-col">
+            <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-6 flex items-center gap-2"><TrendingUp className="w-4 h-4 text-emerald-500"/> Faturamento (R$) por Cenário</h3>
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={stats.dataMes} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
+                <defs>
+                  <linearGradient id="colorFatFinal" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#10b981" stopOpacity={0.3}/><stop offset="95%" stopColor="#10b981" stopOpacity={0}/></linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                <XAxis dataKey="mesLabel" tick={{fontSize: 11, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
+                <YAxis tickFormatter={v => `R$${(v/1e6).toFixed(1)}M`} tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} />
+                <RechartsTooltip formatter={(v: any) => formatMoeda(v)} contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 20px 40px rgba(0,0,0,0.1)'}} />
+                <Legend iconType="circle" wrapperStyle={{fontSize: '10px', fontWeight: 'bold'}}/>
+                <Area type="monotone" dataKey="fat_td" name="Diretoria" stroke="#3b82f6" fill="none" strokeWidth={3} />
+                <Area type="monotone" dataKey="fat_bu" name="Vendas" stroke="#f59e0b" fill="none" strokeWidth={3} />
+                <Area type="monotone" dataKey="fat" name="S&OP Final" stroke="#10b981" fillOpacity={1} fill="url(#colorFatFinal)" strokeWidth={4} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+          
+          <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100 h-[400px] flex flex-col">
+            <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-6 flex items-center gap-2"><BarChart2 className="w-4 h-4 text-indigo-500"/> Volumes (Cx) Consolidados</h3>
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={stats.dataMes} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                <XAxis dataKey="mesLabel" tick={{fontSize: 11, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
+                <YAxis tickFormatter={v => formatVolume(v)} tick={{fontSize: 10, fill: '#94a3b8'}} axisLine={false} tickLine={false} />
+                <RechartsTooltip formatter={(v: any) => formatVolume(v)} contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 20px 40px rgba(0,0,0,0.1)'}} />
+                <Legend iconType="circle" wrapperStyle={{fontSize: '10px', fontWeight: 'bold'}}/>
+                <Bar dataKey="ia" name="Sinal IA" fill="#cbd5e1" radius={[6, 6, 0, 0]} barSize={20} />
+                <Bar dataKey="td" name="Diretoria" fill="#3b82f6" radius={[6, 6, 0, 0]} barSize={20} />
+                <Bar dataKey="bu" name="Vendas" fill="#f59e0b" radius={[6, 6, 0, 0]} barSize={20} />
+                <Line type="monotone" dataKey="final" name="S&OP Final" stroke="#10b981" strokeWidth={4} dot={{r: 4, fill: '#10b981'}} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
         </div>
 
-        <div className="bg-white rounded-[64px] shadow-2xl border border-slate-100 overflow-hidden">
-          <div className="p-10 bg-slate-50 border-b border-slate-100 flex flex-col md:flex-row justify-between items-center gap-4 text-center md:text-left">
-            <h3 className="font-black text-slate-900 uppercase tracking-widest text-sm flex items-center gap-3"><Package className="w-5 h-5 text-indigo-600"/> Matriz de Decisão S&OP Final</h3>
+        {/* TABELA DE MATRIZ DE CENÁRIOS */}
+        <div className="bg-white rounded-[40px] shadow-2xl border border-slate-100 overflow-hidden">
+          <div className="p-8 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
+            <h3 className="font-black text-slate-900 uppercase tracking-widest text-sm flex items-center gap-3"><Package className="w-5 h-5 text-indigo-600"/> Matriz de Cenários (Volume & Faturamento)</h3>
             {isLocked && <div className="bg-emerald-100 text-emerald-700 px-4 py-2 rounded-xl text-xs font-black tracking-widest flex items-center gap-2"><Lock className="w-4 h-4"/> BLOQUEADO: {lockMessage}</div>}
           </div>
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto pb-4">
             <table className="w-full border-collapse">
               <thead className="bg-white border-b-2 border-slate-100">
                 {table.getHeaderGroups().map(hg => (
                   <tr key={hg.id}>
                     {hg.headers.map(h => (
-                      <th key={h.id} className="px-10 py-8 text-left text-[11px] font-black text-slate-400 uppercase tracking-widest">
+                      <th key={h.id} className="px-6 py-6 text-left align-bottom">
                         {flexRender(h.column.columnDef.header, h.getContext())}
                       </th>
                     ))}
@@ -347,15 +405,42 @@ export default function GlobalDashboard() {
               </thead>
               <tbody>
                 {table.getRowModel().rows.map(row => (
-                  <tr key={row.id} className={`group transition-all ${row.depth === 0 ? 'bg-slate-50/70' : 'hover:bg-indigo-50/30'}`}>
+                  <tr key={row.id} className={`group transition-all ${row.depth === 0 ? 'bg-slate-50/70' : 'hover:bg-indigo-50/10'}`}>
                     {row.getVisibleCells().map(cell => (
-                      <td key={cell.id} className="px-10 py-5 border-b border-slate-50">
+                      <td key={cell.id} className="px-6 py-4 border-b border-slate-50">
                         {flexRender(cell.column.columnDef.cell, cell.getContext())}
                       </td>
                     ))}
                   </tr>
                 ))}
               </tbody>
+              <tfoot className="bg-slate-900 text-white">
+                <tr>
+                  {table.getHeaderGroups()[0].headers.map(header => {
+                    if (header.id === 'hierarquia') return (
+                      <td key={header.id} className="px-6 py-6 text-right">
+                        <div className="flex flex-col">
+                          <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Total Oficial</span>
+                          <span className="font-bold text-sm text-white">S&OP FINAL</span>
+                        </div>
+                      </td>
+                    );
+                    if (header.id.startsWith('mes_')) {
+                      const m = header.id.replace('mes_', '');
+                      const tot = stats.dataMes.find(d => d.mesLabel === m.split('-').reverse().slice(1).join('/'));
+                      return (
+                        <td key={header.id} className="px-6 py-6">
+                           <div className="flex flex-col items-center min-w-[160px]">
+                              <span className="font-black text-white">{formatVolume(tot?.final || 0)} <span className="text-[10px] text-slate-400">CX</span></span>
+                              <span className="text-sm font-black text-emerald-400 mt-1">{formatMoeda(tot?.fat || 0)}</span>
+                           </div>
+                        </td>
+                      );
+                    }
+                    return <td key={header.id}></td>;
+                  })}
+                </tr>
+              </tfoot>
             </table>
           </div>
         </div>
