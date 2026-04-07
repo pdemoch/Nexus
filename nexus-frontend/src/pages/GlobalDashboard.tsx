@@ -1,12 +1,11 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useReactTable, getCoreRowModel, flexRender, getExpandedRowModel, getSortedRowModel, SortingState } from '@tanstack/react-table';
-import { Loader2, ChevronDown, ChevronRight, Save, Layers, Package, Users, ArrowUpDown, ArrowUp, ArrowDown, TrendingUp, ChevronLast, Lock, Download, BarChart2 } from 'lucide-react';
+import { Loader2, ChevronDown, ChevronRight, Save, Layers, Package, Users, ArrowUpDown, ArrowUp, ArrowDown, TrendingUp, ChevronLast, Lock, Download, Unlock, BarChart2 } from 'lucide-react';
 import axios from 'axios';
-import { ComposedChart, AreaChart, Area, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer } from 'recharts';
 
 const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor));
 const formatVolume = (val: number) => Math.round(val).toLocaleString('pt-BR');
-
 const calcVar = (atual: number, base: number) => base > 0 ? ((atual - base) / base) * 100 : 0;
 
 const EditableCell = ({ initialValue, onSave, isChanged, isLocked }: any) => {
@@ -38,7 +37,7 @@ export default function GlobalDashboard() {
   const [isProcessing, setIsProcessing] = useState(false);
   
   const [isLocked, setIsLocked] = useState(false); 
-  const [lockMessage, setLockMessage] = useState('Publicar Demanda Oficial');
+  const [lockMessage, setLockMessage] = useState('Publicar Demanda Irrestrita');
   
   const [expanded, setExpanded] = useState({});
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -48,7 +47,7 @@ export default function GlobalDashboard() {
     try {
       const res = await axios.get(`http://localhost:8000/api/v1/dashboard/global?t=${new Date().getTime()}`);
       setIsLocked(res.data.is_locked); 
-      setLockMessage(res.data.lock_message || 'Publicar Demanda Oficial');
+      setLockMessage(res.data.lock_message || 'Publicar Demanda Irrestrita');
       
       const clientesMap = new Map();
       const mesesSet = new Set<string>();
@@ -157,6 +156,10 @@ export default function GlobalDashboard() {
     }
   };
 
+  const handleManualExport = () => {
+    window.open('http://localhost:8000/api/v1/dashboard/export', '_blank');
+  };
+
   const stats = useMemo(() => {
     const dataMes: any[] = mesesUnicos.map(m => {
       let mTot = { ia: 0, fat_ia: 0, td: 0, fat_td: 0, bu: 0, fat_bu: 0, final: 0, fat: 0 };
@@ -211,9 +214,13 @@ export default function GlobalDashboard() {
       cols.push({
         id: `mes_${m}`, accessorFn: (row: any) => getMetricasNode(row, m, celulasEditadas).vol,
         header: ({ column }: any) => (
-          <div className="flex items-center justify-center bg-slate-900 text-white py-2 px-4 rounded-xl text-[11px] font-black tracking-widest w-[160px]">
+          <button 
+            onClick={() => column.toggleSorting()} 
+            className="flex items-center justify-center gap-2 bg-slate-900 text-white py-2 px-4 rounded-xl text-[11px] font-black tracking-widest w-[160px] hover:bg-slate-800 transition-colors"
+          >
             {m.split('-').reverse().slice(1).join('/')}
-          </div>
+            {column.getIsSorted() ? (column.getIsSorted() === 'asc' ? <ArrowUp className="w-3 h-3 text-emerald-400"/> : <ArrowDown className="w-3 h-3 text-rose-400"/>) : <ArrowUpDown className="w-3 h-3 opacity-30"/>}
+          </button>
         ),
         cell: ({ row }: any) => {
           const res = getMetricasNode(row.original, m, celulasEditadas);
@@ -251,12 +258,12 @@ export default function GlobalDashboard() {
                     <span className="text-[7px] font-black text-slate-400 uppercase tracking-tighter">IA</span>
                     <span className="text-[9px] font-bold text-slate-600">{formatVolume(res.ia)}</span>
                  </div>
-                 <div className="flex flex-col items-center justify-center border-r border-slate-100 px-1" title="Top-Down">
-                    <span className="text-[7px] font-black text-blue-400 uppercase tracking-tighter">TD</span>
+                 <div className="flex flex-col items-center justify-center border-r border-slate-100 px-1" title="Gerencial">
+                    <span className="text-[7px] font-black text-blue-400 uppercase tracking-tighter">GER</span>
                     <span className="text-[9px] font-bold text-blue-700">{formatVolume(res.td)}</span>
                  </div>
-                 <div className="flex flex-col items-center justify-center px-1" title="Bottom-Up">
-                    <span className="text-[7px] font-black text-amber-400 uppercase tracking-tighter">BU</span>
+                 <div className="flex flex-col items-center justify-center px-1" title="Comercial">
+                    <span className="text-[7px] font-black text-amber-400 uppercase tracking-tighter">COM</span>
                     <span className="text-[9px] font-bold text-amber-600">{formatVolume(res.bu)}</span>
                  </div>
               </div>
@@ -297,19 +304,19 @@ export default function GlobalDashboard() {
           
           <div className="flex items-center gap-4">
             <button 
-              onClick={() => window.open('http://localhost:8000/api/v1/dashboard/export', '_blank')}
+              onClick={handleManualExport}
               className="flex items-center gap-2 px-6 py-5 rounded-[24px] text-xs font-black transition-all border-2 border-slate-200 text-slate-600 hover:bg-white hover:border-slate-300 shadow-sm tracking-widest uppercase"
             >
               <Download className="w-5 h-5" /> Exportar
             </button>
 
+            {/* BOTÃO PUBLICAR SEMPRE ATIVO */}
             <button 
               onClick={handleSave} 
-              disabled={isLocked || (Object.keys(celulasEditadas).length === 0 && !isLocked)} 
+              disabled={isLocked} 
               className={`group flex items-center gap-4 px-12 py-5 rounded-[24px] text-sm font-black transition-all shadow-xl tracking-tighter uppercase 
                 ${isLocked ? 'bg-emerald-50 border-2 border-emerald-200 text-emerald-600 shadow-none' 
-                : Object.keys(celulasEditadas).length > 0 ? 'bg-slate-900 hover:bg-black text-white hover:scale-105' 
-                : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}
+                : 'bg-slate-900 hover:bg-black text-white hover:scale-105'}`}
             >
               {isProcessing ? <Loader2 className="animate-spin" /> : isLocked ? <Lock className="w-5 h-5" /> : <Save className="w-5 h-5" />}
               {isProcessing ? 'A Gravar...' : lockMessage}
@@ -317,21 +324,25 @@ export default function GlobalDashboard() {
           </div>
         </div>
 
-        {/* CARDS DE KPI (COM VARIAÇÕES) */}
+        {/* CARDS DE KPI (COM VARIAÇÕES DUPLAS: VOLUME E FATURAMENTO) */}
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6 mb-10">
           {[
-            { label: 'IA Pura (Travado)', vol: stats.glob.ia, fat: stats.glob.fat_ia, varNum: 0, color: 'text-slate-500', border: 'border-slate-200' },
-            { label: 'Diretoria (Travado)', vol: stats.glob.td, fat: stats.glob.fat_td, varNum: calcVar(stats.glob.fat_td, stats.glob.fat_ia), color: 'text-blue-600', border: 'border-blue-200' },
-            { label: 'Vendas (Travado)', vol: stats.glob.bu, fat: stats.glob.fat_bu, varNum: calcVar(stats.glob.fat_bu, stats.glob.fat_td), color: 'text-amber-500', border: 'border-amber-200' },
-            { label: 'Oficial S&OP Final', vol: stats.glob.final, fat: stats.glob.fat, varNum: calcVar(stats.glob.fat, stats.glob.fat_bu), color: 'text-emerald-600', border: 'border-emerald-500', highlight: true }
+            { label: 'IA Base', vol: stats.glob.ia, fat: stats.glob.fat_ia, varVol: 0, varFat: 0, color: 'text-slate-500', border: 'border-slate-200' },
+            { label: 'Gerencial', vol: stats.glob.td, fat: stats.glob.fat_td, varVol: calcVar(stats.glob.td, stats.glob.ia), varFat: calcVar(stats.glob.fat_td, stats.glob.fat_ia), color: 'text-blue-600', border: 'border-blue-200' },
+            { label: 'Comercial', vol: stats.glob.bu, fat: stats.glob.fat_bu, varVol: calcVar(stats.glob.bu, stats.glob.td), varFat: calcVar(stats.glob.fat_bu, stats.glob.fat_td), color: 'text-amber-500', border: 'border-amber-200' },
+            { label: 'Demanda Irrestrita', vol: stats.glob.final, fat: stats.glob.fat, varVol: calcVar(stats.glob.final, stats.glob.bu), varFat: calcVar(stats.glob.fat, stats.glob.fat_bu), color: 'text-emerald-600', border: 'border-emerald-500', highlight: true }
           ].map((c, i) => (
             <div key={i} className={`bg-white p-8 rounded-[40px] shadow-sm border-2 ${c.border} flex flex-col justify-between transition-all ${c.highlight ? 'ring-4 ring-emerald-500/10' : ''}`}>
               <div className="flex justify-between items-start mb-4">
                  <p className={`text-[10px] font-black uppercase tracking-widest ${c.color}`}>{c.label}</p>
                  {i > 0 && (
-                   <div className={`px-2 py-1 rounded-lg text-[10px] font-black flex items-center gap-1 ${c.varNum > 0 ? 'bg-emerald-50 text-emerald-600' : c.varNum < 0 ? 'bg-rose-50 text-rose-600' : 'bg-slate-50 text-slate-500'}`}>
-                     {c.varNum > 0 ? <TrendingUp className="w-3 h-3"/> : c.varNum < 0 ? <TrendingUp className="w-3 h-3 rotate-180"/> : null}
-                     {c.varNum > 0 ? '+' : ''}{c.varNum.toFixed(1)}% vs anterior
+                   <div className="flex gap-2">
+                     <div className={`px-2 py-1 rounded-md text-[9px] font-black flex items-center gap-1 ${c.varVol > 0 ? 'bg-emerald-50 text-emerald-600' : c.varVol < 0 ? 'bg-rose-50 text-rose-600' : 'bg-slate-50 text-slate-500'}`} title="Variação de Volume (vs. anterior)">
+                       <Package className="w-3 h-3"/> {c.varVol > 0 ? '+' : ''}{c.varVol.toFixed(1)}%
+                     </div>
+                     <div className={`px-2 py-1 rounded-md text-[9px] font-black flex items-center gap-1 ${c.varFat > 0 ? 'bg-emerald-50 text-emerald-600' : c.varFat < 0 ? 'bg-rose-50 text-rose-600' : 'bg-slate-50 text-slate-500'}`} title="Variação de Faturamento (vs. anterior)">
+                       <TrendingUp className={`w-3 h-3 ${c.varFat < 0 ? 'rotate-180' : ''}`}/> {c.varFat > 0 ? '+' : ''}{c.varFat.toFixed(1)}%
+                     </div>
                    </div>
                  )}
               </div>
@@ -345,41 +356,39 @@ export default function GlobalDashboard() {
           ))}
         </div>
 
-        {/* GRÁFICOS: FATURAMENTO E VOLUME */}
+        {/* GRÁFICOS: APENAS BARRAS NA ORDEM (IA, GER, COM, IRR) */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-10">
           <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100 h-[400px] flex flex-col">
             <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-6 flex items-center gap-2"><TrendingUp className="w-4 h-4 text-emerald-500"/> Faturamento (R$) por Cenário</h3>
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={stats.dataMes} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
-                <defs>
-                  <linearGradient id="colorFatFinal" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#10b981" stopOpacity={0.3}/><stop offset="95%" stopColor="#10b981" stopOpacity={0}/></linearGradient>
-                </defs>
+              <BarChart data={stats.dataMes} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                 <XAxis dataKey="mesLabel" tick={{fontSize: 11, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
                 <YAxis tickFormatter={v => `R$${(v/1e6).toFixed(1)}M`} tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} />
                 <RechartsTooltip formatter={(v: any) => formatMoeda(v)} contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 20px 40px rgba(0,0,0,0.1)'}} />
                 <Legend iconType="circle" wrapperStyle={{fontSize: '10px', fontWeight: 'bold'}}/>
-                <Area type="monotone" dataKey="fat_td" name="Diretoria" stroke="#3b82f6" fill="none" strokeWidth={3} />
-                <Area type="monotone" dataKey="fat_bu" name="Vendas" stroke="#f59e0b" fill="none" strokeWidth={3} />
-                <Area type="monotone" dataKey="fat" name="S&OP Final" stroke="#10b981" fillOpacity={1} fill="url(#colorFatFinal)" strokeWidth={4} />
-              </AreaChart>
+                <Bar dataKey="fat_ia" name="IA Base" fill="#cbd5e1" radius={[4, 4, 0, 0]} barSize={15} />
+                <Bar dataKey="fat_td" name="Gerencial" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={15} />
+                <Bar dataKey="fat_bu" name="Comercial" fill="#f59e0b" radius={[4, 4, 0, 0]} barSize={15} />
+                <Bar dataKey="fat" name="Irrestrita" fill="#10b981" radius={[4, 4, 0, 0]} barSize={15} />
+              </BarChart>
             </ResponsiveContainer>
           </div>
           
           <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100 h-[400px] flex flex-col">
             <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-6 flex items-center gap-2"><BarChart2 className="w-4 h-4 text-indigo-500"/> Volumes (Cx) Consolidados</h3>
             <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={stats.dataMes} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
+              <BarChart data={stats.dataMes} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                 <XAxis dataKey="mesLabel" tick={{fontSize: 11, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
                 <YAxis tickFormatter={v => formatVolume(v)} tick={{fontSize: 10, fill: '#94a3b8'}} axisLine={false} tickLine={false} />
                 <RechartsTooltip formatter={(v: any) => formatVolume(v)} contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 20px 40px rgba(0,0,0,0.1)'}} />
                 <Legend iconType="circle" wrapperStyle={{fontSize: '10px', fontWeight: 'bold'}}/>
-                <Bar dataKey="ia" name="Sinal IA" fill="#cbd5e1" radius={[6, 6, 0, 0]} barSize={20} />
-                <Bar dataKey="td" name="Diretoria" fill="#3b82f6" radius={[6, 6, 0, 0]} barSize={20} />
-                <Bar dataKey="bu" name="Vendas" fill="#f59e0b" radius={[6, 6, 0, 0]} barSize={20} />
-                <Line type="monotone" dataKey="final" name="S&OP Final" stroke="#10b981" strokeWidth={4} dot={{r: 4, fill: '#10b981'}} />
-              </ComposedChart>
+                <Bar dataKey="ia" name="IA Base" fill="#cbd5e1" radius={[4, 4, 0, 0]} barSize={15} />
+                <Bar dataKey="td" name="Gerencial" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={15} />
+                <Bar dataKey="bu" name="Comercial" fill="#f59e0b" radius={[4, 4, 0, 0]} barSize={15} />
+                <Bar dataKey="final" name="Irrestrita" fill="#10b981" radius={[4, 4, 0, 0]} barSize={15} />
+              </BarChart>
             </ResponsiveContainer>
           </div>
         </div>
@@ -421,7 +430,7 @@ export default function GlobalDashboard() {
                       <td key={header.id} className="px-6 py-6 text-right">
                         <div className="flex flex-col">
                           <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Total Oficial</span>
-                          <span className="font-bold text-sm text-white">S&OP FINAL</span>
+                          <span className="font-bold text-sm text-white">IRRESTRITA</span>
                         </div>
                       </td>
                     );

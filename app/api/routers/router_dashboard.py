@@ -66,13 +66,13 @@ async def carregar_dashboard_global(db: Session = Depends(get_db)):
         pendentes = [v for v in v_ativos if v not in v_fechados]
 
         if is_global_fechado:
-            is_locked, lock_message = True, "Plano Oficial Publicado"
+            is_locked, lock_message = True, "Demanda Irrestrita Publicada"
         elif not is_td_fechado:
-            is_locked, lock_message = True, "Aguardando Diretoria (Top-Down)"
+            is_locked, lock_message = True, "Aguardando Visão Gerencial"
         elif pendentes:
             is_locked, lock_message = True, f"Aguardando {len(pendentes)} Vendedor(es)"
         else:
-            is_locked, lock_message = False, "Publicar Demanda Oficial"
+            is_locked, lock_message = False, "Publicar Demanda Irrestrita"
             
         # --- BUSCA DE DADOS ---
         resultados = db.query(
@@ -198,20 +198,20 @@ async def exportar_excel_global(db: Session = Depends(get_db)):
             dados.append({
                 "Categoria": r.categoria, "SKU": r.sku, "Produto": r.descricao, "Cliente (Razão Social)": r.razaosocial,
                 "Mês Projetado": r.mes_projetado.strftime("%m/%Y"), "Sinal IA (Base)": vol_ia,
-                "Meta Top-Down (Diretoria)": int(r.vol_td or 0), "Proposta Bottom-Up (Vendas)": int(r.vol_bu or 0),
-                "Volume S&OP Final": int(r.vol_final or 0), "PMV Ponderado (R$)": round(pmv_real, 2),
-                "Faturamento S&OP Oficial (R$)": int(r.vol_final or 0) * pmv_real
+                "Meta Gerencial": int(r.vol_td or 0), "Proposta Comercial": int(r.vol_bu or 0),
+                "Demanda Irrestrita": int(r.vol_final or 0), "PMV Ponderado (R$)": round(pmv_real, 2),
+                "Faturamento Irrestrito (R$)": int(r.vol_final or 0) * pmv_real
             })
 
         df = pd.DataFrame(dados)
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='SOP Global Consolidado')
+            df.to_excel(writer, index=False, sheet_name='Demanda_Irrestrita')
         
         buffer.seek(0)
         return StreamingResponse(
             buffer, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-            headers={"Content-Disposition": "attachment; filename=SOP_Global_Oficial.xlsx"}
+            headers={"Content-Disposition": "attachment; filename=Demanda_Irrestrita_Oficial.xlsx"}
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
