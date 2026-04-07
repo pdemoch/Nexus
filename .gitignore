@@ -6,7 +6,8 @@ __pycache__/
 *$py.class
 venv/
 env/
-.venv/
+.venv/3
+.env
 
 # ==========================================
 # 2. DEPENDÊNCIAS FRONTEND (React / Node)
