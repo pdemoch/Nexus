@@ -25,10 +25,6 @@ yarn-error.log*
 # Ignorar o banco de dados local para não sobrescrever a produção
 
 
-# Ignorar os relatórios gerados pelos scripts
-*.csv
-!SOP_Nexus_BottomUp_Granular_*.csv # (Se quiser manter algum template, coloque ! na frente)
-
 # ==========================================
 # 4. CONFIGURAÇÕES DE IDE E SISTEMA OPERACIONAL
 # ==========================================
