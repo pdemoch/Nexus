@@ -3,7 +3,6 @@ import numpy as np
 from datetime import date
 from dateutil.relativedelta import relativedelta
 from sqlalchemy import text
-
 from app.core.database import engine, SessionLocal
 from app.models.domain_models import FatoIbpGranular
 
@@ -16,8 +15,6 @@ class TopDownDistributor:
         hoje = date.today()
         data_corte = (hoje - relativedelta(months=self.meses_historico)).strftime("%Y-%m-%d")
 
-        # JOIN milimétrico entre a Fato de Vendas e a Dimensão Cliente para buscar quem comprou o quê
-        # FILTRO CRÍTICO: Exclui clientes inativos do rateio futuro!
         query = f"""
             SELECT 
                 v.sku as produto, 
@@ -37,7 +34,6 @@ class TopDownDistributor:
         df_silver = pd.read_sql(query, engine)
         if df_silver.empty: return df_silver
 
-        # Calcula o Market Share de cada Loja/CGC dentro daquele Produto
         df_silver['qtpedido'] = pd.to_numeric(df_silver['qtpedido'], errors='coerce').fillna(0)
         df_cliente = df_silver[df_silver['qtpedido'] > 0]
         
@@ -65,8 +61,7 @@ class TopDownDistributor:
             mes_proj = row['mes_projetado']
             
             clientes_produto = df_share[df_share['produto'] == produto].copy() if not df_share.empty else pd.DataFrame()
-            
-            # Se é um produto novo sem histórico, aloca a uma conta "Orfã" temporariamente
+
             if clientes_produto.empty:
                 dados_granulares.append({
                     "ciclo_sop": ciclo_atual, "mes_projetado": mes_proj, "sku": produto,
@@ -75,7 +70,6 @@ class TopDownDistributor:
                     "vol_bottomup": vol_ia_total, "pmv_aplicado": 0.0
                 })
             else:
-                # Matemática pura: Algoritmo do Maior Resto
                 clientes_produto['vol_exato'] = vol_ia_total * clientes_produto['share_historico']
                 clientes_produto['vol_arredondado'] = np.floor(clientes_produto['vol_exato']).astype(int)
                 clientes_produto['fracao'] = clientes_produto['vol_exato'] - clientes_produto['vol_arredondado']
@@ -101,10 +95,8 @@ class TopDownDistributor:
         
         with SessionLocal() as db:
             try:
-                # Idempotência: Se o script falhar e rodar duas vezes, não duplica. Limpa o ciclo atual antes.
                 db.execute(text("DELETE FROM fato_ibp_granular WHERE ciclo_sop = :ciclo"), {"ciclo": ciclo_atual})
-                
-                # Bulk Insert (O mesmo usado no Loader, imune a timeouts)
+
                 lote_size = 15000
                 for i in range(0, len(dados_granulares), lote_size):
                     db.bulk_insert_mappings(FatoIbpGranular, dados_granulares[i:i+lote_size])

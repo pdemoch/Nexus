@@ -1,8 +1,6 @@
 import traceback
 from datetime import date
 from dateutil.relativedelta import relativedelta
-import polars as pl
-
 from app.core.state import AppState
 from app.etl.extractor import GobiExtractor
 from app.etl.transformer import NexusTransformer

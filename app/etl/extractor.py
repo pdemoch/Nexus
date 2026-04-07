@@ -4,8 +4,6 @@ import polars as pl
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional, Any
-
-# Se tiver um arquivo de config para o token, mantenha. Senão, coloque o token direto aqui para teste.
 from app.core.config import settings 
 
 class GobiExtractor:

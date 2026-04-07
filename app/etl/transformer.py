@@ -8,9 +8,6 @@ class NexusTransformer:
         if df_150.is_empty():
             return pl.DataFrame()
 
-        # ==========================================
-        # 1. TRATAMENTO DA API 150 (VENDAS)
-        # ==========================================
         df_vendas = df_150.filter(
             (pl.col("operacao").cast(pl.Utf8).str.strip_chars() != "51") & 
             (~pl.col("regional").cast(pl.Utf8).str.to_uppercase().str.contains("FIFEIRO")) &
@@ -24,11 +21,7 @@ class NexusTransformer:
             pl.concat_str([pl.col("cliente"), pl.lit("_"), pl.col("loja")]).alias("cliente_loja")
         ])
 
-        # ==========================================
-        # 2. TRATAMENTO DA API 188 (CLIENTES)
-        # ==========================================
         if not df_188.is_empty():
-            # INJEÇÃO DO GERENTE: Adicionado 'gerente_nome' na seleção abaixo
             df_clientes = df_188.select([
                 "cod", "loja", "cgc", "razao social", "bloqueado", "vendedor_nome", "gerente_nome", "supervisor_nome"
             ]).rename({
@@ -48,8 +41,7 @@ class NexusTransformer:
             df_vendas = df_vendas.join(
                 df_clientes, left_on="cliente_loja", right_on="cod_loja", how="left"
             )
-            
-            # Lógica de hierarquia mantida
+
             df_vendas = df_vendas.with_columns(
                 pl.when(pl.col("supervisor_nome").is_null() | (pl.col("supervisor_nome").str.strip_chars() == ""))
                 .then(pl.col("gerente_nome"))
@@ -65,9 +57,6 @@ class NexusTransformer:
                 pl.lit(None).alias("supervisor_nome")
             ])
 
-        # ==========================================
-        # 3. TRATAMENTO DE SEGMENTOS E PORTFÓLIO
-        # ==========================================
         if not df_seg.is_empty():
             df_portfolio = df_seg.with_columns([
                 pl.col("produto").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars(),
@@ -94,9 +83,6 @@ class NexusTransformer:
         else:
             return pl.DataFrame()
 
-        # ==========================================
-        # 4. FINALIZAÇÃO E ORDENAÇÃO DE COLUNAS
-        # ==========================================
         df_silver = df_silver.with_columns(pl.col("cliente").alias("cod_cliente"))
         
         colunas_finais = [

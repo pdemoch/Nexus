@@ -1,12 +1,9 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, Date, DateTime, ForeignKey, UniqueConstraint, Index
+from sqlalchemy import Column, Integer, String, Float, Boolean, Date, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime
 
 Base = declarative_base()
 
-# ==========================================
-# DOMÍNIO 1: AUTENTICAÇÃO E ACESSOS
-# ==========================================
 class Usuario(Base):
     __tablename__ = "usuarios"
 
@@ -14,16 +11,13 @@ class Usuario(Base):
     nome = Column(String(100), nullable=False)
     email = Column(String(100), unique=True, index=True, nullable=False)
     senha_hash = Column(String(255), nullable=False)
-    funcao = Column(String(50), nullable=False) # Admin, Gerenciador, Executivo
+    funcao = Column(String(50), nullable=False) 
     nome_vendedor = Column(String(100), nullable=True) 
-    gerente_nome = Column(String, nullable=True) # O link com a tabela de vendas
+    gerente_nome = Column(String, nullable=True)
     aprovado = Column(Boolean, default=False)
     primeiro_acesso = Column(Boolean, default=True)
     criado_em = Column(DateTime, default=datetime.utcnow)
 
-# ==========================================
-# DOMÍNIO 2: DIMENSÕES MESTRES (O Dicionário)
-# ==========================================
 class DimProduto(Base):
     __tablename__ = 'dim_produtos'
     
@@ -54,9 +48,6 @@ class DimCliente(Base):
     vendas = relationship("FatoVendas", back_populates="cliente_rel")
     forecasts = relationship("FatoIbpGranular", back_populates="cliente_rel")
 
-# ==========================================
-# DOMÍNIO 3: TRANSAÇÕES S&OP (Fatos)
-# ==========================================
 class FatoVendas(Base):
     __tablename__ = "fato_vendas"
     
@@ -76,7 +67,7 @@ class FatoIbpGranular(Base):
     __tablename__ = "fato_ibp_granular"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    ciclo_sop = Column(String(10), nullable=False, index=True) # Ex: '04/2026'
+    ciclo_sop = Column(String(10), nullable=False, index=True)
     mes_projetado = Column(Date, nullable=False, index=True)
     
     sku = Column(String(50), ForeignKey("dim_produtos.sku"), nullable=False)
@@ -86,7 +77,7 @@ class FatoIbpGranular(Base):
     vol_ia = Column(Integer, default=0)
     vol_topdown = Column(Integer, default=0)
     vol_bottomup = Column(Integer, default=0)
-    vol_final = Column(Integer, default=0) # NOVO CAMPO: Demanda Irrestrita Oficial do Consenso Final
+    vol_final = Column(Integer, default=0) 
     
     pmv_aplicado = Column(Float, default=0.0)
     
@@ -97,16 +88,13 @@ class FatoIbpGranular(Base):
     produto_rel = relationship("DimProduto", back_populates="forecasts")
     cliente_rel = relationship("DimCliente", back_populates="forecasts")
 
-# ==========================================
-# DOMÍNIO 4: GOVERNANÇA, LOGS E KPIs
-# ==========================================
 class ControleCiclo(Base):
     __tablename__ = "controle_ciclos"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     ciclo_sop = Column(String(10), nullable=False, index=True)
-    origem = Column(String(100), nullable=False) # 'Top-Down', ou o Nome do Vendedor
-    status = Column(String(50), default='Aberto') # Aberto, Consenso, Fechado
+    origem = Column(String(100), nullable=False) 
+    status = Column(String(50), default='Aberto')
     data_fechamento = Column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (
@@ -119,7 +107,7 @@ class AuditoriaAjuste(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     ciclo_sop = Column(String(10), nullable=False, index=True)
     data_ajuste = Column(DateTime, default=datetime.utcnow)
-    origem_ajuste = Column(String(100), nullable=False) # Quem fez (Ex: Nexus UI, Top-Down)
+    origem_ajuste = Column(String(100), nullable=False) 
     
     sku = Column(String(50), nullable=False)
     razaosocial_afetada = Column(String(255), nullable=False)

@@ -1,12 +1,11 @@
 import numpy as np
 import pandas as pd
-import xgboost as xgb
-import lightgbm as lgb
+import xgboost 
+import lightgbm
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.forecasting.theta import ThetaModel
 import warnings
 
-# Ignorar avisos de convergência e do LightGBM para manter a consola limpa
 warnings.filterwarnings("ignore")
 
 def calcular_acuracia(y_true, y_pred):
@@ -21,10 +20,6 @@ def calcular_acuracia(y_true, y_pred):
     wmape = np.sum(np.abs(y_true - y_pred)) / soma_real
     acuracia = max(0.0, (1.0 - wmape) * 100)
     return round(acuracia, 2)
-
-# ==========================================
-# OS ESPECIALISTAS (Modelos Estatísticos Locais)
-# ==========================================
 
 class HoltModel:
     """Modelo de Suavização Exponencial de Holt (captura nível e tendência, sem sazonalidade)."""
@@ -48,22 +43,19 @@ class HoltWintersModel:
     """O Caçador de Ondas: Captura Nível, Tendência e Sazonalidade (Ciclos de 12 meses)."""
     def fit_predict(self, train_series: pd.Series, steps_ahead: int):
         try:
-            # Requer pelo menos 2 anos completos (24 meses) para encontrar padrões sazonais perfeitos, 
-            # mas deixamos rodar a partir de 12 para captar o mínimo de ciclo.
             if len(train_series) < 12:
                 return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
                 
             model = ExponentialSmoothing(
                 train_series.values, 
                 trend='add', 
-                seasonal='add', # 'add' é mais seguro que 'mul' quando existem zeros nas vendas
-                seasonal_periods=12, # O tamanho da onda (1 ano)
+                seasonal='add', 
+                seasonal_periods=12,
                 initialization_method="estimated"
             ).fit()
             
             return np.maximum(0, model.forecast(steps_ahead))
         except Exception:
-            # Se a matemática falhar (ex: série muito flat), cai graciosamente
             return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
 
 
@@ -134,11 +126,6 @@ class MovingAverageModel:
             
         return np.array(preds)
 
-
-# ==========================================
-# OS TITÃS (Preparação para Machine Learning Global)
-# ==========================================
-
 class GlobalMLTrainer:
     """
     Construtor de Features para os modelos globais (XGBoost e LightGBM).
@@ -150,31 +137,23 @@ class GlobalMLTrainer:
         
         for sku, group in df_historico_completo.groupby('produto'):
             g = group.copy().sort_values('mes_ano_dt')
-            
-            # Sazonalidade Cíclica (O Segredo do ML)
+
             g['mes'] = g['mes_ano_dt'].dt.month
             
-            # Seno e Cosseno transformam os 12 meses num relógio circular perfeito
-            # garantindo que a IA entende que Dezembro (12) e Janeiro (1) estão conectados.
             g['mes_sin'] = np.sin(2 * np.pi * g['mes'] / 12)
             g['mes_cos'] = np.cos(2 * np.pi * g['mes'] / 12)
             
-            # Criação dos Lags (Vendas nos meses anteriores)
             for lag in lags:
                 g[f'lag_{lag}'] = g['total_qtpedido'].shift(lag)
                 
-            # Criação de features adicionais (ex: Média móvel dos últimos 3 meses)
             g['media_movel_3'] = g['total_qtpedido'].shift(1).rolling(window=3).mean()
             
             dfs_processados.append(g)
             
-        # Junta tudo novamente
         df_feat = pd.concat(dfs_processados)
         
-        # Remove os meses iniciais que ficaram com Lags nulos
         df_feat = df_feat.dropna(subset=[f'lag_{lags[-1]}']).copy()
         
-        # Otimização de Memória e Tratamento Categórico para as Árvores de Decisão
         cols_cat = ['bu', 'categoria', 'segmento', 'curva_2026']
         for col in cols_cat:
             if col in df_feat.columns:

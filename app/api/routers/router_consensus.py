@@ -14,7 +14,6 @@ from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, Fa
 
 router = APIRouter(prefix="/api/v1/consensus", tags=["Consenso S&OP"])
 
-# --- Utilitários ---
 def get_current_cycle() -> str:
     return datetime.date.today().strftime("%m/%Y")
 
@@ -33,7 +32,6 @@ def check_global_lock(db: Session):
     if status_global and status_global.status == 'Fechado':
         raise HTTPException(status_code=403, detail="Acesso Negado: S&OP Global publicado. Ordem reversa necessária.")
 
-# --- Modelos Pydantic ---
 class AjusteTopDown(BaseModel):
     produto: str
     mes_projetado: str
@@ -72,7 +70,6 @@ class PayloadLockAll(BaseModel):
     gerente_nome: str = "" 
     acao: str
 
-# --- Rotas Gerais ---
 @router.get("/status")
 async def checar_status_ciclo(origem: str, db: Session = Depends(get_db)):
     ciclo = get_current_cycle()
@@ -117,7 +114,6 @@ async def fechar_ciclo(payload: PayloadFecharCiclo, db: Session = Depends(get_db
     db.commit()
     return {"status": "success"}
 
-# --- Rotas Macro (Top-Down) ---
 @router.get("/macro")
 async def listar_macro(db: Session = Depends(get_db)):
     try:
@@ -270,7 +266,6 @@ async def reabrir_macro(db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- Rotas Micro (Bottom-Up) ---
 @router.get("/micro")
 async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session = Depends(get_db)):
     m_plus_2, m_plus_4 = get_projection_window()
@@ -351,7 +346,6 @@ async def congelar_micro(nome_responsavel: str, payload: PayloadCongelarBottomUp
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- Rotas Gerenciamento ---
 @router.get("/gerenciamento/vendedores")
 async def listar_gerenciamento_vendedores(gerente_nome: str = None, db: Session = Depends(get_db)):
     try:
@@ -468,7 +462,7 @@ async def aprovar_gerenciamento(payload: PayloadAprovarGerente, db: Session = De
 async def lock_all_gerenciamento(payload: PayloadLockAll, db: Session = Depends(get_db)):
     """Tranca ou destranca todos os vendedores da carteira do gerente de uma só vez."""
     try:
-        check_global_lock(db) # Bloqueio Reverso
+        check_global_lock(db) 
         ciclo = get_current_cycle()
         m_plus_2, m_plus_4 = get_projection_window()
         

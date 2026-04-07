@@ -20,7 +20,6 @@ class NexusLoader:
 
         db = SessionLocal()
         try:
-            # 1. ATUALIZA DIM_CLIENTES (Unique por CGC)
             print("   -> Sincronizando Cadastro de Clientes e Hierarquias...")
             df_clientes = df_silver.select([
                 "cgc", "cod_cliente", "loja", "cliente_razaosocial", 
@@ -49,7 +48,6 @@ class NexusLoader:
                 )
                 db.execute(stmt)
 
-            # 2. ATUALIZA DIM_PRODUTOS (Metadados básicos vindos da Silver)
             print("   -> Sincronizando Dicionário de Produtos...")
             df_prod = df_silver.select([
                 "produto", "descricao", "bu", "categoria", "segmento", "curva_2026"
@@ -75,18 +73,15 @@ class NexusLoader:
                 )
                 db.execute(stmt)
 
-            # 3. ATUALIZA FATO_VENDAS (Limpando e injetando com data convertida)
             print("   -> Atualizando Histórico de Vendas Realizadas...")
             db.execute(text("DELETE FROM fato_vendas")) 
             
             vendas_objetos = []
             for row in df_silver.to_dicts():
-                # CONVERSÃO DE DATA: Transforma '20220103' em objeto date real
                 dt_str = str(row['dtapedido'])
                 try:
                     dt_obj = datetime.strptime(dt_str, "%Y%m%d").date()
                 except:
-                    # Fallback para caso o Transformer já tenha formatado com traços
                     dt_obj = datetime.strptime(dt_str[:10], "%Y-%m-%d").date()
 
                 vendas_objetos.append(
@@ -100,7 +95,6 @@ class NexusLoader:
                     )
                 )
             
-            # Processamento em lotes para não estourar a memória (chunks de 50k)
             chunk_size = 50000
             for i in range(0, len(vendas_objetos), chunk_size):
                 db.bulk_save_objects(vendas_objetos[i : i + chunk_size])
@@ -131,10 +125,8 @@ class NexusLoader:
         db = SessionLocal()
         
         try:
-            # 1. Limpa o ciclo atual para evitar duplicidade
             db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo_atual).delete()
-            
-            # 2. Atualiza Metadados de IA nos Produtos
+
             print("   -> Atualizando métricas de Acurácia IA...")
             df_ia_meta = df_forecast.select(["produto", "modelo_vencedor", "acuracia"]).unique()
             for row in df_ia_meta.to_dicts():
@@ -143,7 +135,6 @@ class NexusLoader:
                     {"mod": row['modelo_vencedor'], "acu": row['acuracia'], "sku": row['produto']}
                 )
 
-            # 3. Motor de Rateio Inicial (Distribuição por cliente baseada no histórico)
             print("   -> Aplicando rateio inicial da IA por cliente...")
             df_ativos = df_silver.filter(pl.col("bloqueado") != "INATIVO")
             
@@ -153,19 +144,16 @@ class NexusLoader:
                 (pl.col("vol_hist") / pl.col("vol_hist").sum().over("produto")).fill_nan(0).alias("peso")
             )
 
-            # Join com o Forecast 
             df_final = df_forecast.join(df_pesos, left_on="produto", right_on="produto", how="inner")
             df_final = df_final.with_columns(
                 (pl.col("vol_ia_global") * pl.col("peso")).round(0).cast(pl.Int32).alias("vol_ia_atomico")
             ).filter(pl.col("vol_ia_atomico") > 0)
 
-            # Busca PMVs vigentes (da Silver)
             df_pmv = df_silver.group_by(["produto", "cgc"]).agg(
                 (pl.col("vlpedido").sum() / pl.col("qtpedido").sum()).fill_nan(0).alias("pmv_ref")
             )
             df_final = df_final.join(df_pmv, on=["produto", "cgc"], how="left")
 
-            # A MÁGICA ACONTECE AQUI: Herança Direta nas 4 camadas.
             objetos_ibp = [
                 FatoIbpGranular(
                     ciclo_sop=ciclo_atual,
@@ -174,14 +162,13 @@ class NexusLoader:
                     cgc=row['cgc'],
                     vendedor_nome=row['vendedor_nome'],
                     vol_ia=row['vol_ia_atomico'],
-                    vol_topdown=row['vol_ia_atomico'],    # <-- INICIA COM O VALOR DA IA
-                    vol_bottomup=row['vol_ia_atomico'],   # <-- INICIA COM O VALOR DA IA
-                    vol_final=row['vol_ia_atomico'],      # <-- INICIA COM O VALOR DA IA (NOVO)
+                    vol_topdown=row['vol_ia_atomico'],   
+                    vol_bottomup=row['vol_ia_atomico'],   
+                    vol_final=row['vol_ia_atomico'],      
                     pmv_aplicado=row['pmv_ref'] or 0.0
                 ) for row in df_final.to_dicts()
             ]
 
-            # Injeção em lotes para as metas atômicas
             chunk_size = 50000 
             for i in range(0, len(objetos_ibp), chunk_size):
                 db.bulk_save_objects(objetos_ibp[i : i + chunk_size])

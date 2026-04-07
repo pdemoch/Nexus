@@ -1,27 +1,19 @@
 import bcrypt
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import func
-
 from app.core.database import get_db
 from app.models.domain_models import Usuario, DimCliente
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Autenticação e Usuários"])
 
-# ==========================================
-# FUNÇÕES DE SEGURANÇA PADRONIZADAS (BCRYPT)
-# ==========================================
 def verificar_senha(senha_plana: str, senha_hash: str) -> bool:
     return bcrypt.checkpw(senha_plana.encode('utf-8')[:72], senha_hash.encode('utf-8'))
 
 def gerar_hash(senha_plana: str) -> str:
     return bcrypt.hashpw(senha_plana.encode('utf-8')[:72], bcrypt.gensalt()).decode('utf-8')
 
-# ==========================================
-# SCHEMAS (PAYLOADS)
-# ==========================================
 class LoginPayload(BaseModel):
     email: str
     senha: str
@@ -38,9 +30,6 @@ class NovaSenhaPayload(BaseModel):
     email: str
     nova_senha: str
 
-# ==========================================
-# ROTAS DE ACESSO (LOGIN / CADASTRO)
-# ==========================================
 @router.post("/login")
 async def login(payload: LoginPayload, db: Session = Depends(get_db)):
     email_limpo = payload.email.lower().strip()
@@ -65,7 +54,7 @@ async def login(payload: LoginPayload, db: Session = Depends(get_db)):
                 "email": usuario.email,
                 "funcao": usuario.funcao,
                 "nome_vendedor": usuario.nome_vendedor,
-                "gerente_nome": getattr(usuario, 'gerente_nome', None), # Captura o nome do gerente
+                "gerente_nome": getattr(usuario, 'gerente_nome', None),
                 "primeiro_acesso": usuario.primeiro_acesso
             }
         }
@@ -83,16 +72,12 @@ async def cadastrar_usuario(payload: CadastroPayload, db: Session = Depends(get_
         if check_email:
             raise HTTPException(status_code=400, detail="Este email já está cadastrado.")
             
-        # TRAVA: Exclusividade de Vendedor
         if payload.funcao == 'Executivo' and payload.nome_vendedor:
             check_vendedor = db.query(Usuario).filter(Usuario.nome_vendedor == payload.nome_vendedor).first()
             if check_vendedor:
                 raise HTTPException(status_code=400, detail=f"O vendedor {payload.nome_vendedor} já está vinculado a outro usuário.")
         
-        # TRAVA: Exclusividade de Gerente
         if payload.funcao == 'Gerente' and payload.gerente_nome:
-            # Verificamos se já existe um usuário com esse nome de gerente vinculado
-            # Usando hasattr para evitar erro caso a coluna ainda não exista no banco durante o teste
             check_gerente = db.query(Usuario).filter(getattr(Usuario, 'gerente_nome', None) == payload.gerente_nome).first()
             if check_gerente:
                 raise HTTPException(status_code=400, detail=f"A gerência {payload.gerente_nome} já está vinculada a outro usuário.")
@@ -103,7 +88,7 @@ async def cadastrar_usuario(payload: CadastroPayload, db: Session = Depends(get_
             senha_hash=gerar_hash(payload.senha_inicial),
             funcao=payload.funcao,
             nome_vendedor=payload.nome_vendedor if payload.funcao == 'Executivo' else None,
-            gerente_nome=payload.gerente_nome if payload.funcao == 'Gerente' else None, # Salva o vínculo
+            gerente_nome=payload.gerente_nome if payload.funcao == 'Gerente' else None, 
             primeiro_acesso=True,
             aprovado=False
         )
@@ -134,9 +119,6 @@ async def alterar_senha(payload: NovaSenhaPayload, db: Session = Depends(get_db)
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-# ==========================================
-# UTILITÁRIOS E APOIO (LISTAS DO ERP)
-# ==========================================
 @router.get("/lista-vendedores")
 async def obter_vendedores(db: Session = Depends(get_db)):
     try:
@@ -155,7 +137,6 @@ async def obter_vendedores(db: Session = Depends(get_db)):
 async def obter_gerentes(db: Session = Depends(get_db)):
     """Retorna a lista de nomes de gerentes disponíveis no ERP (que ainda não possuem conta)"""
     try:
-        # Puxamos as colunas usando getattr para NÃO DAR CRASH se o domain_models.py estiver desatualizado
         col_gerente_erp = getattr(DimCliente, 'gerente_nome', None)
         col_gerente_user = getattr(Usuario, 'gerente_nome', None)
 
@@ -163,11 +144,9 @@ async def obter_gerentes(db: Session = Depends(get_db)):
             print("⚠️ AVISO: A coluna 'gerente_nome' não foi encontrada na classe DimCliente do domain_models.py!")
             return {"status": "success", "dados": []}
 
-        # 1. Busca todos os gerentes na DimCliente
         erp_gerentes = db.query(col_gerente_erp).filter(col_gerente_erp.isnot(None)).distinct().all()
         todos_gerentes = set(r[0].strip() for r in erp_gerentes if r[0] and str(r[0]).strip())
 
-        # 2. Busca os gerentes que já possuem conta cadastrada
         if col_gerente_user is None:
             print("⚠️ AVISO: A coluna 'gerente_nome' não foi encontrada na classe Usuario do domain_models.py!")
             gerentes_em_uso = set()
@@ -175,18 +154,14 @@ async def obter_gerentes(db: Session = Depends(get_db)):
             usuarios_gerentes = db.query(col_gerente_user).filter(col_gerente_user.isnot(None)).distinct().all()
             gerentes_em_uso = set(u[0].strip() for u in usuarios_gerentes if u[0] and str(u[0]).strip())
 
-        # 3. Retorna apenas os que estão "livres" no mercado
         gerentes_livres = sorted(list(todos_gerentes - gerentes_em_uso))
         
         return {"status": "success", "dados": gerentes_livres}
         
     except Exception as e:
-        print(f"❌ ERRO GRAVE no banco ao buscar gerentes: {str(e)}") # O erro exato vai aparecer no terminal do Uvicorn!
+        print(f"❌ ERRO GRAVE no banco ao buscar gerentes: {str(e)}")
         return {"status": "success", "dados": []}
-    
-# ==========================================
-# ROTAS DE APROVAÇÃO (EXCLUSIVO ADMIN)
-# ==========================================
+
 @router.get("/pendentes")
 async def listar_pendentes(db: Session = Depends(get_db)):
     try:

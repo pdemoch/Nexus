@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import polars as pl
-from datetime import date, datetime
+from datetime import date
 import xgboost as xgb
 import lightgbm as lgb
 from app.ml.models_library import (
@@ -29,7 +29,6 @@ class NexusForecaster:
             log_callback(f"❌ [ENGINE] Nenhum dado encontrado na base IA para o ciclo {ciclo_atual}.")
             return pl.DataFrame()
 
-        # Converte para Pandas e remove o mês atual (que ainda está incompleto)
         df = df_ia_polars.to_pandas()
         mes_atual_str = hoje.strftime("%Y-%m")
         df = df[df['mes_ano'] < mes_atual_str].copy()
@@ -58,10 +57,9 @@ class NexusForecaster:
         log_callback("🦾 [ENGINE] Treinando os Titãs (XGBoost e LightGBM)...")
         df_feat = GlobalMLTrainer.gerar_features_globais(df_global)
         df_treino_global = df_feat[df_feat['mes_ano_dt'] < data_corte_holdout]
-        
-        # Lista de features categóricas e numéricas
+
         features = ['mes', 'mes_sin', 'mes_cos', 'lag_1', 'lag_2', 'lag_3', 'lag_6', 'lag_12', 'media_movel_3']
-        # Adiciona categorias se existirem
+
         for c in ['bu', 'categoria', 'segmento', 'curva_2026']:
             if c in df_treino_global.columns: features.append(c)
         
@@ -105,8 +103,7 @@ class NexusForecaster:
                         acc = calcular_acuracia(holdout_real.values, preds)
                         if acc > maior_acuracia: maior_acuracia, melhor_modelo = acc, nome
                     except: continue
-            
-            # Previsão final
+
             modelo_final = self.especialistas.get(melhor_modelo, self.especialistas['MediaMovel_3M'])
             try:
                 previsao_futura = modelo_final.fit_predict(serie, self.forecast_horizon)
@@ -114,10 +111,8 @@ class NexusForecaster:
                 previsao_futura = self.especialistas['MediaMovel_3M'].fit_predict(serie, self.forecast_horizon)
             
             for i, vol_proj in enumerate(previsao_futura):
-                # AJUSTE: Transformamos para objeto Date real para o Loader não dar erro
                 data_proj = (data_inicio_previsao + pd.DateOffset(months=i)).to_pydatetime().date()
                 
-                # AJUSTE NOMENCLATURA: Usamos 'vol_ia_global' e 'acuracia' para bater com o Loader.py
                 resultados_forecast.append({
                     "ciclo_sop": ciclo_atual,
                     "produto": sku,

@@ -14,7 +14,6 @@ from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, Co
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["S&OP Global Dashboard"])
 
-# --- Utilitários ---
 def get_current_cycle() -> str:
     return datetime.date.today().strftime("%m/%Y")
 
@@ -40,7 +39,6 @@ async def carregar_dashboard_global(db: Session = Depends(get_db)):
         ciclo = get_current_cycle()
         m_plus_2, m_plus_4 = get_projection_window()
 
-        # --- GATEKEEPER ---
         status_global = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
         is_global_fechado = status_global.status == 'Fechado' if status_global else False
         
@@ -75,7 +73,6 @@ async def carregar_dashboard_global(db: Session = Depends(get_db)):
         else:
             is_locked, lock_message = False, "Publicar Demanda Oficial"
             
-        # --- BUSCA DE DADOS ---
         resultados = db.query(
             FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('vol_ia'),
