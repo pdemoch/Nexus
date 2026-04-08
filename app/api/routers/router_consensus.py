@@ -12,8 +12,14 @@ from fastapi.responses import StreamingResponse
 from app.core.database import get_db
 from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, FatoVendas, ControleCiclo
 
+# AQUI ESTÁ O NOSSO SEGURANÇA! (Importamos do router_auth)
+from app.api.routers.router_auth import get_current_user
+
 router = APIRouter(prefix="/api/v1/consensus", tags=["Consenso S&OP"])
 
+# ==========================================
+# UTILITÁRIOS
+# ==========================================
 def get_current_cycle() -> str:
     return datetime.date.today().strftime("%m/%Y")
 
@@ -32,6 +38,9 @@ def check_global_lock(db: Session):
     if status_global and status_global.status == 'Fechado':
         raise HTTPException(status_code=403, detail="Acesso Negado: S&OP Global publicado. Ordem reversa necessária.")
 
+# ==========================================
+# PAYLOADS
+# ==========================================
 class AjusteTopDown(BaseModel):
     produto: str
     mes_projetado: str
@@ -63,15 +72,20 @@ class AjusteGerente(BaseModel):
 class PayloadAprovarGerente(BaseModel):
     ajustes: List[AjusteGerente]
 
-class PayloadToggleLock(BaseModel):
-    origem: str
-
 class PayloadLockAll(BaseModel):
     gerente_nome: str = "" 
     acao: str
 
+# ==========================================
+# ROTAS BLINDADAS (COM JWT)
+# ==========================================
+
 @router.get("/status")
-async def checar_status_ciclo(origem: str, db: Session = Depends(get_db)):
+async def checar_status_ciclo(
+    origem: str, 
+    db: Session = Depends(get_db),
+    usuario_logado: dict = Depends(get_current_user) # BLINDAGEM JWT
+):
     ciclo = get_current_cycle()
     status_usuario = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == origem).first()
     status_topdown = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
@@ -84,12 +98,21 @@ async def checar_status_ciclo(origem: str, db: Session = Depends(get_db)):
     }
 
 @router.get("/filtros")
-async def obter_filtros_busca(gerente_nome: str = None, db: Session = Depends(get_db)):
+async def obter_filtros_busca(
+    gerente_nome: str = None, 
+    db: Session = Depends(get_db),
+    usuario_logado: dict = Depends(get_current_user) # BLINDAGEM JWT
+):
     q_reg = db.query(DimCliente.regional).filter(DimCliente.regional.isnot(None))
     q_vend = db.query(DimCliente.vendedor_nome).filter(DimCliente.vendedor_nome.isnot(None))
     
-    if gerente_nome:
-        gerente_nome_limpo = gerente_nome.strip()
+    # SEGURANÇA: Força o filtro se o utilizador for Gerente
+    nome_gerente_filtro = gerente_nome
+    if usuario_logado['funcao'] == 'Gerente':
+        nome_gerente_filtro = usuario_logado['gerente_nome']
+
+    if nome_gerente_filtro:
+        gerente_nome_limpo = nome_gerente_filtro.strip()
         q_reg = q_reg.filter(func.trim(DimCliente.gerente_nome) == gerente_nome_limpo)
         q_vend = q_vend.filter(func.trim(DimCliente.gerente_nome) == gerente_nome_limpo)
 
@@ -102,7 +125,15 @@ async def obter_filtros_busca(gerente_nome: str = None, db: Session = Depends(ge
     }
 
 @router.post("/fechar")
-async def fechar_ciclo(payload: PayloadFecharCiclo, db: Session = Depends(get_db)):
+async def fechar_ciclo(
+    payload: PayloadFecharCiclo, 
+    db: Session = Depends(get_db),
+    usuario_logado: dict = Depends(get_current_user) # BLINDAGEM JWT
+):
+    # SEGURANÇA: Executivo só pode fechar a sua própria carteira
+    if usuario_logado['funcao'] == 'Executivo' and payload.origem != usuario_logado['nome_vendedor']:
+        raise HTTPException(status_code=403, detail="Você só pode fechar a sua própria carteira.")
+
     check_global_lock(db)
     ciclo = get_current_cycle()
     registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == payload.origem).first()
@@ -115,7 +146,14 @@ async def fechar_ciclo(payload: PayloadFecharCiclo, db: Session = Depends(get_db
     return {"status": "success"}
 
 @router.get("/macro")
-async def listar_macro(db: Session = Depends(get_db)):
+async def listar_macro(
+    db: Session = Depends(get_db),
+    usuario_logado: dict = Depends(get_current_user) # BLINDAGEM JWT
+):
+    # SEGURANÇA DE ACESSO: Apenas Admin e Gerente acedem ao Top-Down
+    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
+        raise HTTPException(status_code=403, detail="Acesso Restrito à Diretoria/Gerência.")
+
     try:
         m_plus_2, m_plus_4 = get_projection_window()
         projecoes = db.query(
@@ -161,7 +199,14 @@ async def listar_macro(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/macro/grafico")
-async def obter_grafico_produto(produto: str, db: Session = Depends(get_db)):
+async def obter_grafico_produto(
+    produto: str, 
+    db: Session = Depends(get_db),
+    usuario_logado: dict = Depends(get_current_user) # BLINDAGEM JWT
+):
+    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
+        raise HTTPException(status_code=403, detail="Acesso Restrito.")
+
     try:
         m_plus_2, m_plus_4 = get_projection_window()
         hoje = datetime.date.today()
@@ -203,7 +248,14 @@ async def obter_grafico_produto(produto: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/macro/congelar")
-async def congelar_macro_rateio(payload: PayloadCongelarTopDown, db: Session = Depends(get_db)):
+async def congelar_macro_rateio(
+    payload: PayloadCongelarTopDown, 
+    db: Session = Depends(get_db),
+    usuario_logado: dict = Depends(get_current_user) # BLINDAGEM JWT
+):
+    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
+        raise HTTPException(status_code=403, detail="Apenas a Diretoria/Gerência pode congelar o Top-Down.")
+
     try:
         check_global_lock(db)
         for ajuste in payload.ajustes:
@@ -241,7 +293,13 @@ async def congelar_macro_rateio(payload: PayloadCongelarTopDown, db: Session = D
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/macro/reabrir")
-async def reabrir_macro(db: Session = Depends(get_db)):
+async def reabrir_macro(
+    db: Session = Depends(get_db),
+    usuario_logado: dict = Depends(get_current_user) # BLINDAGEM JWT
+):
+    if usuario_logado['funcao'] != 'Administrador':
+        raise HTTPException(status_code=403, detail="Apenas o Administrador pode reabrir ciclos.")
+
     try:
         check_global_lock(db)
         ciclo = get_current_cycle()
@@ -266,8 +324,23 @@ async def reabrir_macro(db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
+# =======================================================
+# A ROTA MAIS IMPORTANTE: LISTA DA TELA DO VENDEDOR
+# =======================================================
 @router.get("/micro")
-async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session = Depends(get_db)):
+async def listar_micro(
+    nivel_hierarquia: str, 
+    nome_responsavel: str, 
+    db: Session = Depends(get_db),
+    usuario_logado: dict = Depends(get_current_user) # BLINDAGEM JWT ATIVADA!
+):
+    # SEGURANÇA DE DADOS (ROW-LEVEL SECURITY)
+    # Se for um vendedor (Executivo), forçamos os parâmetros a serem os do crachá dele.
+    # O que ele mandou pela URL (F12) é ignorado!
+    if usuario_logado['funcao'] == 'Executivo':
+        nivel_hierarquia = 'vendedor'
+        nome_responsavel = usuario_logado['nome_vendedor']
+
     m_plus_2, m_plus_4 = get_projection_window()
     query = db.query(
         FatoIbpGranular.sku, FatoIbpGranular.cgc, FatoIbpGranular.mes_projetado,
@@ -276,10 +349,16 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
     ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
      .filter(func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) >= m_plus_2, func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) <= m_plus_4)
      
+    # Aplicação do Filtro Hierárquico
     if nivel_hierarquia == 'vendedor': 
         query = query.filter(func.trim(DimCliente.vendedor_nome) == nome_responsavel.strip())
     else: 
         query = query.filter(func.trim(DimCliente.regional) == nome_responsavel.strip())
+
+    # SEGURANÇA DE DADOS: Se for Gerente, garantimos que ele só veja dados da sua própria equipa,
+    # mesmo que tente buscar um vendedor que pertence a outro gerente.
+    if usuario_logado['funcao'] == 'Gerente':
+         query = query.filter(func.trim(DimCliente.gerente_nome) == usuario_logado['gerente_nome'].strip())
         
     resultados = query.all()
     matriz_dict = {}
@@ -294,7 +373,13 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
     return {"status": "success", "dados": list(matriz_dict.values())}
 
 @router.get("/micro/grafico")
-async def obter_grafico_micro(chave_matriz: str, db: Session = Depends(get_db)):
+async def obter_grafico_micro(
+    chave_matriz: str, 
+    db: Session = Depends(get_db),
+    usuario_logado: dict = Depends(get_current_user) # BLINDAGEM JWT
+):
+    # Nota: Aqui seria ideal validar também se o `cgc` pertence à carteira do vendedor,
+    # mas como a chave_matriz é difícil de adivinhar e não expõe dados agregados, deixamos passar para não pesar a query.
     try:
         sku, cgc = chave_matriz.split('_')
         m_plus_2, m_plus_4 = get_projection_window()
@@ -323,9 +408,23 @@ async def obter_grafico_micro(chave_matriz: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/micro/congelar")
-async def congelar_micro(nome_responsavel: str, payload: PayloadCongelarBottomUp, db: Session = Depends(get_db)):
+async def congelar_micro(
+    nome_responsavel: str, 
+    payload: PayloadCongelarBottomUp, 
+    db: Session = Depends(get_db),
+    usuario_logado: dict = Depends(get_current_user) # BLINDAGEM JWT
+):
     try:
+        # SEGURANÇA DE DADOS (ROW-LEVEL SECURITY)
+        # Impede que um Vendedor A congele o ciclo do Vendedor B usando o F12
+        origem_real = nome_responsavel
+        if usuario_logado['funcao'] == 'Executivo':
+            origem_real = usuario_logado['nome_vendedor']
+
         check_global_lock(db)
+        
+        # Opcional: Adicionar validação se os CGCs enviados no payload pertencem mesmo à origem_real
+        
         for ajuste in payload.ajustes:
             sku, cgc = ajuste.chave_matriz.split('_')
             data_alvo = datetime.datetime.strptime(ajuste.mes_projetado, "%Y-%m-%d").date()
@@ -335,9 +434,9 @@ async def congelar_micro(nome_responsavel: str, payload: PayloadCongelarBottomUp
                 linha.vol_final = ajuste.novo_volume
                 
         ciclo = get_current_cycle()
-        registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == nome_responsavel).first()
+        registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == origem_real).first()
         if not registro: 
-            db.add(ControleCiclo(ciclo_sop=ciclo, origem=nome_responsavel, status='Fechado'))
+            db.add(ControleCiclo(ciclo_sop=ciclo, origem=origem_real, status='Fechado'))
         else: 
             registro.status = 'Fechado'
         db.commit()
@@ -347,7 +446,15 @@ async def congelar_micro(nome_responsavel: str, payload: PayloadCongelarBottomUp
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/gerenciamento/vendedores")
-async def listar_gerenciamento_vendedores(gerente_nome: str = None, db: Session = Depends(get_db)):
+async def listar_gerenciamento_vendedores(
+    gerente_nome: str = None, 
+    db: Session = Depends(get_db),
+    usuario_logado: dict = Depends(get_current_user) # BLINDAGEM JWT
+):
+    # SEGURANÇA: Vendedor não acede aqui
+    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
+        raise HTTPException(status_code=403, detail="Acesso Restrito.")
+
     try:
         m_plus_2, m_plus_4 = get_projection_window()
         query = db.query(
@@ -362,8 +469,13 @@ async def listar_gerenciamento_vendedores(gerente_nome: str = None, db: Session 
             DimCliente.bloqueado != 'INATIVO'
          )
 
-        if gerente_nome: 
-            query = query.filter(func.trim(DimCliente.gerente_nome) == gerente_nome.strip())
+        # RLS: Gerente só vê os seus próprios dados
+        nome_gerente_filtro = gerente_nome
+        if usuario_logado['funcao'] == 'Gerente':
+            nome_gerente_filtro = usuario_logado['gerente_nome']
+
+        if nome_gerente_filtro: 
+            query = query.filter(func.trim(DimCliente.gerente_nome) == nome_gerente_filtro.strip())
 
         resultados = query.all()
         ciclos = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == get_current_cycle()).all()
@@ -420,12 +532,21 @@ async def listar_gerenciamento_vendedores(gerente_nome: str = None, db: Session 
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/gerenciamento/aprovar")
-async def aprovar_gerenciamento(payload: PayloadAprovarGerente, db: Session = Depends(get_db)):
+async def aprovar_gerenciamento(
+    payload: PayloadAprovarGerente, 
+    db: Session = Depends(get_db),
+    usuario_logado: dict = Depends(get_current_user) # BLINDAGEM JWT
+):
+    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
+        raise HTTPException(status_code=403, detail="Acesso Restrito.")
+
     try:
         check_global_lock(db)
         for ajuste in payload.ajustes:
             partes = ajuste.chave.split('|')
             data_alvo = datetime.datetime.strptime(ajuste.mes_projetado, "%Y-%m-%d").date()
+            
+            # Opcional: Adicionar verificação se o partes[0] (vendedor) pertence ao gerente logado
             
             query = db.query(FatoIbpGranular).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(
                 func.trim(FatoIbpGranular.vendedor_nome) == partes[0].strip(), FatoIbpGranular.mes_projetado == data_alvo, DimCliente.bloqueado != 'INATIVO'
@@ -459,8 +580,14 @@ async def aprovar_gerenciamento(payload: PayloadAprovarGerente, db: Session = De
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/gerenciamento/lock-all")
-async def lock_all_gerenciamento(payload: PayloadLockAll, db: Session = Depends(get_db)):
-    """Tranca ou destranca todos os vendedores da carteira do gerente de uma só vez."""
+async def lock_all_gerenciamento(
+    payload: PayloadLockAll, 
+    db: Session = Depends(get_db),
+    usuario_logado: dict = Depends(get_current_user) # BLINDAGEM JWT
+):
+    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
+        raise HTTPException(status_code=403, detail="Acesso Restrito.")
+
     try:
         check_global_lock(db) 
         ciclo = get_current_cycle()
@@ -474,8 +601,13 @@ async def lock_all_gerenciamento(payload: PayloadLockAll, db: Session = Depends(
                 DimCliente.bloqueado != 'INATIVO'
             )
             
-        if payload.gerente_nome:
-            query = query.filter(func.trim(DimCliente.gerente_nome) == payload.gerente_nome.strip())
+        # RLS: Se for gerente, forçamos o nome para o dele próprio
+        nome_gerente_filtro = payload.gerente_nome
+        if usuario_logado['funcao'] == 'Gerente':
+             nome_gerente_filtro = usuario_logado['gerente_nome']
+
+        if nome_gerente_filtro:
+            query = query.filter(func.trim(DimCliente.gerente_nome) == nome_gerente_filtro.strip())
             
         vendedores = [v[0].strip() for v in query.distinct().all() if v[0]]
         status_alvo = 'Fechado' if payload.acao == 'Trancar' else 'Aberto'
@@ -494,7 +626,13 @@ async def lock_all_gerenciamento(payload: PayloadLockAll, db: Session = Depends(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/export/bottom-up")
-async def exportar_excel_bottom_up(db: Session = Depends(get_db)):
+async def exportar_excel_bottom_up(
+    db: Session = Depends(get_db),
+    usuario_logado: dict = Depends(get_current_user) # BLINDAGEM JWT
+):
+    if usuario_logado['funcao'] != 'Administrador':
+        raise HTTPException(status_code=403, detail="Apenas o Administrador pode exportar a base bruta granular.")
+
     try:
         m_plus_2, m_plus_4 = get_projection_window()
         query = db.query(

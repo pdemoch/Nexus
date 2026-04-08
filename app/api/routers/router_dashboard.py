@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 
 from app.core.database import get_db
 from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, ControleCiclo
+from app.api.routers.router_auth import get_current_user
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["S&OP Global Dashboard"])
 
@@ -35,12 +36,14 @@ class PayloadAprovarGlobal(BaseModel):
     ajustes: List[AjusteGlobal]
 
 @router.get("/global")
-async def carregar_dashboard_global(db: Session = Depends(get_db)):
+async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
+    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
+        raise HTTPException(status_code=403, detail="Acesso restrito à Diretoria/Gerência.")
+        
     try:
         ciclo = get_current_cycle()
         m_plus_2, m_plus_4 = get_projection_window()
 
-        # --- GATEKEEPER ---
         status_global = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
         is_global_fechado = status_global.status == 'Fechado' if status_global else False
         
@@ -74,7 +77,6 @@ async def carregar_dashboard_global(db: Session = Depends(get_db)):
         else:
             is_locked, lock_message = False, "Publicar Demanda Irrestrita"
             
-        # --- BUSCA DE DADOS ---
         resultados = db.query(
             FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('vol_ia'),
@@ -105,17 +107,15 @@ async def carregar_dashboard_global(db: Session = Depends(get_db)):
                 "vol_irrestrito": int(r.vol_final or 0), "pmv": pmv_real
             })
 
-        return {
-            "status": "success", 
-            "is_locked": is_locked, 
-            "lock_message": lock_message, 
-            "dados": dados_formatados
-        }
+        return {"status": "success", "is_locked": is_locked, "lock_message": lock_message, "dados": dados_formatados}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/aprovar")
-async def aprovar_dashboard_global(payload: PayloadAprovarGlobal, db: Session = Depends(get_db)):
+async def aprovar_dashboard_global(payload: PayloadAprovarGlobal, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
+    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
+        raise HTTPException(status_code=403, detail="Acesso restrito.")
+        
     try:
         ciclo = get_current_cycle()
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
@@ -166,7 +166,10 @@ async def aprovar_dashboard_global(payload: PayloadAprovarGlobal, db: Session = 
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/export")
-async def exportar_excel_global(db: Session = Depends(get_db)):
+async def exportar_excel_global(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
+    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
+        raise HTTPException(status_code=403, detail="Acesso restrito.")
+        
     try:
         m_plus_2, m_plus_4 = get_projection_window()
         resultados = db.query(

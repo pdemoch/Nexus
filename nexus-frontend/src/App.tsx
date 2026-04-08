@@ -25,14 +25,13 @@ export default function App() {
   // RADAR DO SISTEMA (POLLING GLOBAL)
   // ==========================================
   useEffect(() => {
-    if (!user) return; // Só ativa o radar se alguém estiver logado
+    if (!user) return;
 
     const checkSystemStatus = async () => {
       try {
-        const res = await axios.get('http://localhost:8000/api/v1/admin/pipeline/status');
+        const res = await axios.get('/api/v1/admin/pipeline/status');
         setIsSystemLocked(res.data.is_running);
         
-        // Pega a última linha do log para mostrar no escudo de bloqueio
         if (res.data.is_running && res.data.logs && res.data.logs.length > 0) {
           setLatestLog(res.data.logs[res.data.logs.length - 1]);
         }
@@ -42,24 +41,23 @@ export default function App() {
     };
 
     checkSystemStatus();
-    // Verifica o status do servidor a cada 3 segundos
     const interval = setInterval(checkSystemStatus, 3000);
     return () => clearInterval(interval);
   }, [user]);
 
   const handleLoginSuccess = (userData: any) => {
     setUser(userData);
-    // Roteamento inteligente baseado na função
     if (userData.funcao === 'Executivo') {
       setCurrentRoute('consenso');
     } else if (userData.funcao === 'Gerente') {
-      setCurrentRoute('gerenciamento'); // Gerente vai direto para a sua central
+      setCurrentRoute('gerenciamento');
     } else {
-      setCurrentRoute('admin'); // Admin vai para a Control Tower
+      setCurrentRoute('admin'); 
     }
   };
 
   const handleLogout = () => {
+    localStorage.removeItem('nexus_token'); // RASGA O CRACHÁ AO SAIR
     setUser(null);
     setCurrentRoute('admin');
   };
@@ -83,7 +81,7 @@ export default function App() {
       case 'consenso': return <ConsensoArena usuarioSessao={user} />; 
       case 'dashboard': return <GlobalDashboard />;
       case 'npd': return <NPDArena />;
-      case 'gerenciamento': return <GerenciamentoArena usuarioSessao={user} />; // <--- SESSÃO PASSADA PARA A TELA DE GERENCIAMENTO!
+      case 'gerenciamento': return <GerenciamentoArena usuarioSessao={user} />;
       default: return (
         <div className="h-full flex flex-col items-center justify-center bg-slate-50 text-slate-400 font-bold tracking-widest uppercase gap-4">
           <h2>Módulo em Construção</h2>
@@ -92,7 +90,6 @@ export default function App() {
     }
   };
 
-  // Regra de Ouro: O bloqueio engole a tela de todos, EXCETO se for o Admin olhando a Control Tower
   const isControlTower = currentRoute === 'admin';
   const showGlobalLock = isSystemLocked && !isControlTower;
 
@@ -105,18 +102,13 @@ export default function App() {
       {showGlobalLock && (
         <div className="absolute inset-0 z-[9999] bg-slate-950/95 backdrop-blur-2xl flex flex-col items-center justify-center text-white overflow-hidden animate-in fade-in duration-500">
             
-            {/* Brilho de Fundo (Reactor) */}
             <div className="absolute w-[600px] h-[600px] bg-indigo-600/20 rounded-full blur-[120px] animate-pulse"></div>
             
             <div className="relative z-10 flex flex-col items-center max-w-2xl text-center px-6">
                 
-                {/* Ícone Rotativo Cibernético */}
                 <div className="relative flex items-center justify-center w-40 h-40 mb-8">
-                    {/* Anel Externo Lento */}
                     <div className="absolute inset-0 border-[3px] border-indigo-500/20 rounded-full animate-[spin_6s_linear_infinite]"></div>
-                    {/* Anel Interno Rápido com falha (tracejado) */}
                     <div className="absolute inset-3 border-[3px] border-t-indigo-400 border-r-transparent border-b-indigo-400 border-l-transparent rounded-full animate-[spin_2s_linear_infinite]"></div>
-                    {/* Pulso Central */}
                     <div className="absolute inset-8 bg-indigo-500/20 rounded-full animate-ping opacity-50"></div>
                     <Cpu className="w-14 h-14 text-indigo-400" />
                 </div>
@@ -130,7 +122,6 @@ export default function App() {
                     O sistema encontra-se bloqueado. O Motor de Engenharia de Dados e o Treinamento de Redes Neurais (IA) estão em execução neste exato momento.
                 </p>
 
-                {/* Console Minimalista do Escudo */}
                 <div className="bg-slate-900 border border-slate-800 p-6 rounded-[24px] w-full flex flex-col items-start text-left shadow-[0_0_50px_rgba(0,0,0,0.5)] relative overflow-hidden">
                     <div className="absolute top-0 left-0 w-1.5 h-full bg-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.8)]"></div>
                     <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-3 flex items-center gap-2">

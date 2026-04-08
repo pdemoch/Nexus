@@ -45,7 +45,7 @@ export default function GlobalDashboard() {
 
   const fetchData = useCallback(async () => {
     try {
-      const res = await axios.get(`http://localhost:8000/api/v1/dashboard/global?t=${new Date().getTime()}`);
+      const res = await axios.get(`/api/v1/dashboard/global?t=${new Date().getTime()}`);
       setIsLocked(res.data.is_locked); 
       setLockMessage(res.data.lock_message || 'Publicar Demanda Irrestrita');
       
@@ -139,25 +139,36 @@ export default function GlobalDashboard() {
     setCelulasEditadas(novasEdicoes);
   };
 
+  const handleManualExport = async () => {
+    try {
+      const res = await axios.get('/api/v1/dashboard/export', { responseType: 'blob' });
+      const url = window.URL.createObjectURL(new Blob([res.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', 'Demanda_Irrestrita_Oficial.xlsx');
+      document.body.appendChild(link);
+      link.click();
+      link.parentNode?.removeChild(link);
+    } catch (e) {
+      alert("Erro ao exportar o Excel do Dashboard Global.");
+    }
+  };
+
   const handleSave = async () => {
     if (isLocked) return;
     if (!window.confirm("Atenção: A Publicação bloqueará a tela para todos os utilizadores. Deseja aprovar este plano oficial e reescrever a base atómica na Coluna Final?")) return;
     setIsProcessing(true);
     try {
       const ajustes = Object.entries(celulasEditadas).map(([k, v]) => ({ nivel: k.split('|')[0], chave: k.split('|')[1], mes_projetado: k.split('|')[2], novo_volume: v === '' ? 0 : v }));
-      await axios.post('http://localhost:8000/api/v1/dashboard/aprovar', { ajustes });
+      await axios.post('/api/v1/dashboard/aprovar', { ajustes });
       setCelulasEditadas({});
       await fetchData(); 
-      window.open('http://localhost:8000/api/v1/dashboard/export', '_blank');
+      await handleManualExport();
     } catch (e: any) { 
       alert("Erro ao salvar: " + (e.response?.data?.detail || e.message)); 
     } finally { 
       setIsProcessing(false); 
     }
-  };
-
-  const handleManualExport = () => {
-    window.open('http://localhost:8000/api/v1/dashboard/export', '_blank');
   };
 
   const stats = useMemo(() => {

@@ -21,12 +21,11 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
   // Busca lista de vendedores e gerentes se for para o modo cadastro
   useEffect(() => {
     if (modo === 'cadastro') {
-      axios.get('http://localhost:8000/api/v1/auth/lista-vendedores')
+      axios.get('/api/v1/auth/lista-vendedores')
         .then(res => setListaVendedores(res.data.dados))
         .catch(e => console.log(e));
         
-      // Busca a lista de gerentes para preencher o Dropdown
-      axios.get('http://localhost:8000/api/v1/auth/lista-gerentes')
+      axios.get('/api/v1/auth/lista-gerentes')
         .then(res => setListaGerentes(res.data.dados))
         .catch(e => console.log("Erro ao buscar gerentes:", e));
     }
@@ -36,12 +35,15 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
     e.preventDefault();
     setIsLoading(true);
     try {
-      const res = await axios.post('http://localhost:8000/api/v1/auth/login', { email, senha });
+      const res = await axios.post('/api/v1/auth/login', { email, senha });
+      
       const usuario = res.data.usuario;
+      const token = res.data.access_token;
       
       if (usuario.primeiro_acesso) {
         setModo('primeiro_acesso');
       } else {
+        localStorage.setItem('nexus_token', token); // Grava o crachá
         onLoginSuccess(usuario);
       }
     } catch (error: any) {
@@ -58,7 +60,7 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
     
     setIsLoading(true);
     try {
-      await axios.post('http://localhost:8000/api/v1/auth/cadastrar', {
+      await axios.post('/api/v1/auth/cadastrar', {
         nome, 
         email, 
         senha_inicial: senha, 
@@ -79,7 +81,7 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
     e.preventDefault();
     setIsLoading(true);
     try {
-      await axios.post('http://localhost:8000/api/v1/auth/alterar-senha', { email, nova_senha: novaSenha });
+      await axios.post('/api/v1/auth/alterar-senha', { email, nova_senha: novaSenha });
       alert("🔒 Senha atualizada! Faça o login novamente com a sua nova senha.");
       setSenha(''); setNovaSenha('');
       setModo('login');
@@ -98,7 +100,9 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
         <div className="absolute inset-0 bg-gradient-to-br from-indigo-900/50 to-slate-900 z-0"></div>
         <div className="absolute -top-40 -right-40 w-96 h-96 bg-indigo-500 rounded-full blur-[120px] opacity-20"></div>
         
-        
+        <div className="relative z-10">
+          <img src="https://www.lineaalimentos.com.br/media/wysiwyg/icones/logo-linea-headline.png" alt="Linea" className="h-12 brightness-0 invert" />
+        </div>
         
         <div className="relative z-10 mb-20">
           <h1 className="text-5xl font-black text-white tracking-tighter mb-6 leading-tight">
@@ -208,7 +212,7 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
                   </div>
                 </div>
 
-                {/* CAMPO CONDICIONAL PARA GERENTE (AGORA É UM SELECT) */}
+                {/* CAMPO CONDICIONAL PARA GERENTE */}
                 {funcao === 'Gerente' && (
                   <div className="mt-2 animate-in fade-in slide-in-from-top-2">
                     <label className="text-[10px] font-black text-emerald-600 uppercase tracking-widest ml-1 block mb-1">Amarração de Gerente (Obrigatório)</label>
@@ -243,7 +247,7 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
             </div>
           )}
 
-          {/* MODO PRIMEIRO ACESSO (Troca de Senha) */}
+          {/* MODO PRIMEIRO ACESSO */}
           {modo === 'primeiro_acesso' && (
             <div className="animate-in fade-in zoom-in duration-500">
               <div className="mb-8 text-center bg-amber-50 border border-amber-200 p-6 rounded-3xl">

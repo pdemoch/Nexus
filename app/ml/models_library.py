@@ -6,6 +6,17 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.forecasting.theta import ThetaModel
 import warnings
 
+# Novas Importações
+try:
+    from prophet import Prophet
+except ImportError:
+    pass
+
+try:
+    import pmdarima as pm
+except ImportError:
+    pass
+
 warnings.filterwarnings("ignore")
 
 def calcular_acuracia(y_true, y_pred):
@@ -20,6 +31,41 @@ def calcular_acuracia(y_true, y_pred):
     wmape = np.sum(np.abs(y_true - y_pred)) / soma_real
     acuracia = max(0.0, (1.0 - wmape) * 100)
     return round(acuracia, 2)
+
+class ProphetModel:
+    """O Rei dos Picos: Algoritmo da Meta/Facebook excelente para capturar sazonalidades agressivas."""
+    def fit_predict(self, train_series: pd.Series, steps_ahead: int):
+        try:
+            if len(train_series) < 6:
+                return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
+            
+            df_p = pd.DataFrame({'ds': train_series.index, 'y': train_series.values})
+            # Desliga logs chatos do Prophet
+            import logging
+            logging.getLogger('prophet').setLevel(logging.ERROR)
+            
+            m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
+            m.fit(df_p)
+            future = m.make_future_dataframe(periods=steps_ahead, freq='MS')
+            forecast = m.predict(future)
+            preds = forecast['yhat'].iloc[-steps_ahead:].values
+            return np.maximum(0, preds)
+        except Exception:
+            return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
+
+class AutoArimaModel:
+    """O Padrão Ouro Estatístico (SARIMAX): Testa várias combinações e acha o melhor ajuste sazonal."""
+    def fit_predict(self, train_series: pd.Series, steps_ahead: int):
+        try:
+            if len(train_series) < 12:
+                return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
+            
+            # seasonal=True e m=12 diz ao modelo para procurar padrões anuais
+            model = pm.auto_arima(train_series.values, seasonal=True, m=12, stepwise=True, suppress_warnings=True, error_action="ignore")
+            preds = model.predict(n_periods=steps_ahead)
+            return np.maximum(0, preds)
+        except Exception:
+            return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
 
 class HoltModel:
     """Modelo de Suavização Exponencial de Holt (captura nível e tendência, sem sazonalidade)."""
@@ -40,7 +86,7 @@ class HoltModel:
             return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
 
 class HoltWintersModel:
-    """O Caçador de Ondas: Captura Nível, Tendência e Sazonalidade (Ciclos de 12 meses)."""
+    """O Caçador de Ondas Clássico: Captura Nível, Tendência e Sazonalidade (Ciclos de 12 meses)."""
     def fit_predict(self, train_series: pd.Series, steps_ahead: int):
         try:
             if len(train_series) < 12:
@@ -58,7 +104,6 @@ class HoltWintersModel:
         except Exception:
             return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
 
-
 class ThetaModelWrapper:
     """Modelo Theta de Assimakopoulos & Nikolopoulos (excelente desempenho geral)."""
     def fit_predict(self, train_series: pd.Series, steps_ahead: int):
@@ -70,7 +115,6 @@ class ThetaModelWrapper:
             return np.maximum(0, model.forecast(steps_ahead))
         except Exception:
             return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
-
 
 class CrostonModel:
     """Método de Croston Clássico: O melhor para Procura Intermitente (Muitos zeros na série)."""
@@ -106,7 +150,6 @@ class CrostonModel:
         
         return np.full(steps_ahead, max(0, forecast))
 
-
 class MovingAverageModel:
     """Baseline Clássico: Média Móvel Simples."""
     def __init__(self, window=3):
@@ -129,7 +172,7 @@ class MovingAverageModel:
 class GlobalMLTrainer:
     """
     Construtor de Features para os modelos globais (XGBoost e LightGBM).
-    Cria a matriz que junta o comportamento de TODOS os SKUs.
+    Foi anabolizado para capturar picos ensinando aceleração e volatilidade à máquina.
     """
     @staticmethod
     def gerar_features_globais(df_historico_completo: pd.DataFrame, lags=[1, 2, 3, 6, 12]):
@@ -139,7 +182,6 @@ class GlobalMLTrainer:
             g = group.copy().sort_values('mes_ano_dt')
 
             g['mes'] = g['mes_ano_dt'].dt.month
-            
             g['mes_sin'] = np.sin(2 * np.pi * g['mes'] / 12)
             g['mes_cos'] = np.cos(2 * np.pi * g['mes'] / 12)
             
@@ -148,10 +190,17 @@ class GlobalMLTrainer:
                 
             g['media_movel_3'] = g['total_qtpedido'].shift(1).rolling(window=3).mean()
             
+            # --- NOVAS FEATURES DE VOLATILIDADE E ACELERAÇÃO ---
+            # Desvio Padrão: Ensina à arvore se o produto costuma ter saltos agressivos
+            g['volatilidade_3m'] = g['total_qtpedido'].shift(1).rolling(window=3).std().fillna(0)
+            
+            # Aceleração (Variação Relativa): Ensina à arvore se estamos a entrar numa rampa de subida ou descida
+            g['diff_1'] = g['lag_1'] - g['lag_2']
+            g['diff_2'] = g['lag_2'] - g['lag_3']
+            
             dfs_processados.append(g)
             
         df_feat = pd.concat(dfs_processados)
-        
         df_feat = df_feat.dropna(subset=[f'lag_{lags[-1]}']).copy()
         
         cols_cat = ['bu', 'categoria', 'segmento', 'curva_2026']

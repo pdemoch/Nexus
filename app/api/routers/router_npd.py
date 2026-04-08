@@ -7,6 +7,7 @@ from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 from app.core.database import get_db
 from app.models.domain_models import DimProduto, FatoIbpGranular
+from app.api.routers.router_auth import get_current_user
 
 router = APIRouter(prefix="/api/v1/npd", tags=["New Product Development"])
 
@@ -27,9 +28,10 @@ class PayloadNPD(BaseModel):
     projecao: List[ProjecaoMes]
 
 @router.get("/espelhos")
-async def obter_listas_npd(db: Session = Depends(get_db)):
-    """Fornece as listas do ERP para o usuário montar o Lançamento."""
-    
+async def obter_listas_npd(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
+    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
+        raise HTTPException(status_code=403, detail="Acesso restrito à Diretoria/Gerência.")
+        
     produtos = db.query(DimProduto.sku, DimProduto.descricao).filter(DimProduto.descricao.isnot(None)).distinct().all()
     categorias = db.query(DimProduto.categoria).filter(DimProduto.categoria.isnot(None)).distinct().all()
     segmentos = db.query(DimProduto.segmento).filter(DimProduto.segmento.isnot(None)).distinct().all()
@@ -42,8 +44,10 @@ async def obter_listas_npd(db: Session = Depends(get_db)):
     }
 
 @router.post("/injetar")
-async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db)):
-    """Copia a árvore do SKU Espelho e injeta o NPD no S&OP na janela de M+2 a M+4."""
+async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
+    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
+        raise HTTPException(status_code=403, detail="Acesso restrito.")
+        
     try:
         produto_existente = db.query(DimProduto).filter(DimProduto.sku == payload.codigo_lancamento).first()
         if not produto_existente:
@@ -65,7 +69,6 @@ async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db))
             raise HTTPException(status_code=400, detail="O SKU Espelho selecionado não possui clientes ativos para clonagem.")
 
         total_peso_espelho = sum([c.peso_hist for c in clientes_espelho])
-
         hoje = date.today()
         mes_base_dinamico = hoje.replace(day=1) + relativedelta(months=2) 
         
@@ -77,9 +80,7 @@ async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db))
             for cliente in clientes_espelho:
                 peso_cliente = cliente.peso_hist / total_peso_espelho if total_peso_espelho > 0 else 1 / len(clientes_espelho)
                 volume_cliente = int(round(volume_mes_nacional * peso_cliente))
-                
-                if volume_cliente == 0:
-                    continue
+                if volume_cliente == 0: continue
                     
                 nova_fato = FatoIbpGranular(
                     ciclo_sop=datetime.date.today().strftime("%m/%Y"),
@@ -87,9 +88,7 @@ async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db))
                     sku=payload.codigo_lancamento,
                     cgc=cliente.cgc,
                     vendedor_nome=cliente.vendedor_nome,
-                    vol_ia=volume_cliente, 
-                    vol_topdown=0,
-                    vol_bottomup=0,
+                    vol_ia=volume_cliente, vol_topdown=0, vol_bottomup=0,
                     pmv_aplicado=payload.pmv
                 )
                 novas_linhas.append(nova_fato)

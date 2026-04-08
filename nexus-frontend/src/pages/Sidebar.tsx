@@ -6,9 +6,9 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
   // Definição das permissões de cada tela
   const allNavItems = [
     { id: 'dashboard', label: 'S&OP Global', icon: LayoutDashboard, roles: ['Administrador', 'Gerente'] },
-    { id: 'topdown', label: 'Top-Down (Diretoria)', icon: BarChart3, roles: ['Administrador', 'Gerente'] },
-    { id: 'npd', label: 'Inovações (NPD)', icon: Rocket, roles: ['Administrador', 'Gerente'] },
-    { id: 'consenso', label: 'Bottom-Up (Vendas)', icon: Users, roles: ['Administrador', 'Gerente', 'Executivo'] },
+    { id: 'topdown', label: 'Top-Down (Gerencia)', icon: BarChart3, roles: ['Administrador', 'Gerente'] },
+    { id: 'npd', label: 'Inovações (MKT)', icon: Rocket, roles: ['Administrador', 'Gerente'] },
+    { id: 'consenso', label: 'Bottom-Up (Comercial)', icon: Users, roles: ['Administrador', 'Gerente', 'Executivo'] },
     { id: 'gerenciamento', label: 'Gerenciamento', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },
     { id: 'admin', label: 'Control Tower', icon: Settings, roles: ['Administrador'] },
   ];

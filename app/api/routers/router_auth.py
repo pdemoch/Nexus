@@ -1,5 +1,8 @@
 import bcrypt
-from fastapi import APIRouter, HTTPException, Depends
+from datetime import datetime, timedelta
+from jose import JWTError, jwt
+from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.orm import Session
@@ -8,6 +11,54 @@ from app.models.domain_models import Usuario, DimCliente
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Autenticação e Usuários"])
 
+# ==========================================
+# CONFIGURAÇÕES DE SEGURANÇA JWT
+# ==========================================
+SECRET_KEY = "NEXUS_SUPER_SECRET_KEY_MUDE_ISSO_EM_PRODUCAO" 
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # O token expira em 24 horas
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Credenciais inválidas ou token expirado",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+        
+    usuario = db.query(Usuario).filter(Usuario.email == email).first()
+    if usuario is None:
+        raise credentials_exception
+        
+    return {
+        "id": usuario.id,
+        "email": usuario.email,
+        "funcao": usuario.funcao,
+        "nome_vendedor": usuario.nome_vendedor,
+        "gerente_nome": getattr(usuario, 'gerente_nome', None)
+    }
+
+# ==========================================
+# UTILITÁRIOS E PAYLOADS
+# ==========================================
 def verificar_senha(senha_plana: str, senha_hash: str) -> bool:
     return bcrypt.checkpw(senha_plana.encode('utf-8')[:72], senha_hash.encode('utf-8'))
 
@@ -30,6 +81,9 @@ class NovaSenhaPayload(BaseModel):
     email: str
     nova_senha: str
 
+# ==========================================
+# ROTAS DO SISTEMA
+# ==========================================
 @router.post("/login")
 async def login(payload: LoginPayload, db: Session = Depends(get_db)):
     email_limpo = payload.email.lower().strip()
@@ -46,8 +100,17 @@ async def login(payload: LoginPayload, db: Session = Depends(get_db)):
         if not usuario.aprovado:
             raise HTTPException(status_code=403, detail="⏳ Cadastro em análise. Aguarde a aprovação de um Administrador.")
             
+        # GERAÇÃO DO TOKEN JWT
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": usuario.email, "funcao": usuario.funcao},
+            expires_delta=access_token_expires
+        )
+            
         return {
             "status": "success", 
+            "access_token": access_token,
+            "token_type": "bearer",
             "usuario": {
                 "id": usuario.id,
                 "nome": usuario.nome,
@@ -135,31 +198,26 @@ async def obter_vendedores(db: Session = Depends(get_db)):
 
 @router.get("/lista-gerentes")
 async def obter_gerentes(db: Session = Depends(get_db)):
-    """Retorna a lista de nomes de gerentes disponíveis no ERP (que ainda não possuem conta)"""
     try:
         col_gerente_erp = getattr(DimCliente, 'gerente_nome', None)
         col_gerente_user = getattr(Usuario, 'gerente_nome', None)
 
         if col_gerente_erp is None:
-            print("⚠️ AVISO: A coluna 'gerente_nome' não foi encontrada na classe DimCliente do domain_models.py!")
             return {"status": "success", "dados": []}
 
         erp_gerentes = db.query(col_gerente_erp).filter(col_gerente_erp.isnot(None)).distinct().all()
         todos_gerentes = set(r[0].strip() for r in erp_gerentes if r[0] and str(r[0]).strip())
 
         if col_gerente_user is None:
-            print("⚠️ AVISO: A coluna 'gerente_nome' não foi encontrada na classe Usuario do domain_models.py!")
             gerentes_em_uso = set()
         else:
             usuarios_gerentes = db.query(col_gerente_user).filter(col_gerente_user.isnot(None)).distinct().all()
             gerentes_em_uso = set(u[0].strip() for u in usuarios_gerentes if u[0] and str(u[0]).strip())
 
         gerentes_livres = sorted(list(todos_gerentes - gerentes_em_uso))
-        
         return {"status": "success", "dados": gerentes_livres}
         
     except Exception as e:
-        print(f"❌ ERRO GRAVE no banco ao buscar gerentes: {str(e)}")
         return {"status": "success", "dados": []}
 
 @router.get("/pendentes")
