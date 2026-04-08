@@ -1,17 +1,14 @@
 import polars as pl
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy import text
-from datetime import datetime
+from datetime import datetime, date
+from dateutil.relativedelta import relativedelta
 
 class NexusLoader:
     def __init__(self):
         pass
 
     def executar_carga_silver(self, df_silver: pl.DataFrame):
-        """
-        Recebe a base harmonizada do Transformer e popula DimCliente, DimProduto e FatoVendas.
-        Converte as datas brutas em objetos date reais para o SQLite.
-        """
         from app.core.database import SessionLocal
         from app.models.domain_models import DimCliente, FatoVendas, DimProduto
 
@@ -28,14 +25,9 @@ class NexusLoader:
 
             for row in df_clientes.to_dicts():
                 stmt = sqlite_insert(DimCliente).values(
-                    cgc=row['cgc'],
-                    cod_cliente=row['cod_cliente'],
-                    loja=row['loja'],
-                    razaosocial=row['cliente_razaosocial'],
-                    regional=row['regional'],
-                    bloqueado=row['bloqueado'],
-                    vendedor_nome=row['vendedor_nome'],
-                    gerente_nome=row['gerente_nome']
+                    cgc=row['cgc'], cod_cliente=row['cod_cliente'], loja=row['loja'],
+                    razaosocial=row['cliente_razaosocial'], regional=row['regional'],
+                    bloqueado=row['bloqueado'], vendedor_nome=row['vendedor_nome'], gerente_nome=row['gerente_nome']
                 ).on_conflict_do_update(
                     index_elements=['cgc'],
                     set_={
@@ -49,25 +41,17 @@ class NexusLoader:
                 db.execute(stmt)
 
             print("   -> Sincronizando Dicionário de Produtos...")
-            df_prod = df_silver.select([
-                "produto", "descricao", "bu", "categoria", "segmento", "curva_2026"
-            ]).unique(subset=["produto"])
+            df_prod = df_silver.select(["produto", "descricao", "bu", "categoria", "segmento", "curva_2026"]).unique(subset=["produto"])
 
             for row in df_prod.to_dicts():
                 stmt = sqlite_insert(DimProduto).values(
-                    sku=row['produto'],
-                    descricao=row['descricao'],
-                    bu=row['bu'],
-                    categoria=row['categoria'],
-                    segmento=row['segmento'],
-                    curva=row['curva_2026']
+                    sku=row['produto'], descricao=row['descricao'], bu=row['bu'],
+                    categoria=row['categoria'], segmento=row['segmento'], curva=row['curva_2026']
                 ).on_conflict_do_update(
                     index_elements=['sku'],
                     set_={
-                        'descricao': sqlite_insert(DimProduto).excluded.descricao,
-                        'bu': sqlite_insert(DimProduto).excluded.bu,
-                        'categoria': sqlite_insert(DimProduto).excluded.categoria,
-                        'segmento': sqlite_insert(DimProduto).excluded.segmento,
+                        'descricao': sqlite_insert(DimProduto).excluded.descricao, 'bu': sqlite_insert(DimProduto).excluded.bu,
+                        'categoria': sqlite_insert(DimProduto).excluded.categoria, 'segmento': sqlite_insert(DimProduto).excluded.segmento,
                         'curva': sqlite_insert(DimProduto).excluded.curva
                     }
                 )
@@ -86,12 +70,8 @@ class NexusLoader:
 
                 vendas_objetos.append(
                     FatoVendas(
-                        data_pedido=dt_obj,
-                        sku=row['produto'],
-                        cgc=row['cgc'],
-                        vendedor_nome=row['vendedor_nome'],
-                        qt_pedido=row['qtpedido'],
-                        vl_pedido=row['vlpedido']
+                        data_pedido=dt_obj, sku=row['produto'], cgc=row['cgc'],
+                        vendedor_nome=row['vendedor_nome'], qt_pedido=row['qtpedido'], vl_pedido=row['vlpedido']
                     )
                 )
             
@@ -111,10 +91,6 @@ class NexusLoader:
             db.close()
 
     def executar_carga_forecast(self, df_forecast: pl.DataFrame, df_silver: pl.DataFrame):
-        """
-        Calcula o rateio atômico e injeta no FatoIbpGranular.
-        Nova Lógica (Cascata de Herança): Todos os volumes nascem com o valor da IA.
-        """
         from app.core.database import SessionLocal
         from app.models.domain_models import FatoIbpGranular, DimProduto
         
@@ -135,15 +111,37 @@ class NexusLoader:
                     {"mod": row['modelo_vencedor'], "acu": row['acuracia'], "sku": row['produto']}
                 )
 
-            print("   -> Aplicando rateio inicial da IA por cliente...")
+            print("   -> Aplicando rateio cascata IA (Histórico 12 Meses)...")
+            
             df_ativos = df_silver.filter(pl.col("bloqueado") != "INATIVO")
             
-            df_pesos = df_ativos.group_by(["produto", "cgc", "vendedor_nome"]).agg(
+            # Filtra os últimos 12 meses para definir o peso
+            data_corte = (date.today() - relativedelta(months=12)).strftime('%Y%m%d')
+            df_12m = df_ativos.filter(pl.col("dtapedido").cast(pl.Utf8) >= data_corte)
+            
+            # Calcula o peso histórico real
+            df_pesos = df_12m.group_by(["produto", "cgc", "vendedor_nome"]).agg(
                 pl.col("qtpedido").sum().alias("vol_hist")
-            ).with_columns(
+            )
+
+            # Garante que todos os clientes ativos estão na base de rateio, mesmo sem vendas recentes
+            df_base = df_ativos.select(["produto", "cgc", "vendedor_nome"]).unique()
+            df_pesos = df_base.join(df_pesos, on=["produto", "cgc", "vendedor_nome"], how="left").fill_null(0)
+            
+            # Calcula a proporção (%)
+            df_pesos = df_pesos.with_columns(
                 (pl.col("vol_hist") / pl.col("vol_hist").sum().over("produto")).fill_nan(0).alias("peso")
             )
 
+            # Fallback: Se um produto for novo e não tiver histórico no Brasil, divide igual
+            df_pesos = df_pesos.with_columns(
+                pl.when(pl.col("peso").sum().over("produto") == 0)
+                .then(1.0 / pl.col("cgc").count().over("produto"))
+                .otherwise(pl.col("peso"))
+                .alias("peso")
+            )
+
+            # Cruza a previsão Macro da IA com o Peso de cada Loja
             df_final = df_forecast.join(df_pesos, left_on="produto", right_on="produto", how="inner")
             df_final = df_final.with_columns(
                 (pl.col("vol_ia_global") * pl.col("peso")).round(0).cast(pl.Int32).alias("vol_ia_atomico")
@@ -156,15 +154,9 @@ class NexusLoader:
 
             objetos_ibp = [
                 FatoIbpGranular(
-                    ciclo_sop=ciclo_atual,
-                    mes_projetado=row['mes_projetado'],
-                    sku=row['produto'],
-                    cgc=row['cgc'],
-                    vendedor_nome=row['vendedor_nome'],
-                    vol_ia=row['vol_ia_atomico'],
-                    vol_topdown=row['vol_ia_atomico'],   
-                    vol_bottomup=row['vol_ia_atomico'],   
-                    vol_final=row['vol_ia_atomico'],      
+                    ciclo_sop=ciclo_atual, mes_projetado=row['mes_projetado'], sku=row['produto'],
+                    cgc=row['cgc'], vendedor_nome=row['vendedor_nome'], vol_ia=row['vol_ia_atomico'],
+                    vol_topdown=row['vol_ia_atomico'], vol_bottomup=row['vol_ia_atomico'], vol_final=row['vol_ia_atomico'],      
                     pmv_aplicado=row['pmv_ref'] or 0.0
                 ) for row in df_final.to_dicts()
             ]
@@ -174,7 +166,7 @@ class NexusLoader:
                 db.bulk_save_objects(objetos_ibp[i : i + chunk_size])
 
             db.commit()
-            print(f"✅ [LOAD] Injeção IBP concluída: {len(objetos_ibp)} registros herdaram o sinal da IA nas 4 camadas.")
+            print(f"✅ [LOAD] Injeção IBP concluída com Sucesso Histórico: {len(objetos_ibp)} lojas impactadas.")
             
         except Exception as e:
             db.rollback()

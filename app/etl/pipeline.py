@@ -18,6 +18,7 @@ def log(mensagem: str):
 async def executar_pipeline_nexus():
     try:
         hoje = date.today()
+        # Janela de extração de dados
         data_inicio = date(2022, 1, 1)                  
         data_fim = hoje - relativedelta(days=1)
         
@@ -33,6 +34,7 @@ async def executar_pipeline_nexus():
         
         if df_150.is_empty():
             log("❌ [EXTRACT] Falha: API 150 não retornou dados. Abortando.")
+            AppState.pipeline_rodando = False
             return
 
         log("⏳ [TRANSFORM] Aplicando regras da Camada Silver e limpando inativos...")
@@ -40,16 +42,22 @@ async def executar_pipeline_nexus():
         df_ia = transformer.preparar_camada_ia(df_silver)
         
         log("🧠 [MACHINE LEARNING] Iniciando Arena de Modelos Preditivos...")
+        # A IA prevê os volumes a nível de SKU
         df_forecast = forecaster.executar_arena(df_ia, log_callback=log)
 
         log("⏳ [LOAD] Injetando Fatos e Dimensões no banco local SQLite...")
         loader.executar_carga_silver(df_silver)
-        loader.executar_carga_forecast(df_forecast, df_silver)
         
-        log("🎯 [SYSTEM] Pipeline 100% Concluído. A plataforma está pronta para o S&OP.")
+        log("🌊 [RATEIO] Distribuindo Inteligência Artificial para Lojas (CGCs)...")
+        # A GRANDE MUDANÇA: Passamos o df_silver (Histórico de Vendas) junto com o df_forecast (Previsão).
+        # O Loader vai olhar os últimos 12 meses do df_silver e ratear a IA loja a loja!
+        loader.executar_carga_forecast(df_forecast, df_silver)
 
-    except Exception as e:
-        log(f"❌ [ERRO CRÍTICO] Falha na execução: {str(e)}")
-        traceback.print_exc() 
-    finally:
         AppState.pipeline_rodando = False
+        log("🏁 [SYSTEM] Pipeline concluído com sucesso!")
+        
+    except Exception as e:
+        AppState.pipeline_rodando = False
+        erro_msg = traceback.format_exc()
+        log(f"❌ [ERRO CRÍTICO] Falha na execução: {str(e)}")
+        print(erro_msg)

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, Fragment } from 'react';
 import {
   useReactTable,
   getCoreRowModel,
@@ -7,12 +7,13 @@ import {
   getSortedRowModel,
   SortingState
 } from '@tanstack/react-table';
-import { Loader2, ChevronDown, ChevronUp, ArrowUpDown, ArrowUp, ArrowDown, Activity, BrainCircuit, ShieldCheck, Check, Hash, Search, Filter, Download } from 'lucide-react';
+import { Loader2, ChevronDown, ChevronUp, ArrowUpDown, ArrowUp, ArrowDown, Activity, BrainCircuit, ShieldCheck, Check, Hash, Search, Filter, Download, X } from 'lucide-react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import * as XLSX from 'xlsx';
 
 const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor));
+const formatVolume = (val: number) => Math.round(val).toLocaleString('pt-BR');
 
 export default function TopDownArena() {
   const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
@@ -21,27 +22,29 @@ export default function TopDownArena() {
   const [expanded, setExpanded] = useState({});
   const [sorting, setSorting] = useState<SortingState>([]);
   const [isCicloFechado, setIsCicloFechado] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-
+  
   const [busca, setBusca] = useState('');
   const [categoriaSelecionada, setCategoriaSelecionada] = useState('TODAS');
   const [segmentoSelecionado, setSegmentoSelecionado] = useState('TODOS');
 
   const fetchData = useCallback(async () => {
+    setIsLoading(true);
     try {
       const [res, statusRes] = await Promise.all([
-        axios.get('http://localhost:8000/api/v1/consensus/macro'),
-        axios.get('http://localhost:8000/api/v1/consensus/status', { params: { origem: 'Top-Down' } })
+        axios.get('/api/v1/consensus/macro'),
+        axios.get('/api/v1/consensus/status', { params: { origem: 'Top-Down' } })
       ]);
       setDadosBrutos(res.data.dados || []);
       setIsCicloFechado(statusRes.data.is_topdown_fechado);
-    } catch (e) { 
-      console.error("Erro ao carregar Top-Down:", e); 
-    } finally { 
-      setIsLoading(false); 
+    } catch (e) {
+      console.error(e);
+      setDadosBrutos([]);
+    } finally {
+      setIsLoading(false);
     }
   }, []);
 
@@ -50,10 +53,11 @@ export default function TopDownArena() {
   const handleExportExcel = (isSnapshot = false) => {
     if (dadosFiltrados.length === 0) return alert("Não há dados na tela para exportar.");
     const dadosExcel = dadosFiltrados.map(row => {
+      const pmvBase = row.meses[0]?.pmv || 0;
       const linha: any = {
         "CÓDIGO SKU": row.produto, "DESCRIÇÃO": row.descricao, "CATEGORIA": row.categoria,
         "SEGMENTO": row.segmento, "MODELO IA": row.modelo_vencedor, "ACURÁCIA IA (%)": row.acuracia_ia,
-        "PMV PONDERADO (R$)": row.meses[0]?.pmv || 0
+        "PMV PONDERADO (R$)": pmvBase
       };
       row.meses.forEach((m: any) => {
         const edicao = celulasEditadas[row.produto]?.[m.mes_banco];
@@ -86,7 +90,7 @@ export default function TopDownArena() {
 
     try {
       handleExportExcel(true); 
-      await axios.post('http://localhost:8000/api/v1/consensus/macro/congelar', { origem_ajuste: "Top-Down", ajustes });
+      await axios.post('/api/v1/consensus/macro/congelar', { origem_ajuste: "Top-Down", ajustes });
       alert("🔒 Ciclo Top-Down congelado e rateado com sucesso!");
       setCelulasEditadas({});
       fetchData(); 
@@ -109,11 +113,16 @@ export default function TopDownArena() {
   const totaisFaturamento = useMemo(() => {
     const totais: Record<string, number> = {};
     dadosFiltrados.forEach(row => row.meses.forEach((m: any) => totais[m.mes_banco] = 0));
-    dadosFiltrados.forEach(row => row.meses.forEach((mes: any) => {
-      const edicao = celulasEditadas[row.produto]?.[mes.mes_banco];
-      const volumeFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : mes.vol_ajustado));
-      totais[mes.mes_banco] += volumeFinal * mes.pmv;
-    }));
+    
+    dadosFiltrados.forEach(row => {
+      const pmvBase = row.meses[0]?.pmv || 0; // Travado no PMV da primeira coluna
+      
+      row.meses.forEach((mes: any) => {
+        const edicao = celulasEditadas[row.produto]?.[mes.mes_banco];
+        const volumeFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : mes.vol_ajustado));
+        totais[mes.mes_banco] += volumeFinal * pmvBase;
+      });
+    });
     return totais;
   }, [dadosFiltrados, celulasEditadas]);
 
@@ -124,13 +133,15 @@ export default function TopDownArena() {
     if (isExpanding && !dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
-        const res = await axios.get('http://localhost:8000/api/v1/consensus/macro/grafico', { params: { produto: chave } });
+        const res = await axios.get('/api/v1/consensus/macro/grafico', { params: { produto: chave } });
         setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
       } catch (e) { console.error(e); }
       finally { setLoadingGrafico(null); }
     }
     row.toggleExpanded();
   };
+
+  const qtdEdicoes = Object.keys(celulasEditadas).length;
 
   const columns = useMemo(() => {
     if (dadosFiltrados.length === 0) return [];
@@ -140,7 +151,7 @@ export default function TopDownArena() {
         id: 'expander', enableSorting: false, header: () => null,
         cell: ({ row }: any) => (
           <button onClick={() => toggleRow(row)} className="p-2 hover:bg-slate-100 rounded-xl transition-all">
-            {row.getIsExpanded() ? <ChevronUp className="w-5 h-5 text-slate-800" /> : <ChevronDown className="w-5 h-5 text-slate-400" />}
+            {row.getIsExpanded() ? <ChevronUp className="w-5 h-5 text-indigo-600" /> : <ChevronDown className="w-5 h-5 text-slate-400" />}
           </button>
         ),
       },
@@ -150,9 +161,26 @@ export default function TopDownArena() {
         cell: (info: any) => (
           <div className="flex flex-col py-1">
             <span className="font-bold text-gray-900 text-sm truncate max-w-[320px]">{info.row.original.descricao}</span>
-            <span className="text-[10px] text-gray-400 font-black uppercase tracking-widest">{info.row.original.produto}</span>
+            <div className="flex items-center gap-2 mt-1">
+              <span className="text-[10px] text-slate-400 font-black uppercase tracking-tighter bg-slate-100 px-2 py-0.5 rounded-md">{info.row.original.produto}</span>
+              <span className="text-[10px] text-indigo-400 font-black uppercase tracking-tighter">{info.row.original.categoria}</span>
+            </div>
           </div>
         )
+      },
+      {
+        id: 'acuracia', header: 'Motor IA', accessorFn: (row: any) => row.acuracia_ia,
+        cell: (info: any) => {
+          const acc = info.getValue();
+          const modelo = info.row.original.modelo_vencedor;
+          const cor = acc >= 80 ? 'text-emerald-500' : acc >= 60 ? 'text-amber-500' : 'text-rose-500';
+          return (
+            <div className="flex flex-col items-start w-28">
+               <span className={`text-xs font-black flex items-center gap-1 ${cor}`}><BrainCircuit className="w-3 h-3"/> {acc.toFixed(1)}%</span>
+               <span className="text-[8px] text-slate-400 font-bold uppercase tracking-widest truncate max-w-full" title={modelo}>{modelo}</span>
+            </div>
+          );
+        }
       },
       {
         id: 'pmv_base', header: 'PMV Ponderado',
@@ -184,7 +212,10 @@ export default function TopDownArena() {
           const valorInteiro = Math.round(Number(valorReal));
           const baseIA = Math.round(Number(dadosMes?.vol_ia || 0));
           const isChanged = valorInteiro !== baseIA;
-          const faturamentoPrevisto = valorInteiro * (dadosMes?.pmv || 0);
+          
+          // A MÁGICA: Usa o PMV Base (Index 0) para cravar o faturamento
+          const pmvBase = row.meses[0]?.pmv || 0;
+          const faturamentoPrevisto = valorInteiro * pmvBase;
 
           return (
             <div className="flex flex-col w-28 gap-1">
@@ -243,15 +274,19 @@ export default function TopDownArena() {
           </h1>
           <div className="flex items-center gap-4">
             {isCicloFechado ? (
-                <div className="flex items-center gap-2 bg-slate-800 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-slate-800/20">
-                    <Check className="w-5 h-5 text-emerald-400" />
-                    Ciclo Congelado
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2 bg-slate-800 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-slate-800/20">
+                      <Check className="w-5 h-5 text-emerald-400" /> Top-Down Congelado
+                  </div>
                 </div>
             ) : (
-                <button onClick={handleCongelarCiclo} disabled={isProcessing} className="flex items-center gap-2 bg-rose-500 hover:bg-rose-400 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-rose-500/30 transition-all disabled:opacity-50">
-                    {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : <ShieldCheck className="w-5 h-5" />}
-                    Gravar Ciclo Definitivo
-                </button>
+                <div className="flex items-center gap-3 h-full">
+                  {qtdEdicoes > 0 && (<button onClick={() => setCelulasEditadas({})} className="flex items-center gap-1 text-xs font-black text-rose-500 hover:text-rose-700 transition tracking-widest uppercase px-4 py-3 rounded-2xl hover:bg-rose-50"><X className="w-4 h-4" /> Descartar</button>)}
+                  <button onClick={handleCongelarCiclo} disabled={isProcessing} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-indigo-600/30 transition-all disabled:opacity-50">
+                      {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : qtdEdicoes > 0 ? 'Gravar e Ratear Lojas' : <ShieldCheck className="w-5 h-5" />}
+                      {qtdEdicoes > 0 ? '' : 'Aprovar Ciclo Base IA'}
+                  </button>
+                </div>
             )}
           </div>
         </div>
@@ -363,8 +398,8 @@ export default function TopDownArena() {
                                   <LineChart data={
                                       (dadosGraficoCache[row.original.produto] || []).map((p: any) => {
                                           const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
-                                          const edicao = celulasEditadas[row.original.produto]?.[p.data_iso];
-                                          const valDiretoria = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
+                                          const edicao = celulasEditadas[row.original.produto]?.meses?.[p.data_iso];
+                                          const valDiretoria = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao : mesNaTab.vol_ajustado)) : null;
                                           return { ...p, Consenso: valDiretoria !== null ? valDiretoria : p.Consenso };
                                       })
                                   }>
@@ -373,6 +408,10 @@ export default function TopDownArena() {
                                     <YAxis tick={{fontSize: 10}} axisLine={false} tickLine={false} />
                                     <Tooltip contentStyle={{borderRadius: '20px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)'}} />
                                     <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900'}} />
+                                    
+                                    {/* A MÁGICA DA VIAGEM NO TEMPO AQUI */}
+                                    <Line type="monotone" dataKey="CicloAnterior" name="Proposta Mês Passado" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
+
                                     <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={4} dot={{r: 3, fill: '#0f172a'}} connectNulls={false} />
                                     <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
                                     <Line type="monotone" dataKey="Consenso" name="Meta Gerencial" stroke="#3b82f6" strokeWidth={5} dot={{r: 6, fill: '#3b82f6', strokeWidth: 2, stroke: '#fff'}} connectNulls={false} />
@@ -391,7 +430,7 @@ export default function TopDownArena() {
               <tfoot className="bg-slate-900 text-white">
                 <tr>
                   {table.getHeaderGroups()[0].headers.map(header => {
-                    if (header.id === 'expander' || header.id === 'pmv_base') return <td key={header.id} className="px-8 py-5"></td>;
+                    if (header.id === 'expander' || header.id === 'pmv_base' || header.id === 'acuracia') return <td key={header.id} className="px-8 py-5"></td>;
                     if (header.id === 'info') return (
                       <td key={header.id} className="px-8 py-5 text-right">
                         <div className="flex flex-col">

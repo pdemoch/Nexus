@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useReactTable, getCoreRowModel, flexRender, getExpandedRowModel, getSortedRowModel, SortingState } from '@tanstack/react-table';
-import { Loader2, ChevronDown, ChevronRight, Save, Layers, Package, Users, ArrowUpDown, ArrowUp, ArrowDown, TrendingUp, ChevronLast, Lock, Download, Unlock, BarChart2 } from 'lucide-react';
+import { Loader2, ChevronDown, ChevronRight, Save, Layers, Package, Users, ArrowUpDown, ArrowUp, ArrowDown, TrendingUp, ChevronLast, Lock, Download, BarChart2 } from 'lucide-react';
 import axios from 'axios';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer } from 'recharts';
 
@@ -78,7 +78,9 @@ export default function GlobalDashboard() {
     clientesArray.forEach(cli => {
       if(!catMap.has(cli.categoria)) catMap.set(cli.categoria, { tipo: 'categoria', id: cli.categoria, nome_exibicao: cli.categoria, childrenMap: new Map() });
       const catNode = catMap.get(cli.categoria);
+      // Produto fica no meio
       if(!catNode.childrenMap.has(cli.produto)) catNode.childrenMap.set(cli.produto, { tipo: 'produto', id: cli.produto, chave_produto: cli.produto, nome_exibicao: cli.descricao, children: [] });
+      // Cliente (Razão Social) fica na ponta
       catNode.childrenMap.get(cli.produto).children.push({ ...cli, tipo: 'cliente', nome_exibicao: cli.cliente });
     });
     return Array.from(catMap.values()).map(cat => ({ ...cat, children: Array.from(cat.childrenMap.values()) }));
@@ -263,7 +265,6 @@ export default function GlobalDashboard() {
               </div>
               <span className="text-[10px] font-black text-emerald-600">{formatMoeda(res.fat)}</span>
               
-              {/* VISÃO COMPARATIVA DE CENÁRIOS TRAVADOS */}
               <div className="grid grid-cols-3 w-full border-t border-slate-100 pt-1 mt-1">
                  <div className="flex flex-col items-center justify-center border-r border-slate-100 px-1" title="Sinal IA">
                     <span className="text-[7px] font-black text-slate-400 uppercase tracking-tighter">IA</span>
@@ -321,7 +322,6 @@ export default function GlobalDashboard() {
               <Download className="w-5 h-5" /> Exportar
             </button>
 
-            {/* BOTÃO PUBLICAR SEMPRE ATIVO */}
             <button 
               onClick={handleSave} 
               disabled={isLocked} 
@@ -335,7 +335,6 @@ export default function GlobalDashboard() {
           </div>
         </div>
 
-        {/* CARDS DE KPI (COM VARIAÇÕES DUPLAS: VOLUME E FATURAMENTO) */}
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6 mb-10">
           {[
             { label: 'IA Base', vol: stats.glob.ia, fat: stats.glob.fat_ia, varVol: 0, varFat: 0, color: 'text-slate-500', border: 'border-slate-200' },
@@ -367,7 +366,6 @@ export default function GlobalDashboard() {
           ))}
         </div>
 
-        {/* GRÁFICOS: APENAS BARRAS NA ORDEM (IA, GER, COM, IRR) */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-10">
           <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100 h-[400px] flex flex-col">
             <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-6 flex items-center gap-2"><TrendingUp className="w-4 h-4 text-emerald-500"/> Faturamento (R$) por Cenário</h3>
@@ -404,7 +402,6 @@ export default function GlobalDashboard() {
           </div>
         </div>
 
-        {/* TABELA DE MATRIZ DE CENÁRIOS */}
         <div className="bg-white rounded-[40px] shadow-2xl border border-slate-100 overflow-hidden">
           <div className="p-8 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
             <h3 className="font-black text-slate-900 uppercase tracking-widest text-sm flex items-center gap-3"><Package className="w-5 h-5 text-indigo-600"/> Matriz de Cenários (Volume & Faturamento)</h3>

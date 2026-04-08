@@ -128,9 +128,10 @@ async def aprovar_dashboard_global(payload: PayloadAprovarGlobal, db: Session = 
                 partes = ajuste.chave.split('_', 1)
                 sku, razaosocial = partes[0], partes[1] if len(partes) > 1 else ""
                 linhas = db.query(FatoIbpGranular).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(
-                    FatoIbpGranular.sku == sku, DimCliente.razaosocial == razaosocial, FatoIbpGranular.mes_projetado == data_alvo, DimCliente.bloqueado != 'INATIVO'
+                    FatoIbpGranular.sku == sku, func.trim(DimCliente.razaosocial) == razaosocial.strip(), FatoIbpGranular.mes_projetado == data_alvo, DimCliente.bloqueado != 'INATIVO'
                 ).all()
                 if linhas:
+                    # O Rateio do Global baseia-se na coluna vol_final (que herdou o trabalho do Comercial e do Gerente)
                     total_base = sum([l.vol_final for l in linhas])
                     soma_dist = 0
                     for i, l in enumerate(linhas):

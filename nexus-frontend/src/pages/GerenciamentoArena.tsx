@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, Fragment } from 'react';
 import {
   useReactTable,
   getCoreRowModel,
@@ -7,10 +7,12 @@ import {
   getExpandedRowModel,
   SortingState
 } from '@tanstack/react-table';
-import { Users, Loader2, Search, ArrowUpDown, ArrowUp, ArrowDown, Lock, Unlock, ShieldAlert, Save, Store, Package, ChevronRight, ChevronDown } from 'lucide-react';
+import { Users, Loader2, Search, ArrowUpDown, ArrowUp, ArrowDown, Lock, Unlock, ShieldAlert, Save, Store, Package, ChevronRight, ChevronDown, BarChart2, X } from 'lucide-react';
 import axios from 'axios';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor));
+const formatVolume = (val: number) => Math.round(val).toLocaleString('pt-BR');
 
 export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: any }) {
   const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
@@ -21,9 +23,14 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   const [busca, setBusca] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
 
+  // NOVO ESTADO: Controla qual gráfico de Produto está aberto
+  const [chartExpanded, setChartExpanded] = useState<string | null>(null);
+  const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
+  const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
+
   const fetchData = useCallback(async () => {
     try {
-      const res = await axios.get('http://localhost:8000/api/v1/consensus/gerenciamento/vendedores', {
+      const res = await axios.get('/api/v1/consensus/gerenciamento/vendedores', {
         params: { gerente_nome: usuarioSessao?.gerente_nome }
       });
       setDadosBrutos(res.data.dados || []);
@@ -50,22 +57,23 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     return totais;
   }, [dadosFiltrados]);
 
+  // AÇÃO INDIVIDUAL: Trancar/Destrancar Vendedor (Agora com a rota certa)
   const handleToggleLock = async (vendedor: string) => {
     try {
-      await axios.post('http://localhost:8000/api/v1/consensus/gerenciamento/toggle-lock', { origem: vendedor });
+      await axios.post('/api/v1/consensus/gerenciamento/toggle-lock', { origem: vendedor });
       fetchData(); 
     } catch (e: any) { 
       alert(e.response?.data?.detail || "Erro ao alterar o status do vendedor."); 
     }
   };
 
-  // CORREÇÃO: Ação em Lote Blindada contra [object Object]
+  // AÇÃO EM MASSA
   const handleLockAll = async (acao: 'Trancar' | 'Destrancar') => {
     if (!window.confirm(`Deseja realmente ${acao.toLowerCase()} todos os vendedores listados para a sua gerência?`)) return;
     setIsProcessing(true);
     try {
-      await axios.post('http://localhost:8000/api/v1/consensus/gerenciamento/lock-all', {
-        gerente_nome: usuarioSessao?.gerente_nome || "", // FastAPI Pydantic exige String
+      await axios.post('/api/v1/consensus/gerenciamento/lock-all', {
+        gerente_nome: usuarioSessao?.gerente_nome || "",
         acao
       });
       alert(`✅ Vendedores ${acao === 'Trancar' ? 'trancados' : 'destrancados'} com sucesso!`);
@@ -79,6 +87,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     }
   };
 
+  // GRAVAR AJUSTES MANUAIS
   const handleSalvarAjustes = async () => {
     if (!window.confirm("Isso aplicará um rateio forçado sobre as cotas. Continuar?")) return;
     setIsProcessing(true);
@@ -91,7 +100,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     });
 
     try {
-      await axios.post('http://localhost:8000/api/v1/consensus/gerenciamento/aprovar', { ajustes });
+      await axios.post('/api/v1/consensus/gerenciamento/aprovar', { ajustes });
       alert("✅ Ajustes Sincronizados (Rateio Aplicado)!");
       setCelulasEditadas({});
       fetchData();
@@ -99,6 +108,26 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
       alert(e.response?.data?.detail || "Erro ao processar as alterações."); 
     } finally { 
       setIsProcessing(false); 
+    }
+  };
+
+  // EXPANDIR GRÁFICO (Nível SKU)
+  const toggleChart = async (row: any) => {
+    const chave = row.original.chave_matriz;
+    if (chartExpanded === chave) {
+      setChartExpanded(null); 
+      return;
+    }
+    
+    setChartExpanded(chave);
+    if (!dadosGraficoCache[chave]) {
+      setLoadingGrafico(chave);
+      try {
+        // A rota agora atende perfeitamente ao formato "Vendedor|Razão|SKU"
+        const res = await axios.get('/api/v1/consensus/gerenciamento/grafico', { params: { chave_matriz: chave } });
+        setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
+      } catch (e) { console.error(e); }
+      finally { setLoadingGrafico(null); }
     }
   };
 
@@ -112,19 +141,24 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           const row = info.row;
           const isVendedor = row.original.tipo === 'vendedor';
           const isCliente = row.original.tipo === 'cliente';
+          const isProduto = row.original.tipo === 'produto';
 
           return (
             <div style={{ paddingLeft: `${row.depth * 2}rem` }} className="flex items-center gap-3 py-2">
-              {row.getCanExpand() ? (
+              {!isProduto ? (
                 <button onClick={row.getToggleExpandedHandler()} className="p-1 hover:bg-slate-100 rounded">
-                  {row.getIsExpanded() ? <ChevronDown className="w-4 h-4 text-slate-500" /> : <ChevronRight className="w-4 h-4 text-slate-400" />}
+                  {row.getIsExpanded() ? <ChevronDown className="w-5 h-5 text-slate-500" /> : <ChevronRight className="w-5 h-5 text-slate-400" />}
                 </button>
-              ) : <div className="w-6" />}
+              ) : (
+                <button onClick={() => toggleChart(row)} className={`p-1 rounded transition-colors ${chartExpanded === row.original.chave_matriz ? 'bg-indigo-100 text-indigo-600' : 'hover:bg-slate-100 text-slate-400'}`}>
+                  <BarChart2 className="w-5 h-5" />
+                </button>
+              )}
               
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center border ${isVendedor ? 'bg-indigo-50 border-indigo-100' : isCliente ? 'bg-amber-50 border-amber-100' : 'bg-slate-50 border-slate-100'}`}>
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center border flex-shrink-0 ${isVendedor ? 'bg-indigo-50 border-indigo-100' : isCliente ? 'bg-amber-50 border-amber-100' : 'bg-slate-50 border-slate-100'}`}>
                 {isVendedor ? <Users className="w-4 h-4 text-indigo-500" /> : isCliente ? <Store className="w-4 h-4 text-amber-500" /> : <Package className="w-4 h-4 text-slate-400" />}
               </div>
-              <span className={`text-sm ${isVendedor ? 'font-black text-slate-800' : isCliente ? 'font-bold text-slate-700' : 'font-medium text-slate-600 truncate max-w-[200px]'}`}>
+              <span className={`text-sm ${isVendedor ? 'font-black text-slate-800' : isCliente ? 'font-bold text-slate-700' : 'font-medium text-slate-600 truncate max-w-[300px]'}`}>
                 {info.getValue()}
               </span>
             </div>
@@ -159,16 +193,19 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           const meta = info.table.options.meta as any;
           const edicao = meta.celulasEditadas[row.chave_matriz]?.meses?.[m.mes_banco];
           
+          // HERANÇA DO BLOQUEIO: Se o Vendedor está fechado, toda a cascata abaixo fica fechada
+          const isFechado = row.status === 'Fechado';
+          
           const valorReal = edicao !== undefined ? edicao.novo_volume : (dadosMes?.vol_ajustado || 0);
           const isChanged = edicao !== undefined;
 
           return (
             <div className="flex flex-col w-28 gap-1">
               <input
-                type="number" value={valorReal === 0 ? '' : valorReal} placeholder="0"
+                type="number" disabled={isFechado} value={valorReal === 0 ? '' : valorReal} placeholder="0"
                 onChange={(e) => meta.updateCell(row.tipo, row.chave_matriz, m.mes_banco, e.target.value)}
                 className={`text-sm text-center font-black p-2.5 rounded-xl outline-none border-2 transition-all w-full
-                  ${isChanged ? 'bg-slate-800 border-slate-700 text-white shadow-md' : 'bg-gray-50 border-transparent text-gray-800 focus:bg-white focus:border-slate-300'}`}
+                  ${isFechado ? 'cursor-not-allowed opacity-50 bg-slate-100 border-gray-200 text-gray-500' : isChanged ? 'bg-slate-800 border-slate-700 text-white shadow-md' : 'bg-gray-50 border-transparent text-gray-800 focus:bg-white focus:border-slate-300'}`}
               />
               <span className={`text-[10px] font-black text-center pr-1 tracking-tight ${isChanged ? 'text-slate-400' : 'text-emerald-600'}`}>
                 {isChanged ? 'A calcular...' : formatMoeda(dadosMes?.receita || 0)}
@@ -185,7 +222,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
         if (info.row.original.tipo !== 'vendedor') return null;
         const isFechado = info.row.original.status === 'Fechado';
         return (
-          <button onClick={() => handleToggleLock(info.row.original.id)} className={`px-4 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all border ${isFechado ? 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50' : 'bg-slate-800 text-white border-slate-800 hover:bg-slate-700'}`}>
+          <button onClick={() => handleToggleLock(info.row.original.id)} className={`px-4 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all border shadow-sm ${isFechado ? 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50' : 'bg-slate-800 text-white border-slate-800 hover:bg-slate-700'}`}>
             {isFechado ? 'Reabrir' : 'Trancar'}
           </button>
         )
@@ -193,7 +230,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     });
 
     return baseCols;
-  }, [dadosBrutos]);
+  }, [dadosBrutos, chartExpanded]);
 
   const table = useReactTable({
     data: dadosFiltrados, columns, state: { sorting, expanded },
@@ -209,11 +246,11 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     }
   });
 
-  if (isLoading) return <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-slate-400" /></div>;
+  if (isLoading) return <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-indigo-500" /><span className="text-slate-400 font-black text-xs tracking-widest uppercase mt-4">Carregando Hierarquias...</span></div>;
 
   return (
-    <div className="flex h-full w-full bg-[#f8fafc] overflow-hidden p-6 font-sans min-h-screen">
-      <div className="flex-1 flex flex-col max-w-[1600px] mx-auto relative pb-24">
+    <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
+      <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative pb-24">
         
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-6 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100">
           <div>
@@ -224,7 +261,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           </div>
           
           <div className="flex flex-col md:flex-row items-center gap-4 w-full lg:w-auto">
-            {/* BOTÕES DE AÇÃO EM LOTE */}
             <div className="flex items-center gap-2 w-full md:w-auto">
               <button onClick={() => handleLockAll('Destrancar')} disabled={isProcessing} className="flex-1 md:flex-none flex items-center justify-center gap-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 px-5 py-3 rounded-xl text-[10px] font-black tracking-widest uppercase transition-all">
                   <Unlock className="w-4 h-4" /> Destrancar Todos
@@ -244,69 +280,116 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           </div>
         </div>
 
-        <div className="bg-white rounded-[45px] shadow-2xl border border-slate-100 overflow-hidden flex-1 overflow-y-auto relative">
-          <table className="w-full text-left border-collapse">
-            <thead className="sticky top-0 bg-white/95 backdrop-blur-xl z-10 border-b border-slate-100 shadow-sm">
-              {table.getHeaderGroups().map(hg => (
-                <tr key={hg.id}>
-                  {hg.headers.map(header => (
-                    <th key={header.id} className={`px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest ${header.column.getCanSort() ? 'cursor-pointer hover:bg-slate-50 transition-colors' : ''}`} onClick={header.column.getToggleSortingHandler()}>
-                      <div className="flex items-center gap-2">
-                        {flexRender(header.column.columnDef.header, header.getContext())}
-                        {header.column.getCanSort() && (
-                          <span className="text-slate-300">
-                            {{ asc: <ArrowUp className="w-4 h-4" />, desc: <ArrowDown className="w-4 h-4" /> }[header.column.getIsSorted() as string] ?? <ArrowUpDown className="w-4 h-4 opacity-50" />}
-                          </span>
-                        )}
-                      </div>
-                    </th>
-                  ))}
-                </tr>
-              ))}
-            </thead>
-            
-            <tbody>
-              {table.getRowModel().rows.map(row => (
-                <tr key={row.id} className={`border-b transition-colors ${row.original.tipo === 'vendedor' ? 'bg-white border-slate-100' : row.original.tipo === 'cliente' ? 'bg-slate-50/50 border-slate-100' : 'bg-slate-50/80 border-white hover:bg-slate-100'}`}>
-                  {row.getVisibleCells().map(cell => (
-                    <td key={cell.id} className="px-8 py-3">
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
+        <div className="bg-white rounded-[40px] shadow-2xl border border-slate-100 overflow-hidden relative">
+          <div className="overflow-x-auto pb-4">
+            <table className="w-full text-left border-collapse">
+              <thead className="sticky top-0 bg-white/95 backdrop-blur-xl z-10 border-b border-slate-100 shadow-sm">
+                {table.getHeaderGroups().map(hg => (
+                  <tr key={hg.id}>
+                    {hg.headers.map(header => (
+                      <th key={header.id} className={`px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest ${header.column.getCanSort() ? 'cursor-pointer hover:bg-slate-50 transition-colors group' : ''}`} onClick={header.column.getToggleSortingHandler()}>
+                        <div className="flex items-center gap-2">
+                          {flexRender(header.column.columnDef.header, header.getContext())}
+                          {header.column.getCanSort() && (
+                            <span className="text-slate-300">
+                              {{ asc: <ArrowUp className="w-4 h-4 text-indigo-500" />, desc: <ArrowDown className="w-4 h-4 text-indigo-500" /> }[header.column.getIsSorted() as string] ?? <ArrowUpDown className="w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity" />}
+                            </span>
+                          )}
+                        </div>
+                      </th>
+                    ))}
+                  </tr>
+                ))}
+              </thead>
+              
+              <tbody>
+                {table.getRowModel().rows.map(row => (
+                  <Fragment key={row.id}>
+                    <tr className={`border-b transition-colors ${row.original.tipo === 'vendedor' ? 'bg-white border-slate-100' : row.original.tipo === 'cliente' ? 'bg-slate-50/50 border-slate-100' : 'bg-slate-50/80 border-white hover:bg-slate-100'}`}>
+                      {row.getVisibleCells().map(cell => (
+                        <td key={cell.id} className="px-8 py-3">
+                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                        </td>
+                      ))}
+                    </tr>
 
-            <tfoot className="sticky bottom-0 bg-slate-900 text-white z-20 shadow-[0_-20px_40px_rgba(0,0,0,0.2)]">
-              <tr>
-                {table.getHeaderGroups()[0].headers.map((header: any) => {
-                  if (header.id === 'nome') return (
-                    <td key={header.id} className="px-8 py-5 text-right">
-                      <div className="flex flex-col">
-                        <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Receita Consolidada</span>
-                        <span className="font-bold text-sm text-white">TOTAL (R$)</span>
-                      </div>
-                    </td>
-                  );
-                  if (header.id === 'status' || header.id === 'acoes') return <td key={header.id} className="px-8 py-5"></td>;
-                  
-                  if (header.id.startsWith('mes_')) {
-                    const mesBanco = header.id.replace('mes_', '');
-                    return (
-                      <td key={header.id} className="px-8 py-5">
-                        <div className="bg-slate-800/80 inline-block px-3 py-1.5 rounded-xl border border-slate-700/50">
-                          <span className="font-black text-emerald-400 text-[13px] tracking-tight">
-                            {formatMoeda(totaisFaturamento[mesBanco] || 0)}
-                          </span>
+                    {/* EXPANSÃO DO GRÁFICO NO NÍVEL DO PRODUTO */}
+                    {chartExpanded === row.original.chave_matriz && row.original.tipo === 'produto' && (
+                      <tr>
+                        <td colSpan={table.getAllColumns().length} className="bg-indigo-50/20 p-8 border-b border-slate-100">
+                          <div className="bg-white rounded-[40px] p-8 shadow-inner border border-indigo-100 animate-in fade-in duration-500">
+                            <h3 className="text-lg font-black text-gray-900 uppercase tracking-tighter mb-6">
+                               Detalhe: <span className="text-indigo-600">{row.original.nome}</span>
+                            </h3>
+
+                            <div className="h-[200px] w-full -ml-4">
+                              {loadingGrafico === row.original.chave_matriz ? (
+                                <div className="h-full flex items-center justify-center text-indigo-600"><Loader2 className="animate-spin w-8 h-8" /></div>
+                              ) : (
+                                <ResponsiveContainer width="100%" height="100%">
+                                  <LineChart data={
+                                      (dadosGraficoCache[row.original.chave_matriz] || []).map((p: any) => {
+                                          const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
+                                          const edicao = celulasEditadas[row.original.chave_matriz]?.meses?.[p.data_iso];
+                                          const valConsenso = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
+                                          return { ...p, Consenso: valConsenso !== null ? valConsenso : p.Consenso };
+                                      })
+                                  }>
+                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                    <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900}} axisLine={false} tickLine={false} />
+                                    <YAxis tick={{fontSize: 10}} axisLine={false} tickLine={false} />
+                                    <Tooltip contentStyle={{borderRadius: '20px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)'}} />
+                                    <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900'}} />
+                                    
+                                    {/* A MÁGICA: A LINHA DO CICLO ANTERIOR AQUI */}
+                                    <Line type="monotone" dataKey="CicloAnterior" name="Proposta Mês Passado" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
+                                    
+                                    <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={4} dot={{r: 3, fill: '#0f172a'}} connectNulls={false} />
+                                    <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
+                                    <Line type="monotone" dataKey="Consenso" name="Ajuste Gerencial" stroke="#10b981" strokeWidth={5} dot={{r: 6, fill: '#10b981', strokeWidth: 2, stroke: '#fff'}} connectNulls={false} />
+                                  </LineChart>
+                                </ResponsiveContainer>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                ))}
+              </tbody>
+
+              <tfoot className="bg-slate-900 text-white">
+                <tr>
+                  {table.getHeaderGroups()[0].headers.map((header: any) => {
+                    if (header.id === 'nome') return (
+                      <td key={header.id} className="px-8 py-5 text-right">
+                        <div className="flex flex-col">
+                          <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Receita Consolidada</span>
+                          <span className="font-bold text-sm text-white">TOTAL (R$)</span>
                         </div>
                       </td>
                     );
-                  }
-                  return <td key={header.id} className="px-8 py-5"></td>;
-                })}
-              </tr>
-            </tfoot>
-          </table>
+                    if (header.id === 'status' || header.id === 'acoes') return <td key={header.id} className="px-8 py-5"></td>;
+                    
+                    if (header.id.startsWith('mes_')) {
+                      const mesBanco = header.id.replace('mes_', '');
+                      return (
+                        <td key={header.id} className="px-8 py-5">
+                          <div className="bg-slate-800/80 inline-block px-3 py-1.5 rounded-xl border border-slate-700/50">
+                            <span className="font-black text-emerald-400 text-[13px] tracking-tight">
+                              {formatMoeda(totaisFaturamento[mesBanco] || 0)}
+                            </span>
+                          </div>
+                        </td>
+                      );
+                    }
+                    return <td key={header.id} className="px-8 py-5"></td>;
+                  })}
+                </tr>
+              </tfoot>
+            </table>
+          </div>
         </div>
 
         {Object.keys(celulasEditadas).length > 0 && (

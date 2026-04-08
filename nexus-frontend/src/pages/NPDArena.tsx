@@ -19,7 +19,6 @@ const SearchableSelect = ({ options, value, onChange, placeholder, icon: Icon }:
   );
 
   return (
-    // O SEGREDO DO Z-INDEX ESTÁ AQUI: z-50 quando aberto, z-10 quando fechado
     <div className={`relative w-full ${isOpen ? 'z-50' : 'z-10'}`}>
       {isOpen && <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)}></div>}
       
@@ -75,7 +74,6 @@ export default function NPDArena() {
   const [listaCategorias, setListaCategorias] = useState<string[]>([]);
   const [listaSegmentos, setListaSegmentos] = useState<string[]>([]);
 
-  // CALCULA OS MESES S&OP DINAMICAMENTE SEM BIBLIOTECAS (M+2, M+3, M+4)
   const mesesDinamicos = useMemo(() => {
     const nomesMeses = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
     const getMesProj = (addOffset: number) => {
@@ -91,7 +89,7 @@ export default function NPDArena() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const res = await axios.get('http://localhost:8000/api/v1/npd/espelhos');
+        const res = await axios.get('/api/v1/npd/espelhos');
         setListaEspelhos(res.data.espelhos || []);
         setListaCategorias(res.data.categorias || []);
         setListaSegmentos(res.data.segmentos || []);
@@ -138,7 +136,7 @@ export default function NPDArena() {
         projecao: projecao
       };
 
-      await axios.post('http://localhost:8000/api/v1/npd/injetar', payload);
+      await axios.post('/api/v1/npd/injetar', payload);
       
       alert("🚀 Lançamento injetado com sucesso no S&OP Global!");
       
@@ -155,10 +153,11 @@ export default function NPDArena() {
   const opcoesSegmentos = listaSegmentos.map(s => ({ value: s, label: s }));
 
   return (
-    <div className="flex h-full w-full bg-[#f8fafc] overflow-hidden p-6 font-sans min-h-screen pb-20">
-      <div className="flex-1 flex flex-col max-w-[1600px] mx-auto">
+    // CORREÇÃO DO SCROLL: Removido 'overflow-hidden' e adicionado 'overflow-y-auto'
+    <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20 overflow-y-auto custom-scrollbar">
+      <div className="flex-1 flex flex-col max-w-[1600px] mx-auto p-6 lg:p-12 relative">
         
-        <div className="flex justify-between items-center mb-6 bg-white p-6 rounded-[32px] shadow-sm border border-gray-100">
+        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-6 bg-white p-6 rounded-[32px] shadow-sm border border-gray-100">
           <div>
             <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
               <Rocket className="w-8 h-8 text-indigo-600" /> ARENA DE INOVAÇÃO (NPD)

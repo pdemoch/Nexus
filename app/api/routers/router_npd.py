@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from typing import List
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from datetime import datetime, date
+from datetime import date
 from dateutil.relativedelta import relativedelta
 from app.core.database import get_db
 from app.models.domain_models import DimProduto, FatoIbpGranular
@@ -83,12 +83,15 @@ async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db),
                 if volume_cliente == 0: continue
                     
                 nova_fato = FatoIbpGranular(
-                    ciclo_sop=datetime.date.today().strftime("%m/%Y"),
+                    ciclo_sop=date.today().strftime("%m/%Y"), # CORREÇÃO DO ERRO AQUI!
                     mes_projetado=mes_alvo,
                     sku=payload.codigo_lancamento,
                     cgc=cliente.cgc,
                     vendedor_nome=cliente.vendedor_nome,
-                    vol_ia=volume_cliente, vol_topdown=0, vol_bottomup=0,
+                    vol_ia=volume_cliente, 
+                    vol_topdown=volume_cliente, # Adequado à nova regra de Cascata
+                    vol_bottomup=volume_cliente, # Adequado à nova regra de Cascata
+                    vol_final=volume_cliente,    # Adequado à nova regra de Cascata
                     pmv_aplicado=payload.pmv
                 )
                 novas_linhas.append(nova_fato)
