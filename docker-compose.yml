@@ -1,6 +1,7 @@
 version: '3.8'
 
 services:
+  # 1. O Banco de Dados
   nexus-db:
     image: postgres:15
     container_name: nexus_postgres
@@ -14,8 +15,9 @@ services:
     volumes:
       - nexus_pgdata:/var/lib/postgresql/data
 
+  # 2. O Backend (API & Machine Learning)
   nexus-api:
-    build: .
+    build: ./backend
     container_name: nexus_backend
     restart: always
     ports:
@@ -29,7 +31,16 @@ services:
       - DB_PORT=5432
       - DB_NAME=${DB_NAME:-nexus_db}
       - SECRET_KEY=${SECRET_KEY:-gerar_uma_chave_segura_em_producao}
-      - CORS_ORIGINS=${CORS_ORIGINS:-http://nexus.linea.local}
+
+  # 3. O Frontend (React via Nginx)
+  nexus-web:
+    build: ./frontend
+    container_name: nexus_frontend
+    restart: always
+    ports:
+      - "80:80" # Vai rodar na porta padrão da internet
+    depends_on:
+      - nexus-api
 
 volumes:
   nexus_pgdata:
