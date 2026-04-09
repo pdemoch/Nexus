@@ -10,7 +10,6 @@ import pandas as pd
 from fastapi.responses import StreamingResponse
 
 from app.core.database import get_db
-# AQUI: Importamos a tabela de Usuario para checar quem está online
 from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, FatoVendas, ControleCiclo, Usuario
 from app.api.routers.router_auth import get_current_user
 
@@ -45,7 +44,6 @@ def verificar_vendedor_online(db: Session, vendedor_nome: str):
     vendedor_user = db.query(Usuario).filter(func.trim(Usuario.nome_vendedor) == vendedor_nome.strip()).first()
     if vendedor_user and vendedor_user.ultima_atividade:
         segundos_inativo = (datetime.datetime.utcnow() - vendedor_user.ultima_atividade).total_seconds()
-        # Se a última atividade foi há menos de 60 segundos, ele está ativamente na tela
         if segundos_inativo < 60:
             raise HTTPException(
                 status_code=403, 
@@ -186,7 +184,6 @@ async def listar_macro(db: Session = Depends(get_db), usuario_logado: dict = Dep
     try:
         m_plus_2, m_plus_4 = get_projection_window()
         
-        # CORREÇÃO POSTGRESQL: Remoção de strftime para comparação de datas
         projecoes = db.query(
             FatoIbpGranular.sku, FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('vol_ia'),
@@ -216,7 +213,6 @@ async def listar_macro(db: Session = Depends(get_db), usuario_logado: dict = Dep
             vol_ia = int(r.vol_ia or 0)
             pmv_real = (float(r.receita_base or 0) / vol_ia) if vol_ia > 0 else float(r.pmv_simples or 0)
 
-            # Tratamento de segurança de data Postgres
             mes_banco_str = r.mes_projetado.strftime("%Y-%m-%d") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado)
             mes_amigavel = r.mes_projetado.strftime("%b/%y").capitalize() if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado)
 
@@ -240,7 +236,6 @@ async def obter_grafico_produto(produto: str, db: Session = Depends(get_db), usu
         data_limite = hoje - relativedelta(years=2)
         ciclo_anterior = get_previous_cycle()
         
-        # CORREÇÃO POSTGRESQL: func.to_char para formatação YYYY-MM
         historico = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol_real'))\
             .filter(FatoVendas.sku == produto, FatoVendas.data_pedido >= data_limite)\
             .group_by(func.to_char(FatoVendas.data_pedido, 'YYYY-MM')).all()
@@ -280,10 +275,19 @@ async def congelar_macro_rateio(payload: PayloadCongelarTopDown, db: Session = D
         check_global_lock(db)
         ciclo = get_current_cycle()
         for ajuste in payload.ajustes:
-            data_alvo = datetime.datetime.strptime(ajuste.mes_projetado, "%Y-%m-%d").date()
+            # CORREÇÃO: Evita que string com fuso horário quebre o Parse
+            data_str = ajuste.mes_projetado.split("T")[0]
+            data_alvo = datetime.datetime.strptime(data_str, "%Y-%m-%d").date()
+            
             linhas_atomicas = db.query(FatoIbpGranular).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
-                .filter(FatoIbpGranular.sku == ajuste.produto, FatoIbpGranular.mes_projetado == data_alvo, DimCliente.bloqueado != 'INATIVO', FatoIbpGranular.ciclo_sop == ciclo).all()
-            aplicar_rateio_historico_amplo(db, linhas_atomicas, ajuste.novo_volume, 'Top-Down')
+                .filter(
+                    FatoIbpGranular.sku == ajuste.produto, 
+                    FatoIbpGranular.mes_projetado == data_alvo, 
+                    func.upper(func.coalesce(DimCliente.bloqueado, 'ATIVO')) != 'INATIVO', 
+                    FatoIbpGranular.ciclo_sop == ciclo
+                ).all()
+                
+            aplicar_rateio_historico_amplo(db, linhas_atomicas, int(ajuste.novo_volume), 'Top-Down')
 
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
         if not registro:
@@ -294,7 +298,7 @@ async def congelar_macro_rateio(payload: PayloadCongelarTopDown, db: Session = D
         return {"status": "success"}
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Falha no rateio: {str(e)}")
 
 @router.post("/macro/reabrir")
 async def reabrir_macro(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
@@ -305,7 +309,7 @@ async def reabrir_macro(db: Session = Depends(get_db), usuario_logado: dict = De
         check_global_lock(db)
         ciclo = get_current_cycle()
         fechados = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.status == 'Fechado', ControleCiclo.origem.notin_(['Top-Down', 'S&OP-Final'])).count()
-        if fechados > 0: raise HTTPException(status_code=403, detail="Ordem Reversa Violada.")
+        if fechados > 0: raise HTTPException(status_code=403, detail="Ordem Reversa Violada: Destranque os Vendedores primeiro.")
 
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
         if registro:
@@ -326,7 +330,6 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
 
     m_plus_2, m_plus_4 = get_projection_window()
     
-    # CORREÇÃO POSTGRESQL: Remoção de strftime
     query = db.query(
         DimCliente.razaosocial, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado,
         func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), 
@@ -336,7 +339,7 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
      .filter(
          FatoIbpGranular.mes_projetado >= m_plus_2, 
          FatoIbpGranular.mes_projetado <= m_plus_4,
-         DimCliente.bloqueado != 'INATIVO',
+         func.upper(func.coalesce(DimCliente.bloqueado, 'ATIVO')) != 'INATIVO',
          FatoIbpGranular.ciclo_sop == get_current_cycle()
      )
      
@@ -407,7 +410,6 @@ async def obter_grafico_micro(chave_matriz: str, nivel_hierarquia: str = 'vended
         razaosocial = chave_matriz.split('|')[0] if is_produto else chave_matriz
         sku = chave_matriz.split('|')[1] if is_produto else None
 
-        # CORREÇÃO POSTGRESQL: func.to_char para YYYY-MM
         query_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol_real'))\
             .join(DimCliente, FatoVendas.cgc == DimCliente.cgc).filter(func.trim(DimCliente.razaosocial) == razaosocial.strip(), FatoVendas.data_pedido >= data_limite)
             
@@ -460,11 +462,12 @@ async def congelar_micro(nome_responsavel: str, payload: PayloadCongelarBottomUp
         ciclo = get_current_cycle()
         
         for ajuste in payload.ajustes:
-            data_alvo = datetime.datetime.strptime(ajuste.mes_projetado, "%Y-%m-%d").date()
+            data_str = ajuste.mes_projetado.split("T")[0]
+            data_alvo = datetime.datetime.strptime(data_str, "%Y-%m-%d").date()
             query = db.query(FatoIbpGranular).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(
                 func.trim(FatoIbpGranular.vendedor_nome) == origem_real.strip(), 
                 FatoIbpGranular.mes_projetado == data_alvo, 
-                DimCliente.bloqueado != 'INATIVO',
+                func.upper(func.coalesce(DimCliente.bloqueado, 'ATIVO')) != 'INATIVO',
                 FatoIbpGranular.ciclo_sop == ciclo
             )
             
@@ -474,7 +477,7 @@ async def congelar_micro(nome_responsavel: str, payload: PayloadCongelarBottomUp
                 query = query.filter(func.trim(DimCliente.razaosocial) == razao.strip(), FatoIbpGranular.sku == sku.strip())
                 
             linhas_atomicas = query.all()
-            aplicar_rateio_historico_amplo(db, linhas_atomicas, ajuste.novo_volume, 'Bottom-Up')
+            aplicar_rateio_historico_amplo(db, linhas_atomicas, int(ajuste.novo_volume), 'Bottom-Up')
                 
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == origem_real).first()
         if not registro: db.add(ControleCiclo(ciclo_sop=ciclo, origem=origem_real, status='Fechado'))
@@ -485,9 +488,6 @@ async def congelar_micro(nome_responsavel: str, payload: PayloadCongelarBottomUp
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-# =========================================================================
-# GERENCIAMENTO (RATEIO + GRÁFICO EXCLUSIVO + BLOQUEIO CONCORRÊNCIA)
-# =========================================================================
 @router.post("/gerenciamento/toggle-lock")
 async def toggle_lock_gerenciamento(payload: PayloadToggleLock, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
     if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
@@ -495,7 +495,6 @@ async def toggle_lock_gerenciamento(payload: PayloadToggleLock, db: Session = De
 
     try:
         check_global_lock(db)
-        # BARRICADA DO HEARTBEAT
         verificar_vendedor_online(db, payload.origem)
         
         ciclo = get_current_cycle()
@@ -519,7 +518,6 @@ async def listar_gerenciamento_vendedores(gerente_nome: str = None, db: Session 
     try:
         m_plus_2, m_plus_4 = get_projection_window()
         
-        # CORREÇÃO POSTGRESQL: Comparação nativa de data
         query = db.query(
             FatoIbpGranular.vendedor_nome, FatoIbpGranular.sku, FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_bottomup).label('vol_bottomup'),
@@ -530,7 +528,7 @@ async def listar_gerenciamento_vendedores(gerente_nome: str = None, db: Session 
             FatoIbpGranular.mes_projetado >= m_plus_2,
             FatoIbpGranular.mes_projetado <= m_plus_4,
             FatoIbpGranular.vendedor_nome.isnot(None),
-            DimCliente.bloqueado != 'INATIVO',
+            func.upper(func.coalesce(DimCliente.bloqueado, 'ATIVO')) != 'INATIVO',
             FatoIbpGranular.ciclo_sop == get_current_cycle()
          )
 
@@ -607,7 +605,6 @@ async def obter_grafico_gerenciamento(chave_matriz: str, db: Session = Depends(g
         data_limite = hoje - relativedelta(years=2)
         ciclo_anterior = get_previous_cycle()
         
-        # CORREÇÃO POSTGRESQL: func.to_char para YYYY-MM
         query_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol_real'))\
             .join(DimCliente, FatoVendas.cgc == DimCliente.cgc).filter(func.trim(FatoVendas.vendedor_nome) == vendedor.strip(), FatoVendas.data_pedido >= data_limite)
             
@@ -655,17 +652,20 @@ async def aprovar_gerenciamento(payload: PayloadAprovarGerente, db: Session = De
         check_global_lock(db)
         ciclo = get_current_cycle()
         
-        # BARRICADA DO HEARTBEAT ANTES DE APLICAR QUALQUER RATEIO
         vendedores_afetados = list(set([ajuste.chave.split('|')[0].strip() for ajuste in payload.ajustes]))
         for vendedor_afetado in vendedores_afetados:
             verificar_vendedor_online(db, vendedor_afetado)
 
         for ajuste in payload.ajustes:
             partes = ajuste.chave.split('|')
-            data_alvo = datetime.datetime.strptime(ajuste.mes_projetado, "%Y-%m-%d").date()
+            data_str = ajuste.mes_projetado.split("T")[0]
+            data_alvo = datetime.datetime.strptime(data_str, "%Y-%m-%d").date()
             
             query = db.query(FatoIbpGranular).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(
-                func.trim(FatoIbpGranular.vendedor_nome) == partes[0].strip(), FatoIbpGranular.mes_projetado == data_alvo, DimCliente.bloqueado != 'INATIVO', FatoIbpGranular.ciclo_sop == ciclo
+                func.trim(FatoIbpGranular.vendedor_nome) == partes[0].strip(), 
+                FatoIbpGranular.mes_projetado == data_alvo, 
+                func.upper(func.coalesce(DimCliente.bloqueado, 'ATIVO')) != 'INATIVO', 
+                FatoIbpGranular.ciclo_sop == ciclo
             )
             if ajuste.nivel in ['cliente', 'produto']: query = query.filter(func.trim(DimCliente.razaosocial) == partes[1].strip())
             if ajuste.nivel == 'produto': query = query.filter(FatoIbpGranular.sku == partes[2].strip())
@@ -702,13 +702,12 @@ async def lock_all_gerenciamento(payload: PayloadLockAll, db: Session = Depends(
         ciclo = get_current_cycle()
         m_plus_2, m_plus_4 = get_projection_window()
         
-        # CORREÇÃO POSTGRESQL: Comparação nativa de data
         query = db.query(FatoIbpGranular.vendedor_nome).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
             .filter(
                 FatoIbpGranular.mes_projetado >= m_plus_2,
                 FatoIbpGranular.mes_projetado <= m_plus_4,
                 FatoIbpGranular.vendedor_nome.isnot(None),
-                DimCliente.bloqueado != 'INATIVO'
+                func.upper(func.coalesce(DimCliente.bloqueado, 'ATIVO')) != 'INATIVO'
             )
             
         nome_gerente_filtro = payload.gerente_nome
@@ -720,7 +719,6 @@ async def lock_all_gerenciamento(payload: PayloadLockAll, db: Session = Depends(
             
         vendedores = [v[0].strip() for v in query.distinct().all() if v[0]]
         
-        # BARRICADA DO HEARTBEAT ANTES DE TRANCAR TODOS
         for vend in vendedores:
             verificar_vendedor_online(db, vend)
         
@@ -748,7 +746,6 @@ async def exportar_excel_bottom_up(db: Session = Depends(get_db), usuario_logado
 
     try:
         m_plus_2, m_plus_4 = get_projection_window()
-        # CORREÇÃO POSTGRESQL: Comparação nativa de data
         query = db.query(
             FatoIbpGranular.vendedor_nome, FatoIbpGranular.cgc, DimCliente.razaosocial,
             DimCliente.cod_cliente, DimCliente.loja,

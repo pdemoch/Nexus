@@ -11,21 +11,29 @@ router = APIRouter(prefix="/api/v1/admin", tags=["Administração e Pipeline"])
 
 @router.get("/pipeline/status")
 async def obter_status_pipeline(usuario_logado: dict = Depends(get_current_user)):
-    # Sem restrição de função aqui, pois o App.tsx de TODOS faz polling nesta rota
     return {"is_running": AppState.pipeline_rodando, "logs": AppState.logs}
 
 @router.post("/pipeline/start")
-async def iniciar_pipeline(background_tasks: BackgroundTasks, usuario_logado: dict = Depends(get_current_user)):
+async def iniciar_pipeline(background_tasks: BackgroundTasks, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
     if usuario_logado['funcao'] != 'Administrador':
         raise HTTPException(status_code=403, detail="Acesso negado. Apenas Administradores podem rodar o pipeline.")
         
     if AppState.pipeline_rodando:
         raise HTTPException(status_code=400, detail="O pipeline já está em execução.")
     
+    try:
+        # NOVO: Descongelar todas as telas (limpar o ControleCiclo) sempre que rodar o pipeline
+        ciclo_atual = datetime.date.today().strftime("%m/%Y")
+        db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo_atual).delete()
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao destrancar ciclos: {str(e)}")
+
     AppState.pipeline_rodando = True
     AppState.logs = [] 
     background_tasks.add_task(executar_pipeline_nexus)
-    return {"status": "success", "message": "Pipeline iniciado!"}
+    return {"status": "success", "message": "Pipeline iniciado e todos os ciclos foram destrancados!"}
 
 @router.post("/reabrir-ciclo")
 async def reabrir_ciclo(origem: str, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
