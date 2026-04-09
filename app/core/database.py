@@ -1,17 +1,17 @@
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from dotenv import load_dotenv
+from app.core.config import settings
 
-load_dotenv()
-
-SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./nexus_local.db")
+# Agora o banco bebe da fonte centralizada de configurações
+SQLALCHEMY_DATABASE_URL = settings.DATABASE_URL
 
 if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
     engine = create_engine(
         SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
     )
 else:
+    # Configurações de alta performance exclusivas para PostgreSQL
     engine = create_engine(
         SQLALCHEMY_DATABASE_URL, 
         pool_pre_ping=True,  

@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  nexus-db:
+    image: postgres:15
+    container_name: nexus_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-nexus_super_senha_123}
+      POSTGRES_DB: ${DB_NAME:-nexus_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - nexus_pgdata:/var/lib/postgresql/data
+
+  nexus-api:
+    build: .
+    container_name: nexus_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    depends_on:
+      - nexus-db
+    environment:
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-nexus_super_senha_123}
+      - DB_HOST=nexus-db
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-nexus_db}
+      - SECRET_KEY=${SECRET_KEY:-gerar_uma_chave_segura_em_producao}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://nexus.linea.local}
+
+volumes:
+  nexus_pgdata:

@@ -59,7 +59,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   useEffect(() => { if (isExecutivo) fetchData(); }, [fetchData, isExecutivo]);
 
   const handleCongelarCiclo = async () => {
-    if (!window.confirm("ATENÇÃO: Ao gravar e assinar o ciclo, o volume será distribuído para as filiais do cliente e a tela ficará bloqueada. Continuar?")) return;
+    if (!window.confirm("ATENÇÃO: Ao gravar e assinar o ciclo, o volume será distribuído para as filiais do cliente baseando-se no histórico e a tela ficará bloqueada. Continuar?")) return;
     setIsProcessing(true);
     
     const ajustes: any[] = [];
@@ -94,6 +94,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     return totais;
   }, [dadosFiltrados, celulasEditadas]);
 
+  // Função exclusiva para abrir o gráfico (já que não há subRows para expandir a tabela no Produto)
   const toggleChart = async (row: any) => {
     const chave = row.original.chave_matriz;
     if (chartExpanded === chave) {
@@ -203,11 +204,29 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     }
   });
 
+  if (isLoading && isExecutivo) {
+    return (
+      <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
+        <Loader2 className="w-8 h-8 animate-spin text-blue-500 mb-4" />
+        <span className="text-slate-400 font-black text-xs tracking-widest uppercase">A iniciar Visão Comercial...</span>
+      </div>
+    );
+  }
+
   return (
     <div className="w-full bg-[#f8fafc] font-sans min-h-screen">
       <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative pb-24">
         
-        {/* CABEÇALHOS OMISSOS PARA POUPAR CARACTERES (SÃO OS MESMOS) */}
+        {(!isTopDownFechado && (nomeResponsavel || isExecutivo)) && (
+          <div className="mb-4 bg-orange-100 border border-orange-200 text-orange-800 p-4 rounded-[24px] flex items-center gap-3 shadow-sm">
+            <div className="bg-orange-200 p-2 rounded-full"><Clock className="w-5 h-5 text-orange-700" /></div>
+            <div>
+              <h4 className="font-black text-sm uppercase tracking-widest">Aguardando Visão Gerencial (Top-Down)</h4>
+              <p className="text-sm font-medium opacity-80">A tela está em modo leitura. Só poderá fazer os seus ajustes após o fechamento da meta executiva.</p>
+            </div>
+          </div>
+        )}
+
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-6 bg-white p-6 rounded-[32px] shadow-sm border border-gray-100">
           <div className="flex flex-col gap-4">
             <h1 className="text-2xl font-black text-gray-900 flex items-center gap-2 tracking-tighter">
@@ -237,6 +256,10 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
               </div>
               {isCicloFechado ? (
                   <div className="flex items-center gap-2 bg-slate-800 text-white px-6 py-3 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-slate-800/20 h-full"><Check className="w-5 h-5 text-emerald-400" /> Ciclo Congelado</div>
+              ) : !isTopDownFechado ? (
+                  <div className="flex items-center gap-2 bg-orange-100 text-orange-700 px-6 py-3 rounded-2xl text-sm font-black tracking-widest uppercase border border-orange-200 cursor-not-allowed h-full">
+                      <Lock className="w-4 h-4" /> Aguardando Visão Gerencial
+                  </div>
               ) : (
                   <div className="flex items-center gap-3 h-full">
                     {qtdEdicoes > 0 && (<button onClick={() => setCelulasEditadas({})} className="flex items-center gap-1 text-xs font-black text-rose-500 hover:text-rose-700 transition tracking-widest uppercase px-4 py-3 rounded-2xl hover:bg-rose-50"><X className="w-4 h-4" /> Descartar</button>)}
@@ -250,14 +273,29 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
         </div>
 
         <div className="bg-white rounded-[40px] shadow-2xl border border-gray-100 overflow-hidden relative">
+          {dadosFiltrados.length === 0 ? (
+            <div className="flex flex-col items-center justify-center text-slate-400 gap-4 py-20">
+              <Search className="w-12 h-12 opacity-20" />
+              <p className="font-bold tracking-widest uppercase text-sm text-center px-4">
+                {isExecutivo ? "Nenhum dado encontrado para a sua carteira." : "Selecione um vendedor ou regional e clique em Buscar."}
+              </p>
+            </div>
+          ) : (
           <div className="overflow-x-auto pb-4">
             <table className="w-full text-left border-collapse">
               <thead className="sticky top-0 bg-white/95 backdrop-blur-xl z-10 border-b border-gray-100 shadow-sm">
                 {table.getHeaderGroups().map(hg => (
                   <tr key={hg.id}>
                     {hg.headers.map(header => (
-                      <th key={header.id} className="px-8 py-6 text-[10px] font-black text-gray-400 uppercase tracking-widest">
-                         {flexRender(header.column.columnDef.header, header.getContext())}
+                      <th key={header.id} className={`px-8 py-6 text-[10px] font-black text-gray-400 uppercase tracking-widest ${header.column.getCanSort() ? 'cursor-pointer select-none hover:bg-blue-50/50 transition-colors group' : ''}`} onClick={header.column.getToggleSortingHandler()}>
+                        <div className="flex items-center gap-2">
+                          {flexRender(header.column.columnDef.header, header.getContext())}
+                          {header.column.getCanSort() && (
+                            <span className="text-gray-300 transition-colors">
+                              {{ asc: <ArrowUp className="w-4 h-4 text-blue-500" />, desc: <ArrowDown className="w-4 h-4 text-blue-500" /> }[header.column.getIsSorted() as string] ?? <ArrowUpDown className="w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity" />}
+                            </span>
+                          )}
+                        </div>
                       </th>
                     ))}
                   </tr>
@@ -266,7 +304,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
               <tbody>
                 {table.getRowModel().rows.map(row => (
                   <Fragment key={row.id}>
-                    <tr className={`border-b border-gray-50 transition-colors ${row.original.tipo === 'cliente' ? 'bg-slate-50/50 hover:bg-slate-100' : 'bg-white hover:bg-blue-50/30'}`}>
+                    <tr className={`border-b border-gray-50 transition-colors ${row.getIsExpanded() ? 'bg-blue-50/40' : row.original.tipo === 'cliente' ? 'hover:bg-blue-50/10' : 'bg-slate-50/50 hover:bg-slate-100'}`}>
                       {row.getVisibleCells().map(cell => <td key={cell.id} className="px-8 py-3">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}
                     </tr>
                     
@@ -341,6 +379,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
               </tfoot>
             </table>
           </div>
+          )}
         </div>
       </div>
     </div>

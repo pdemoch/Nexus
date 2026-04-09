@@ -14,9 +14,10 @@ router = APIRouter(prefix="/api/v1/auth", tags=["Autenticação e Usuários"])
 # ==========================================
 # CONFIGURAÇÕES DE SEGURANÇA JWT
 # ==========================================
-SECRET_KEY = "NEXUS_SUPER_SECRET_KEY_MUDE_ISSO_EM_PRODUCAO" 
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # O token expira em 24 horas
+from app.core.config import settings
+SECRET_KEY = settings.SECRET_KEY 
+ALGORITHM = settings.ALGORITHM
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
@@ -55,6 +56,21 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         "nome_vendedor": usuario.nome_vendedor,
         "gerente_nome": getattr(usuario, 'gerente_nome', None)
     }
+
+# ==========================================
+# MOTOR DE HEARTBEAT (CONTROLE DE CONCORRÊNCIA)
+# ==========================================
+@router.post("/heartbeat")
+async def heartbeat(usuario_logado: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Rota chamada pelo React para avisar que o utilizador está com a aba aberta."""
+    try:
+        usuario = db.query(Usuario).filter(Usuario.id == usuario_logado['id']).first()
+        if usuario:
+            usuario.ultima_atividade = datetime.utcnow()
+            db.commit()
+        return {"status": "alive"}
+    except Exception:
+        return {"status": "error"}
 
 # ==========================================
 # UTILITÁRIOS E PAYLOADS
@@ -153,7 +169,8 @@ async def cadastrar_usuario(payload: CadastroPayload, db: Session = Depends(get_
             nome_vendedor=payload.nome_vendedor if payload.funcao == 'Executivo' else None,
             gerente_nome=payload.gerente_nome if payload.funcao == 'Gerente' else None, 
             primeiro_acesso=True,
-            aprovado=False
+            aprovado=False,
+            ultima_atividade=datetime.utcnow()
         )
         
         db.add(novo_usuario)

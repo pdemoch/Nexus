@@ -17,6 +17,7 @@ class Usuario(Base):
     aprovado = Column(Boolean, default=False)
     primeiro_acesso = Column(Boolean, default=True)
     criado_em = Column(DateTime, default=datetime.utcnow)
+    ultima_atividade = Column(DateTime, default=datetime.utcnow) # NOVO CAMPO: MOTOR DE HEARTBEAT
 
 class DimProduto(Base):
     __tablename__ = 'dim_produtos'

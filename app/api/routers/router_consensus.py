@@ -10,7 +10,8 @@ import pandas as pd
 from fastapi.responses import StreamingResponse
 
 from app.core.database import get_db
-from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, FatoVendas, ControleCiclo
+# AQUI: Importamos a tabela de Usuario para checar quem está online
+from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, FatoVendas, ControleCiclo, Usuario
 from app.api.routers.router_auth import get_current_user
 
 router = APIRouter(prefix="/api/v1/consensus", tags=["Consenso S&OP"])
@@ -36,6 +37,20 @@ def check_global_lock(db: Session):
     ).first()
     if status_global and status_global.status == 'Fechado':
         raise HTTPException(status_code=403, detail="Acesso Negado: S&OP Global publicado.")
+
+# =====================================================================
+# NOVO: MOTOR DE PREVENÇÃO DE CONCORRÊNCIA (GERENTE vs. EXECUTIVO)
+# =====================================================================
+def verificar_vendedor_online(db: Session, vendedor_nome: str):
+    vendedor_user = db.query(Usuario).filter(func.trim(Usuario.nome_vendedor) == vendedor_nome.strip()).first()
+    if vendedor_user and vendedor_user.ultima_atividade:
+        segundos_inativo = (datetime.datetime.utcnow() - vendedor_user.ultima_atividade).total_seconds()
+        # Se a última atividade foi há menos de 60 segundos, ele está ativamente na tela
+        if segundos_inativo < 60:
+            raise HTTPException(
+                status_code=403, 
+                detail=f"⚠️ CONCORRÊNCIA: O executivo {vendedor_nome} está com a plataforma aberta neste exato momento. Ação bloqueada para evitar conflito de dados."
+            )
 
 # =====================================================================
 # MOTOR MATEMÁTICO: RATEIO BASEADO EM HISTÓRICO REAL (ÚLTIMOS 12 MESES)
@@ -455,7 +470,7 @@ async def congelar_micro(nome_responsavel: str, payload: PayloadCongelarBottomUp
         raise HTTPException(status_code=500, detail=str(e))
 
 # =========================================================================
-# GERENCIAMENTO (RATEIO + GRÁFICO EXCLUSIVO)
+# GERENCIAMENTO (RATEIO + GRÁFICO EXCLUSIVO + BLOQUEIO CONCORRÊNCIA)
 # =========================================================================
 @router.post("/gerenciamento/toggle-lock")
 async def toggle_lock_gerenciamento(payload: PayloadToggleLock, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
@@ -464,6 +479,9 @@ async def toggle_lock_gerenciamento(payload: PayloadToggleLock, db: Session = De
 
     try:
         check_global_lock(db)
+        # BARRICADA DO HEARTBEAT
+        verificar_vendedor_online(db, payload.origem)
+        
         ciclo = get_current_cycle()
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == payload.origem).first()
         if registro:
@@ -472,6 +490,8 @@ async def toggle_lock_gerenciamento(payload: PayloadToggleLock, db: Session = De
             db.add(ControleCiclo(ciclo_sop=ciclo, origem=payload.origem, status='Fechado'))
         db.commit()
         return {"status": "success"}
+    except HTTPException as he:
+        raise he
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -530,7 +550,6 @@ async def listar_gerenciamento_vendedores(gerente_nome: str = None, db: Session 
             arvore[vend]["meses"][mes]["vol_ajustado"] += vol_ajustado
             arvore[vend]["meses"][mes]["receita"] += receita
 
-        # INJEÇÃO DO STATUS NAS CAMADAS INFERIORES PARA BLOQUEAR A UI
         dados_finais = []
         for vend, v_data in arvore.items():
             vend_status = v_data["status"]
@@ -611,6 +630,12 @@ async def aprovar_gerenciamento(payload: PayloadAprovarGerente, db: Session = De
     try:
         check_global_lock(db)
         ciclo = get_current_cycle()
+        
+        # BARRICADA DO HEARTBEAT ANTES DE APLICAR QUALQUER RATEIO
+        vendedores_afetados = list(set([ajuste.chave.split('|')[0].strip() for ajuste in payload.ajustes]))
+        for vendedor_afetado in vendedores_afetados:
+            verificar_vendedor_online(db, vendedor_afetado)
+
         for ajuste in payload.ajustes:
             partes = ajuste.chave.split('|')
             data_alvo = datetime.datetime.strptime(ajuste.mes_projetado, "%Y-%m-%d").date()
@@ -637,6 +662,8 @@ async def aprovar_gerenciamento(payload: PayloadAprovarGerente, db: Session = De
                 
         db.commit()
         return {"status": "success"}
+    except HTTPException as he:
+        raise he
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -667,6 +694,11 @@ async def lock_all_gerenciamento(payload: PayloadLockAll, db: Session = Depends(
             query = query.filter(func.trim(DimCliente.gerente_nome) == nome_gerente_filtro.strip())
             
         vendedores = [v[0].strip() for v in query.distinct().all() if v[0]]
+        
+        # BARRICADA DO HEARTBEAT ANTES DE TRANCAR TODOS
+        for vend in vendedores:
+            verificar_vendedor_online(db, vend)
+        
         status_alvo = 'Fechado' if payload.acao == 'Trancar' else 'Aberto'
         
         for vend in vendedores:
@@ -678,6 +710,8 @@ async def lock_all_gerenciamento(payload: PayloadLockAll, db: Session = Depends(
                 
         db.commit()
         return {"status": "success"}
+    except HTTPException as he:
+        raise he
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))

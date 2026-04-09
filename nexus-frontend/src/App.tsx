@@ -1,151 +1,239 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { Cpu, Lock, Loader2 } from 'lucide-react';
+import { Settings, RefreshCw, Terminal, Play, ShieldAlert, Loader2, Download, UserPlus, Check, X } from 'lucide-react';
 
-import Sidebar from './pages/Sidebar';
-import AdminPanel from './pages/AdminPanel';
-import LoginArena from './pages/LoginArena'; 
-import TopDownArena from './pages/TopDownArena';
-import ConsensoArena from './pages/ConsensoArena';
-import GlobalDashboard from './pages/GlobalDashboard';
-import NPDArena from './pages/NPDArena';
-import GerenciamentoArena from './pages/GerenciamentoArena';
-
-export default function App() {
-  const [user, setUser] = useState<any>(null);
-  const [currentRoute, setCurrentRoute] = useState('admin');
+export default function AdminPanel() {
+  const [logs, setLogs] = useState<string[]>([]);
+  const [isPipelineRunning, setIsPipelineRunning] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isExporting, setIsExporting] = useState(false);
   
-  // ==========================================
-  // ESTADOS DO ESCUDO GLOBAL (LOCK SCREEN)
-  // ==========================================
-  const [isSystemLocked, setIsSystemLocked] = useState(false);
-  const [latestLog, setLatestLog] = useState('');
+  const [usuariosPendentes, setUsuariosPendentes] = useState<any[]>([]);
 
-  // ==========================================
-  // RADAR DO SISTEMA (POLLING GLOBAL)
-  // ==========================================
+  const terminalScrollRef = useRef<HTMLDivElement>(null);
+
+  // EFEITO: Rola a barra do terminal automaticamente se o pipeline estiver a rodar
   useEffect(() => {
-    if (!user) return;
+    if (isPipelineRunning && terminalScrollRef.current) {
+      terminalScrollRef.current.scrollTop = terminalScrollRef.current.scrollHeight;
+    }
+  }, [logs, isPipelineRunning]);
 
-    const checkSystemStatus = async () => {
+  const fetchData = useCallback(async () => {
+    try {
+      // 1. Busca o status do Pipeline ML
       try {
-        const res = await axios.get('/api/v1/admin/pipeline/status');
-        setIsSystemLocked(res.data.is_running);
-        
-        if (res.data.is_running && res.data.logs && res.data.logs.length > 0) {
-          setLatestLog(res.data.logs[res.data.logs.length - 1]);
-        }
-      } catch (e) {
-        console.error("Erro ao checar status global do Nexus.");
-      }
+        const statusRes = await axios.get('/api/v1/admin/pipeline/status');
+        setLogs(statusRes.data.logs || []);
+        setIsPipelineRunning(statusRes.data.is_running);
+      } catch(e) { console.error("Erro ao buscar status do pipeline"); }
+
+      // 2. Busca utilizadores pendentes de aprovação
+      try {
+        const pendentesRes = await axios.get('/api/v1/auth/pendentes');
+        setUsuariosPendentes(pendentesRes.data.dados || []);
+      } catch(e) { console.error("Erro ao buscar pendentes"); }
+
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  // Faz polling do status a cada 3 segundos APENAS se o pipeline estiver a rodar
+  useEffect(() => {
+    fetchData();
+    // CORREÇÃO: Tipagem universal para o intervalo no TypeScript
+    let interval: ReturnType<typeof setInterval>;
+    if (isPipelineRunning) {
+      interval = setInterval(fetchData, 3000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
     };
+  }, [fetchData, isPipelineRunning]);
 
-    checkSystemStatus();
-    const interval = setInterval(checkSystemStatus, 3000);
-    return () => clearInterval(interval);
-  }, [user]);
-
-  const handleLoginSuccess = (userData: any) => {
-    setUser(userData);
-    if (userData.funcao === 'Executivo') {
-      setCurrentRoute('consenso');
-    } else if (userData.funcao === 'Gerente') {
-      setCurrentRoute('gerenciamento');
-    } else {
-      setCurrentRoute('admin'); 
+  const handleRunPipeline = async () => {
+    if (!window.confirm("⚠️ ATENÇÃO: Iniciar a Engenharia de Dados irá bloquear todo o sistema para os utilizadores. Deseja continuar?")) return;
+    
+    setIsPipelineRunning(true);
+    setLogs(["[SISTEMA] Iniciando requisição para o núcleo de IA..."]);
+    
+    try {
+      await axios.post('/api/v1/admin/pipeline/run');
+    } catch (e: any) {
+      alert(e.response?.data?.detail || "Erro ao iniciar o pipeline.");
+      setIsPipelineRunning(false);
     }
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem('nexus_token'); // RASGA O CRACHÁ AO SAIR
-    setUser(null);
-    setCurrentRoute('admin');
+  // CORREÇÃO: Alterado de 'id: int' para 'id: number'
+  const handleAprovarUsuario = async (id: number) => {
+    if (!window.confirm("Aprovar o acesso deste utilizador ao Nexus?")) return;
+    try {
+      await axios.post(`/api/v1/auth/aprovar/${id}`);
+      fetchData();
+    } catch (e: any) {
+      alert(e.response?.data?.detail || "Erro ao aprovar utilizador.");
+    }
   };
 
-  if (!user) {
-    return <LoginArena onLoginSuccess={handleLoginSuccess} />;
+  // CORREÇÃO: Alterado de 'id: int' para 'id: number'
+  const handleRejeitarUsuario = async (id: number) => {
+    if (!window.confirm("Tem a certeza que deseja REJEITAR e excluir este cadastro?")) return;
+    try {
+      await axios.delete(`/api/v1/auth/rejeitar/${id}`);
+      fetchData();
+    } catch (e: any) {
+      alert(e.response?.data?.detail || "Erro ao rejeitar utilizador.");
+    }
+  };
+
+  const handleExportarBase = async () => {
+    setIsExporting(true);
+    try {
+      const response = await axios.get('/api/v1/consensus/export/bottom-up', {
+        responseType: 'blob', // Importante para o download de ficheiros
+      });
+      
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `SOP_Nexus_Base_Granular_${new Date().toISOString().split('T')[0]}.xlsx`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (e) {
+      alert("Erro ao exportar a base de dados. Verifique se existem dados no ciclo atual.");
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
+        <Loader2 className="w-8 h-8 animate-spin text-slate-500 mb-4" />
+        <span className="text-slate-400 font-black text-xs tracking-widest uppercase">Carregando Control Tower...</span>
+      </div>
+    );
   }
 
-  const renderRoute = () => {
-    if (user.funcao !== 'Administrador' && currentRoute === 'admin') {
-       return (
-        <div className="h-full flex items-center justify-center bg-slate-50 text-rose-400 font-bold tracking-widest uppercase">
-          Acesso Negado à Control Tower.
-        </div>
-      );
-    }
-
-    switch (currentRoute) {
-      case 'admin': return <AdminPanel />;
-      case 'topdown': return <TopDownArena />;
-      case 'consenso': return <ConsensoArena usuarioSessao={user} />; 
-      case 'dashboard': return <GlobalDashboard />;
-      case 'npd': return <NPDArena />;
-      case 'gerenciamento': return <GerenciamentoArena usuarioSessao={user} />;
-      default: return (
-        <div className="h-full flex flex-col items-center justify-center bg-slate-50 text-slate-400 font-bold tracking-widest uppercase gap-4">
-          <h2>Módulo em Construção</h2>
-        </div>
-      );
-    }
-  };
-
-  const isControlTower = currentRoute === 'admin';
-  const showGlobalLock = isSystemLocked && !isControlTower;
-
   return (
-    <div className="flex h-screen bg-[#f8fafc] overflow-hidden relative">
-      
-      {/* ========================================== */}
-      {/* TELA DE BLOQUEIO FUTURISTA (OVERLAY) */}
-      {/* ========================================== */}
-      {showGlobalLock && (
-        <div className="absolute inset-0 z-[9999] bg-slate-950/95 backdrop-blur-2xl flex flex-col items-center justify-center text-white overflow-hidden animate-in fade-in duration-500">
-            
-            <div className="absolute w-[600px] h-[600px] bg-indigo-600/20 rounded-full blur-[120px] animate-pulse"></div>
-            
-            <div className="relative z-10 flex flex-col items-center max-w-2xl text-center px-6">
-                
-                <div className="relative flex items-center justify-center w-40 h-40 mb-8">
-                    <div className="absolute inset-0 border-[3px] border-indigo-500/20 rounded-full animate-[spin_6s_linear_infinite]"></div>
-                    <div className="absolute inset-3 border-[3px] border-t-indigo-400 border-r-transparent border-b-indigo-400 border-l-transparent rounded-full animate-[spin_2s_linear_infinite]"></div>
-                    <div className="absolute inset-8 bg-indigo-500/20 rounded-full animate-ping opacity-50"></div>
-                    <Cpu className="w-14 h-14 text-indigo-400" />
-                </div>
-
-                <h1 className="text-3xl md:text-5xl font-black tracking-tighter mb-4 flex items-center justify-center gap-4 uppercase text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-400">
-                    <Lock className="w-8 h-8 md:w-10 md:h-10 text-rose-500 flex-shrink-0" />
-                    NEXUS EM MANUTENÇÃO
-                </h1>
-                
-                <p className="text-slate-400 text-base md:text-lg mb-10 font-medium max-w-xl">
-                    O sistema encontra-se bloqueado. O Motor de Engenharia de Dados e o Treinamento de Redes Neurais (IA) estão em execução neste exato momento.
-                </p>
-
-                <div className="bg-slate-900 border border-slate-800 p-6 rounded-[24px] w-full flex flex-col items-start text-left shadow-[0_0_50px_rgba(0,0,0,0.5)] relative overflow-hidden">
-                    <div className="absolute top-0 left-0 w-1.5 h-full bg-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.8)]"></div>
-                    <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-3 flex items-center gap-2">
-                       <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-500" />
-                       Interceção de Logs / Tempo Real
-                    </span>
-                    <code className="text-emerald-400 font-mono text-xs md:text-sm w-full truncate border-l border-slate-800 pl-3 py-1">
-                        {latestLog || "Sincronizando com o núcleo do servidor..."}
-                    </code>
-                </div>
-            </div>
+    <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
+      <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative flex flex-col h-[calc(100vh-2rem)]">
+        
+        {/* CABEÇALHO */}
+        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-6 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 flex-shrink-0">
+          <div>
+            <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
+              <Settings className="w-8 h-8 text-slate-800" /> CONTROL TOWER <span className="text-slate-300 font-medium ml-2">Administração</span>
+            </h1>
+            <p className="text-slate-500 font-medium text-sm mt-1 ml-11">Gestão de utilizadores, motor de IA e extração de dados brutos.</p>
+          </div>
+          
+          <button 
+            onClick={handleExportarBase} 
+            disabled={isExporting}
+            className="flex items-center gap-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase transition-all shadow-sm disabled:opacity-50"
+          >
+            {isExporting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Download className="w-5 h-5" />} 
+            {isExporting ? 'A Gerar...' : 'Exportar Base S&OP'}
+          </button>
         </div>
-      )}
 
-      {/* RENDERIZAÇÃO NORMAL DO SISTEMA */}
-      <Sidebar
-        currentRoute={currentRoute}
-        setCurrentRoute={setCurrentRoute}
-        user={user}
-        onLogout={handleLogout}
-      />
-      <main className="flex-1 overflow-auto bg-[#f8fafc]">
-        {renderRoute()}
-      </main>
+        <div className="flex flex-col lg:flex-row gap-6 flex-1 min-h-0">
+          
+          {/* COLUNA ESQUERDA: GESTÃO DE UTILIZADORES */}
+          <div className="w-full lg:w-1/3 bg-white rounded-[32px] p-8 shadow-sm border border-slate-100 flex flex-col overflow-hidden">
+             <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slate-100 flex-shrink-0">
+               <UserPlus className="w-5 h-5 text-indigo-500" />
+               <h2 className="text-sm font-black text-slate-700 uppercase tracking-widest">Aprovações Pendentes</h2>
+               <div className="ml-auto bg-indigo-100 text-indigo-700 font-black text-xs px-2 py-1 rounded-lg">{usuariosPendentes.length}</div>
+             </div>
+
+             <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-4">
+                {usuariosPendentes.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-3 opacity-60">
+                     <ShieldAlert className="w-10 h-10" />
+                     <span className="text-xs font-black uppercase tracking-widest text-center">Nenhum acesso<br/>pendente</span>
+                  </div>
+                ) : (
+                  usuariosPendentes.map((user) => (
+                    <div key={user.id} className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col gap-3">
+                       <div>
+                         <h3 className="font-black text-sm text-slate-800">{user.nome}</h3>
+                         <p className="text-xs font-bold text-slate-500">{user.email}</p>
+                       </div>
+                       
+                       <div className="bg-white p-2 rounded-xl border border-slate-100 flex flex-col gap-1">
+                          <span className="text-[10px] font-black text-indigo-500 uppercase tracking-widest">Perfil: {user.funcao}</span>
+                          {user.nome_vendedor && <span className="text-[10px] font-bold text-slate-600 truncate">Vendedor: {user.nome_vendedor}</span>}
+                          {user.gerente_nome && <span className="text-[10px] font-bold text-slate-600 truncate">Gerente: {user.gerente_nome}</span>}
+                       </div>
+
+                       <div className="flex items-center gap-2 mt-1">
+                          <button onClick={() => handleRejeitarUsuario(user.id)} className="flex-1 flex items-center justify-center gap-1 bg-white border border-rose-200 text-rose-600 hover:bg-rose-50 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors">
+                            <X className="w-3 h-3" /> Rejeitar
+                          </button>
+                          <button onClick={() => handleAprovarUsuario(user.id)} className="flex-1 flex items-center justify-center gap-1 bg-emerald-500 hover:bg-emerald-600 text-white py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors shadow-md shadow-emerald-500/20">
+                            <Check className="w-3 h-3" /> Aprovar
+                          </button>
+                       </div>
+                    </div>
+                  ))
+                )}
+             </div>
+          </div>
+
+          {/* COLUNA DIREITA: MOTOR DE IA & TERMINAL */}
+          <div className="w-full lg:w-2/3 bg-slate-950 rounded-[32px] p-2 shadow-2xl border border-slate-800 flex flex-col relative overflow-hidden">
+            
+            {/* PAINEL DE CONTROLE DO MOTOR */}
+            <div className="bg-slate-900 rounded-[24px] p-6 border border-slate-800 m-2 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 flex-shrink-0">
+               <div>
+                  <h2 className="text-sm font-black text-white uppercase tracking-widest flex items-center gap-2">
+                    <RefreshCw className={`w-4 h-4 text-emerald-400 ${isPipelineRunning ? 'animate-spin' : ''}`} />
+                    Motor de Engenharia S&OP
+                  </h2>
+                  <p className="text-xs font-medium text-slate-400 mt-1">Aciona a pipeline de Machine Learning e recria a matriz estatística global.</p>
+               </div>
+               <button 
+                 onClick={handleRunPipeline}
+                 disabled={isPipelineRunning}
+                 className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-white px-6 py-3 rounded-xl text-xs font-black tracking-widest uppercase transition-all shadow-[0_0_20px_rgba(16,185,129,0.3)] disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+               >
+                 {isPipelineRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                 {isPipelineRunning ? 'Processando...' : 'Run Pipeline'}
+               </button>
+            </div>
+
+            {/* TERMINAL DE LOGS */}
+            <div className="flex-1 bg-slate-950 p-6 flex flex-col overflow-hidden relative min-h-0">
+              <div className="flex items-center gap-2 mb-4 pb-4 border-b border-slate-800 flex-shrink-0">
+                 <Terminal className="w-5 h-5 text-slate-500" />
+                 <span className="text-xs font-black text-slate-500 uppercase tracking-widest">NEXUS SERVER // CONSOLE OUTPUT</span>
+                 {isPipelineRunning && <span className="ml-auto flex items-center gap-2 text-[10px] font-black text-emerald-400 uppercase tracking-widest animate-pulse"><div className="w-2 h-2 bg-emerald-400 rounded-full"></div> RUNNING</span>}
+              </div>
+
+              <div ref={terminalScrollRef} className="flex-1 overflow-y-auto font-mono text-xs md:text-sm text-emerald-400/90 pr-2 space-y-1 custom-scrollbar">
+                {logs.length === 0 ? (
+                   <div className="h-full flex items-center justify-center text-slate-800 font-bold uppercase tracking-widest">Aguardando Execução...</div>
+                ) : (
+                  logs.map((log, i) => (
+                    <div key={i} className={`${log.includes('ERRO') || log.includes('❌') ? 'text-rose-400' : log.includes('✅') ? 'text-cyan-400' : 'text-emerald-400/80'} py-0.5 border-l-2 border-slate-800 pl-3 break-words`}>
+                      {log}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+          </div>
+
+        </div>
+      </div>
     </div>
   );
 }
