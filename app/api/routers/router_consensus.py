@@ -185,6 +185,8 @@ async def listar_macro(db: Session = Depends(get_db), usuario_logado: dict = Dep
 
     try:
         m_plus_2, m_plus_4 = get_projection_window()
+        
+        # CORREÇÃO POSTGRESQL: Remoção de strftime para comparação de datas
         projecoes = db.query(
             FatoIbpGranular.sku, FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('vol_ia'),
@@ -195,8 +197,8 @@ async def listar_macro(db: Session = Depends(get_db), usuario_logado: dict = Dep
             DimProduto.modelo_vencedor, DimProduto.acuracia_ia
         ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)\
          .filter(
-             func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) >= m_plus_2,
-             func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) <= m_plus_4,
+             FatoIbpGranular.mes_projetado >= m_plus_2,
+             FatoIbpGranular.mes_projetado <= m_plus_4,
              FatoIbpGranular.ciclo_sop == get_current_cycle()
          ).group_by(
              FatoIbpGranular.sku, FatoIbpGranular.mes_projetado, DimProduto.descricao, 
@@ -214,9 +216,13 @@ async def listar_macro(db: Session = Depends(get_db), usuario_logado: dict = Dep
             vol_ia = int(r.vol_ia or 0)
             pmv_real = (float(r.receita_base or 0) / vol_ia) if vol_ia > 0 else float(r.pmv_simples or 0)
 
+            # Tratamento de segurança de data Postgres
+            mes_banco_str = r.mes_projetado.strftime("%Y-%m-%d") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado)
+            mes_amigavel = r.mes_projetado.strftime("%b/%y").capitalize() if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado)
+
             produtos_dict[r.sku]["meses"].append({
-                "mes_banco": r.mes_projetado.strftime("%Y-%m-%d"), 
-                "mes_str": r.mes_projetado.strftime("%b/%y").capitalize(),
+                "mes_banco": mes_banco_str, 
+                "mes_str": mes_amigavel,
                 "vol_ia": vol_ia, 
                 "vol_ajustado": int(r.vol_td or 0), 
                 "pmv": pmv_real
@@ -234,14 +240,18 @@ async def obter_grafico_produto(produto: str, db: Session = Depends(get_db), usu
         data_limite = hoje - relativedelta(years=2)
         ciclo_anterior = get_previous_cycle()
         
-        historico = db.query(func.strftime('%Y-%m', FatoVendas.data_pedido).label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol_real'))\
-            .filter(FatoVendas.sku == produto, FatoVendas.data_pedido >= data_limite).group_by(func.strftime('%Y-%m', FatoVendas.data_pedido)).all()
+        # CORREÇÃO POSTGRESQL: func.to_char para formatação YYYY-MM
+        historico = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol_real'))\
+            .filter(FatoVendas.sku == produto, FatoVendas.data_pedido >= data_limite)\
+            .group_by(func.to_char(FatoVendas.data_pedido, 'YYYY-MM')).all()
+            
         hist_dict = {h.mes_ano: int(h.vol_real or 0) for h in historico}
         
         query_ant = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_topdown).label('vol_ant'))\
             .filter(FatoIbpGranular.sku == produto, FatoIbpGranular.ciclo_sop == ciclo_anterior)\
             .group_by(FatoIbpGranular.mes_projetado).all()
-        dict_ant = {p.mes_projetado.strftime('%Y-%m-%d'): int(p.vol_ant or 0) for p in query_ant}
+            
+        dict_ant = {p.mes_projetado.strftime('%Y-%m-%d') if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado): int(p.vol_ant or 0) for p in query_ant}
 
         projecoes = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), func.sum(FatoIbpGranular.vol_topdown).label('vol_td'))\
             .filter(FatoIbpGranular.sku == produto, FatoIbpGranular.ciclo_sop == get_current_cycle())\
@@ -253,9 +263,9 @@ async def obter_grafico_produto(produto: str, db: Session = Depends(get_db), usu
             timeline.append({"name": mes_dt.strftime("%b/%y").capitalize(), "data_iso": mes_dt.replace(day=1).strftime("%Y-%m-%d"), "Realizado": hist_dict.get(mes_dt.strftime('%Y-%m'), 0), "IA": None, "Consenso": None, "CicloAnterior": None})
             
         for p in projecoes:
-            p_str = p.mes_projetado.strftime('%Y-%m-%d')
+            p_str = p.mes_projetado.strftime('%Y-%m-%d') if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado)
             consenso = int(p.vol_td or 0) if m_plus_2 <= p_str <= m_plus_4 else None 
-            timeline.append({"name": p.mes_projetado.strftime("%b/%y").capitalize(), "data_iso": p_str, "Realizado": None, "IA": int(p.vol_ia or 0), "Consenso": consenso, "CicloAnterior": dict_ant.get(p_str, None)})
+            timeline.append({"name": p.mes_projetado.strftime("%b/%y").capitalize() if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado), "data_iso": p_str, "Realizado": None, "IA": int(p.vol_ia or 0), "Consenso": consenso, "CicloAnterior": dict_ant.get(p_str, None)})
             
         return {"status": "success", "dados": timeline}
     except Exception as e:
@@ -316,6 +326,7 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
 
     m_plus_2, m_plus_4 = get_projection_window()
     
+    # CORREÇÃO POSTGRESQL: Remoção de strftime
     query = db.query(
         DimCliente.razaosocial, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado,
         func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), 
@@ -323,8 +334,8 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
         func.avg(FatoIbpGranular.pmv_aplicado).label('pmv_aplicado')
     ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
      .filter(
-         func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) >= m_plus_2, 
-         func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) <= m_plus_4,
+         FatoIbpGranular.mes_projetado >= m_plus_2, 
+         FatoIbpGranular.mes_projetado <= m_plus_4,
          DimCliente.bloqueado != 'INATIVO',
          FatoIbpGranular.ciclo_sop == get_current_cycle()
      )
@@ -343,7 +354,7 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
     for r in resultados:
         razao = str(r.razaosocial).strip() if r.razaosocial else "CLIENTE DESCONHECIDO"
         sku = r.sku
-        mes = r.mes_projetado.strftime("%Y-%m-%d")
+        mes = r.mes_projetado.strftime("%Y-%m-%d") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado)
         vol_ia = int(r.vol_ia or 0)
         vol_ajustado = int(r.vol_bottomup or 0)
         receita = vol_ajustado * float(r.pmv_aplicado or 0)
@@ -396,24 +407,29 @@ async def obter_grafico_micro(chave_matriz: str, nivel_hierarquia: str = 'vended
         razaosocial = chave_matriz.split('|')[0] if is_produto else chave_matriz
         sku = chave_matriz.split('|')[1] if is_produto else None
 
-        query_hist = db.query(func.strftime('%Y-%m', FatoVendas.data_pedido).label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol_real'))\
+        # CORREÇÃO POSTGRESQL: func.to_char para YYYY-MM
+        query_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol_real'))\
             .join(DimCliente, FatoVendas.cgc == DimCliente.cgc).filter(func.trim(DimCliente.razaosocial) == razaosocial.strip(), FatoVendas.data_pedido >= data_limite)
+            
         if is_produto: query_hist = query_hist.filter(FatoVendas.sku == sku)
         if nome_responsavel: query_hist = query_hist.filter(func.trim(DimCliente.vendedor_nome) == nome_responsavel.strip())
         
-        historico = query_hist.group_by(func.strftime('%Y-%m', FatoVendas.data_pedido)).all()
+        historico = query_hist.group_by(func.to_char(FatoVendas.data_pedido, 'YYYY-MM')).all()
         hist_dict = {h.mes_ano: int(h.vol_real or 0) for h in historico}
         
         query_ant = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_bottomup).label('vol_ant'))\
             .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
             .filter(func.trim(DimCliente.razaosocial) == razaosocial.strip(), FatoIbpGranular.ciclo_sop == ciclo_anterior)
+            
         if is_produto: query_ant = query_ant.filter(FatoIbpGranular.sku == sku)
         if nome_responsavel: query_ant = query_ant.filter(func.trim(FatoIbpGranular.vendedor_nome) == nome_responsavel.strip())
-        dict_ant = {p.mes_projetado.strftime('%Y-%m-%d'): int(p.vol_ant or 0) for p in query_ant.group_by(FatoIbpGranular.mes_projetado).all()}
+        
+        dict_ant = {p.mes_projetado.strftime('%Y-%m-%d') if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado): int(p.vol_ant or 0) for p in query_ant.group_by(FatoIbpGranular.mes_projetado).all()}
 
         query_proj = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), func.sum(FatoIbpGranular.vol_bottomup).label('vol_bu'))\
             .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
             .filter(func.trim(DimCliente.razaosocial) == razaosocial.strip(), FatoIbpGranular.ciclo_sop == get_current_cycle())
+            
         if is_produto: query_proj = query_proj.filter(FatoIbpGranular.sku == sku)
         if nome_responsavel: query_proj = query_proj.filter(func.trim(FatoIbpGranular.vendedor_nome) == nome_responsavel.strip())
 
@@ -425,9 +441,9 @@ async def obter_grafico_micro(chave_matriz: str, nivel_hierarquia: str = 'vended
             timeline.append({"name": mes_dt.strftime("%b/%y").capitalize(), "data_iso": mes_dt.replace(day=1).strftime("%Y-%m-%d"), "Realizado": hist_dict.get(mes_dt.strftime('%Y-%m'), 0), "IA": None, "Consenso": None, "CicloAnterior": None})
             
         for p in projecoes:
-            p_str = p.mes_projetado.strftime('%Y-%m-%d')
+            p_str = p.mes_projetado.strftime('%Y-%m-%d') if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado)
             consenso = int(p.vol_bu or 0) if m_plus_2 <= p_str <= m_plus_4 else None 
-            timeline.append({"name": p.mes_projetado.strftime("%b/%y").capitalize(), "data_iso": p_str, "Realizado": None, "IA": int(p.vol_ia or 0), "Consenso": consenso, "CicloAnterior": dict_ant.get(p_str, None)})
+            timeline.append({"name": p.mes_projetado.strftime("%b/%y").capitalize() if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado), "data_iso": p_str, "Realizado": None, "IA": int(p.vol_ia or 0), "Consenso": consenso, "CicloAnterior": dict_ant.get(p_str, None)})
             
         return {"status": "success", "dados": timeline}
     except Exception as e:
@@ -502,6 +518,8 @@ async def listar_gerenciamento_vendedores(gerente_nome: str = None, db: Session 
         raise HTTPException(status_code=403, detail="Acesso Restrito.")
     try:
         m_plus_2, m_plus_4 = get_projection_window()
+        
+        # CORREÇÃO POSTGRESQL: Comparação nativa de data
         query = db.query(
             FatoIbpGranular.vendedor_nome, FatoIbpGranular.sku, FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_bottomup).label('vol_bottomup'),
@@ -509,8 +527,8 @@ async def listar_gerenciamento_vendedores(gerente_nome: str = None, db: Session 
             DimCliente.razaosocial, DimProduto.descricao
         ).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)\
          .filter(
-            func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) >= m_plus_2,
-            func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) <= m_plus_4,
+            FatoIbpGranular.mes_projetado >= m_plus_2,
+            FatoIbpGranular.mes_projetado <= m_plus_4,
             FatoIbpGranular.vendedor_nome.isnot(None),
             DimCliente.bloqueado != 'INATIVO',
             FatoIbpGranular.ciclo_sop == get_current_cycle()
@@ -529,7 +547,7 @@ async def listar_gerenciamento_vendedores(gerente_nome: str = None, db: Session 
 
         for r in resultados:
             vend = str(r.vendedor_nome).strip()
-            mes = r.mes_projetado.strftime("%Y-%m-%d")
+            mes = r.mes_projetado.strftime("%Y-%m-%d") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado)
             vol_ajustado = int(r.vol_bottomup or 0)
             receita = vol_ajustado * float(r.pmv_aplicado or 0)
             razao = str(r.razaosocial).strip() if r.razaosocial else "CLIENTE DESCONHECIDO"
@@ -589,22 +607,28 @@ async def obter_grafico_gerenciamento(chave_matriz: str, db: Session = Depends(g
         data_limite = hoje - relativedelta(years=2)
         ciclo_anterior = get_previous_cycle()
         
-        query_hist = db.query(func.strftime('%Y-%m', FatoVendas.data_pedido).label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol_real'))\
+        # CORREÇÃO POSTGRESQL: func.to_char para YYYY-MM
+        query_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol_real'))\
             .join(DimCliente, FatoVendas.cgc == DimCliente.cgc).filter(func.trim(FatoVendas.vendedor_nome) == vendedor.strip(), FatoVendas.data_pedido >= data_limite)
+            
         if razaosocial: query_hist = query_hist.filter(func.trim(DimCliente.razaosocial) == razaosocial.strip())
         if sku: query_hist = query_hist.filter(FatoVendas.sku == sku)
-        hist_dict = {h.mes_ano: int(h.vol_real or 0) for h in query_hist.group_by(func.strftime('%Y-%m', FatoVendas.data_pedido)).all()}
+        
+        hist_dict = {h.mes_ano: int(h.vol_real or 0) for h in query_hist.group_by(func.to_char(FatoVendas.data_pedido, 'YYYY-MM')).all()}
         
         query_ant = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_final).label('vol_ant'))\
             .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
             .filter(func.trim(FatoIbpGranular.vendedor_nome) == vendedor.strip(), FatoIbpGranular.ciclo_sop == ciclo_anterior)
+            
         if razaosocial: query_ant = query_ant.filter(func.trim(DimCliente.razaosocial) == razaosocial.strip())
         if sku: query_ant = query_ant.filter(FatoIbpGranular.sku == sku)
-        dict_ant = {p.mes_projetado.strftime('%Y-%m-%d'): int(p.vol_ant or 0) for p in query_ant.group_by(FatoIbpGranular.mes_projetado).all()}
+        
+        dict_ant = {p.mes_projetado.strftime('%Y-%m-%d') if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado): int(p.vol_ant or 0) for p in query_ant.group_by(FatoIbpGranular.mes_projetado).all()}
 
         query_proj = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), func.sum(FatoIbpGranular.vol_bottomup).label('vol_bu'))\
             .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
             .filter(func.trim(FatoIbpGranular.vendedor_nome) == vendedor.strip(), FatoIbpGranular.ciclo_sop == get_current_cycle())
+            
         if razaosocial: query_proj = query_proj.filter(func.trim(DimCliente.razaosocial) == razaosocial.strip())
         if sku: query_proj = query_proj.filter(FatoIbpGranular.sku == sku)
 
@@ -616,9 +640,9 @@ async def obter_grafico_gerenciamento(chave_matriz: str, db: Session = Depends(g
             timeline.append({"name": mes_dt.strftime("%b/%y").capitalize(), "data_iso": mes_dt.replace(day=1).strftime("%Y-%m-%d"), "Realizado": hist_dict.get(mes_dt.strftime('%Y-%m'), 0), "IA": None, "Consenso": None, "CicloAnterior": None})
             
         for p in projecoes:
-            p_str = p.mes_projetado.strftime('%Y-%m-%d')
+            p_str = p.mes_projetado.strftime('%Y-%m-%d') if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado)
             consenso = int(p.vol_bu or 0) if m_plus_2 <= p_str <= m_plus_4 else None 
-            timeline.append({"name": p.mes_projetado.strftime("%b/%y").capitalize(), "data_iso": p_str, "Realizado": None, "IA": int(p.vol_ia or 0), "Consenso": consenso, "CicloAnterior": dict_ant.get(p_str, None)})
+            timeline.append({"name": p.mes_projetado.strftime("%b/%y").capitalize() if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado), "data_iso": p_str, "Realizado": None, "IA": int(p.vol_ia or 0), "Consenso": consenso, "CicloAnterior": dict_ant.get(p_str, None)})
             
         return {"status": "success", "dados": timeline}
     except Exception as e:
@@ -678,10 +702,11 @@ async def lock_all_gerenciamento(payload: PayloadLockAll, db: Session = Depends(
         ciclo = get_current_cycle()
         m_plus_2, m_plus_4 = get_projection_window()
         
+        # CORREÇÃO POSTGRESQL: Comparação nativa de data
         query = db.query(FatoIbpGranular.vendedor_nome).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
             .filter(
-                func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) >= m_plus_2,
-                func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) <= m_plus_4,
+                FatoIbpGranular.mes_projetado >= m_plus_2,
+                FatoIbpGranular.mes_projetado <= m_plus_4,
                 FatoIbpGranular.vendedor_nome.isnot(None),
                 DimCliente.bloqueado != 'INATIVO'
             )
@@ -723,6 +748,7 @@ async def exportar_excel_bottom_up(db: Session = Depends(get_db), usuario_logado
 
     try:
         m_plus_2, m_plus_4 = get_projection_window()
+        # CORREÇÃO POSTGRESQL: Comparação nativa de data
         query = db.query(
             FatoIbpGranular.vendedor_nome, FatoIbpGranular.cgc, DimCliente.razaosocial,
             DimCliente.cod_cliente, DimCliente.loja,
@@ -730,14 +756,15 @@ async def exportar_excel_bottom_up(db: Session = Depends(get_db), usuario_logado
             FatoIbpGranular.vol_ia, FatoIbpGranular.vol_topdown, FatoIbpGranular.vol_bottomup,
             FatoIbpGranular.vol_final, FatoIbpGranular.pmv_aplicado
         ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
-         .filter(func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) >= m_plus_2, func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) <= m_plus_4).all()
+         .filter(FatoIbpGranular.mes_projetado >= m_plus_2, FatoIbpGranular.mes_projetado <= m_plus_4).all()
 
         if not query: raise HTTPException(status_code=404, detail="Sem dados para exportar.")
 
         dados = [{
             "Vendedor": r.vendedor_nome, "Cód. Cliente": r.cod_cliente, "Loja": r.loja, "CGC": r.cgc, 
             "Cliente": r.razaosocial, "SKU": r.sku, "Produto": r.descricao, 
-            "Mês Projetado": r.mes_projetado.strftime("%m/%Y"), "Volume IA (Inicial)": r.vol_ia, 
+            "Mês Projetado": r.mes_projetado.strftime("%m/%Y") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado), 
+            "Volume IA (Inicial)": r.vol_ia, 
             "Volume Top-Down (Diretoria)": r.vol_topdown, "Volume Bottom-Up (Vendedor)": r.vol_bottomup, 
             "Volume Final (S&OP)": r.vol_final, "Preço Médio (PMV)": float(r.pmv_aplicado or 0), 
             "Receita Projetada (R$)": r.vol_final * float(r.pmv_aplicado or 0)

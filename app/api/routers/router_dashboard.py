@@ -50,10 +50,11 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
         status_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
         is_td_fechado = status_td.status == 'Fechado' if status_td else False
 
+        # CORREÇÃO POSTGRES: Comparação direta de data sem strftime
         vendedores_ativos = db.query(FatoIbpGranular.vendedor_nome).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
             .filter(
-                func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) >= m_plus_2,
-                func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) <= m_plus_4,
+                FatoIbpGranular.mes_projetado >= m_plus_2,
+                FatoIbpGranular.mes_projetado <= m_plus_4,
                 DimCliente.bloqueado != 'INATIVO',
                 FatoIbpGranular.vendedor_nome.isnot(None)
             ).distinct().all()
@@ -77,6 +78,7 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
         else:
             is_locked, lock_message = False, "Publicar Demanda Irrestrita"
             
+        # CORREÇÃO POSTGRES: Comparação direta de data sem strftime
         resultados = db.query(
             FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('vol_ia'),
@@ -88,8 +90,8 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
             DimProduto.descricao, DimProduto.categoria
         ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
          .filter(
-             func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) >= m_plus_2,
-             func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) <= m_plus_4,
+             FatoIbpGranular.mes_projetado >= m_plus_2,
+             FatoIbpGranular.mes_projetado <= m_plus_4,
              DimCliente.bloqueado != 'INATIVO'
          ).group_by(
              FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado,
@@ -102,7 +104,8 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
             pmv_real = (float(r.receita_base or 0) / vol_ia) if vol_ia > 0 else float(r.pmv_simples or 0)
             dados_formatados.append({
                 "chave_matriz": f"{r.sku}_{r.razaosocial}", "categoria": r.categoria, "produto": r.sku,
-                "descricao": r.descricao, "cliente_razaosocial": r.razaosocial, "mes_projetado": r.mes_projetado.strftime("%Y-%m-%d"),
+                "descricao": r.descricao, "cliente_razaosocial": r.razaosocial, 
+                "mes_projetado": r.mes_projetado.strftime("%Y-%m-%d") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado),
                 "vol_ia": vol_ia, "vol_td": int(r.vol_topdown or 0), "vol_bu": int(r.vol_bottomup or 0),
                 "vol_irrestrito": int(r.vol_final or 0), "pmv": pmv_real
             })
@@ -173,6 +176,7 @@ async def exportar_excel_global(db: Session = Depends(get_db), usuario_logado: d
         
     try:
         m_plus_2, m_plus_4 = get_projection_window()
+        # CORREÇÃO POSTGRES: Comparação direta de data sem strftime
         resultados = db.query(
             FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('vol_ia'),
@@ -184,8 +188,8 @@ async def exportar_excel_global(db: Session = Depends(get_db), usuario_logado: d
             DimProduto.descricao, DimProduto.categoria
         ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
          .filter(
-             func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) >= m_plus_2,
-             func.strftime('%Y-%m-%d', FatoIbpGranular.mes_projetado) <= m_plus_4,
+             FatoIbpGranular.mes_projetado >= m_plus_2,
+             FatoIbpGranular.mes_projetado <= m_plus_4,
              DimCliente.bloqueado != 'INATIVO'
          ).group_by(
              FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado,
@@ -201,7 +205,7 @@ async def exportar_excel_global(db: Session = Depends(get_db), usuario_logado: d
             pmv_real = (float(r.receita_base or 0) / vol_ia) if vol_ia > 0 else float(r.pmv_simples or 0)
             dados.append({
                 "Categoria": r.categoria, "SKU": r.sku, "Produto": r.descricao, "Cliente (Razão Social)": r.razaosocial,
-                "Mês Projetado": r.mes_projetado.strftime("%m/%Y"), "Sinal IA (Base)": vol_ia,
+                "Mês Projetado": r.mes_projetado.strftime("%m/%Y") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado), "Sinal IA (Base)": vol_ia,
                 "Meta Gerencial": int(r.vol_td or 0), "Proposta Comercial": int(r.vol_bu or 0),
                 "Demanda Irrestrita": int(r.vol_final or 0), "PMV Ponderado (R$)": round(pmv_real, 2),
                 "Faturamento Irrestrito (R$)": int(r.vol_final or 0) * pmv_real

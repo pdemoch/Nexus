@@ -1,30 +1,78 @@
 # ==========================================
-# 1. AMBIENTE VIRTUAL E CACHE PYTHON (Backend)
+# 1. AMBIENTE E SEGURANÇA (CRÍTICO)
 # ==========================================
+# Nunca suba ficheiros com senhas, tokens ou IPs internos
+.env.local
+.env.development.local
+.env.test.local
+*.pem
+*.key
+
+# ==========================================
+# 2. BACKEND (PYTHON / FASTAPI / IA)
+# ==========================================
+# Ficheiros compilados do Python
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Ambientes Virtuais
 venv/
 env/
-.venv/3
-.env
+.venv/
+
+# Ficheiros de Log do Servidor
+*.log
+logs/
+
+# Modelos de Machine Learning (Pesados)
+*.pkl
+*.joblib
+*.h5
+*.model
 
 # ==========================================
-# 2. DEPENDÊNCIAS FRONTEND (React / Node)
+# 3. FRONTEND (REACT / VITE / NODE)
 # ==========================================
+# Dependências do Node (O Docker já instala isto isoladamente)
 node_modules/
+/nexus-frontend/node_modules/
+
+# Pastas de Build (Código compilado para Produção)
 dist/
 build/
-.npm/
+/nexus-frontend/dist/
+
+# Logs de erro do NPM
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+.eslintcache
 
 # ==========================================
-# 3. CONFIGURAÇÕES DE IDE E SISTEMA OPERACIONAL
+# 4. BANCO DE DADOS E FICHEIROS DE EXCEL
+# ==========================================
+# Impede que suba o volume do PostgreSQL (Gigante)
+pgdata/
+nexus_pgdata/
+
+# Impede que suba bases de dados SQLite antigas
+*.db
+*.sqlite3
+
+# Ficheiros de Dados Brutos (ERP) e Exportações
+*.csv
+*.xls
+*.parquet
+# Nota: Se precisar de subir um template vazio para a equipa,
+# retire o comentário da linha abaixo e coloque o nome do ficheiro:
+# !Template_SOP.xlsx
+
+# ==========================================
+# 5. SISTEMA OPERACIONAL E EDITORES (VS CODE)
 # ==========================================
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
-nexus_local.db
+*.swp

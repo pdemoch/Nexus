@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+.env
+nexus_local.db
+alembic/versions/*.py
+nexus-frontend/

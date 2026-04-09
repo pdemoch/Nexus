@@ -1,13 +1,19 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { Settings, RefreshCw, Terminal, Play, ShieldAlert, Loader2, Download, UserPlus, Check, X } from 'lucide-react';
+import { Settings, RefreshCw, Terminal, Play, ShieldAlert, Loader2, Download, UserPlus, Check, X, Unlock } from 'lucide-react';
 
 export default function AdminPanel() {
   const [logs, setLogs] = useState<string[]>([]);
   const [isPipelineRunning, setIsPipelineRunning] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  const [isExporting, setIsExporting] = useState(false);  
+  const [isExporting, setIsExporting] = useState(false);
+  
   const [usuariosPendentes, setUsuariosPendentes] = useState<any[]>([]);
+  
+  // ESTADOS DO DESCONGELAMENTO
+  const [origemDesbloqueio, setOrigemDesbloqueio] = useState('');
+  const [isUnlocking, setIsUnlocking] = useState(false);
+
   const terminalScrollRef = useRef<HTMLDivElement>(null);
 
   // EFEITO: Rola a barra do terminal automaticamente se o pipeline estiver a rodar
@@ -42,7 +48,6 @@ export default function AdminPanel() {
   // Faz polling do status a cada 3 segundos APENAS se o pipeline estiver a rodar
   useEffect(() => {
     fetchData();
-    // CORREÇÃO: Tipagem universal para o intervalo no TypeScript
     let interval: ReturnType<typeof setInterval>;
     if (isPipelineRunning) {
       interval = setInterval(fetchData, 3000);
@@ -59,14 +64,13 @@ export default function AdminPanel() {
     setLogs(["[SISTEMA] Iniciando requisição para o núcleo de IA..."]);
     
     try {
-      await axios.post('/api/v1/admin/pipeline/run');
+      await axios.post('/api/v1/admin/pipeline/start');
     } catch (e: any) {
       alert(e.response?.data?.detail || "Erro ao iniciar o pipeline.");
       setIsPipelineRunning(false);
     }
   };
 
-  // CORREÇÃO: Alterado de 'id: int' para 'id: number'
   const handleAprovarUsuario = async (id: number) => {
     if (!window.confirm("Aprovar o acesso deste utilizador ao Nexus?")) return;
     try {
@@ -77,7 +81,6 @@ export default function AdminPanel() {
     }
   };
 
-  // CORREÇÃO: Alterado de 'id: int' para 'id: number'
   const handleRejeitarUsuario = async (id: number) => {
     if (!window.confirm("Tem a certeza que deseja REJEITAR e excluir este cadastro?")) return;
     try {
@@ -109,6 +112,22 @@ export default function AdminPanel() {
     }
   };
 
+  const handleDescongelar = async () => {
+    if (!origemDesbloqueio) return alert("Selecione ou digite a origem que deseja descongelar.");
+    if (!window.confirm(`Deseja realmente forçar a reabertura da tela para: ${origemDesbloqueio}?`)) return;
+
+    setIsUnlocking(true);
+    try {
+      await axios.post(`/api/v1/admin/reabrir-ciclo?origem=${origemDesbloqueio}`);
+      alert(`✅ Tela destrancada com sucesso para: ${origemDesbloqueio}`);
+      setOrigemDesbloqueio('');
+    } catch (e: any) {
+      alert(e.response?.data?.detail || "Erro ao destrancar a tela.");
+    } finally {
+      setIsUnlocking(false);
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
@@ -128,7 +147,7 @@ export default function AdminPanel() {
             <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
               <Settings className="w-8 h-8 text-slate-800" /> CONTROL TOWER <span className="text-slate-300 font-medium ml-2">Administração</span>
             </h1>
-            <p className="text-slate-500 font-medium text-sm mt-1 ml-11">Gestão de utilizadores, motor de IA e extração de dados brutos.</p>
+            <p className="text-slate-500 font-medium text-sm mt-1 ml-11">Gestão de utilizadores, travas de segurança e motor de IA.</p>
           </div>
           
           <button 
@@ -143,46 +162,92 @@ export default function AdminPanel() {
 
         <div className="flex flex-col lg:flex-row gap-6 flex-1 min-h-0">
           
-          {/* COLUNA ESQUERDA: GESTÃO DE UTILIZADORES */}
-          <div className="w-full lg:w-1/3 bg-white rounded-[32px] p-8 shadow-sm border border-slate-100 flex flex-col overflow-hidden">
-             <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slate-100 flex-shrink-0">
-               <UserPlus className="w-5 h-5 text-indigo-500" />
-               <h2 className="text-sm font-black text-slate-700 uppercase tracking-widest">Aprovações Pendentes</h2>
-               <div className="ml-auto bg-indigo-100 text-indigo-700 font-black text-xs px-2 py-1 rounded-lg">{usuariosPendentes.length}</div>
+          {/* COLUNA ESQUERDA: GESTÃO DE UTILIZADORES E TRAVAS */}
+          <div className="w-full lg:w-1/3 flex flex-col gap-6 min-h-0">
+             
+             {/* CARD 1: APROVAÇÕES PENDENTES */}
+             <div className="bg-white rounded-[32px] p-8 shadow-sm border border-slate-100 flex flex-col overflow-hidden flex-1 min-h-0">
+                 <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slate-100 flex-shrink-0">
+                   <UserPlus className="w-5 h-5 text-indigo-500" />
+                   <h2 className="text-sm font-black text-slate-700 uppercase tracking-widest">Aprovações Pendentes</h2>
+                   <div className="ml-auto bg-indigo-100 text-indigo-700 font-black text-xs px-2 py-1 rounded-lg">{usuariosPendentes.length}</div>
+                 </div>
+
+                 <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-4">
+                    {usuariosPendentes.length === 0 ? (
+                      <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-3 opacity-60">
+                         <ShieldAlert className="w-10 h-10" />
+                         <span className="text-xs font-black uppercase tracking-widest text-center">Nenhum acesso<br/>pendente</span>
+                      </div>
+                    ) : (
+                      usuariosPendentes.map((user) => (
+                        <div key={user.id} className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col gap-3">
+                           <div>
+                             <h3 className="font-black text-sm text-slate-800">{user.nome}</h3>
+                             <p className="text-xs font-bold text-slate-500">{user.email}</p>
+                           </div>
+                           
+                           <div className="bg-white p-2 rounded-xl border border-slate-100 flex flex-col gap-1">
+                              <span className="text-[10px] font-black text-indigo-500 uppercase tracking-widest">Perfil: {user.funcao}</span>
+                              {user.nome_vendedor && <span className="text-[10px] font-bold text-slate-600 truncate">Vendedor: {user.nome_vendedor}</span>}
+                              {user.gerente_nome && <span className="text-[10px] font-bold text-slate-600 truncate">Gerente: {user.gerente_nome}</span>}
+                           </div>
+
+                           <div className="flex items-center gap-2 mt-1">
+                              <button onClick={() => handleRejeitarUsuario(user.id)} className="flex-1 flex items-center justify-center gap-1 bg-white border border-rose-200 text-rose-600 hover:bg-rose-50 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors">
+                                <X className="w-3 h-3" /> Rejeitar
+                              </button>
+                              <button onClick={() => handleAprovarUsuario(user.id)} className="flex-1 flex items-center justify-center gap-1 bg-emerald-500 hover:bg-emerald-600 text-white py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors shadow-md shadow-emerald-500/20">
+                                <Check className="w-3 h-3" /> Aprovar
+                              </button>
+                           </div>
+                        </div>
+                      ))
+                    )}
+                 </div>
              </div>
 
-             <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-4">
-                {usuariosPendentes.length === 0 ? (
-                  <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-3 opacity-60">
-                     <ShieldAlert className="w-10 h-10" />
-                     <span className="text-xs font-black uppercase tracking-widest text-center">Nenhum acesso<br/>pendente</span>
-                  </div>
-                ) : (
-                  usuariosPendentes.map((user) => (
-                    <div key={user.id} className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col gap-3">
-                       <div>
-                         <h3 className="font-black text-sm text-slate-800">{user.nome}</h3>
-                         <p className="text-xs font-bold text-slate-500">{user.email}</p>
-                       </div>
-                       
-                       <div className="bg-white p-2 rounded-xl border border-slate-100 flex flex-col gap-1">
-                          <span className="text-[10px] font-black text-indigo-500 uppercase tracking-widest">Perfil: {user.funcao}</span>
-                          {user.nome_vendedor && <span className="text-[10px] font-bold text-slate-600 truncate">Vendedor: {user.nome_vendedor}</span>}
-                          {user.gerente_nome && <span className="text-[10px] font-bold text-slate-600 truncate">Gerente: {user.gerente_nome}</span>}
-                       </div>
+             {/* CARD 2: DESCONGELAMENTO DE TELAS */}
+             <div className="bg-white rounded-[32px] p-8 shadow-sm border border-slate-100 flex flex-col shrink-0">
+               <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slate-100 flex-shrink-0">
+                 <Unlock className="w-5 h-5 text-amber-500" />
+                 <h2 className="text-sm font-black text-slate-700 uppercase tracking-widest">Descongelar Telas</h2>
+               </div>
 
-                       <div className="flex items-center gap-2 mt-1">
-                          <button onClick={() => handleRejeitarUsuario(user.id)} className="flex-1 flex items-center justify-center gap-1 bg-white border border-rose-200 text-rose-600 hover:bg-rose-50 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors">
-                            <X className="w-3 h-3" /> Rejeitar
-                          </button>
-                          <button onClick={() => handleAprovarUsuario(user.id)} className="flex-1 flex items-center justify-center gap-1 bg-emerald-500 hover:bg-emerald-600 text-white py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors shadow-md shadow-emerald-500/20">
-                            <Check className="w-3 h-3" /> Aprovar
-                          </button>
-                       </div>
-                    </div>
-                  ))
-                )}
+               <div className="flex flex-col gap-4">
+                 <p className="text-xs font-medium text-slate-500 leading-relaxed">
+                   Force a reabertura de uma etapa do S&OP que já foi assinada e congelada.
+                 </p>
+
+                 <select
+                   value={origemDesbloqueio}
+                   onChange={(e) => setOrigemDesbloqueio(e.target.value)}
+                   className="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-xl focus:ring-amber-500 focus:border-amber-500 block w-full p-3 font-bold outline-none cursor-pointer"
+                 >
+                   <option value="">Selecione um nível global...</option>
+                   <option value="Top-Down">Visão Gerencial (Top-Down)</option>
+                   <option value="S&OP-Final">S&OP Global (Dashboard Final)</option>
+                 </select>
+
+                 <input
+                    type="text"
+                    placeholder="Ou digite o nome de um Vendedor..."
+                    value={origemDesbloqueio}
+                    onChange={(e) => setOrigemDesbloqueio(e.target.value.toUpperCase())}
+                    className="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-xl focus:ring-amber-500 focus:border-amber-500 block w-full p-3 font-bold outline-none placeholder:text-slate-400"
+                 />
+
+                 <button
+                   onClick={handleDescongelar}
+                   disabled={isUnlocking || !origemDesbloqueio}
+                   className="mt-2 w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 text-white py-3.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-md shadow-amber-500/20 disabled:opacity-50"
+                 >
+                   {isUnlocking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Unlock className="w-4 h-4" />}
+                   Forçar Reabertura
+                 </button>
+               </div>
              </div>
+
           </div>
 
           {/* COLUNA DIREITA: MOTOR DE IA & TERMINAL */}

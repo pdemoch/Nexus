@@ -1,4 +1,3 @@
-import React from 'react';
 import { BarChart3, Users, LayoutDashboard, Settings, Rocket, LogOut, UserCircle, ShieldAlert } from 'lucide-react';
 
 export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout }: any) {
@@ -6,7 +5,7 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
   // Definição das permissões de cada tela
   const allNavItems = [
     { id: 'dashboard', label: 'S&OP Global', icon: LayoutDashboard, roles: ['Administrador', 'Gerente'] },
-    { id: 'topdown', label: 'Top-Down (Gerencia)', icon: BarChart3, roles: ['Administrador', 'Gerente'] },
+    { id: 'topdown', label: 'Top-Down (Gerência)', icon: BarChart3, roles: ['Administrador', 'Gerente'] },
     { id: 'npd', label: 'Inovações (MKT)', icon: Rocket, roles: ['Administrador', 'Gerente'] },
     { id: 'consenso', label: 'Bottom-Up (Comercial)', icon: Users, roles: ['Administrador', 'Gerente', 'Executivo'] },
     { id: 'gerenciamento', label: 'Gerenciamento', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },
@@ -17,12 +16,23 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
   const allowedNavItems = allNavItems.filter(item => item.roles.includes(user?.funcao));
 
   return (
-    <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col h-full shadow-2xl relative z-50">
+    // A MÁGICA AQUI: O 'shrink-0' impede que a barra seja esmagada
+    <aside className="w-64 shrink-0 bg-slate-900 border-r border-slate-800 flex flex-col h-screen relative z-50">
       
-      {/* PERFIL DO USUÁRIO LOGADO */}
-      <div className="px-6 pb-6 mb-4 border-b border-slate-800">
-        <div className="flex items-center gap-3 bg-slate-800 p-3 rounded-2xl border border-slate-700">
-          <UserCircle className="w-8 h-8 text-indigo-400 flex-shrink-0" />
+      {/* CABEÇALHO DA SIDEBAR */}
+      <div className="h-20 flex items-center justify-center border-b border-slate-800 px-6 shrink-0">
+        <div className="flex items-center gap-3">
+          <div className="bg-indigo-500 p-2 rounded-xl shadow-lg shadow-indigo-500/30">
+            <Rocket className="w-6 h-6 text-white" />
+          </div>
+          <span className="text-2xl font-black text-white tracking-tighter">NEXUS<span className="text-indigo-400">.</span></span>
+        </div>
+      </div>
+
+      {/* PERFIL DO USUARIO */}
+      <div className="p-6 border-b border-slate-800 mb-4 shrink-0">
+        <div className="flex items-center gap-3 bg-slate-800/50 p-3 rounded-2xl border border-slate-700/50">
+          <UserCircle className="w-10 h-10 text-indigo-400 flex-shrink-0" />
           <div className="flex flex-col overflow-hidden">
             <span className="text-sm font-bold text-white truncate">{user?.nome}</span>
             <span className="text-[10px] font-black uppercase tracking-widest text-emerald-400 truncate">{user?.funcao}</span>
@@ -30,6 +40,7 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
         </div>
       </div>
 
+      {/* NAVEGAÇÃO */}
       <nav className="flex-1 px-4 space-y-2 overflow-y-auto custom-scrollbar">
         {allowedNavItems.map((item) => {
           const Icon = item.icon;
@@ -50,10 +61,11 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
         })}
       </nav>
 
-      <div className="p-4 border-t border-slate-800">
+      {/* LOGOUT */}
+      <div className="p-4 border-t border-slate-800 shrink-0">
         <button
           onClick={onLogout}
-          className="w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm font-bold text-rose-400 hover:bg-rose-500/10 transition-all"
+          className="w-full flex items-center gap-3 px-4 py-3 text-sm font-bold text-rose-400 hover:bg-rose-500/10 hover:text-rose-300 rounded-xl transition-colors"
         >
           <LogOut className="w-5 h-5" />
           Sair do Sistema
