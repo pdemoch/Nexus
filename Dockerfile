@@ -2,7 +2,7 @@ FROM python:3.10-slim
 
 WORKDIR /nexus_backend
 
-# Instala ferramentas do Linux necessárias para compilar o Prophet e o Postgres
+# Instala ferramentas do Linux necessárias para compilar o Prophet e o Postgres.
 RUN apt-get update && apt-get install -y \
     build-essential \
     libpq-dev \
