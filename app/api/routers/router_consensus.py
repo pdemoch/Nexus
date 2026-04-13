@@ -1,13 +1,15 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from typing import List
-from sqlalchemy.orm import Session
+from typing import List, Optional
+from sqlalchemy.orm import Session, Query
 from sqlalchemy import func
 import datetime
 from dateutil.relativedelta import relativedelta
 import io
 import pandas as pd
 from fastapi.responses import StreamingResponse
+import traceback
+from collections import defaultdict
 
 from app.core.database import get_db
 from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, FatoVendas, ControleCiclo, Usuario
@@ -15,763 +17,409 @@ from app.api.routers.router_auth import get_current_user
 
 router = APIRouter(prefix="/api/v1/consensus", tags=["Consenso S&OP"])
 
+# =====================================================================
+# 1. UTILITÁRIOS E HELPERS (DRY)
+# =====================================================================
 def get_current_cycle() -> str:
     return datetime.date.today().strftime("%m/%Y")
 
 def get_previous_cycle() -> str:
-    hoje = datetime.date.today()
-    mes_passado = hoje.replace(day=1) - relativedelta(months=1)
-    return mes_passado.strftime("%m/%Y")
+    return (datetime.date.today().replace(day=1) - relativedelta(months=1)).strftime("%m/%Y")
 
 def get_projection_window() -> tuple[str, str]:
     hoje = datetime.date.today().replace(day=1)
-    m_plus_2 = (hoje + relativedelta(months=2)).strftime('%Y-%m-%d')
-    m_plus_4 = (hoje + relativedelta(months=4)).strftime('%Y-%m-%d')
-    return m_plus_2, m_plus_4
+    return (hoje + relativedelta(months=2)).strftime('%Y-%m-%d'), (hoje + relativedelta(months=4)).strftime('%Y-%m-%d')
+
+def parse_date_safe(date_input) -> datetime.date:
+    return datetime.datetime.strptime(str(date_input).split("T")[0], "%Y-%m-%d").date()
+
+# =====================================================================
+# 2. MIDDLEWARES E VALIDAÇÕES
+# =====================================================================
+def require_manager_or_admin(usuario: dict = Depends(get_current_user)):
+    if usuario['funcao'] not in ['Administrador', 'Gerente']:
+        raise HTTPException(status_code=403, detail="Acesso Restrito à Diretoria/Gerência.")
+    return usuario
+
+def require_admin(usuario: dict = Depends(get_current_user)):
+    if usuario['funcao'] != 'Administrador':
+        raise HTTPException(status_code=403, detail="Acesso Restrito ao Administrador.")
+    return usuario
 
 def check_global_lock(db: Session):
-    status_global = db.query(ControleCiclo).filter(
-        ControleCiclo.ciclo_sop == get_current_cycle(), 
-        ControleCiclo.origem == 'S&OP-Final'
-    ).first()
-    if status_global and status_global.status == 'Fechado':
+    if db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == get_current_cycle(), ControleCiclo.origem == 'S&OP-Final', ControleCiclo.status == 'Fechado').first():
         raise HTTPException(status_code=403, detail="Acesso Negado: S&OP Global publicado.")
 
-# =====================================================================
-# NOVO: MOTOR DE PREVENÇÃO DE CONCORRÊNCIA (GERENTE vs. EXECUTIVO)
-# =====================================================================
 def verificar_vendedor_online(db: Session, vendedor_nome: str):
     vendedor_user = db.query(Usuario).filter(func.trim(Usuario.nome_vendedor) == vendedor_nome.strip()).first()
-    if vendedor_user and vendedor_user.ultima_atividade:
-        segundos_inativo = (datetime.datetime.utcnow() - vendedor_user.ultima_atividade).total_seconds()
-        if segundos_inativo < 60:
-            raise HTTPException(
-                status_code=403, 
-                detail=f"⚠️ CONCORRÊNCIA: O executivo {vendedor_nome} está com a plataforma aberta neste exato momento. Ação bloqueada para evitar conflito de dados."
+    if vendedor_user and vendedor_user.ultima_atividade and (datetime.datetime.utcnow() - vendedor_user.ultima_atividade).total_seconds() < 60:
+        raise HTTPException(status_code=403, detail=f"⚠️ CONCORRÊNCIA: O executivo {vendedor_nome} está com a plataforma aberta neste exato momento.")
+
+# =====================================================================
+# 3. REPOSITÓRIOS
+# =====================================================================
+class QueryRepository:
+    @staticmethod
+    def get_base_ibp_query(db: Session, m_plus_2: str, m_plus_4: str, ciclo: str) -> Query:
+        return db.query(FatoIbpGranular, DimCliente, DimProduto)\
+            .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
+            .join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)\
+            .filter(
+                FatoIbpGranular.mes_projetado >= m_plus_2,
+                FatoIbpGranular.mes_projetado <= m_plus_4,
+                func.upper(func.coalesce(DimCliente.bloqueado, 'ATIVO')) != 'INATIVO',
+                FatoIbpGranular.ciclo_sop == ciclo
             )
 
 # =====================================================================
-# MOTOR MATEMÁTICO: RATEIO BASEADO EM HISTÓRICO REAL (ÚLTIMOS 12 MESES)
+# 4. SERVIÇOS DE NEGÓCIO
 # =====================================================================
-def aplicar_rateio_historico_amplo(db: Session, linhas_atomicas: List[FatoIbpGranular], volume_total: int, nivel_rateio: str):
-    if not linhas_atomicas: return
+class RateioService:
+    @staticmethod
+    def aplicar_historico_amplo(db: Session, linhas_atomicas: List[FatoIbpGranular], volume_total: int, nivel_rateio: str):
+        if not linhas_atomicas: return
 
-    pares = set([(l.sku, l.cgc) for l in linhas_atomicas])
-    skus = list(set([p[0] for p in pares]))
-    cgcs = list(set([p[1] for p in pares]))
-    
-    data_limite = datetime.date.today() - relativedelta(months=12)
-    
-    historico = db.query(FatoVendas.sku, FatoVendas.cgc, func.sum(FatoVendas.qt_pedido).label('vol_hist'))\
-        .filter(FatoVendas.sku.in_(skus), FatoVendas.cgc.in_(cgcs), FatoVendas.data_pedido >= data_limite)\
-        .group_by(FatoVendas.sku, FatoVendas.cgc).all()
+        skus = list({l.sku for l in linhas_atomicas if l.sku})
+        cgcs = list({l.cgc for l in linhas_atomicas if l.cgc})
+        if not skus or not cgcs: return
         
-    dict_hist = {f"{h.sku}_{h.cgc}": float(h.vol_hist or 0) for h in historico}
-    soma_hist = sum([dict_hist.get(f"{l.sku}_{l.cgc}", 0) for l in linhas_atomicas])
-    
-    soma_dist = 0
-    for i, l in enumerate(linhas_atomicas):
-        if i == len(linhas_atomicas) - 1:
-            rateado = volume_total - soma_dist 
-        else:
-            peso = dict_hist.get(f"{l.sku}_{l.cgc}", 0) / soma_hist if soma_hist > 0 else 1.0 / len(linhas_atomicas)
-            rateado = int(round(volume_total * peso))
-            soma_dist += rateado
+        data_limite_str = (datetime.date.today() - relativedelta(months=12)).strftime('%Y-%m-%d')
+        historico = db.query(FatoVendas.sku, FatoVendas.cgc, func.sum(FatoVendas.qt_pedido).label('vol_hist'))\
+            .filter(FatoVendas.sku.in_(skus), FatoVendas.cgc.in_(cgcs), FatoVendas.data_pedido >= data_limite_str)\
+            .group_by(FatoVendas.sku, FatoVendas.cgc).all()
             
-        if nivel_rateio == 'Top-Down':
-            l.vol_topdown = rateado
-            l.vol_bottomup = rateado
-            l.vol_final = rateado
-        elif nivel_rateio == 'Bottom-Up':
-            l.vol_bottomup = rateado
-            l.vol_final = rateado
-
-class AjusteTopDown(BaseModel):
-    produto: str
-    mes_projetado: str
-    novo_volume: int
-
-class PayloadCongelarTopDown(BaseModel):
-    origem_ajuste: str
-    ajustes: List[AjusteTopDown]
-
-class AjusteBottomUpNovo(BaseModel):
-    nivel: str
-    chave: str
-    mes_projetado: str
-    novo_volume: int
-    pmv_aplicado: float = 0.0
-
-class PayloadCongelarBottomUp(BaseModel):
-    origem_ajuste: str
-    ajustes: List[AjusteBottomUpNovo]
-
-class PayloadFecharCiclo(BaseModel):
-    origem: str
-
-class AjusteGerente(BaseModel):
-    nivel: str 
-    chave: str 
-    mes_projetado: str
-    novo_volume: int
-
-class PayloadAprovarGerente(BaseModel):
-    ajustes: List[AjusteGerente]
-
-class PayloadLockAll(BaseModel):
-    gerente_nome: str = "" 
-    acao: str
-
-class PayloadToggleLock(BaseModel):
-    origem: str
-
-@router.get("/status")
-async def checar_status_ciclo(origem: str, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    ciclo = get_current_cycle()
-    status_usuario = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == origem).first()
-    status_topdown = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
-    status_global = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
-
-    return {
-        "is_fechado": status_usuario.status == 'Fechado' if status_usuario else False,
-        "is_topdown_fechado": status_topdown.status == 'Fechado' if status_topdown else False,
-        "is_global_fechado": status_global.status == 'Fechado' if status_global else False
-    }
-
-@router.get("/filtros")
-async def obter_filtros_busca(gerente_nome: str = None, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    q_reg = db.query(DimCliente.regional).filter(DimCliente.regional.isnot(None))
-    q_vend = db.query(DimCliente.vendedor_nome).filter(DimCliente.vendedor_nome.isnot(None))
-    
-    nome_gerente_filtro = gerente_nome
-    if usuario_logado['funcao'] == 'Gerente':
-        nome_gerente_filtro = usuario_logado['gerente_nome']
-
-    if nome_gerente_filtro:
-        gerente_nome_limpo = nome_gerente_filtro.strip()
-        q_reg = q_reg.filter(func.trim(DimCliente.gerente_nome) == gerente_nome_limpo)
-        q_vend = q_vend.filter(func.trim(DimCliente.gerente_nome) == gerente_nome_limpo)
-
-    regionais = q_reg.distinct().all()
-    vendedores = q_vend.distinct().all()
-    
-    return {
-        "regionais": sorted([str(r[0]).strip() for r in regionais if r[0] and str(r[0]).strip()]),
-        "vendedores": sorted([str(v[0]).strip() for v in vendedores if v[0] and str(v[0]).strip()])
-    }
-
-@router.post("/fechar")
-async def fechar_ciclo(payload: PayloadFecharCiclo, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] == 'Executivo' and payload.origem != usuario_logado['nome_vendedor']:
-        raise HTTPException(status_code=403, detail="Você só pode fechar a sua própria carteira.")
-
-    check_global_lock(db)
-    ciclo = get_current_cycle()
-    registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == payload.origem).first()
-    
-    if not registro:
-        db.add(ControleCiclo(ciclo_sop=ciclo, origem=payload.origem, status='Fechado'))
-    else:
-        registro.status = 'Fechado'
-    db.commit()
-    return {"status": "success"}
-
-@router.get("/macro")
-async def listar_macro(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
-        raise HTTPException(status_code=403, detail="Acesso Restrito à Diretoria/Gerência.")
-
-    try:
-        m_plus_2, m_plus_4 = get_projection_window()
+        dict_hist = {f"{h.sku}_{h.cgc}": float(h.vol_hist or 0) for h in historico}
+        soma_hist = sum([dict_hist.get(f"{l.sku}_{l.cgc}", 0) for l in linhas_atomicas])
         
-        projecoes = db.query(
-            FatoIbpGranular.sku, FatoIbpGranular.mes_projetado,
-            func.sum(FatoIbpGranular.vol_ia).label('vol_ia'),
-            func.sum(FatoIbpGranular.vol_topdown).label('vol_td'),
-            func.sum(FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('receita_base'),
-            func.avg(FatoIbpGranular.pmv_aplicado).label('pmv_simples'),
-            DimProduto.descricao, DimProduto.categoria, DimProduto.segmento,
-            DimProduto.modelo_vencedor, DimProduto.acuracia_ia
-        ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)\
-         .filter(
-             FatoIbpGranular.mes_projetado >= m_plus_2,
-             FatoIbpGranular.mes_projetado <= m_plus_4,
-             FatoIbpGranular.ciclo_sop == get_current_cycle()
-         ).group_by(
-             FatoIbpGranular.sku, FatoIbpGranular.mes_projetado, DimProduto.descricao, 
-             DimProduto.categoria, DimProduto.segmento, DimProduto.modelo_vencedor, DimProduto.acuracia_ia
-         ).all()
-
-        produtos_dict = {}
-        for r in projecoes:
-            if r.sku not in produtos_dict:
-                produtos_dict[r.sku] = {
-                    "produto": r.sku, "descricao": r.descricao, "categoria": r.categoria, "segmento": r.segmento,
-                    "modelo_vencedor": r.modelo_vencedor or "Não Calculado", "acuracia_ia": float(r.acuracia_ia or 0.0), "meses": []
-                }
-            
-            vol_ia = int(r.vol_ia or 0)
-            pmv_real = (float(r.receita_base or 0) / vol_ia) if vol_ia > 0 else float(r.pmv_simples or 0)
-
-            mes_banco_str = r.mes_projetado.strftime("%Y-%m-%d") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado)
-            mes_amigavel = r.mes_projetado.strftime("%b/%y").capitalize() if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado)
-
-            produtos_dict[r.sku]["meses"].append({
-                "mes_banco": mes_banco_str, 
-                "mes_str": mes_amigavel,
-                "vol_ia": vol_ia, 
-                "vol_ajustado": int(r.vol_td or 0), 
-                "pmv": pmv_real
-            })
-
-        return {"status": "success", "dados": list(produtos_dict.values())}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/macro/grafico")
-async def obter_grafico_produto(produto: str, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    try:
-        m_plus_2, m_plus_4 = get_projection_window()
-        hoje = datetime.date.today()
-        data_limite = hoje - relativedelta(years=2)
-        ciclo_anterior = get_previous_cycle()
-        
-        historico = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol_real'))\
-            .filter(FatoVendas.sku == produto, FatoVendas.data_pedido >= data_limite)\
-            .group_by(func.to_char(FatoVendas.data_pedido, 'YYYY-MM')).all()
-            
-        hist_dict = {h.mes_ano: int(h.vol_real or 0) for h in historico}
-        
-        query_ant = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_topdown).label('vol_ant'))\
-            .filter(FatoIbpGranular.sku == produto, FatoIbpGranular.ciclo_sop == ciclo_anterior)\
-            .group_by(FatoIbpGranular.mes_projetado).all()
-            
-        dict_ant = {p.mes_projetado.strftime('%Y-%m-%d') if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado): int(p.vol_ant or 0) for p in query_ant}
-
-        projecoes = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), func.sum(FatoIbpGranular.vol_topdown).label('vol_td'))\
-            .filter(FatoIbpGranular.sku == produto, FatoIbpGranular.ciclo_sop == get_current_cycle())\
-            .group_by(FatoIbpGranular.mes_projetado).order_by(FatoIbpGranular.mes_projetado).all()
-
-        timeline = []
-        for i in range(24, 0, -1):
-            mes_dt = hoje - relativedelta(months=i)
-            timeline.append({"name": mes_dt.strftime("%b/%y").capitalize(), "data_iso": mes_dt.replace(day=1).strftime("%Y-%m-%d"), "Realizado": hist_dict.get(mes_dt.strftime('%Y-%m'), 0), "IA": None, "Consenso": None, "CicloAnterior": None})
-            
-        for p in projecoes:
-            p_str = p.mes_projetado.strftime('%Y-%m-%d') if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado)
-            consenso = int(p.vol_td or 0) if m_plus_2 <= p_str <= m_plus_4 else None 
-            timeline.append({"name": p.mes_projetado.strftime("%b/%y").capitalize() if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado), "data_iso": p_str, "Realizado": None, "IA": int(p.vol_ia or 0), "Consenso": consenso, "CicloAnterior": dict_ant.get(p_str, None)})
-            
-        return {"status": "success", "dados": timeline}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/macro/congelar")
-async def congelar_macro_rateio(payload: PayloadCongelarTopDown, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
-        raise HTTPException(status_code=403, detail="Acesso Restrito.")
-
-    try:
-        check_global_lock(db)
-        ciclo = get_current_cycle()
-        for ajuste in payload.ajustes:
-            # CORREÇÃO: Evita que string com fuso horário quebre o Parse
-            data_str = ajuste.mes_projetado.split("T")[0]
-            data_alvo = datetime.datetime.strptime(data_str, "%Y-%m-%d").date()
-            
-            linhas_atomicas = db.query(FatoIbpGranular).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
-                .filter(
-                    FatoIbpGranular.sku == ajuste.produto, 
-                    FatoIbpGranular.mes_projetado == data_alvo, 
-                    func.upper(func.coalesce(DimCliente.bloqueado, 'ATIVO')) != 'INATIVO', 
-                    FatoIbpGranular.ciclo_sop == ciclo
-                ).all()
+        soma_dist = 0
+        for i, l in enumerate(linhas_atomicas):
+            if i == len(linhas_atomicas) - 1:
+                rateado = volume_total - soma_dist 
+            else:
+                peso = dict_hist.get(f"{l.sku}_{l.cgc}", 0) / soma_hist if soma_hist > 0 else 1.0 / len(linhas_atomicas)
+                rateado = int(round(volume_total * peso))
+                soma_dist += rateado
                 
-            aplicar_rateio_historico_amplo(db, linhas_atomicas, int(ajuste.novo_volume), 'Top-Down')
+            if nivel_rateio == 'Top-Down':
+                l.vol_topdown = l.vol_bottomup = l.vol_final = rateado
+            elif nivel_rateio == 'Bottom-Up':
+                l.vol_bottomup = l.vol_final = rateado
 
-        registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
-        if not registro:
-            db.add(ControleCiclo(ciclo_sop=ciclo, origem='Top-Down', status='Fechado'))
-        else:
-            registro.status = 'Fechado'
-        db.commit()
-        return {"status": "success"}
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Falha no rateio: {str(e)}")
-
-@router.post("/macro/reabrir")
-async def reabrir_macro(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] != 'Administrador':
-        raise HTTPException(status_code=403, detail="Acesso Restrito.")
-
-    try:
-        check_global_lock(db)
-        ciclo = get_current_cycle()
-        fechados = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.status == 'Fechado', ControleCiclo.origem.notin_(['Top-Down', 'S&OP-Final'])).count()
-        if fechados > 0: raise HTTPException(status_code=403, detail="Ordem Reversa Violada: Destranque os Vendedores primeiro.")
-
-        registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
-        if registro:
-            registro.status = 'Aberto'
-            db.commit()
-        return {"status": "success"}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/micro")
-async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] == 'Executivo':
-        nivel_hierarquia = 'vendedor'
-        nome_responsavel = usuario_logado['nome_vendedor']
-
-    m_plus_2, m_plus_4 = get_projection_window()
-    
-    query = db.query(
-        DimCliente.razaosocial, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado,
-        func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), 
-        func.sum(FatoIbpGranular.vol_bottomup).label('vol_bottomup'), 
-        func.avg(FatoIbpGranular.pmv_aplicado).label('pmv_aplicado')
-    ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
-     .filter(
-         FatoIbpGranular.mes_projetado >= m_plus_2, 
-         FatoIbpGranular.mes_projetado <= m_plus_4,
-         func.upper(func.coalesce(DimCliente.bloqueado, 'ATIVO')) != 'INATIVO',
-         FatoIbpGranular.ciclo_sop == get_current_cycle()
-     )
-     
-    if nivel_hierarquia == 'vendedor': 
-        query = query.filter(func.trim(DimCliente.vendedor_nome) == nome_responsavel.strip())
-    else: 
-        query = query.filter(func.trim(DimCliente.regional) == nome_responsavel.strip())
-
-    if usuario_logado['funcao'] == 'Gerente':
-         query = query.filter(func.trim(DimCliente.gerente_nome) == usuario_logado['gerente_nome'].strip())
-        
-    resultados = query.group_by(DimCliente.razaosocial, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all()
-    
-    arvore = {}
-    for r in resultados:
-        razao = str(r.razaosocial).strip() if r.razaosocial else "CLIENTE DESCONHECIDO"
-        sku = r.sku
-        mes = r.mes_projetado.strftime("%Y-%m-%d") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado)
-        vol_ia = int(r.vol_ia or 0)
-        vol_ajustado = int(r.vol_bottomup or 0)
-        receita = vol_ajustado * float(r.pmv_aplicado or 0)
-
-        if razao not in arvore:
-            arvore[razao] = {"id": razao, "chave_matriz": razao, "nome": razao, "tipo": "cliente", "meses": {}, "produtos": {}}
-        if sku not in arvore[razao]["produtos"]:
-            arvore[razao]["produtos"][sku] = {"id": f"{razao}|{sku}", "chave_matriz": f"{razao}|{sku}", "nome": r.descricao, "tipo": "produto", "meses": {}}
-
-        if mes not in arvore[razao]["produtos"][sku]["meses"]:
-            arvore[razao]["produtos"][sku]["meses"][mes] = {"vol_ia": 0, "vol_ajustado": 0, "receita": 0, "pmv": float(r.pmv_aplicado or 0)}
-        arvore[razao]["produtos"][sku]["meses"][mes]["vol_ia"] += vol_ia
-        arvore[razao]["produtos"][sku]["meses"][mes]["vol_ajustado"] += vol_ajustado
-        arvore[razao]["produtos"][sku]["meses"][mes]["receita"] += receita
-
-        if mes not in arvore[razao]["meses"]: 
-            arvore[razao]["meses"][mes] = {"vol_ia": 0, "vol_ajustado": 0, "receita": 0, "pmv": float(r.pmv_aplicado or 0)}
-        arvore[razao]["meses"][mes]["vol_ia"] += vol_ia
-        arvore[razao]["meses"][mes]["vol_ajustado"] += vol_ajustado
-        arvore[razao]["meses"][mes]["receita"] += receita
-
-    dados_finais = []
-    for razao, c_data in arvore.items():
-        c_node = {
-            "id": c_data["id"], "chave_matriz": c_data["id"], "razaosocial": c_data["nome"], "nome": c_data["nome"], "tipo": c_data["tipo"],
-            "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%b/%y").capitalize(), "vol_ia": v["vol_ia"], "vol_ajustado": v["vol_ajustado"], "pmv": v["pmv"]} for k, v in c_data["meses"].items()],
-            "subRows": []
-        }
-        for sku, p_data in c_data["produtos"].items():
-            c_node["subRows"].append({
-                "id": p_data["id"], "chave_matriz": p_data["id"], "nome": p_data["nome"], "produto": sku, "tipo": p_data["tipo"],
-                "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%b/%y").capitalize(), "vol_ia": v["vol_ia"], "vol_ajustado": v["vol_ajustado"], "pmv": v["pmv"]} for k, v in p_data["meses"].items()]
-            })
-        dados_finais.append(c_node)
-
-    return {"status": "success", "dados": dados_finais}
-
-@router.get("/micro/grafico")
-async def obter_grafico_micro(chave_matriz: str, nivel_hierarquia: str = 'vendedor', nome_responsavel: str = '', db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    try:
-        if usuario_logado['funcao'] == 'Executivo':
-            nome_responsavel = usuario_logado['nome_vendedor']
-
+class GraphService:
+    @staticmethod
+    def build_timeline(db: Session, filters: dict):
         m_plus_2, m_plus_4 = get_projection_window()
         hoje = datetime.date.today()
-        data_limite = hoje - relativedelta(years=2)
-        ciclo_anterior = get_previous_cycle()
+        ciclo_anterior, ciclo_atual = get_previous_cycle(), get_current_cycle()
         
-        is_produto = '|' in chave_matriz
-        razaosocial = chave_matriz.split('|')[0] if is_produto else chave_matriz
-        sku = chave_matriz.split('|')[1] if is_produto else None
-
-        query_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol_real'))\
-            .join(DimCliente, FatoVendas.cgc == DimCliente.cgc).filter(func.trim(DimCliente.razaosocial) == razaosocial.strip(), FatoVendas.data_pedido >= data_limite)
-            
-        if is_produto: query_hist = query_hist.filter(FatoVendas.sku == sku)
-        if nome_responsavel: query_hist = query_hist.filter(func.trim(DimCliente.vendedor_nome) == nome_responsavel.strip())
+        q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol_real'))\
+            .join(DimCliente, FatoVendas.cgc == DimCliente.cgc).filter(FatoVendas.data_pedido >= hoje - relativedelta(years=2))
         
-        historico = query_hist.group_by(func.to_char(FatoVendas.data_pedido, 'YYYY-MM')).all()
-        hist_dict = {h.mes_ano: int(h.vol_real or 0) for h in historico}
-        
-        query_ant = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_bottomup).label('vol_ant'))\
-            .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
-            .filter(func.trim(DimCliente.razaosocial) == razaosocial.strip(), FatoIbpGranular.ciclo_sop == ciclo_anterior)
+        q_ant = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_final if filters.get('use_final') else FatoIbpGranular.vol_bottomup).label('vol_ant'))\
+            .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(FatoIbpGranular.ciclo_sop == ciclo_anterior)
             
-        if is_produto: query_ant = query_ant.filter(FatoIbpGranular.sku == sku)
-        if nome_responsavel: query_ant = query_ant.filter(func.trim(FatoIbpGranular.vendedor_nome) == nome_responsavel.strip())
-        
-        dict_ant = {p.mes_projetado.strftime('%Y-%m-%d') if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado): int(p.vol_ant or 0) for p in query_ant.group_by(FatoIbpGranular.mes_projetado).all()}
+        q_proj = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), func.sum(FatoIbpGranular.vol_bottomup if filters.get('use_bu') else FatoIbpGranular.vol_topdown).label('vol_consenso'))\
+            .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(FatoIbpGranular.ciclo_sop == ciclo_atual)
 
-        query_proj = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), func.sum(FatoIbpGranular.vol_bottomup).label('vol_bu'))\
-            .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
-            .filter(func.trim(DimCliente.razaosocial) == razaosocial.strip(), FatoIbpGranular.ciclo_sop == get_current_cycle())
-            
-        if is_produto: query_proj = query_proj.filter(FatoIbpGranular.sku == sku)
-        if nome_responsavel: query_proj = query_proj.filter(func.trim(FatoIbpGranular.vendedor_nome) == nome_responsavel.strip())
+        if filters.get('vendedor'): q_hist = q_hist.filter(func.trim(FatoVendas.vendedor_nome) == filters['vendedor'])
+        if filters.get('razaosocial'): q_hist = q_hist.filter(func.trim(DimCliente.razaosocial) == filters['razaosocial'])
+        if filters.get('sku'): q_hist = q_hist.filter(FatoVendas.sku == filters['sku'])
 
-        projecoes = query_proj.group_by(FatoIbpGranular.mes_projetado).order_by(FatoIbpGranular.mes_projetado).all()
+        if filters.get('vendedor'): q_ant = q_ant.filter(func.trim(FatoIbpGranular.vendedor_nome) == filters['vendedor'])
+        if filters.get('razaosocial'): q_ant = q_ant.filter(func.trim(DimCliente.razaosocial) == filters['razaosocial'])
+        if filters.get('sku'): q_ant = q_ant.filter(FatoIbpGranular.sku == filters['sku'])
 
-        timeline = []
-        for i in range(24, 0, -1):
-            mes_dt = hoje - relativedelta(months=i)
-            timeline.append({"name": mes_dt.strftime("%b/%y").capitalize(), "data_iso": mes_dt.replace(day=1).strftime("%Y-%m-%d"), "Realizado": hist_dict.get(mes_dt.strftime('%Y-%m'), 0), "IA": None, "Consenso": None, "CicloAnterior": None})
-            
+        if filters.get('vendedor'): q_proj = q_proj.filter(func.trim(FatoIbpGranular.vendedor_nome) == filters['vendedor'])
+        if filters.get('razaosocial'): q_proj = q_proj.filter(func.trim(DimCliente.razaosocial) == filters['razaosocial'])
+        if filters.get('sku'): q_proj = q_proj.filter(FatoIbpGranular.sku == filters['sku'])
+
+        hist_dict = {h.mes_ano: int(h.vol_real or 0) for h in q_hist.group_by(func.to_char(FatoVendas.data_pedido, 'YYYY-MM')).all()}
+        ant_dict = {p.mes_projetado.strftime('%Y-%m-%d') if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado): int(p.vol_ant or 0) for p in q_ant.group_by(FatoIbpGranular.mes_projetado).all()}
+        projecoes = q_proj.group_by(FatoIbpGranular.mes_projetado).order_by(FatoIbpGranular.mes_projetado).all()
+
+        timeline = [{"name": (hoje - relativedelta(months=i)).strftime("%b/%y").capitalize(), "data_iso": (hoje - relativedelta(months=i)).replace(day=1).strftime("%Y-%m-%d"), "Realizado": hist_dict.get((hoje - relativedelta(months=i)).strftime('%Y-%m'), 0), "IA": None, "Consenso": None, "CicloAnterior": None} for i in range(24, 0, -1)]
         for p in projecoes:
             p_str = p.mes_projetado.strftime('%Y-%m-%d') if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado)
-            consenso = int(p.vol_bu or 0) if m_plus_2 <= p_str <= m_plus_4 else None 
-            timeline.append({"name": p.mes_projetado.strftime("%b/%y").capitalize() if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado), "data_iso": p_str, "Realizado": None, "IA": int(p.vol_ia or 0), "Consenso": consenso, "CicloAnterior": dict_ant.get(p_str, None)})
+            timeline.append({"name": p.mes_projetado.strftime("%b/%y").capitalize() if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado), "data_iso": p_str, "Realizado": None, "IA": int(p.vol_ia or 0), "Consenso": int(p.vol_consenso or 0) if m_plus_2 <= p_str <= m_plus_4 else None, "CicloAnterior": ant_dict.get(p_str, None)})
             
-        return {"status": "success", "dados": timeline}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return timeline
 
-@router.post("/micro/congelar")
-async def congelar_micro(nome_responsavel: str, payload: PayloadCongelarBottomUp, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    try:
-        origem_real = nome_responsavel
-        if usuario_logado['funcao'] == 'Executivo':
-            origem_real = usuario_logado['nome_vendedor']
-
+class AdjustmentService:
+    @staticmethod
+    def processar_ajustes(db: Session, ajustes: list, ciclo: str, nivel_rateio: str, origem_real: str = 'Top-Down', is_gerente: bool = False):
         check_global_lock(db)
-        ciclo = get_current_cycle()
         
-        for ajuste in payload.ajustes:
-            data_str = ajuste.mes_projetado.split("T")[0]
-            data_alvo = datetime.datetime.strptime(data_str, "%Y-%m-%d").date()
+        if is_gerente:
+            vendedores_afetados = list({a.chave.split('|')[0].strip() for a in ajustes})
+            for v in vendedores_afetados: verificar_vendedor_online(db, v)
+
+        for ajuste in ajustes:
+            data_alvo = parse_date_safe(ajuste.mes_projetado)
             query = db.query(FatoIbpGranular).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(
-                func.trim(FatoIbpGranular.vendedor_nome) == origem_real.strip(), 
                 FatoIbpGranular.mes_projetado == data_alvo, 
                 func.upper(func.coalesce(DimCliente.bloqueado, 'ATIVO')) != 'INATIVO',
                 FatoIbpGranular.ciclo_sop == ciclo
             )
-            
-            if ajuste.nivel == 'cliente': query = query.filter(func.trim(DimCliente.razaosocial) == ajuste.chave.strip())
-            elif ajuste.nivel == 'produto':
-                razao, sku = ajuste.chave.split('|')
-                query = query.filter(func.trim(DimCliente.razaosocial) == razao.strip(), FatoIbpGranular.sku == sku.strip())
-                
-            linhas_atomicas = query.all()
-            aplicar_rateio_historico_amplo(db, linhas_atomicas, int(ajuste.novo_volume), 'Bottom-Up')
-                
+
+            if nivel_rateio == 'Top-Down':
+                query = query.filter(FatoIbpGranular.sku == str(ajuste.produto))
+            else:
+                partes = ajuste.chave.split('|')
+                query = query.filter(func.trim(FatoIbpGranular.vendedor_nome) == (partes[0].strip() if is_gerente else origem_real.strip()))
+                if ajuste.nivel in ['cliente', 'produto']: query = query.filter(func.trim(DimCliente.razaosocial) == (partes[1].strip() if is_gerente else partes[0].strip()))
+                if ajuste.nivel == 'produto': query = query.filter(FatoIbpGranular.sku == (partes[2].strip() if is_gerente else partes[1].strip()))
+
+            linhas = query.all()
+            if not linhas: continue
+
+            if is_gerente:
+                total_base = sum([l.vol_bottomup for l in linhas]) 
+                soma_dist = 0
+                for i, l in enumerate(linhas):
+                    rateado = int(ajuste.novo_volume) - soma_dist if i == len(linhas) - 1 else int(round(int(ajuste.novo_volume) * (l.vol_bottomup / total_base if total_base > 0 else 1.0 / len(linhas))))
+                    soma_dist += rateado
+                    l.vol_bottomup = l.vol_final = rateado
+            else:
+                RateioService.aplicar_historico_amplo(db, linhas, int(ajuste.novo_volume), nivel_rateio)
+
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == origem_real).first()
         if not registro: db.add(ControleCiclo(ciclo_sop=ciclo, origem=origem_real, status='Fechado'))
         else: registro.status = 'Fechado'
         db.commit()
+
+# =====================================================================
+# 5. SCHEMAS (PYDANTIC)
+# =====================================================================
+class AjusteBase(BaseModel):
+    mes_projetado: str
+    novo_volume: int
+
+class AjusteTopDown(AjusteBase): produto: str
+class AjusteBottomUp(AjusteBase): nivel: str; chave: str; pmv_aplicado: float = 0.0
+class AjusteGerente(AjusteBase): nivel: str; chave: str
+
+class PayloadCongelar(BaseModel): origem_ajuste: str; ajustes: List[AjusteTopDown]
+class PayloadCongelarBU(BaseModel): origem_ajuste: str; ajustes: List[AjusteBottomUp]
+class PayloadAprovarGerente(BaseModel): ajustes: List[AjusteGerente]
+class PayloadLockAll(BaseModel): gerente_nome: str = ""; acao: str
+class PayloadToggleLock(BaseModel): origem: str
+class PayloadFecharCiclo(BaseModel): origem: str
+
+# =====================================================================
+# 6. ENDPOINTS
+# =====================================================================
+@router.get("/status")
+async def checar_status_ciclo(origem: str, db: Session = Depends(get_db)):
+    c = get_current_cycle()
+    status_dict = {ctrl.origem: ctrl.status == 'Fechado' for ctrl in db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == c).all()}
+    return {"is_fechado": status_dict.get(origem, False), "is_topdown_fechado": status_dict.get('Top-Down', False), "is_global_fechado": status_dict.get('S&OP-Final', False)}
+
+@router.get("/filtros")
+async def obter_filtros_busca(gerente_nome: str = None, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+    q = db.query(DimCliente)
+    filtro_gerente = usuario.get('gerente_nome') if usuario['funcao'] == 'Gerente' else gerente_nome
+    if filtro_gerente: q = q.filter(func.trim(DimCliente.gerente_nome) == filtro_gerente.strip())
+    
+    return {
+        "regionais": sorted({str(r.regional).strip() for r in q.distinct(DimCliente.regional).all() if r.regional}),
+        "vendedores": sorted({str(v.vendedor_nome).strip() for v in q.distinct(DimCliente.vendedor_nome).all() if v.vendedor_nome})
+    }
+
+@router.post("/fechar")
+async def fechar_ciclo(payload: PayloadFecharCiclo, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+    if usuario['funcao'] == 'Executivo' and payload.origem != usuario['nome_vendedor']:
+        raise HTTPException(status_code=403, detail="Você só pode fechar a sua própria carteira.")
+    check_global_lock(db)
+    
+    reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == get_current_cycle(), ControleCiclo.origem == payload.origem).first()
+    if not reg: db.add(ControleCiclo(ciclo_sop=get_current_cycle(), origem=payload.origem, status='Fechado'))
+    else: reg.status = 'Fechado'
+    db.commit()
+    return {"status": "success"}
+
+# --- MACRO (S&OP) ---
+@router.get("/macro")
+async def listar_macro(db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
+    try:
+        m2, m4 = get_projection_window()
+        projecoes = QueryRepository.get_base_ibp_query(db, m2, m4, get_current_cycle())\
+            .with_entities(FatoIbpGranular.sku, FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_ia).label('v_ia'), func.sum(FatoIbpGranular.vol_topdown).label('v_td'), func.avg(FatoIbpGranular.pmv_aplicado).label('pmv'), func.sum(FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('rec'), DimProduto.descricao, DimProduto.categoria, DimProduto.segmento, DimProduto.modelo_vencedor, DimProduto.acuracia_ia)\
+            .group_by(FatoIbpGranular.sku, FatoIbpGranular.mes_projetado, DimProduto.descricao, DimProduto.categoria, DimProduto.segmento, DimProduto.modelo_vencedor, DimProduto.acuracia_ia).all()
+
+        prod_map = defaultdict(lambda: {"meses": []})
+        for r in projecoes:
+            p = prod_map[r.sku]
+            if not p.get('produto'): p.update({"produto": r.sku, "descricao": r.descricao, "categoria": r.categoria, "segmento": r.segmento, "modelo_vencedor": r.modelo_vencedor or "N/A", "acuracia_ia": float(r.acuracia_ia or 0)})
+            p["meses"].append({"mes_banco": str(r.mes_projetado), "mes_str": r.mes_projetado.strftime("%b/%y").capitalize() if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado), "vol_ia": int(r.v_ia or 0), "vol_ajustado": int(r.v_td or 0), "pmv": float(r.rec/r.v_ia) if r.v_ia else float(r.pmv or 0)})
+        return {"status": "success", "dados": list(prod_map.values())}
+    except Exception as e: raise HTTPException(500, repr(e))
+
+@router.get("/macro/grafico")
+async def grafico_macro(produto: str, db: Session = Depends(get_db)):
+    return {"status": "success", "dados": GraphService.build_timeline(db, {'sku': produto, 'use_bu': False})}
+
+@router.post("/macro/congelar")
+async def congelar_macro(payload: PayloadCongelar, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
+    try:
+        AdjustmentService.processar_ajustes(db, payload.ajustes, get_current_cycle(), 'Top-Down')
         return {"status": "success"}
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException as he: raise he
+    except Exception as e: db.rollback(); raise HTTPException(500, repr(e))
 
-@router.post("/gerenciamento/toggle-lock")
-async def toggle_lock_gerenciamento(payload: PayloadToggleLock, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
-        raise HTTPException(status_code=403, detail="Acesso Restrito.")
-
+@router.post("/macro/reabrir")
+async def reabrir_macro(db: Session = Depends(get_db), usuario: dict = Depends(require_admin)):
     try:
         check_global_lock(db)
-        verificar_vendedor_online(db, payload.origem)
+        if db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == get_current_cycle(), ControleCiclo.status == 'Fechado', ControleCiclo.origem.notin_(['Top-Down', 'S&OP-Final'])).count():
+            raise HTTPException(403, "Ordem Reversa Violada.")
+        reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == get_current_cycle(), ControleCiclo.origem == 'Top-Down').first()
+        if reg: reg.status = 'Aberto'; db.commit()
+        return {"status": "success"}
+    except HTTPException as e: raise e
+    except Exception as e: db.rollback(); raise HTTPException(500, repr(e))
+
+# --- MICRO (Executivo) ---
+@router.get("/micro")
+async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+    try:
+        filtro_vend = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else (nome_responsavel if nivel_hierarquia == 'vendedor' else None)
+        filtro_reg = nome_responsavel if nivel_hierarquia != 'vendedor' and usuario['funcao'] != 'Executivo' else None
         
-        ciclo = get_current_cycle()
-        registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == payload.origem).first()
-        if registro:
-            registro.status = 'Aberto' if registro.status == 'Fechado' else 'Fechado'
-        else:
-            db.add(ControleCiclo(ciclo_sop=ciclo, origem=payload.origem, status='Fechado'))
+        q = QueryRepository.get_base_ibp_query(db, *get_projection_window(), get_current_cycle())\
+            .with_entities(DimCliente.razaosocial, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_ia).label('v_ia'), func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), func.avg(FatoIbpGranular.pmv_aplicado).label('pmv'))
+        if filtro_vend: q = q.filter(func.trim(DimCliente.vendedor_nome) == filtro_vend.strip())
+        if filtro_reg: q = q.filter(func.trim(DimCliente.regional) == filtro_reg.strip())
+        if usuario['funcao'] == 'Gerente': q = q.filter(func.trim(DimCliente.gerente_nome) == usuario['gerente_nome'].strip())
+        
+        arvore = defaultdict(lambda: {"id": "", "nome": "", "tipo": "cliente", "meses": defaultdict(lambda: {"vol_ia":0, "vol_ajustado":0, "receita":0}), "produtos": defaultdict(lambda: {"id": "", "nome": "", "tipo": "produto", "meses": defaultdict(lambda: {"vol_ia":0, "vol_ajustado":0, "receita":0})})})
+        for r in q.group_by(DimCliente.razaosocial, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all():
+            rz, sku, ms = str(r.razaosocial or "DESC"), r.sku, str(r.mes_projetado)
+            rec = int(r.v_bu or 0) * float(r.pmv or 0)
+            
+            arvore[rz]["id"] = arvore[rz]["nome"] = rz
+            arvore[rz]["produtos"][sku]["id"] = f"{rz}|{sku}"
+            arvore[rz]["produtos"][sku]["nome"] = r.descricao
+            
+            for target in [arvore[rz]["meses"][ms], arvore[rz]["produtos"][sku]["meses"][ms]]:
+                target["vol_ia"] += int(r.v_ia or 0); target["vol_ajustado"] += int(r.v_bu or 0); target["receita"] += rec; target["pmv"] = float(r.pmv or 0)
+
+        dados = [{"id": v["id"], "chave_matriz": v["id"], "nome": v["nome"], "tipo": v["tipo"], "meses": [{"mes_banco": k, "mes_str": parse_date_safe(k).strftime("%b/%y").capitalize(), **mv} for k, mv in v["meses"].items()], "subRows": [{"id": p["id"], "chave_matriz": p["id"], "nome": p["nome"], "produto": pk, "tipo": p["tipo"], "meses": [{"mes_banco": k, "mes_str": parse_date_safe(k).strftime("%b/%y").capitalize(), **mv} for k, mv in p["meses"].items()]} for pk, p in v["produtos"].items()]} for v in arvore.values()]
+        return {"status": "success", "dados": dados}
+    except Exception as e: raise HTTPException(500, repr(e))
+
+@router.get("/micro/grafico")
+async def grafico_micro(chave_matriz: str, nome_responsavel: str = '', db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+    p = chave_matriz.split('|'); razao, sku = p[0], p[1] if len(p) > 1 else None
+    vend = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else nome_responsavel
+    return {"status": "success", "dados": GraphService.build_timeline(db, {'razaosocial': razao.strip(), 'sku': sku.strip() if sku else None, 'vendedor': vend.strip() if vend else None, 'use_bu': True, 'use_final': False})}
+
+@router.post("/micro/congelar")
+async def congelar_micro(nome_responsavel: str, payload: PayloadCongelarBU, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+    origem = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else nome_responsavel
+    try:
+        AdjustmentService.processar_ajustes(db, payload.ajustes, get_current_cycle(), 'Bottom-Up', origem)
+        return {"status": "success"}
+    except HTTPException as he: raise he
+    except Exception as e: db.rollback(); raise HTTPException(500, repr(e))
+
+# --- GERENCIAMENTO ---
+@router.post("/gerenciamento/toggle-lock")
+async def toggle_lock_gerenciamento(payload: PayloadToggleLock, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
+    try:
+        check_global_lock(db); verificar_vendedor_online(db, payload.origem)
+        reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == get_current_cycle(), ControleCiclo.origem == payload.origem).first()
+        if reg: reg.status = 'Aberto' if reg.status == 'Fechado' else 'Fechado'
+        else: db.add(ControleCiclo(ciclo_sop=get_current_cycle(), origem=payload.origem, status='Fechado'))
         db.commit()
         return {"status": "success"}
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException as e: raise e
+    except Exception as e: db.rollback(); raise HTTPException(500, repr(e))
 
 @router.get("/gerenciamento/vendedores")
-async def listar_gerenciamento_vendedores(gerente_nome: str = None, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
-        raise HTTPException(status_code=403, detail="Acesso Restrito.")
+async def listar_gerenciamento(gerente_nome: str = None, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
-        m_plus_2, m_plus_4 = get_projection_window()
-        
-        query = db.query(
-            FatoIbpGranular.vendedor_nome, FatoIbpGranular.sku, FatoIbpGranular.mes_projetado,
-            func.sum(FatoIbpGranular.vol_bottomup).label('vol_bottomup'),
-            func.avg(FatoIbpGranular.pmv_aplicado).label('pmv_aplicado'),
-            DimCliente.razaosocial, DimProduto.descricao
-        ).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)\
-         .filter(
-            FatoIbpGranular.mes_projetado >= m_plus_2,
-            FatoIbpGranular.mes_projetado <= m_plus_4,
-            FatoIbpGranular.vendedor_nome.isnot(None),
-            func.upper(func.coalesce(DimCliente.bloqueado, 'ATIVO')) != 'INATIVO',
-            FatoIbpGranular.ciclo_sop == get_current_cycle()
-         )
-
-        nome_gerente_filtro = gerente_nome
-        if usuario_logado['funcao'] == 'Gerente':
-            nome_gerente_filtro = usuario_logado['gerente_nome']
-
-        if nome_gerente_filtro: query = query.filter(func.trim(DimCliente.gerente_nome) == nome_gerente_filtro.strip())
-
-        resultados = query.group_by(FatoIbpGranular.vendedor_nome, DimCliente.razaosocial, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all()
-        ciclos = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == get_current_cycle()).all()
-        status_dict = {c.origem.strip(): c.status for c in ciclos if c.origem}
-        arvore = {}
-
-        for r in resultados:
-            vend = str(r.vendedor_nome).strip()
-            mes = r.mes_projetado.strftime("%Y-%m-%d") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado)
-            vol_ajustado = int(r.vol_bottomup or 0)
-            receita = vol_ajustado * float(r.pmv_aplicado or 0)
-            razao = str(r.razaosocial).strip() if r.razaosocial else "CLIENTE DESCONHECIDO"
-
-            if vend not in arvore: arvore[vend] = {"id": vend, "nome": vend, "tipo": "vendedor", "status": status_dict.get(vend, "Aberto"), "meses": {}, "clientes": {}}
-            if razao not in arvore[vend]["clientes"]: arvore[vend]["clientes"][razao] = {"id": f"{vend}|{razao}", "nome": razao, "tipo": "cliente", "meses": {}, "produtos": {}}
-            if r.sku not in arvore[vend]["clientes"][razao]["produtos"]: arvore[vend]["clientes"][razao]["produtos"][r.sku] = {"id": f"{vend}|{razao}|{r.sku}", "nome": r.descricao, "tipo": "produto", "meses": {}}
-
-            if mes not in arvore[vend]["clientes"][razao]["produtos"][r.sku]["meses"]: arvore[vend]["clientes"][razao]["produtos"][r.sku]["meses"][mes] = {"vol_ajustado": 0, "receita": 0}
-            arvore[vend]["clientes"][razao]["produtos"][r.sku]["meses"][mes]["vol_ajustado"] += vol_ajustado
-            arvore[vend]["clientes"][razao]["produtos"][r.sku]["meses"][mes]["receita"] += receita
+        # AQUI FOI ADICIONADA A COLUNA VOL_TOPDOWN ('v_td') PARA SER USADA COMO REFERÊNCIA NO FRONT
+        q = QueryRepository.get_base_ibp_query(db, *get_projection_window(), get_current_cycle())\
+            .with_entities(
+                FatoIbpGranular.vendedor_nome, 
+                FatoIbpGranular.sku, 
+                FatoIbpGranular.mes_projetado, 
+                func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
+                func.sum(FatoIbpGranular.vol_topdown).label('v_td'),
+                func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), 
+                func.avg(FatoIbpGranular.pmv_aplicado).label('pmv'), 
+                DimCliente.razaosocial, 
+                DimProduto.descricao
+            ).filter(FatoIbpGranular.vendedor_nome.isnot(None))
             
-            if mes not in arvore[vend]["clientes"][razao]["meses"]: arvore[vend]["clientes"][razao]["meses"][mes] = {"vol_ajustado": 0, "receita": 0}
-            arvore[vend]["clientes"][razao]["meses"][mes]["vol_ajustado"] += vol_ajustado
-            arvore[vend]["clientes"][razao]["meses"][mes]["receita"] += receita
+        filtro_gerente = usuario.get('gerente_nome') if usuario['funcao'] == 'Gerente' else gerente_nome
+        if filtro_gerente: q = q.filter(func.trim(DimCliente.gerente_nome) == filtro_gerente.strip())
 
-            if mes not in arvore[vend]["meses"]: arvore[vend]["meses"][mes] = {"vol_ajustado": 0, "receita": 0}
-            arvore[vend]["meses"][mes]["vol_ajustado"] += vol_ajustado
-            arvore[vend]["meses"][mes]["receita"] += receita
+        status_dict = {c.origem.strip(): c.status for c in db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == get_current_cycle()).all() if c.origem}
+        
+        arvore = defaultdict(lambda: {"id": "", "nome": "", "tipo": "vendedor", "status": "Aberto", "meses": defaultdict(lambda: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0}), "clientes": defaultdict(lambda: {"id": "", "nome": "", "tipo": "cliente", "meses": defaultdict(lambda: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0}), "produtos": defaultdict(lambda: {"id": "", "nome": "", "tipo": "produto", "meses": defaultdict(lambda: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0})})})})
+        
+        for r in q.group_by(FatoIbpGranular.vendedor_nome, DimCliente.razaosocial, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all():
+            v, rz, sku, ms = str(r.vendedor_nome).strip(), str(r.razaosocial or "DESC"), r.sku, str(r.mes_projetado)
+            rec = int(r.v_bu or 0) * float(r.pmv or 0)
 
-        dados_finais = []
-        for vend, v_data in arvore.items():
-            vend_status = v_data["status"]
-            v_node = {
-                "id": v_data["id"], "chave_matriz": v_data["id"], "nome": v_data["nome"], "tipo": v_data["tipo"], "status": vend_status,
-                "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%b/%y").capitalize(), "vol_ajustado": v["vol_ajustado"], "receita": v["receita"]} for k, v in v_data["meses"].items()],
-                "subRows": []
-            }
-            for razao, c_data in v_data["clientes"].items():
-                c_node = {
-                    "id": c_data["id"], "chave_matriz": c_data["id"], "nome": c_data["nome"], "tipo": c_data["tipo"], "status": vend_status,
-                    "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%b/%y").capitalize(), "vol_ajustado": v["vol_ajustado"], "receita": v["receita"]} for k, v in c_data["meses"].items()],
-                    "subRows": []
-                }
-                for sku, p_data in c_data["produtos"].items():
-                    c_node["subRows"].append({
-                        "id": p_data["id"], "chave_matriz": p_data["id"], "nome": p_data["nome"], "tipo": p_data["tipo"], "status": vend_status,
-                        "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%b/%y").capitalize(), "vol_ajustado": v["vol_ajustado"], "receita": v["receita"]} for k, v in p_data["meses"].items()]
-                    })
-                v_node["subRows"].append(c_node)
-            dados_finais.append(v_node)
+            arvore[v]["id"] = arvore[v]["nome"] = v; arvore[v]["status"] = status_dict.get(v, "Aberto")
+            arvore[v]["clientes"][rz]["id"] = f"{v}|{rz}"; arvore[v]["clientes"][rz]["nome"] = rz
+            arvore[v]["clientes"][rz]["produtos"][sku]["id"] = f"{v}|{rz}|{sku}"; arvore[v]["clientes"][rz]["produtos"][sku]["nome"] = r.descricao
+            
+            for t in [arvore[v]["meses"][ms], arvore[v]["clientes"][rz]["meses"][ms], arvore[v]["clientes"][rz]["produtos"][sku]["meses"][ms]]:
+                t["vol_ia"] += int(r.v_ia or 0); t["vol_td"] += int(r.v_td or 0); t["vol_ajustado"] += int(r.v_bu or 0); t["receita"] += rec
 
-        return {"status": "success", "dados": dados_finais}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        dados = [{"id": v["id"], "chave_matriz": v["id"], "nome": v["nome"], "tipo": v["tipo"], "status": v["status"], "meses": [{"mes_banco": k, "mes_str": parse_date_safe(k).strftime("%b/%y").capitalize(), **mv} for k, mv in v["meses"].items()], "subRows": [{"id": c["id"], "chave_matriz": c["id"], "nome": c["nome"], "tipo": c["tipo"], "status": v["status"], "meses": [{"mes_banco": k, "mes_str": parse_date_safe(k).strftime("%b/%y").capitalize(), **mv} for k, mv in c["meses"].items()], "subRows": [{"id": p["id"], "chave_matriz": p["id"], "nome": p["nome"], "tipo": p["tipo"], "status": v["status"], "meses": [{"mes_banco": k, "mes_str": parse_date_safe(k).strftime("%b/%y").capitalize(), **mv} for k, mv in p["meses"].items()]} for p in c["produtos"].values()]} for c in v["clientes"].values()]} for v in arvore.values()]
+        return {"status": "success", "dados": dados}
+    except Exception as e: raise HTTPException(500, repr(e))
 
 @router.get("/gerenciamento/grafico")
-async def obter_grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    try:
-        partes = chave_matriz.split('|')
-        vendedor = partes[0]
-        razaosocial = partes[1] if len(partes) > 1 else None
-        sku = partes[2] if len(partes) > 2 else None
-
-        m_plus_2, m_plus_4 = get_projection_window()
-        hoje = datetime.date.today()
-        data_limite = hoje - relativedelta(years=2)
-        ciclo_anterior = get_previous_cycle()
-        
-        query_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol_real'))\
-            .join(DimCliente, FatoVendas.cgc == DimCliente.cgc).filter(func.trim(FatoVendas.vendedor_nome) == vendedor.strip(), FatoVendas.data_pedido >= data_limite)
-            
-        if razaosocial: query_hist = query_hist.filter(func.trim(DimCliente.razaosocial) == razaosocial.strip())
-        if sku: query_hist = query_hist.filter(FatoVendas.sku == sku)
-        
-        hist_dict = {h.mes_ano: int(h.vol_real or 0) for h in query_hist.group_by(func.to_char(FatoVendas.data_pedido, 'YYYY-MM')).all()}
-        
-        query_ant = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_final).label('vol_ant'))\
-            .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
-            .filter(func.trim(FatoIbpGranular.vendedor_nome) == vendedor.strip(), FatoIbpGranular.ciclo_sop == ciclo_anterior)
-            
-        if razaosocial: query_ant = query_ant.filter(func.trim(DimCliente.razaosocial) == razaosocial.strip())
-        if sku: query_ant = query_ant.filter(FatoIbpGranular.sku == sku)
-        
-        dict_ant = {p.mes_projetado.strftime('%Y-%m-%d') if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado): int(p.vol_ant or 0) for p in query_ant.group_by(FatoIbpGranular.mes_projetado).all()}
-
-        query_proj = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), func.sum(FatoIbpGranular.vol_bottomup).label('vol_bu'))\
-            .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
-            .filter(func.trim(FatoIbpGranular.vendedor_nome) == vendedor.strip(), FatoIbpGranular.ciclo_sop == get_current_cycle())
-            
-        if razaosocial: query_proj = query_proj.filter(func.trim(DimCliente.razaosocial) == razaosocial.strip())
-        if sku: query_proj = query_proj.filter(FatoIbpGranular.sku == sku)
-
-        projecoes = query_proj.group_by(FatoIbpGranular.mes_projetado).order_by(FatoIbpGranular.mes_projetado).all()
-
-        timeline = []
-        for i in range(24, 0, -1):
-            mes_dt = hoje - relativedelta(months=i)
-            timeline.append({"name": mes_dt.strftime("%b/%y").capitalize(), "data_iso": mes_dt.replace(day=1).strftime("%Y-%m-%d"), "Realizado": hist_dict.get(mes_dt.strftime('%Y-%m'), 0), "IA": None, "Consenso": None, "CicloAnterior": None})
-            
-        for p in projecoes:
-            p_str = p.mes_projetado.strftime('%Y-%m-%d') if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado)
-            consenso = int(p.vol_bu or 0) if m_plus_2 <= p_str <= m_plus_4 else None 
-            timeline.append({"name": p.mes_projetado.strftime("%b/%y").capitalize() if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado), "data_iso": p_str, "Realizado": None, "IA": int(p.vol_ia or 0), "Consenso": consenso, "CicloAnterior": dict_ant.get(p_str, None)})
-            
-        return {"status": "success", "dados": timeline}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+async def grafico_gerencia(chave_matriz: str, db: Session = Depends(get_db)):
+    p = chave_matriz.split('|')
+    return {"status": "success", "dados": GraphService.build_timeline(db, {'vendedor': p[0].strip(), 'razaosocial': p[1].strip() if len(p)>1 else None, 'sku': p[2].strip() if len(p)>2 else None, 'use_bu': True, 'use_final': True})}
 
 @router.post("/gerenciamento/aprovar")
-async def aprovar_gerenciamento(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']: raise HTTPException(status_code=403, detail="Acesso Restrito.")
+async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
-        check_global_lock(db)
-        ciclo = get_current_cycle()
-        
-        vendedores_afetados = list(set([ajuste.chave.split('|')[0].strip() for ajuste in payload.ajustes]))
-        for vendedor_afetado in vendedores_afetados:
-            verificar_vendedor_online(db, vendedor_afetado)
-
-        for ajuste in payload.ajustes:
-            partes = ajuste.chave.split('|')
-            data_str = ajuste.mes_projetado.split("T")[0]
-            data_alvo = datetime.datetime.strptime(data_str, "%Y-%m-%d").date()
-            
-            query = db.query(FatoIbpGranular).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(
-                func.trim(FatoIbpGranular.vendedor_nome) == partes[0].strip(), 
-                FatoIbpGranular.mes_projetado == data_alvo, 
-                func.upper(func.coalesce(DimCliente.bloqueado, 'ATIVO')) != 'INATIVO', 
-                FatoIbpGranular.ciclo_sop == ciclo
-            )
-            if ajuste.nivel in ['cliente', 'produto']: query = query.filter(func.trim(DimCliente.razaosocial) == partes[1].strip())
-            if ajuste.nivel == 'produto': query = query.filter(FatoIbpGranular.sku == partes[2].strip())
-                
-            linhas = query.all()
-            if not linhas: continue
-
-            total_base = sum([l.vol_bottomup for l in linhas]) 
-            soma_dist = 0
-            for i, l in enumerate(linhas):
-                if i == len(linhas) - 1: rateado = ajuste.novo_volume - soma_dist
-                else:
-                    peso = l.vol_bottomup / total_base if total_base > 0 else 1.0 / len(linhas)
-                    rateado = int(round(ajuste.novo_volume * peso))
-                    soma_dist += rateado
-                l.vol_bottomup = rateado
-                l.vol_final = rateado
-                
-        db.commit()
+        AdjustmentService.processar_ajustes(db, payload.ajustes, get_current_cycle(), 'Bottom-Up', is_gerente=True)
         return {"status": "success"}
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException as he: raise he
+    except Exception as e: db.rollback(); raise HTTPException(500, repr(e))
 
 @router.post("/gerenciamento/lock-all")
-async def lock_all_gerenciamento(payload: PayloadLockAll, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
-        raise HTTPException(status_code=403, detail="Acesso Restrito.")
-
+async def lock_all(payload: PayloadLockAll, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
-        check_global_lock(db) 
-        ciclo = get_current_cycle()
-        m_plus_2, m_plus_4 = get_projection_window()
-        
-        query = db.query(FatoIbpGranular.vendedor_nome).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
-            .filter(
-                FatoIbpGranular.mes_projetado >= m_plus_2,
-                FatoIbpGranular.mes_projetado <= m_plus_4,
-                FatoIbpGranular.vendedor_nome.isnot(None),
-                func.upper(func.coalesce(DimCliente.bloqueado, 'ATIVO')) != 'INATIVO'
-            )
+        check_global_lock(db); c = get_current_cycle()
+        q = QueryRepository.get_base_ibp_query(db, *get_projection_window(), c).with_entities(FatoIbpGranular.vendedor_nome).filter(FatoIbpGranular.vendedor_nome.isnot(None))
+        filtro = usuario.get('gerente_nome') if usuario['funcao'] == 'Gerente' else payload.gerente_nome
+        if filtro: q = q.filter(func.trim(DimCliente.gerente_nome) == filtro.strip())
             
-        nome_gerente_filtro = payload.gerente_nome
-        if usuario_logado['funcao'] == 'Gerente':
-             nome_gerente_filtro = usuario_logado['gerente_nome']
-
-        if nome_gerente_filtro:
-            query = query.filter(func.trim(DimCliente.gerente_nome) == nome_gerente_filtro.strip())
-            
-        vendedores = [v[0].strip() for v in query.distinct().all() if v[0]]
-        
-        for vend in vendedores:
-            verificar_vendedor_online(db, vend)
+        vendedores = {v[0].strip() for v in q.distinct().all() if v[0]}
+        for v in vendedores: verificar_vendedor_online(db, v)
         
         status_alvo = 'Fechado' if payload.acao == 'Trancar' else 'Aberto'
-        
-        for vend in vendedores:
-            registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == vend).first()
-            if registro:
-                registro.status = status_alvo
-            else:
-                db.add(ControleCiclo(ciclo_sop=ciclo, origem=vend, status=status_alvo))
-                
+        for v in vendedores:
+            reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == c, ControleCiclo.origem == v).first()
+            if reg: reg.status = status_alvo
+            else: db.add(ControleCiclo(ciclo_sop=c, origem=v, status=status_alvo))
         db.commit()
         return {"status": "success"}
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException as he: raise he
+    except Exception as e: db.rollback(); raise HTTPException(500, repr(e))
 
 @router.get("/export/bottom-up")
-async def exportar_excel_bottom_up(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] != 'Administrador':
-        raise HTTPException(status_code=403, detail="Apenas o Administrador pode exportar a base bruta granular.")
-
+async def exportar_bottom_up(db: Session = Depends(get_db), usuario: dict = Depends(require_admin)):
     try:
-        m_plus_2, m_plus_4 = get_projection_window()
-        query = db.query(
-            FatoIbpGranular.vendedor_nome, FatoIbpGranular.cgc, DimCliente.razaosocial,
-            DimCliente.cod_cliente, DimCliente.loja,
-            FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado,
-            FatoIbpGranular.vol_ia, FatoIbpGranular.vol_topdown, FatoIbpGranular.vol_bottomup,
-            FatoIbpGranular.vol_final, FatoIbpGranular.pmv_aplicado
-        ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
-         .filter(FatoIbpGranular.mes_projetado >= m_plus_2, FatoIbpGranular.mes_projetado <= m_plus_4).all()
+        query = QueryRepository.get_base_ibp_query(db, *get_projection_window(), get_current_cycle())\
+            .with_entities(FatoIbpGranular.vendedor_nome, FatoIbpGranular.cgc, DimCliente.razaosocial, DimCliente.cod_cliente, DimCliente.loja, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado, FatoIbpGranular.vol_ia, FatoIbpGranular.vol_topdown, FatoIbpGranular.vol_bottomup, FatoIbpGranular.vol_final, FatoIbpGranular.pmv_aplicado).all()
 
-        if not query: raise HTTPException(status_code=404, detail="Sem dados para exportar.")
-
-        dados = [{
-            "Vendedor": r.vendedor_nome, "Cód. Cliente": r.cod_cliente, "Loja": r.loja, "CGC": r.cgc, 
-            "Cliente": r.razaosocial, "SKU": r.sku, "Produto": r.descricao, 
-            "Mês Projetado": r.mes_projetado.strftime("%m/%Y") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado), 
-            "Volume IA (Inicial)": r.vol_ia, 
-            "Volume Top-Down (Diretoria)": r.vol_topdown, "Volume Bottom-Up (Vendedor)": r.vol_bottomup, 
-            "Volume Final (S&OP)": r.vol_final, "Preço Médio (PMV)": float(r.pmv_aplicado or 0), 
-            "Receita Projetada (R$)": r.vol_final * float(r.pmv_aplicado or 0)
-        } for r in query]
-
-        df = pd.DataFrame(dados)
+        if not query: raise HTTPException(404, "Sem dados para exportar.")
+        
+        df = pd.DataFrame([{"Vendedor": r.vendedor_nome, "Cód. Cliente": r.cod_cliente, "Loja": r.loja, "CGC": r.cgc, "Cliente": r.razaosocial, "SKU": r.sku, "Produto": r.descricao, "Mês Projetado": parse_date_safe(r.mes_projetado).strftime("%m/%Y"), "Volume IA": r.vol_ia, "Vol Top-Down": r.vol_topdown, "Vol Bottom-Up": r.vol_bottomup, "Vol Final": r.vol_final, "PMV": float(r.pmv_aplicado or 0), "Receita": r.vol_final * float(r.pmv_aplicado or 0)} for r in query])
+        
         buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='Base Granular')
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df.to_excel(writer, index=False, sheet_name='Base Granular')
         buffer.seek(0)
         return StreamingResponse(buffer, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=consenso_granular.xlsx"})
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e: raise HTTPException(500, repr(e))

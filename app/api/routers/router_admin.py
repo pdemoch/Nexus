@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 import datetime
 from app.core.database import get_db
 from app.core.state import AppState
@@ -22,7 +23,6 @@ async def iniciar_pipeline(background_tasks: BackgroundTasks, db: Session = Depe
         raise HTTPException(status_code=400, detail="O pipeline já está em execução.")
     
     try:
-        # NOVO: Descongelar todas as telas (limpar o ControleCiclo) sempre que rodar o pipeline
         ciclo_atual = datetime.date.today().strftime("%m/%Y")
         db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo_atual).delete()
         db.commit()
@@ -42,12 +42,20 @@ async def reabrir_ciclo(origem: str, db: Session = Depends(get_db), usuario_loga
         
     ciclo_atual = datetime.date.today().strftime("%m/%Y")
     try:
-        cadeado = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo_atual, ControleCiclo.origem == origem).first()
+        # CORREÇÃO: Busca à prova de falhas (ignora maiúsculas, minúsculas e espaços)
+        cadeado = db.query(ControleCiclo).filter(
+            ControleCiclo.ciclo_sop == ciclo_atual, 
+            func.upper(func.trim(ControleCiclo.origem)) == origem.strip().upper()
+        ).first()
+        
         if cadeado:
             db.delete(cadeado)
             db.commit()
-            return {"status": "success", "message": f"Ciclo destrancado para: {origem}"}
-        raise HTTPException(status_code=404, detail="Cadeado não encontrado para esta origem.")
+            return {"status": "success", "message": f"O cadeado de '{origem}' foi removido com sucesso!"}
+            
+        # Se não achou cadeado, é porque já está destrancado! (Não é um erro)
+        return {"status": "success", "message": f"A tela de '{origem}' já se encontra aberta/destrancada."}
+        
     except HTTPException as e:
         raise e
     except Exception as e:

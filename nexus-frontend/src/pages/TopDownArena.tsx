@@ -115,7 +115,7 @@ export default function TopDownArena() {
     dadosFiltrados.forEach(row => row.meses.forEach((m: any) => totais[m.mes_banco] = 0));
     
     dadosFiltrados.forEach(row => {
-      const pmvBase = row.meses[0]?.pmv || 0; // Travado no PMV da primeira coluna
+      const pmvBase = row.meses[0]?.pmv || 0;
       
       row.meses.forEach((mes: any) => {
         const edicao = celulasEditadas[row.produto]?.[mes.mes_banco];
@@ -213,7 +213,6 @@ export default function TopDownArena() {
           const baseIA = Math.round(Number(dadosMes?.vol_ia || 0));
           const isChanged = valorInteiro !== baseIA;
           
-          // A MÁGICA: Usa o PMV Base (Index 0) para cravar o faturamento
           const pmvBase = row.meses[0]?.pmv || 0;
           const faturamentoPrevisto = valorInteiro * pmvBase;
 
@@ -329,7 +328,7 @@ export default function TopDownArena() {
            </div>
         </div>
 
-        {/* TABELA DE DADOS E GRÁFICOS (SCROLL NATIVO) */}
+        {/* TABELA DE DADOS E GRÁFICOS */}
         <div className="bg-white rounded-[40px] shadow-2xl border border-gray-100 overflow-hidden relative">
           <div className="overflow-x-auto pb-4">
             <table className="w-full text-left border-collapse">
@@ -398,8 +397,9 @@ export default function TopDownArena() {
                                   <LineChart data={
                                       (dadosGraficoCache[row.original.produto] || []).map((p: any) => {
                                           const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
-                                          const edicao = celulasEditadas[row.original.produto]?.meses?.[p.data_iso];
-                                          const valDiretoria = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao : mesNaTab.vol_ajustado)) : null;
+                                          const edicao = celulasEditadas[row.original.produto]?.[p.data_iso];
+                                          // CORREÇÃO: Agora lê o 'novo_volume' em tempo real!
+                                          const valDiretoria = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
                                           return { ...p, Consenso: valDiretoria !== null ? valDiretoria : p.Consenso };
                                       })
                                   }>
@@ -409,7 +409,6 @@ export default function TopDownArena() {
                                     <Tooltip contentStyle={{borderRadius: '20px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)'}} />
                                     <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900'}} />
                                     
-                                    {/* A MÁGICA DA VIAGEM NO TEMPO AQUI */}
                                     <Line type="monotone" dataKey="CicloAnterior" name="Proposta Mês Passado" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
 
                                     <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={4} dot={{r: 3, fill: '#0f172a'}} connectNulls={false} />

@@ -7,7 +7,7 @@ import {
   getExpandedRowModel,
   SortingState
 } from '@tanstack/react-table';
-import { Users, Loader2, Search, ArrowUpDown, ArrowUp, ArrowDown, Lock, Unlock, ShieldAlert, Save, Store, Package, ChevronRight, ChevronDown, BarChart2, X } from 'lucide-react';
+import { Users, Loader2, Search, ArrowUpDown, ArrowUp, ArrowDown, Lock, Unlock, ShieldAlert, Save, Store, Package, ChevronRight, ChevronDown, BarChart2, X, Filter } from 'lucide-react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
@@ -20,10 +20,13 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   const [celulasEditadas, setCelulasEditadas] = useState<any>({});
   const [sorting, setSorting] = useState<SortingState>([]);
   const [expanded, setExpanded] = useState({});
-  const [busca, setBusca] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
 
-  // NOVO ESTADO: Controla qual gráfico de Produto está aberto
+  const [busca, setBusca] = useState('');
+  const [filtroVendedor, setFiltroVendedor] = useState('TODOS');
+  const [filtroCliente, setFiltroCliente] = useState('TODOS');
+  const [filtroProduto, setFiltroProduto] = useState('TODOS');
+
   const [chartExpanded, setChartExpanded] = useState<string | null>(null);
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
@@ -43,7 +46,54 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const dadosFiltrados = useMemo(() => dadosBrutos.filter(d => d.nome.toLowerCase().includes(busca.toLowerCase())), [dadosBrutos, busca]);
+  const vendedoresUnicos = useMemo(() => [...new Set(dadosBrutos.map(v => v.nome))].sort(), [dadosBrutos]);
+  const clientesUnicos = useMemo(() => {
+    const cls = new Set<string>();
+    dadosBrutos.forEach(v => v.subRows?.forEach((c: any) => cls.add(c.nome)));
+    return Array.from(cls).sort();
+  }, [dadosBrutos]);
+  const produtosUnicos = useMemo(() => {
+    const prds = new Set<string>();
+    dadosBrutos.forEach(v => v.subRows?.forEach((c: any) => c.subRows?.forEach((p: any) => prds.add(p.nome))));
+    return Array.from(prds).sort();
+  }, [dadosBrutos]);
+
+  const dadosFiltrados = useMemo(() => {
+    let dados = dadosBrutos;
+
+    if (filtroVendedor !== 'TODOS') {
+      dados = dados.filter(v => v.nome === filtroVendedor);
+    }
+
+    if (filtroCliente !== 'TODOS' || filtroProduto !== 'TODOS' || busca) {
+      const bl = busca.toLowerCase();
+      dados = dados.map(v => {
+        const matchV = v.nome.toLowerCase().includes(bl);
+        
+        const novosClientes = v.subRows.map((c: any) => {
+          const matchC = matchV || c.nome.toLowerCase().includes(bl);
+          if (filtroCliente !== 'TODOS' && c.nome !== filtroCliente) return null;
+
+          const novosProdutos = c.subRows.filter((p: any) => {
+             if (filtroProduto !== 'TODOS' && p.nome !== filtroProduto) return false;
+             if (busca && !matchC && !p.nome.toLowerCase().includes(bl)) return false;
+             return true;
+          });
+
+          if (filtroProduto !== 'TODOS' && novosProdutos.length === 0) return null;
+          if (busca && !matchC && novosProdutos.length === 0) return null;
+
+          return { ...c, subRows: novosProdutos };
+        }).filter(Boolean);
+
+        if ((filtroCliente !== 'TODOS' || filtroProduto !== 'TODOS') && novosClientes.length === 0) return null;
+        if (busca && !matchV && novosClientes.length === 0) return null;
+
+        return { ...v, subRows: novosClientes };
+      }).filter(Boolean);
+    }
+    return dados;
+  }, [dadosBrutos, filtroVendedor, filtroCliente, filtroProduto, busca]);
 
   const totaisFaturamento = useMemo(() => {
     if (dadosFiltrados.length === 0) return {};
@@ -57,7 +107,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     return totais;
   }, [dadosFiltrados]);
 
-  // AÇÃO INDIVIDUAL: Trancar/Destrancar Vendedor (Agora com a rota certa)
   const handleToggleLock = async (vendedor: string) => {
     try {
       await axios.post('/api/v1/consensus/gerenciamento/toggle-lock', { origem: vendedor });
@@ -67,7 +116,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     }
   };
 
-  // AÇÃO EM MASSA
   const handleLockAll = async (acao: 'Trancar' | 'Destrancar') => {
     if (!window.confirm(`Deseja realmente ${acao.toLowerCase()} todos os vendedores listados para a sua gerência?`)) return;
     setIsProcessing(true);
@@ -79,15 +127,12 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
       alert(`✅ Vendedores ${acao === 'Trancar' ? 'trancados' : 'destrancados'} com sucesso!`);
       fetchData();
     } catch (e: any) { 
-      const erroBack = e.response?.data?.detail;
-      const msgErro = typeof erroBack === 'string' ? erroBack : JSON.stringify(erroBack);
-      alert(`Erro ao ${acao.toLowerCase()} os vendedores: ${msgErro}`); 
+      alert(`Erro ao ${acao.toLowerCase()} os vendedores: ${JSON.stringify(e.response?.data?.detail)}`); 
     } finally { 
       setIsProcessing(false); 
     }
   };
 
-  // GRAVAR AJUSTES MANUAIS
   const handleSalvarAjustes = async () => {
     if (!window.confirm("Isso aplicará um rateio forçado sobre as cotas. Continuar?")) return;
     setIsProcessing(true);
@@ -111,7 +156,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     }
   };
 
-  // EXPANDIR GRÁFICO (Nível SKU)
   const toggleChart = async (row: any) => {
     const chave = row.original.chave_matriz;
     if (chartExpanded === chave) {
@@ -123,7 +167,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
-        // A rota agora atende perfeitamente ao formato "Vendedor|Razão|SKU"
         const res = await axios.get('/api/v1/consensus/gerenciamento/grafico', { params: { chave_matriz: chave } });
         setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
       } catch (e) { console.error(e); }
@@ -193,22 +236,38 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           const meta = info.table.options.meta as any;
           const edicao = meta.celulasEditadas[row.chave_matriz]?.meses?.[m.mes_banco];
           
-          // HERANÇA DO BLOQUEIO: Se o Vendedor está fechado, toda a cascata abaixo fica fechada
           const isFechado = row.status === 'Fechado';
           
           const valorReal = edicao !== undefined ? edicao.novo_volume : (dadosMes?.vol_ajustado || 0);
-          const isChanged = edicao !== undefined;
+          const valorInteiro = Math.round(Number(valorReal));
+          
+          const baseIA = Math.round(Number(dadosMes?.vol_ia || 0));
+          const baseTD = Math.round(Number(dadosMes?.vol_td || 0));
+          
+          const isPendente = edicao !== undefined;
+          const isDiferenteTD = !isPendente && valorInteiro !== baseTD;
+          
+          let inputClass = 'bg-slate-50 border-transparent text-slate-800 focus:bg-white focus:border-slate-300';
+          if (isFechado) {
+            inputClass = 'cursor-not-allowed opacity-50 bg-slate-100 border-slate-200 text-slate-500';
+          } else if (isPendente) {
+            inputClass = 'bg-slate-800 border-slate-700 text-white shadow-md';
+          } else if (isDiferenteTD) {
+            inputClass = 'bg-blue-50 border-blue-200 text-blue-700 shadow-sm';
+          }
 
           return (
             <div className="flex flex-col w-28 gap-1">
+              <span className="text-[9px] text-slate-400 font-black opacity-60 uppercase text-center tracking-widest truncate">
+                IA: {formatVolume(baseIA)} | TD: {formatVolume(baseTD)}
+              </span>
               <input
                 type="number" disabled={isFechado} value={valorReal === 0 ? '' : valorReal} placeholder="0"
                 onChange={(e) => meta.updateCell(row.tipo, row.chave_matriz, m.mes_banco, e.target.value)}
-                className={`text-sm text-center font-black p-2.5 rounded-xl outline-none border-2 transition-all w-full
-                  ${isFechado ? 'cursor-not-allowed opacity-50 bg-slate-100 border-gray-200 text-gray-500' : isChanged ? 'bg-slate-800 border-slate-700 text-white shadow-md' : 'bg-gray-50 border-transparent text-gray-800 focus:bg-white focus:border-slate-300'}`}
+                className={`text-sm text-center font-black p-2.5 rounded-xl outline-none border-2 transition-all w-full ${inputClass}`}
               />
-              <span className={`text-[10px] font-black text-center pr-1 tracking-tight ${isChanged ? 'text-slate-400' : 'text-emerald-600'}`}>
-                {isChanged ? 'A calcular...' : formatMoeda(dadosMes?.receita || 0)}
+              <span className={`text-[10px] font-black text-center pr-1 tracking-tight ${isPendente ? 'text-slate-400' : 'text-emerald-600'}`}>
+                {isPendente ? 'A calcular...' : formatMoeda(dadosMes?.receita || 0)}
               </span>
             </div>
           );
@@ -260,28 +319,52 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
             <p className="text-slate-500 font-medium text-sm mt-1 ml-11">Visão Hierárquica: Force o Rateio de cotas em qualquer nível e tranque telas.</p>
           </div>
           
-          <div className="flex flex-col md:flex-row items-center gap-4 w-full lg:w-auto">
-            <div className="flex items-center gap-2 w-full md:w-auto">
-              <button onClick={() => handleLockAll('Destrancar')} disabled={isProcessing} className="flex-1 md:flex-none flex items-center justify-center gap-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 px-5 py-3 rounded-xl text-[10px] font-black tracking-widest uppercase transition-all">
-                  <Unlock className="w-4 h-4" /> Destrancar Todos
-              </button>
-              <button onClick={() => handleLockAll('Trancar')} disabled={isProcessing} className="flex-1 md:flex-none flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-white px-5 py-3 rounded-xl text-[10px] font-black tracking-widest uppercase transition-all shadow-md">
-                  <Lock className="w-4 h-4" /> Trancar Todos
-              </button>
-            </div>
-
-            <div className="flex items-center gap-3 px-4 bg-slate-50 rounded-xl border border-slate-100 w-full lg:w-64">
-              <Search className="w-5 h-5 text-slate-400" />
-              <input 
-                type="text" placeholder="Buscar vendedor..." value={busca} onChange={e => setBusca(e.target.value)}
-                className="w-full bg-transparent py-3 text-sm font-bold text-slate-800 outline-none placeholder:text-slate-400"
-              />
-            </div>
+          <div className="flex items-center gap-2 w-full md:w-auto">
+            <button onClick={() => handleLockAll('Destrancar')} disabled={isProcessing} className="flex-1 md:flex-none flex items-center justify-center gap-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 px-5 py-3 rounded-xl text-[10px] font-black tracking-widest uppercase transition-all">
+                <Unlock className="w-4 h-4" /> Destrancar Todos
+            </button>
+            <button onClick={() => handleLockAll('Trancar')} disabled={isProcessing} className="flex-1 md:flex-none flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-white px-5 py-3 rounded-xl text-[10px] font-black tracking-widest uppercase transition-all shadow-md">
+                <Lock className="w-4 h-4" /> Trancar Todos
+            </button>
           </div>
         </div>
 
+        <div className="flex flex-col lg:flex-row items-center gap-3 mb-6 bg-white p-3 rounded-[24px] shadow-sm border border-slate-100">
+           <div className="flex items-center gap-2 w-full lg:w-1/4 px-3 py-1">
+             <Search className="w-4 h-4 text-slate-400" />
+             <input type="text" placeholder="Busca livre..." value={busca} onChange={e => setBusca(e.target.value)} className="w-full bg-transparent text-sm font-bold text-slate-800 outline-none placeholder:text-slate-400" />
+           </div>
+           <div className="hidden lg:block w-px h-6 bg-slate-100"></div>
+
+           <div className="flex items-center gap-2 w-full lg:w-1/4 px-3 py-1">
+             <Users className="w-4 h-4 text-slate-400" />
+             <select value={filtroVendedor} onChange={e => setFiltroVendedor(e.target.value)} className="bg-transparent text-sm font-bold text-slate-700 outline-none w-full cursor-pointer truncate">
+                <option value="TODOS">TODOS OS VENDEDORES</option>
+                {vendedoresUnicos.map((v: any) => <option key={v} value={v}>{v}</option>)}
+             </select>
+           </div>
+           <div className="hidden lg:block w-px h-6 bg-slate-100"></div>
+           
+           <div className="flex items-center gap-2 w-full lg:w-1/4 px-3 py-1">
+             <Store className="w-4 h-4 text-slate-400" />
+             <select value={filtroCliente} onChange={e => setFiltroCliente(e.target.value)} className="bg-transparent text-sm font-bold text-slate-700 outline-none w-full cursor-pointer truncate">
+                <option value="TODOS">TODOS OS CLIENTES</option>
+                {clientesUnicos.map((c: any) => <option key={c} value={c}>{c}</option>)}
+             </select>
+           </div>
+           <div className="hidden lg:block w-px h-6 bg-slate-100"></div>
+
+           <div className="flex items-center gap-2 w-full lg:w-1/4 px-3 py-1">
+             <Package className="w-4 h-4 text-slate-400" />
+             <select value={filtroProduto} onChange={e => setFiltroProduto(e.target.value)} className="bg-transparent text-sm font-bold text-slate-700 outline-none w-full cursor-pointer truncate">
+                <option value="TODOS">TODOS OS PRODUTOS</option>
+                {produtosUnicos.map((p: any) => <option key={p} value={p}>{p}</option>)}
+             </select>
+           </div>
+        </div>
+
         <div className="bg-white rounded-[40px] shadow-2xl border border-slate-100 overflow-hidden relative">
-          <div className="overflow-x-auto pb-4">
+          <div className="overflow-x-auto pb-4 min-h-[400px]">
             <table className="w-full text-left border-collapse">
               <thead className="sticky top-0 bg-white/95 backdrop-blur-xl z-10 border-b border-slate-100 shadow-sm">
                 {table.getHeaderGroups().map(hg => (
@@ -303,60 +386,70 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
               </thead>
               
               <tbody>
-                {table.getRowModel().rows.map(row => (
-                  <Fragment key={row.id}>
-                    <tr className={`border-b transition-colors ${row.original.tipo === 'vendedor' ? 'bg-white border-slate-100' : row.original.tipo === 'cliente' ? 'bg-slate-50/50 border-slate-100' : 'bg-slate-50/80 border-white hover:bg-slate-100'}`}>
-                      {row.getVisibleCells().map(cell => (
-                        <td key={cell.id} className="px-8 py-3">
-                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                        </td>
-                      ))}
-                    </tr>
-
-                    {/* EXPANSÃO DO GRÁFICO NO NÍVEL DO PRODUTO */}
-                    {chartExpanded === row.original.chave_matriz && row.original.tipo === 'produto' && (
-                      <tr>
-                        <td colSpan={table.getAllColumns().length} className="bg-indigo-50/20 p-8 border-b border-slate-100">
-                          <div className="bg-white rounded-[40px] p-8 shadow-inner border border-indigo-100 animate-in fade-in duration-500">
-                            <h3 className="text-lg font-black text-gray-900 uppercase tracking-tighter mb-6">
-                               Detalhe: <span className="text-indigo-600">{row.original.nome}</span>
-                            </h3>
-
-                            <div className="h-[200px] w-full -ml-4">
-                              {loadingGrafico === row.original.chave_matriz ? (
-                                <div className="h-full flex items-center justify-center text-indigo-600"><Loader2 className="animate-spin w-8 h-8" /></div>
-                              ) : (
-                                <ResponsiveContainer width="100%" height="100%">
-                                  <LineChart data={
-                                      (dadosGraficoCache[row.original.chave_matriz] || []).map((p: any) => {
-                                          const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
-                                          const edicao = celulasEditadas[row.original.chave_matriz]?.meses?.[p.data_iso];
-                                          const valConsenso = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
-                                          return { ...p, Consenso: valConsenso !== null ? valConsenso : p.Consenso };
-                                      })
-                                  }>
-                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                                    <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900}} axisLine={false} tickLine={false} />
-                                    <YAxis tick={{fontSize: 10}} axisLine={false} tickLine={false} />
-                                    <Tooltip contentStyle={{borderRadius: '20px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)'}} />
-                                    <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900'}} />
-                                    
-                                    {/* A MÁGICA: A LINHA DO CICLO ANTERIOR AQUI */}
-                                    <Line type="monotone" dataKey="CicloAnterior" name="Proposta Mês Passado" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
-                                    
-                                    <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={4} dot={{r: 3, fill: '#0f172a'}} connectNulls={false} />
-                                    <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
-                                    <Line type="monotone" dataKey="Consenso" name="Ajuste Gerencial" stroke="#10b981" strokeWidth={5} dot={{r: 6, fill: '#10b981', strokeWidth: 2, stroke: '#fff'}} connectNulls={false} />
-                                  </LineChart>
-                                </ResponsiveContainer>
-                              )}
-                            </div>
-                          </div>
-                        </td>
+                {dadosFiltrados.length === 0 ? (
+                  <tr>
+                    <td colSpan={10} className="text-center py-20 text-slate-400 font-bold uppercase tracking-widest text-sm">
+                      Nenhum resultado encontrado para os filtros selecionados.
+                    </td>
+                  </tr>
+                ) : (
+                  table.getRowModel().rows.map(row => (
+                    <Fragment key={row.id}>
+                      <tr className={`border-b transition-colors ${row.original.tipo === 'vendedor' ? 'bg-white border-slate-100' : row.original.tipo === 'cliente' ? 'bg-slate-50/50 border-slate-100' : 'bg-slate-50/80 border-white hover:bg-slate-100'}`}>
+                        {row.getVisibleCells().map(cell => (
+                          <td key={cell.id} className="px-8 py-3">
+                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                          </td>
+                        ))}
                       </tr>
-                    )}
-                  </Fragment>
-                ))}
+
+                      {/* EXPANSÃO DO GRÁFICO NO NÍVEL DO PRODUTO */}
+                      {chartExpanded === row.original.chave_matriz && row.original.tipo === 'produto' && (
+                        <tr>
+                          <td colSpan={table.getAllColumns().length} className="bg-indigo-50/20 p-8 border-b border-slate-100">
+                            <div className="bg-white rounded-[40px] p-8 shadow-inner border border-indigo-100 animate-in fade-in duration-500">
+                              <h3 className="text-lg font-black text-gray-900 uppercase tracking-tighter mb-6">
+                                 Detalhe: <span className="text-indigo-600">{row.original.nome}</span>
+                              </h3>
+
+                              <div className="h-[200px] w-full -ml-4">
+                                {loadingGrafico === row.original.chave_matriz ? (
+                                  <div className="h-full flex items-center justify-center text-indigo-600"><Loader2 className="animate-spin w-8 h-8" /></div>
+                                ) : (
+                                  <ResponsiveContainer width="100%" height="100%">
+                                    <LineChart data={
+                                        (dadosGraficoCache[row.original.chave_matriz] || []).map((p: any) => {
+                                            const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
+                                            const edicao = celulasEditadas[row.original.chave_matriz]?.meses?.[p.data_iso];
+                                            // CORREÇÃO: Agora lê o 'novo_volume' em tempo real!
+                                            const valConsenso = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
+                                            return { ...p, Consenso: valConsenso !== null ? valConsenso : p.Consenso };
+                                        })
+                                    }>
+                                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                      <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900}} axisLine={false} tickLine={false} />
+                                      <YAxis tick={{fontSize: 10}} axisLine={false} tickLine={false} />
+                                      <Tooltip contentStyle={{borderRadius: '20px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)'}} />
+                                      <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900'}} />
+                                      
+                                      <Line type="monotone" dataKey="CicloAnterior" name="Proposta Mês Passado" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
+                                      
+                                      <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={4} dot={{r: 3, fill: '#0f172a'}} connectNulls={false} />
+                                      <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
+                                      
+                                      {/* CORREÇÃO: Linha de ajuste gerencial ajustada para cor Azul (#3b82f6) */}
+                                      <Line type="monotone" dataKey="Consenso" name="Ajuste Gerencial" stroke="#3b82f6" strokeWidth={5} dot={{r: 6, fill: '#3b82f6', strokeWidth: 2, stroke: '#fff'}} connectNulls={false} />
+                                    </LineChart>
+                                  </ResponsiveContainer>
+                                )}
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  ))
+                )}
               </tbody>
 
               <tfoot className="bg-slate-900 text-white">

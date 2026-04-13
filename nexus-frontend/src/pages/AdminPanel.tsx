@@ -118,7 +118,9 @@ export default function AdminPanel() {
 
     setIsUnlocking(true);
     try {
-      await axios.post(`/api/v1/admin/reabrir-ciclo?origem=${origemDesbloqueio}`);
+      await axios.post('/api/v1/admin/reabrir-ciclo', null, { 
+        params: { origem: origemDesbloqueio } 
+      });
       alert(`✅ Tela destrancada com sucesso para: ${origemDesbloqueio}`);
       setOrigemDesbloqueio('');
     } catch (e: any) {

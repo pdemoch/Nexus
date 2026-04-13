@@ -21,7 +21,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   const [expanded, setExpanded] = useState({});
   const [sorting, setSorting] = useState<SortingState>([]);
   
-  // NOVO ESTADO: Controla qual gráfico de Produto está aberto
   const [chartExpanded, setChartExpanded] = useState<string | null>(null);
   
   const [isCicloFechado, setIsCicloFechado] = useState(false);
@@ -94,11 +93,10 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     return totais;
   }, [dadosFiltrados, celulasEditadas]);
 
-  // Função exclusiva para abrir o gráfico (já que não há subRows para expandir a tabela no Produto)
   const toggleChart = async (row: any) => {
     const chave = row.original.chave_matriz;
     if (chartExpanded === chave) {
-      setChartExpanded(null); // Fecha se clicar de novo
+      setChartExpanded(null); 
       return;
     }
     
@@ -326,6 +324,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                                       (dadosGraficoCache[row.original.chave_matriz] || []).map((p: any) => {
                                           const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
                                           const edicao = celulasEditadas[row.original.chave_matriz]?.meses?.[p.data_iso];
+                                          // CORREÇÃO: Lê o novo_volume no momento em que é digitado!
                                           const valConsenso = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
                                           return { ...p, Consenso: valConsenso !== null ? valConsenso : p.Consenso };
                                       })
@@ -336,7 +335,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                                     <Tooltip contentStyle={{borderRadius: '20px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)'}} />
                                     <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900'}} />
                                     
-                                    {/* A MÁGICA: A LINHA DO CICLO ANTERIOR AQUI */}
                                     <Line type="monotone" dataKey="CicloAnterior" name="Proposta Mês Passado" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
                                     
                                     <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={4} dot={{r: 3, fill: '#0f172a'}} connectNulls={false} />
