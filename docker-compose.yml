@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # 1. O Banco de Dados PostgreSQL
+  # 1. O Banco de Dados PostgreSQL.
   nexus-db:
     image: postgres:15
     container_name: nexus_postgres
