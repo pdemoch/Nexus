@@ -23,11 +23,14 @@ app = FastAPI(
 # SEGURANÇA DE REDE (CORS)
 # Lê do config.py quem tem permissão para aceder à API
 # =========================================================================
-origins = [origin.strip() for origin in settings.CORS_ORIGINS.split(",")] if settings.CORS_ORIGINS else ["*"]
+origins = [
+    "https://lineanexus.com.br",
+    "http://localhost:3000", # para seus testes locais
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,  
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
