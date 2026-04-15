@@ -161,6 +161,10 @@ async def cadastrar_usuario(payload: CadastroPayload, db: Session = Depends(get_
             if check_gerente:
                 raise HTTPException(status_code=400, detail=f"A gerência {payload.gerente_nome} já está vinculada a outro usuário.")
             
+        # VERIFICAÇÃO SE É O PRIMEIRO USUÁRIO (BOOTSTRAP)
+        total_usuarios = db.query(Usuario).count()
+        eh_primeiro_usuario = (total_usuarios == 0)
+            
         novo_usuario = Usuario(
             nome=payload.nome.strip().upper(),
             email=email_limpo,
@@ -169,7 +173,7 @@ async def cadastrar_usuario(payload: CadastroPayload, db: Session = Depends(get_
             nome_vendedor=payload.nome_vendedor if payload.funcao == 'Executivo' else None,
             gerente_nome=payload.gerente_nome if payload.funcao == 'Gerente' else None, 
             primeiro_acesso=True,
-            aprovado=False,
+            aprovado=eh_primeiro_usuario, # Auto-aprova se for o primeiro
             ultima_atividade=datetime.utcnow()
         )
         

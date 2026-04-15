@@ -22,9 +22,9 @@ jobs:
             cd ~/Nexus
             git pull origin main
             
-            # Faxina preventiva: apaga caches e imagens velhas
+            # Faxina preventiva automática (para o disco nunca mais encher)
             sudo docker builder prune -a -f
             sudo docker image prune -a -f
             
-            # Sobe o sistema com o motor novo e atualizado
-            sudo docker-compose up -d --build
+            # Sobe o sistema com o motor novo
+            sudo docker compose up -d --build
