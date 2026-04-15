@@ -3,7 +3,7 @@ name: Deploy Nexus to AWS
 on:
   push:
     branches:
-      - main  # O robô só trabalha quando você envia para a branch main
+      - main
 
 jobs:
   deploy:
