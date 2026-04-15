@@ -1,5 +1,7 @@
 import traceback
 import time
+import os
+import polars as pl
 from datetime import date
 from dateutil.relativedelta import relativedelta
 from app.core.state import AppState
@@ -9,7 +11,6 @@ from app.etl.loader import NexusLoader
 from app.ml.forecaster import NexusForecaster
 
 def log(mensagem: str):
-    """Grava o log no estado global para o terminal React consumir em tempo real."""
     from datetime import datetime
     hora = datetime.now().strftime('%H:%M:%S')
     linha_log = f"[{hora}] {mensagem}"
@@ -19,11 +20,14 @@ def log(mensagem: str):
 async def executar_pipeline_nexus():
     tempo_inicio_total = time.time()
     try:
+        os.makedirs("data", exist_ok=True)
+        
         hoje = date.today()
+        # DE VOLTA AOS 4 ANOS - JANELA DO NEGÓCIO MANTIDA!
         data_inicio = date(2022, 1, 1)                  
         data_fim = hoje - relativedelta(days=1)
         
-        log("🚀 [SYSTEM] Iniciando Nexus Engine 3.0...")
+        log("🚀 [SYSTEM] Iniciando Nexus Engine 3.0 (Arquitetura OOC / Streaming)...")
         log(f"📅 [SYSTEM] Janela de processamento: {data_inicio.strftime('%d/%m/%Y')} a {data_fim.strftime('%d/%m/%Y')}")
         
         extractor = GobiExtractor()
@@ -33,21 +37,24 @@ async def executar_pipeline_nexus():
         
         # --- EXTRAÇÃO ---
         t0 = time.time()
-        log("⏳ [EXTRACT] Estabelecendo conexão com ERP Linea (APIs 150, 188 e Segmentos)...")
-        df_150, df_188, df_seg = await extractor.extrair_tudo(data_inicio, data_fim)
-        
-        if df_150.is_empty():
-            log("❌ [EXTRACT] CRÍTICO: API 150 retornou vazia. Abortando pipeline.")
-            AppState.pipeline_rodando = False
-            return
-        log(f"✅ [EXTRACT] Dados extraídos em {time.time() - t0:.2f}s. ({len(df_150)} registos brutos)")
+        log("⏳ [EXTRACT] Baixando dados do ERP e armazenando em lotes no disco...")
+        lf_150, lf_188, df_seg = await extractor.extrair_tudo(data_inicio, data_fim)
+        log(f"✅ [EXTRACT] Aquisição concluída em {time.time() - t0:.2f}s.")
 
         # --- TRANSFORMAÇÃO ---
         t0 = time.time()
-        log("⏳ [TRANSFORM] Limpando anomalias e construindo Camada Silver...")
-        df_silver = transformer.processar_camada_silver(df_150, df_188, df_seg)
+        log("⏳ [TRANSFORM] Limpando Camada Silver e descartando histórico de itens inativos (Inner Join)...")
+        lf_silver = transformer.processar_camada_silver(lf_150, lf_188, df_seg)
+        
+        caminho_silver = "data/silver_final.parquet"
+        
+        # O SEGREDO DO OOM: O Polars processa os dados aos pedaços e salva o resultado final no disco!
+        lf_silver.collect(streaming=True).write_parquet(caminho_silver)
+        log(f"✅ [TRANSFORM] Matriz consolidada gerada no disco em {time.time() - t0:.2f}s.")
+        
+        # Carregamos a matriz já reduzida pelas suas regras de negócio para a memória
+        df_silver = pl.read_parquet(caminho_silver)
         df_ia = transformer.preparar_camada_ia(df_silver)
-        log(f"✅ [TRANSFORM] Matriz estatística gerada em {time.time() - t0:.2f}s.")
         
         # --- MACHINE LEARNING ---
         t0 = time.time()
@@ -66,7 +73,6 @@ async def executar_pipeline_nexus():
         loader.executar_carga_forecast(df_forecast, df_silver, log_callback=log)
         log(f"✅ [LOAD] Gravação finalizada em {time.time() - t0:.2f}s.")
 
-        # --- FINALIZAÇÃO ---
         tempo_total = time.time() - tempo_inicio_total
         minutos, segundos = divmod(tempo_total, 60)
         AppState.pipeline_rodando = False

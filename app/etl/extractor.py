@@ -1,6 +1,8 @@
 import asyncio
 import aiohttp
 import polars as pl
+import os
+import glob
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional, Any
@@ -11,7 +13,9 @@ class GobiExtractor:
         self.headers = {"Authorization": f"Bearer {settings.GOBI_TOKEN}"}
         self.base_url = "https://gobi-api.lineaalimentos.com.br/v1/reports" 
         self.data_dir = Path(data_dir)
-        self.semaphore = asyncio.Semaphore(5)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        # Limitamos a 10 conexões simultâneas para não estourar a rede/RAM
+        self.semaphore = asyncio.Semaphore(10)
         self.timeout = aiohttp.ClientTimeout(total=400)
 
     async def _fetch_json_with_retry(self, session: aiohttp.ClientSession, url: str, params: dict, retries: int = 4) -> Optional[Any]:
@@ -32,7 +36,7 @@ class GobiExtractor:
                         await asyncio.sleep(2 ** tentativa)
             return None
 
-    async def _fetch_dia_paginado(self, session: aiohttp.ClientSession, dia_str: str) -> pl.DataFrame:
+    async def _fetch_dia_paginado(self, session: aiohttp.ClientSession, dia_str: str) -> Optional[str]:
         offset = 0
         limit = 1000
         lote_anterior = []
@@ -58,29 +62,42 @@ class GobiExtractor:
         if cols_para_cast:
             df = df.with_columns([pl.col(c).cast(pl.Float64, strict=False) for c in cols_para_cast])
             
-        return df
+        # O SEGREDO OOM: Salva no disco imediatamente e esvazia a RAM!
+        arquivo_parquet = self.data_dir / f"150_{dia_str}.parquet"
+        df.write_parquet(arquivo_parquet)
+        return str(arquivo_parquet)
 
-    async def extrair_pedidos_150(self, data_inicio: date, data_fim: date) -> pl.DataFrame:
+    async def extrair_pedidos_150(self, data_inicio: date, data_fim: date) -> pl.LazyFrame:
+        # Limpa o disco de execuções antigas
+        for f in glob.glob(f"{self.data_dir}/150_*.parquet"):
+            try: os.remove(f)
+            except: pass
+
         dias = []
         data_atual = data_inicio
         while data_atual <= data_fim:
             dias.append(data_atual.strftime("%Y-%m-%d"))
             data_atual += timedelta(days=1)
 
-        connector = aiohttp.TCPConnector(limit=5, keepalive_timeout=30)
+        connector = aiohttp.TCPConnector(limit=10, keepalive_timeout=30)
         async with aiohttp.ClientSession(connector=connector) as session:
             tasks = [self._fetch_dia_paginado(session, dia) for dia in dias]
-            resultados = await asyncio.gather(*tasks)
+            await asyncio.gather(*tasks)
 
-        lista_dfs = [df for df in resultados if df is not None and not df.is_empty()]
-        if lista_dfs: return pl.concat(lista_dfs, how="vertical")
-        return pl.DataFrame()
+        # Retorna o "mapa" para o Polars ler do disco depois (LazyFrame)
+        arquivos_gerados = glob.glob(f"{self.data_dir}/150_*.parquet")
+        if not arquivos_gerados: return pl.LazyFrame()
+        return pl.scan_parquet(arquivos_gerados)
 
-    async def extrair_clientes_188(self) -> pl.DataFrame:
+    async def extrair_clientes_188(self) -> pl.LazyFrame:
+        for f in glob.glob(f"{self.data_dir}/188_*.parquet"):
+            try: os.remove(f)
+            except: pass
+
         offset = 0
-        limit = 1000
+        limit = 5000
         lote_anterior = []
-        registros = []
+        chunk_idx = 0
 
         connector = aiohttp.TCPConnector(limit=5, keepalive_timeout=30)
         async with aiohttp.ClientSession(connector=connector) as session:
@@ -89,12 +106,18 @@ class GobiExtractor:
                 lote = await self._fetch_json_with_retry(session, f"{self.base_url}/188/data", params)
                 if not lote: break
                 if lote_anterior and lote[0] == lote_anterior[0]: break
-                registros.extend(lote)
+                
+                df_chunk = pl.from_dicts(lote)
+                df_chunk.write_parquet(f"{self.data_dir}/188_chunk_{chunk_idx}.parquet")
+                
                 lote_anterior = lote
                 offset += len(lote)
+                chunk_idx += 1
                 if len(lote) < limit: break
 
-        return pl.from_dicts(registros) if registros else pl.DataFrame()
+        arquivos_gerados = glob.glob(f"{self.data_dir}/188_*.parquet")
+        if not arquivos_gerados: return pl.LazyFrame()
+        return pl.scan_parquet(arquivos_gerados)
 
     def extrair_segmentos(self, caminho_arquivo: str) -> pl.DataFrame:
         try:
@@ -115,5 +138,6 @@ class GobiExtractor:
         tarefa_150 = self.extrair_pedidos_150(data_inicio, data_fim)
         tarefa_188 = self.extrair_clientes_188()
         df_seg = self.extrair_segmentos(caminho_excel)
-        df_150, df_188 = await asyncio.gather(tarefa_150, tarefa_188)
-        return df_150, df_188, df_seg
+        
+        lf_150, lf_188 = await asyncio.gather(tarefa_150, tarefa_188)
+        return lf_150, lf_188, df_seg
