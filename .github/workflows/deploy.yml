@@ -21,4 +21,10 @@ jobs:
           script: |
             cd ~/Nexus
             git pull origin main
-            sudo docker-compose up -d
+            
+            # Faxina preventiva: apaga caches e imagens velhas
+            sudo docker builder prune -a -f
+            sudo docker image prune -a -f
+            
+            # Sobe o sistema com o motor novo e atualizado
+            sudo docker-compose up -d --build
