@@ -1,4 +1,5 @@
 import traceback
+import time
 from datetime import date
 from dateutil.relativedelta import relativedelta
 from app.core.state import AppState
@@ -8,7 +9,7 @@ from app.etl.loader import NexusLoader
 from app.ml.forecaster import NexusForecaster
 
 def log(mensagem: str):
-    """Grava o log no estado global para o React consumir em tempo real."""
+    """Grava o log no estado global para o terminal React consumir em tempo real."""
     from datetime import datetime
     hora = datetime.now().strftime('%H:%M:%S')
     linha_log = f"[{hora}] {mensagem}"
@@ -16,48 +17,63 @@ def log(mensagem: str):
     print(linha_log)
 
 async def executar_pipeline_nexus():
+    tempo_inicio_total = time.time()
     try:
         hoje = date.today()
-        # Janela de extração de dados
         data_inicio = date(2022, 1, 1)                  
         data_fim = hoje - relativedelta(days=1)
         
-        log("✅ [SYSTEM] Iniciando Nexus Pipeline Oficial...")
+        log("🚀 [SYSTEM] Iniciando Nexus Engine 3.0...")
+        log(f"📅 [SYSTEM] Janela de processamento: {data_inicio.strftime('%d/%m/%Y')} a {data_fim.strftime('%d/%m/%Y')}")
         
         extractor = GobiExtractor()
         transformer = NexusTransformer()
         forecaster = NexusForecaster()
         loader = NexusLoader()
         
-        log("⏳ [EXTRACT] Conectando ao ERP Linea (APIs 150, 188 e Portfólio)...")
+        # --- EXTRAÇÃO ---
+        t0 = time.time()
+        log("⏳ [EXTRACT] Estabelecendo conexão com ERP Linea (APIs 150, 188 e Segmentos)...")
         df_150, df_188, df_seg = await extractor.extrair_tudo(data_inicio, data_fim)
         
         if df_150.is_empty():
-            log("❌ [EXTRACT] Falha: API 150 não retornou dados. Abortando.")
+            log("❌ [EXTRACT] CRÍTICO: API 150 retornou vazia. Abortando pipeline.")
             AppState.pipeline_rodando = False
             return
+        log(f"✅ [EXTRACT] Dados extraídos em {time.time() - t0:.2f}s. ({len(df_150)} registos brutos)")
 
-        log("⏳ [TRANSFORM] Aplicando regras da Camada Silver e limpando inativos...")
+        # --- TRANSFORMAÇÃO ---
+        t0 = time.time()
+        log("⏳ [TRANSFORM] Limpando anomalias e construindo Camada Silver...")
         df_silver = transformer.processar_camada_silver(df_150, df_188, df_seg)
         df_ia = transformer.preparar_camada_ia(df_silver)
+        log(f"✅ [TRANSFORM] Matriz estatística gerada em {time.time() - t0:.2f}s.")
         
-        log("🧠 [MACHINE LEARNING] Iniciando Arena de Modelos Preditivos...")
-        # A IA prevê os volumes a nível de SKU
+        # --- MACHINE LEARNING ---
+        t0 = time.time()
+        log("🧠 [ML] Acordando Redes Neurais e Modelos Preditivos...")
         df_forecast = forecaster.executar_arena(df_ia, log_callback=log)
+        log(f"✅ [ML] Previsões globais concluídas em {time.time() - t0:.2f}s.")
 
-        log("⏳ [LOAD] Injetando Fatos e Dimensões no banco local SQLite...")
-        loader.executar_carga_silver(df_silver)
+        # --- CARGA (LOAD) ---
+        t0 = time.time()
+        log("⏳ [LOAD] Preparando injeção no Banco de Dados (PostgreSQL AWS)...")
         
-        log("🌊 [RATEIO] Distribuindo Inteligência Artificial para Lojas (CGCs)...")
-        # A GRANDE MUDANÇA: Passamos o df_silver (Histórico de Vendas) junto com o df_forecast (Previsão).
-        # O Loader vai olhar os últimos 12 meses do df_silver e ratear a IA loja a loja!
-        loader.executar_carga_forecast(df_forecast, df_silver)
+        log("   -> [ETAPA 1/2] Atualizando Dimensões e Fatos (Silver)...")
+        loader.executar_carga_silver(df_silver, log_callback=log)
+        
+        log("   -> [ETAPA 2/2] Calculando Rateio Atômico e distribuindo Inteligência (S&OP)...")
+        loader.executar_carga_forecast(df_forecast, df_silver, log_callback=log)
+        log(f"✅ [LOAD] Gravação finalizada em {time.time() - t0:.2f}s.")
 
+        # --- FINALIZAÇÃO ---
+        tempo_total = time.time() - tempo_inicio_total
+        minutos, segundos = divmod(tempo_total, 60)
         AppState.pipeline_rodando = False
-        log("🏁 [SYSTEM] Pipeline concluído com sucesso!")
+        log(f"🏁 [SYSTEM] Pipeline S&OP concluído com sucesso! (Tempo total: {int(minutos)}m {int(segundos)}s)")
         
     except Exception as e:
         AppState.pipeline_rodando = False
         erro_msg = traceback.format_exc()
-        log(f"❌ [ERRO CRÍTICO] Falha na execução: {str(e)}")
+        log(f"❌ [ERRO FATAL] O motor colapsou: {str(e)}")
         print(erro_msg)

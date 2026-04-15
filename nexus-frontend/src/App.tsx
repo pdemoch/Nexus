@@ -90,7 +90,7 @@ export default function App() {
     <div className="flex h-screen w-full bg-[#f8fafc] font-sans overflow-hidden">
       
       {/* TELA DE BLOQUEIO GLOBAL */}
-      {isSystemLocked && (
+      {isSystemLocked && user?.funcao !== 'Administrador' && (
         <div className="fixed inset-0 z-[9999] bg-slate-950/90 backdrop-blur-xl flex flex-col items-center justify-center p-6 animate-in fade-in duration-500">
             <div className="max-w-2xl w-full flex flex-col items-center text-center">
                 <div className="relative mb-8">

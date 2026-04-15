@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Baixar código no robô
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Empurrar arquivos para a AWS (Substitui o git pull)
         uses: appleboy/scp-action@master

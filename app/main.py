@@ -25,6 +25,7 @@ app = FastAPI(
 # =========================================================================
 origins = [
     "https://lineanexus.com.br",
+    "http://localhost:5173",
     "http://localhost:3000", # para seus testes locais
 ]
 
