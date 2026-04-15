@@ -4,8 +4,13 @@ import App from './App.tsx'
 import './index.css'
 import axios from 'axios'
 
-// Configura a URL base (Localhost no seu PC, Nuvem quando for pro Vercel)
-axios.defaults.baseURL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// Descobre automaticamente se estamos no servidor ou no PC local
+const isProd = import.meta.env.PROD;
+
+// Configura a URL base
+axios.defaults.baseURL = isProd 
+  ? 'https://api.lineanexus.com.br' 
+  : 'http://localhost:8000';
 
 // INTERCEPTOR DE SEGURANÇA: Anexa o Crachá (Token) em TODOS os pedidos!
 axios.interceptors.request.use((config) => {
