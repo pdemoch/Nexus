@@ -22,9 +22,9 @@ jobs:
             cd ~/Nexus
             git pull origin main
             
-            # Faxina preventiva automática (para o disco nunca mais encher)
+            # Comandos nativos do Docker (Sem hífen)
             sudo docker builder prune -a -f
             sudo docker image prune -a -f
             
-            # Sobe o sistema com o motor novo
-            sudo docker compose up -d --build
+            # O nosso motor atualizado para driblar o Ubuntu (Com hífen)
+            sudo docker-compose up -d --build
