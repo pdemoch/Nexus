@@ -34,10 +34,12 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   const [opcoesBusca, setOpcoesBusca] = useState<{vendedores: string[], regionais: string[]}>({vendedores: [], regionais: []});
 
   useEffect(() => {
+    // Busca os filtros globais (Vendedores e Regionais)
     axios.get('/api/v1/consensus/filtros', { params: { gerente_nome: usuarioSessao?.gerente_nome } })
          .then(res => setOpcoesBusca(res.data)).catch(console.error);
 
-    axios.get('/api/v1/consensus/status', { params: { origem: 'Check-Inicial' } })
+    // Checa se o Top-Down já foi assinado pela diretoria
+    axios.get('/api/v1/consensus/macro/status')
          .then(res => setIsTopDownFechado(res.data.is_topdown_fechado)).catch(console.error);
   }, [usuarioSessao]);
 
@@ -46,11 +48,14 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     setIsLoading(true);
     try {
       const [statusRes, microRes] = await Promise.all([
-        axios.get('/api/v1/consensus/status', { params: { origem: nomeResponsavel } }),
+        // Rota unificada no cérebro compartilhado para checar travas
+        axios.get('/api/v1/consensus/gerenciamento/toggle-lock', { params: { origem: nomeResponsavel } }).catch(() => ({data: {status: 'Aberto'}})),
+        // Nova rota modular do Bottom-Up
         axios.get('/api/v1/consensus/micro', { params: { nivel_hierarquia: nivelHierarquia, nome_responsavel: nomeResponsavel } })
       ]);
-      setIsCicloFechado(statusRes.data.is_fechado);
-      setIsTopDownFechado(statusRes.data.is_topdown_fechado); 
+      
+      // Ajuste de status baseado na resposta do backend
+      setIsCicloFechado(statusRes.data?.status === 'Fechado');
       setDadosBrutos(microRes.data.dados || []);
     } catch (e) { setDadosBrutos([]); } finally { setIsLoading(false); }
   }, [nivelHierarquia, nomeResponsavel, isExecutivo]);
@@ -64,30 +69,42 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     const ajustes: any[] = [];
     Object.entries(celulasEditadas).forEach(([chaveMatriz, dados]: any) => {
       Object.entries(dados.meses).forEach(([mes, val]: any) => {
-        ajustes.push({ nivel: dados.tipo, chave: chaveMatriz, mes_projetado: mes, novo_volume: val.novo_volume === '' ? 0 : val.novo_volume, pmv_aplicado: val.pmv_aplicado });
+        ajustes.push({ 
+            nivel: dados.tipo, 
+            chave: chaveMatriz, 
+            mes_projetado: mes, 
+            novo_volume: val.novo_volume === '' ? 0 : val.novo_volume 
+        });
       });
     });
 
     try {
-      await axios.post(`/api/v1/consensus/micro/congelar?nome_responsavel=${nomeResponsavel}`, { origem_ajuste: "Nexus UI", ajustes });
+      await axios.post(`/api/v1/consensus/micro/congelar?nome_responsavel=${nomeResponsavel}`, { origem_ajuste: "Comercial", ajustes });
       alert("🔒 Ciclo Comercial gravado com sucesso!");
       setCelulasEditadas({});
       fetchData();
     } catch (e: any) { alert("Erro ao gravar: " + (e.response?.data?.detail || e.message)); } finally { setIsProcessing(false); }
   };
 
-  const clientesUnicos = useMemo(() => [...new Set(dadosBrutos.map(d => d.razaosocial).filter(Boolean))].sort(), [dadosBrutos]);
-  const dadosFiltrados = useMemo(() => clienteFiltro === "TODOS" ? dadosBrutos : dadosBrutos.filter(d => d.razaosocial === clienteFiltro), [dadosBrutos, clienteFiltro]);
+  const dadosFiltrados = useMemo(() => clienteFiltro === "TODOS" ? dadosBrutos : dadosBrutos.filter(d => d.nome === clienteFiltro), [dadosBrutos, clienteFiltro]);
+  const clientesUnicos = useMemo(() => [...new Set(dadosBrutos.map(d => d.nome).filter(Boolean))].sort(), [dadosBrutos]);
 
+  // =========================================================================
+  // CÁLCULO DE TOTAIS: Respeitando a Receita Atómica do Banco
+  // =========================================================================
   const totaisGerais = useMemo(() => {
     const totais: Record<string, { vol: number, fat: number }> = {};
     dadosFiltrados.forEach(row => { row.meses.forEach((m: any) => { totais[m.mes_banco] = { vol: 0, fat: 0 }; }); });
+    
     dadosFiltrados.forEach(row => {
       row.meses.forEach((mes: any) => {
         const edicao = celulasEditadas[row.chave_matriz]?.meses?.[mes.mes_banco];
-        const volumeFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : mes.vol_ajustado));
+        const isPendente = edicao !== undefined;
+        const volumeFinal = Math.round(Number(isPendente ? edicao.novo_volume : mes.vol_ajustado));
+        
         totais[mes.mes_banco].vol += volumeFinal;
-        totais[mes.mes_banco].fat += volumeFinal * mes.pmv; 
+        // Se estiver em edição, simula (vol * pmv). Se já gravado, usa receita real do banco.
+        totais[mes.mes_banco].fat += isPendente ? (volumeFinal * (mes.pmv || 0)) : (mes.receita || 0); 
       });
     });
     return totais;
@@ -161,22 +178,25 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           const meta = info.table.options.meta as any;
           const edicao = meta.celulasEditadas[row.chave_matriz]?.meses?.[m.mes_banco];
           
-          const valorReal = edicao !== undefined ? edicao.novo_volume : (dadosMes?.vol_ajustado || 0);
+          const isPendente = edicao !== undefined;
+          const valorReal = isPendente ? edicao.novo_volume : (dadosMes?.vol_ajustado || 0);
           const valorInteiro = Math.round(Number(valorReal));
           const baseIA = Math.round(Number(dadosMes?.vol_ia || 0));
           const isChanged = valorInteiro !== baseIA;
-          const faturamentoPrevisto = valorInteiro * (dadosMes?.pmv || 0);
+          
+          // O SEGREDO: Se não está em edição, mostra a Receita exata do banco
+          const faturamentoExibicao = isPendente ? (valorInteiro * (dadosMes?.pmv || 0)) : (dadosMes?.receita || 0);
 
           return (
             <div className="flex flex-col w-28 gap-1">
               <span className="text-[9px] text-gray-400 font-black opacity-60 uppercase text-center tracking-widest">Ref. IA: {formatVolume(baseIA)}</span>
               <input
                 type="number" disabled={isTelaBloqueada} value={valorInteiro === 0 ? '' : valorInteiro} placeholder="0"
-                onChange={(e) => meta.updateCell(row.tipo, row.chave_matriz, m.mes_banco, e.target.value, (dadosMes?.pmv || 0))}
+                onChange={(e) => meta.updateCell(row.tipo, row.chave_matriz, m.mes_banco, e.target.value)}
                 className={`text-sm text-center font-black p-2.5 rounded-xl outline-none border-2 transition-all w-full
                   ${isTelaBloqueada ? 'cursor-not-allowed opacity-50 bg-gray-100 border-gray-200 text-gray-500' : isChanged ? 'bg-blue-50 border-blue-200 text-blue-700 shadow-sm' : 'bg-gray-50 border-transparent text-gray-700 focus:bg-white focus:border-gray-200'}`}
               />
-              <span className="text-[10px] font-black text-emerald-600 text-center pr-1 tracking-tight">{formatMoeda(faturamentoPrevisto)}</span>
+              <span className="text-[10px] font-black text-emerald-600 text-center pr-1 tracking-tight">{formatMoeda(faturamentoExibicao)}</span>
             </div>
           );
         }
@@ -193,11 +213,11 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel(), getSortedRowModel: getSortedRowModel(),
     meta: {
       celulasEditadas,
-      updateCell: (tipo: string, chave: string, mes: string, val: string, pmv: number) => {
+      updateCell: (tipo: string, chave: string, mes: string, val: string) => {
         if (isTelaBloqueada) return;
         const v = val === '' ? '' : Math.round(Number(val));
         const finalV = Number.isNaN(v as any) && val !== '' ? 0 : v;
-        setCelulasEditadas((prev: any) => ({ ...prev, [chave]: { tipo: tipo, meses: { ...(prev[chave]?.meses || {}), [mes]: { novo_volume: finalV, pmv_aplicado: pmv } } } }));
+        setCelulasEditadas((prev: any) => ({ ...prev, [chave]: { tipo: tipo, meses: { ...(prev[chave]?.meses || {}), [mes]: { novo_volume: finalV } } } }));
       }
     }
   });
@@ -262,7 +282,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                   <div className="flex items-center gap-3 h-full">
                     {qtdEdicoes > 0 && (<button onClick={() => setCelulasEditadas({})} className="flex items-center gap-1 text-xs font-black text-rose-500 hover:text-rose-700 transition tracking-widest uppercase px-4 py-3 rounded-2xl hover:bg-rose-50"><X className="w-4 h-4" /> Descartar</button>)}
                     <button onClick={handleCongelarCiclo} disabled={isProcessing} className="flex items-center gap-2 bg-rose-500 hover:bg-rose-400 text-white px-6 py-3 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-rose-500/30 transition-all h-full">
-                        {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : qtdEdicoes > 0 ? 'Gravar e Ratear Ciclo' : 'Gravar Ciclo Definitivo'}
+                        {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : qtdEdicoes > 0 ? 'Gravar e Ratear Ciclo' : 'Gravar Ciclo Comercial'}
                     </button>
                   </div>
               )}
@@ -306,7 +326,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                       {row.getVisibleCells().map(cell => <td key={cell.id} className="px-8 py-3">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}
                     </tr>
                     
-                    {/* EXPANSÃO DO GRÁFICO NO NÍVEL DO PRODUTO */}
                     {chartExpanded === row.original.chave_matriz && row.original.tipo === 'produto' && (
                       <tr>
                         <td colSpan={table.getAllColumns().length} className="bg-indigo-50/20 p-8 border-b border-gray-100">
@@ -324,7 +343,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                                       (dadosGraficoCache[row.original.chave_matriz] || []).map((p: any) => {
                                           const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
                                           const edicao = celulasEditadas[row.original.chave_matriz]?.meses?.[p.data_iso];
-                                          // CORREÇÃO: Lê o novo_volume no momento em que é digitado!
                                           const valConsenso = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
                                           return { ...p, Consenso: valConsenso !== null ? valConsenso : p.Consenso };
                                       })

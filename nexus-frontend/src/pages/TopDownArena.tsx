@@ -36,7 +36,8 @@ export default function TopDownArena() {
     try {
       const [res, statusRes] = await Promise.all([
         axios.get('/api/v1/consensus/macro'),
-        axios.get('/api/v1/consensus/status', { params: { origem: 'Top-Down' } })
+        // Rota atualizada para a nova arquitetura modular
+        axios.get('/api/v1/consensus/macro/status')
       ]);
       setDadosBrutos(res.data.dados || []);
       setIsCicloFechado(statusRes.data.is_topdown_fechado);
@@ -110,6 +111,9 @@ export default function TopDownArena() {
     (segmentoSelecionado === 'TODOS' || d.segmento === segmentoSelecionado)
   ), [dadosBrutos, busca, categoriaSelecionada, segmentoSelecionado]);
 
+  // =========================================================================
+  // A MÁGICA DA RECEITA: Usa o banco de dados como Fonte da Verdade
+  // =========================================================================
   const totaisFaturamento = useMemo(() => {
     const totais: Record<string, number> = {};
     dadosFiltrados.forEach(row => row.meses.forEach((m: any) => totais[m.mes_banco] = 0));
@@ -119,8 +123,13 @@ export default function TopDownArena() {
       
       row.meses.forEach((mes: any) => {
         const edicao = celulasEditadas[row.produto]?.[mes.mes_banco];
-        const volumeFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : mes.vol_ajustado));
-        totais[mes.mes_banco] += volumeFinal * pmvBase;
+        const isPendente = edicao !== undefined;
+        const volumeFinal = Math.round(Number(isPendente ? edicao.novo_volume : mes.vol_ajustado));
+        
+        // Se a célula está pendente de gravação, usamos a simulação matemática.
+        // Se não, extraímos a receita EXATA calculada no PostgreSQL.
+        const receitaReal = isPendente ? (volumeFinal * pmvBase) : (mes.receita || 0);
+        totais[mes.mes_banco] += receitaReal;
       });
     });
     return totais;
@@ -208,13 +217,17 @@ export default function TopDownArena() {
           const meta = info.table.options.meta as any;
           const edicao = meta.celulasEditadas[row.produto]?.[m.mes_banco];
           
-          const valorReal = edicao !== undefined ? edicao.novo_volume : (dadosMes?.vol_ajustado || 0);
+          const isPendente = edicao !== undefined;
+          const valorReal = isPendente ? edicao.novo_volume : (dadosMes?.vol_ajustado || 0);
           const valorInteiro = Math.round(Number(valorReal));
           const baseIA = Math.round(Number(dadosMes?.vol_ia || 0));
           const isChanged = valorInteiro !== baseIA;
           
           const pmvBase = row.meses[0]?.pmv || 0;
-          const faturamentoPrevisto = valorInteiro * pmvBase;
+          
+          // A MÁGICA AQUI: O React só faz a conta de padaria se você estiver a editar. 
+          // Se já estiver gravado, ele exibe o Faturamento Real que veio do banco de dados.
+          const faturamentoPrevisto = isPendente ? (valorInteiro * pmvBase) : (dadosMes?.receita || 0);
 
           return (
             <div className="flex flex-col w-28 gap-1">
@@ -398,7 +411,6 @@ export default function TopDownArena() {
                                       (dadosGraficoCache[row.original.produto] || []).map((p: any) => {
                                           const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
                                           const edicao = celulasEditadas[row.original.produto]?.[p.data_iso];
-                                          // CORREÇÃO: Agora lê o 'novo_volume' em tempo real!
                                           const valDiretoria = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
                                           return { ...p, Consenso: valDiretoria !== null ? valDiretoria : p.Consenso };
                                       })

@@ -1,7 +1,16 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routers import router_consensus, router_auth, router_admin, router_dashboard, router_npd
+# IMPORTAÇÕES ATUALIZADAS (Adeus router_consensus, Olá Rotas Modulares!)
+from app.api.routers import (
+    router_auth, 
+    router_admin, 
+    router_dashboard, 
+    router_npd, 
+    router_topdown, 
+    router_bottomup, 
+    router_gerenciamento
+)
 from app.core.config import settings
 from app.models.domain_models import Base
 from app.core.database import engine
@@ -37,17 +46,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Injeção das Rotas
-app.include_router(router_consensus.router)
+# =========================================================================
+# INJEÇÃO DAS ROTAS (A NOVA ESTRUTURA)
+# =========================================================================
 app.include_router(router_auth.router)
 app.include_router(router_admin.router)
 app.include_router(router_dashboard.router)
 app.include_router(router_npd.router)
+
+# As 3 novas rotas especializadas do Consenso (S&OP)
+app.include_router(router_topdown.router)
+app.include_router(router_bottomup.router)
+app.include_router(router_gerenciamento.router)
 
 @app.get("/", tags=["Health Check"])
 async def root():
     return {
         "status": "online", 
         "sistema": "Nexus IBP 3.0",
-        "mensagem": "Servidor rodando perfeitamente em Clean Architecture com PostgreSQL!"
+        "mensagem": "Servidor rodando perfeitamente em Arquitetura Modular com PostgreSQL!"
     }
