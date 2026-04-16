@@ -23,7 +23,7 @@ const EditableCell = ({ initialValue, onSave, isChanged, isLocked }: any) => {
     <input
       type="number" value={value} placeholder="0" disabled={isLocked}
       onChange={e => setValue(e.target.value === '' ? '' : Math.round(Number(e.target.value)))}
-      onBlur={onBlur} onKeyDown={e => e.key === 'Enter' && onBlur()}
+      onBlur = {onBlur} onKeyDown={e => e.key === 'Enter' && onBlur()}
       className={`w-full text-center text-sm font-black p-2 rounded-lg border-2 transition-all shadow-sm outline-none
         ${isChanged ? 'bg-emerald-50 border-emerald-500 text-emerald-800' : 'bg-white border-slate-200 hover:border-slate-300 focus:border-indigo-500 text-slate-800'}`}
     />
@@ -61,8 +61,10 @@ export default function GlobalDashboard() {
             cliente: d.cliente_razaosocial, meses: {} 
           });
         }
+        // AGORA CONSUMINDO RECEITAS ATÓMICAS DO BACKEND
         clientesMap.get(d.chave_matriz).meses[d.mes_projetado] = { 
-          vol_ia: d.vol_ia, vol_td: d.vol_td, vol_bu: d.vol_bu, vol_irrestrito: d.vol_irrestrito, pmv: d.pmv 
+          vol_ia: d.vol_ia, vol_td: d.vol_td, vol_bu: d.vol_bu, vol_irrestrito: d.vol_irrestrito,
+          rec_ia: d.rec_ia, rec_td: d.rec_td, rec_bu: d.rec_bu, rec_final: d.rec_final
         };
       });
       setMesesUnicos(Array.from(mesesSet).sort());
@@ -78,9 +80,7 @@ export default function GlobalDashboard() {
     clientesArray.forEach(cli => {
       if(!catMap.has(cli.categoria)) catMap.set(cli.categoria, { tipo: 'categoria', id: cli.categoria, nome_exibicao: cli.categoria, childrenMap: new Map() });
       const catNode = catMap.get(cli.categoria);
-      // Produto fica no meio
       if(!catNode.childrenMap.has(cli.produto)) catNode.childrenMap.set(cli.produto, { tipo: 'produto', id: cli.produto, chave_produto: cli.produto, nome_exibicao: cli.descricao, children: [] });
-      // Cliente (Razão Social) fica na ponta
       catNode.childrenMap.get(cli.produto).children.push({ ...cli, tipo: 'cliente', nome_exibicao: cli.cliente });
     });
     return Array.from(catMap.values()).map(cat => ({ ...cat, children: Array.from(cat.childrenMap.values()) }));
@@ -88,22 +88,29 @@ export default function GlobalDashboard() {
 
   const getMetricasNode = useCallback((node: any, mes: string, editadas: any): any => {
     if (node.tipo === 'cliente') {
-      const pmv = node.meses[mes]?.pmv || 0;
-      const valFinal = editadas[`cliente|${node.id}|${mes}`] ?? node.meses[mes]?.vol_irrestrito ?? 0;
+      const editValue = editadas[`cliente|${node.id}|${mes}`];
+      const isEdited = editValue !== undefined;
       
-      const vol = Math.round(Number(valFinal));
-      const ia = Math.round(Number(node.meses[mes]?.vol_ia || 0));
-      const td = Math.round(Number(node.meses[mes]?.vol_td || 0));
-      const bu = Math.round(Number(node.meses[mes]?.vol_bu || 0));
+      const volFinal = isEdited ? Math.round(Number(editValue)) : Math.round(Number(node.meses[mes]?.vol_irrestrito || 0));
+      
+      // Cálculo de Receita para Edição: Proporcional ao volume editado sobre o volume final atual
+      const baseRecFinal = node.meses[mes]?.rec_final || 0;
+      const baseVolFinal = node.meses[mes]?.vol_irrestrito || 1; // evita div por zero
+      const fatFinal = isEdited ? (volFinal * (baseRecFinal / baseVolFinal)) : baseRecFinal;
 
       return { 
-        vol, fat: vol * pmv, 
-        ia, fat_ia: ia * pmv, 
-        td, fat_td: td * pmv, 
-        bu, fat_bu: bu * pmv 
+        vol: volFinal, 
+        fat: fatFinal, 
+        ia: Math.round(Number(node.meses[mes]?.vol_ia || 0)), 
+        fat_ia: node.meses[mes]?.rec_ia || 0, 
+        td: Math.round(Number(node.meses[mes]?.vol_td || 0)), 
+        fat_td: node.meses[mes]?.rec_td || 0, 
+        bu: Math.round(Number(node.meses[mes]?.vol_bu || 0)), 
+        fat_bu: node.meses[mes]?.rec_bu || 0 
       };
     }
-    const somaFilhos = node.children.reduce((acc: any, c: any) => {
+    
+    return node.children.reduce((acc: any, c: any) => {
       const r = getMetricasNode(c, mes, editadas);
       return { 
         vol: acc.vol + r.vol, fat: acc.fat + r.fat, 
@@ -112,15 +119,6 @@ export default function GlobalDashboard() {
         bu: acc.bu + r.bu, fat_bu: acc.fat_bu + r.fat_bu 
       };
     }, { vol: 0, fat: 0, ia: 0, fat_ia: 0, td: 0, fat_td: 0, bu: 0, fat_bu: 0 });
-
-    if (node.tipo === 'produto') {
-      const editKey = `produto|${node.chave_produto}|${mes}`;
-      if (editadas[editKey] !== undefined) {
-        const novoV = Math.round(Number(editadas[editKey]));
-        return { ...somaFilhos, vol: novoV, fat: somaFilhos.vol > 0 ? (novoV / somaFilhos.vol) * somaFilhos.fat : 0 };
-      }
-    }
-    return somaFilhos;
   }, []);
 
   const handleDistribuirVolume = (produtoNode: any, mes: string) => {
@@ -151,26 +149,19 @@ export default function GlobalDashboard() {
       document.body.appendChild(link);
       link.click();
       link.parentNode?.removeChild(link);
-    } catch (e) {
-      alert("Erro ao exportar o Excel do Dashboard Global.");
-    }
+    } catch (e) { alert("Erro ao exportar."); }
   };
 
   const handleSave = async () => {
     if (isLocked) return;
-    if (!window.confirm("Atenção: A Publicação bloqueará a tela para todos os utilizadores. Deseja aprovar este plano oficial e reescrever a base atómica na Coluna Final?")) return;
+    if (!window.confirm("Atenção: A Publicação bloqueará a tela. Deseja aprovar este plano oficial?")) return;
     setIsProcessing(true);
     try {
       const ajustes = Object.entries(celulasEditadas).map(([k, v]) => ({ nivel: k.split('|')[0], chave: k.split('|')[1], mes_projetado: k.split('|')[2], novo_volume: v === '' ? 0 : v }));
       await axios.post('/api/v1/dashboard/aprovar', { ajustes });
       setCelulasEditadas({});
       await fetchData(); 
-      await handleManualExport();
-    } catch (e: any) { 
-      alert("Erro ao salvar: " + (e.response?.data?.detail || e.message)); 
-    } finally { 
-      setIsProcessing(false); 
-    }
+    } catch (e: any) { alert("Erro ao salvar."); } finally { setIsProcessing(false); }
   };
 
   const stats = useMemo(() => {
@@ -227,24 +218,16 @@ export default function GlobalDashboard() {
       cols.push({
         id: `mes_${m}`, accessorFn: (row: any) => getMetricasNode(row, m, celulasEditadas).vol,
         header: ({ column }: any) => (
-          <button 
-            onClick={() => column.toggleSorting()} 
-            className="flex items-center justify-center gap-2 bg-slate-900 text-white py-2 px-4 rounded-xl text-[11px] font-black tracking-widest w-[160px] hover:bg-slate-800 transition-colors"
-          >
+          <button onClick={() => column.toggleSorting()} className="flex items-center justify-center gap-2 bg-slate-900 text-white py-2 px-4 rounded-xl text-[11px] font-black tracking-widest w-[160px] hover:bg-slate-800 transition-colors">
             {m.split('-').reverse().slice(1).join('/')}
-            {column.getIsSorted() ? (column.getIsSorted() === 'asc' ? <ArrowUp className="w-3 h-3 text-emerald-400"/> : <ArrowDown className="w-3 h-3 text-rose-400"/>) : <ArrowUpDown className="w-3 h-3 opacity-30"/>}
           </button>
         ),
         cell: ({ row }: any) => {
           const res = getMetricasNode(row.original, m, celulasEditadas);
-          const isCategoria = row.original.tipo === 'categoria';
-          const isProduto = row.original.tipo === 'produto';
-          const isCliente = row.original.tipo === 'cliente';
-
-          const editKey = isCliente ? `cliente|${row.original.id}|${m}` : isProduto ? `produto|${row.original.chave_produto}|${m}` : '';
+          const editKey = row.original.tipo === 'cliente' ? `cliente|${row.original.id}|${m}` : row.original.tipo === 'produto' ? `produto|${row.original.chave_produto}|${m}` : '';
           const isChanged = celulasEditadas[editKey] !== undefined;
 
-          if (isCategoria) {
+          if (row.original.tipo === 'categoria') {
             return (
               <div className="flex flex-col items-center py-2 min-w-[160px] bg-slate-50/50 rounded-xl border-b-4 border-indigo-100">
                 <span className="font-black text-slate-900">{formatVolume(res.vol)} <span className="text-[9px] text-slate-400">CX</span></span>
@@ -256,9 +239,9 @@ export default function GlobalDashboard() {
           return (
             <div className="flex flex-col items-center justify-center gap-1.5 min-w-[160px] bg-white p-2 rounded-xl border border-slate-100 shadow-sm hover:shadow-md transition-all group">
               <div className="w-full flex items-center justify-between gap-2">
-                <EditableCell initialValue={res.vol} isChanged={isChanged} depth={row.depth} isLocked={isLocked} onSave={(newVal: number) => setCelulasEditadas((p: any) => ({ ...p, [editKey]: newVal }))} />
-                {isProduto && !isLocked && (
-                  <button onClick={() => handleDistribuirVolume(row.original, m)} className="p-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded-lg transition-colors" title="Ratear Volume">
+                <EditableCell initialValue={res.vol} isChanged={isChanged} isLocked={isLocked} onSave={(newVal: number) => setCelulasEditadas((p: any) => ({ ...p, [editKey]: newVal }))} />
+                {row.original.tipo === 'produto' && !isLocked && (
+                  <button onClick={() => handleDistribuirVolume(row.original, m)} className="p-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded-lg transition-colors">
                     <ChevronLast className="w-4 h-4 rotate-90" />
                   </button>
                 )}
@@ -266,17 +249,17 @@ export default function GlobalDashboard() {
               <span className="text-[10px] font-black text-emerald-600">{formatMoeda(res.fat)}</span>
               
               <div className="grid grid-cols-3 w-full border-t border-slate-100 pt-1 mt-1">
-                 <div className="flex flex-col items-center justify-center border-r border-slate-100 px-1" title="Sinal IA">
-                    <span className="text-[7px] font-black text-slate-400 uppercase tracking-tighter">IA</span>
-                    <span className="text-[9px] font-bold text-slate-600">{formatVolume(res.ia)}</span>
-                 </div>
-                 <div className="flex flex-col items-center justify-center border-r border-slate-100 px-1" title="Gerencial">
+                 <div className="flex flex-col items-center justify-center border-r border-slate-100 px-1" title="Meta Gerencial">
                     <span className="text-[7px] font-black text-blue-400 uppercase tracking-tighter">GER</span>
                     <span className="text-[9px] font-bold text-blue-700">{formatVolume(res.td)}</span>
                  </div>
-                 <div className="flex flex-col items-center justify-center px-1" title="Comercial">
+                 <div className="flex flex-col items-center justify-center border-r border-slate-100 px-1" title="Proposta Comercial">
                     <span className="text-[7px] font-black text-amber-400 uppercase tracking-tighter">COM</span>
                     <span className="text-[9px] font-bold text-amber-600">{formatVolume(res.bu)}</span>
+                 </div>
+                 <div className="flex flex-col items-center justify-center px-1" title="Sinal IA">
+                    <span className="text-[7px] font-black text-slate-400 uppercase tracking-tighter">IA</span>
+                    <span className="text-[9px] font-bold text-slate-600">{formatVolume(res.ia)}</span>
                  </div>
               </div>
             </div>
@@ -294,14 +277,7 @@ export default function GlobalDashboard() {
     getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel(), getSortedRowModel: getSortedRowModel()
   });
 
-  if (isLoading) {
-    return (
-      <div className="h-screen w-full bg-slate-50 flex flex-col items-center justify-center font-sans">
-        <Loader2 className="w-8 h-8 animate-spin text-indigo-500 mb-4" />
-        <span className="text-slate-400 font-black text-xs tracking-widest uppercase">Iniciando S&OP Oficial...</span>
-      </div>
-    );
-  }
+  if (isLoading) return <div className="h-screen w-full bg-slate-50 flex flex-col items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-indigo-500 mb-4" /><span className="text-slate-400 font-black text-xs tracking-widest uppercase">Iniciando S&OP Oficial...</span></div>;
 
   return (
     <div className="w-full bg-slate-50 font-sans min-h-screen pb-20">
@@ -311,24 +287,10 @@ export default function GlobalDashboard() {
             <h1 className="text-5xl font-black text-slate-900 tracking-tighter flex items-center gap-4">
               <Layers className="w-12 h-12 text-indigo-600" /> DASHBOARD GLOBAL
             </h1>
-            <p className="text-slate-400 font-bold text-xs uppercase tracking-widest mt-2">Torre de Controle de Demanda Irrestrita</p>
           </div>
-          
           <div className="flex items-center gap-4">
-            <button 
-              onClick={handleManualExport}
-              className="flex items-center gap-2 px-6 py-5 rounded-[24px] text-xs font-black transition-all border-2 border-slate-200 text-slate-600 hover:bg-white hover:border-slate-300 shadow-sm tracking-widest uppercase"
-            >
-              <Download className="w-5 h-5" /> Exportar
-            </button>
-
-            <button 
-              onClick={handleSave} 
-              disabled={isLocked} 
-              className={`group flex items-center gap-4 px-12 py-5 rounded-[24px] text-sm font-black transition-all shadow-xl tracking-tighter uppercase 
-                ${isLocked ? 'bg-emerald-50 border-2 border-emerald-200 text-emerald-600 shadow-none' 
-                : 'bg-slate-900 hover:bg-black text-white hover:scale-105'}`}
-            >
+            <button onClick={handleManualExport} className="flex items-center gap-2 px-6 py-5 rounded-[24px] text-xs font-black transition-all border-2 border-slate-200 text-slate-600 hover:bg-white shadow-sm tracking-widest uppercase"><Download className="w-5 h-5" /> Exportar</button>
+            <button onClick={handleSave} disabled={isLocked} className={`group flex items-center gap-4 px-12 py-5 rounded-[24px] text-sm font-black transition-all shadow-xl tracking-tighter uppercase ${isLocked ? 'bg-emerald-50 border-2 border-emerald-200 text-emerald-600 shadow-none' : 'bg-slate-900 hover:bg-black text-white hover:scale-105'}`}>
               {isProcessing ? <Loader2 className="animate-spin" /> : isLocked ? <Lock className="w-5 h-5" /> : <Save className="w-5 h-5" />}
               {isProcessing ? 'A Gravar...' : lockMessage}
             </button>
@@ -337,30 +299,19 @@ export default function GlobalDashboard() {
 
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6 mb-10">
           {[
-            { label: 'IA Base', vol: stats.glob.ia, fat: stats.glob.fat_ia, varVol: 0, varFat: 0, color: 'text-slate-500', border: 'border-slate-200' },
-            { label: 'Gerencial', vol: stats.glob.td, fat: stats.glob.fat_td, varVol: calcVar(stats.glob.td, stats.glob.ia), varFat: calcVar(stats.glob.fat_td, stats.glob.fat_ia), color: 'text-blue-600', border: 'border-blue-200' },
-            { label: 'Comercial', vol: stats.glob.bu, fat: stats.glob.fat_bu, varVol: calcVar(stats.glob.bu, stats.glob.td), varFat: calcVar(stats.glob.fat_bu, stats.glob.fat_td), color: 'text-amber-500', border: 'border-amber-200' },
-            { label: 'Demanda Irrestrita', vol: stats.glob.final, fat: stats.glob.fat, varVol: calcVar(stats.glob.final, stats.glob.bu), varFat: calcVar(stats.glob.fat, stats.glob.fat_bu), color: 'text-emerald-600', border: 'border-emerald-500', highlight: true }
+            { label: 'IA Base', vol: stats.glob.ia, fat: stats.glob.fat_ia, color: 'text-slate-500', border: 'border-slate-200', varVol: 0 },
+            { label: 'Gerencial', vol: stats.glob.td, fat: stats.glob.fat_td, color: 'text-blue-600', border: 'border-blue-200', varVol: calcVar(stats.glob.td, stats.glob.ia) },
+            { label: 'Comercial', vol: stats.glob.bu, fat: stats.glob.fat_bu, color: 'text-amber-500', border: 'border-amber-200', varVol: calcVar(stats.glob.bu, stats.glob.td) },
+            { label: 'Demanda Irrestrita', vol: stats.glob.final, fat: stats.glob.fat, color: 'text-emerald-600', border: 'border-emerald-500', varVol: calcVar(stats.glob.final, stats.glob.bu), highlight: true }
           ].map((c, i) => (
             <div key={i} className={`bg-white p-8 rounded-[40px] shadow-sm border-2 ${c.border} flex flex-col justify-between transition-all ${c.highlight ? 'ring-4 ring-emerald-500/10' : ''}`}>
               <div className="flex justify-between items-start mb-4">
                  <p className={`text-[10px] font-black uppercase tracking-widest ${c.color}`}>{c.label}</p>
-                 {i > 0 && (
-                   <div className="flex gap-2">
-                     <div className={`px-2 py-1 rounded-md text-[9px] font-black flex items-center gap-1 ${c.varVol > 0 ? 'bg-emerald-50 text-emerald-600' : c.varVol < 0 ? 'bg-rose-50 text-rose-600' : 'bg-slate-50 text-slate-500'}`} title="Variação de Volume (vs. anterior)">
-                       <Package className="w-3 h-3"/> {c.varVol > 0 ? '+' : ''}{c.varVol.toFixed(1)}%
-                     </div>
-                     <div className={`px-2 py-1 rounded-md text-[9px] font-black flex items-center gap-1 ${c.varFat > 0 ? 'bg-emerald-50 text-emerald-600' : c.varFat < 0 ? 'bg-rose-50 text-rose-600' : 'bg-slate-50 text-slate-500'}`} title="Variação de Faturamento (vs. anterior)">
-                       <TrendingUp className={`w-3 h-3 ${c.varFat < 0 ? 'rotate-180' : ''}`}/> {c.varFat > 0 ? '+' : ''}{c.varFat.toFixed(1)}%
-                     </div>
-                   </div>
-                 )}
+                 {i > 0 && <div className={`px-2 py-1 rounded-md text-[9px] font-black ${c.varVol > 0 ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'}`}>{c.varVol > 0 ? '+' : ''}{c.varVol.toFixed(1)}% Vol.</div>}
               </div>
               <div>
                  <h3 className="text-3xl font-black text-slate-900 mb-1">{formatVolume(c.vol)} <span className="text-[10px] text-slate-400 font-bold uppercase">Caixas</span></h3>
-                 <div className={`text-sm font-black flex items-center gap-1.5 ${c.highlight ? 'text-emerald-600' : 'text-slate-500'}`}>
-                    R$ {formatMoeda(c.fat).replace('R$', '').trim()} Previsto
-                 </div>
+                 <div className={`text-sm font-black flex items-center gap-1.5 ${c.highlight ? 'text-emerald-600' : 'text-slate-500'}`}>{formatMoeda(c.fat)} Previsto</div>
               </div>
             </div>
           ))}
@@ -405,7 +356,6 @@ export default function GlobalDashboard() {
         <div className="bg-white rounded-[40px] shadow-2xl border border-slate-100 overflow-hidden">
           <div className="p-8 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
             <h3 className="font-black text-slate-900 uppercase tracking-widest text-sm flex items-center gap-3"><Package className="w-5 h-5 text-indigo-600"/> Matriz de Cenários (Volume & Faturamento)</h3>
-            {isLocked && <div className="bg-emerald-100 text-emerald-700 px-4 py-2 rounded-xl text-xs font-black tracking-widest flex items-center gap-2"><Lock className="w-4 h-4"/> BLOQUEADO: {lockMessage}</div>}
           </div>
           <div className="overflow-x-auto pb-4">
             <table className="w-full border-collapse">
@@ -434,22 +384,15 @@ export default function GlobalDashboard() {
               <tfoot className="bg-slate-900 text-white">
                 <tr>
                   {table.getHeaderGroups()[0].headers.map(header => {
-                    if (header.id === 'hierarquia') return (
-                      <td key={header.id} className="px-6 py-6 text-right">
-                        <div className="flex flex-col">
-                          <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Total Oficial</span>
-                          <span className="font-bold text-sm text-white">IRRESTRITA</span>
-                        </div>
-                      </td>
-                    );
+                    if (header.id === 'hierarquia') return <td key={header.id} className="px-6 py-6 text-right font-bold text-sm">TOTAL OFICIAL</td>;
                     if (header.id.startsWith('mes_')) {
                       const m = header.id.replace('mes_', '');
                       const tot = stats.dataMes.find(d => d.mesLabel === m.split('-').reverse().slice(1).join('/'));
                       return (
-                        <td key={header.id} className="px-6 py-6">
-                           <div className="flex flex-col items-center min-w-[160px]">
-                              <span className="font-black text-white">{formatVolume(tot?.final || 0)} <span className="text-[10px] text-slate-400">CX</span></span>
-                              <span className="text-sm font-black text-emerald-400 mt-1">{formatMoeda(tot?.fat || 0)}</span>
+                        <td key={header.id} className="px-6 py-6 text-center">
+                           <div className="flex flex-col">
+                              <span className="font-black">{formatVolume(tot?.final || 0)} <span className="text-[10px] text-slate-400">CX</span></span>
+                              <span className="text-sm font-black text-emerald-400">{formatMoeda(tot?.fat || 0)}</span>
                            </div>
                         </td>
                       );

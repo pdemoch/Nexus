@@ -50,17 +50,19 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
         status_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
         is_td_fechado = status_td.status == 'Fechado' if status_td else False
 
-        # CORREÇÃO POSTGRES: Comparação direta de data sem strftime
+        # 1. Identificar Vendedores Ativos no Ciclo
         vendedores_ativos = db.query(FatoIbpGranular.vendedor_nome).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
             .filter(
                 FatoIbpGranular.mes_projetado >= m_plus_2,
                 FatoIbpGranular.mes_projetado <= m_plus_4,
                 DimCliente.bloqueado != 'INATIVO',
-                FatoIbpGranular.vendedor_nome.isnot(None)
+                FatoIbpGranular.vendedor_nome.isnot(None),
+                FatoIbpGranular.ciclo_sop == ciclo
             ).distinct().all()
         
         v_ativos = [v[0].strip() for v in vendedores_ativos if v[0] and v[0].strip()]
         
+        # 2. Identificar quem já fechou a carteira
         vendedores_fechados = db.query(ControleCiclo.origem).filter(
             ControleCiclo.ciclo_sop == ciclo, ControleCiclo.status == 'Fechado',
             ControleCiclo.origem.notin_(['Top-Down', 'S&OP-Final'])
@@ -69,6 +71,7 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
 
         pendentes = [v for v in v_ativos if v not in v_fechados]
 
+        # 3. Lógica de Travamento de Tela
         if is_global_fechado:
             is_locked, lock_message = True, "Demanda Irrestrita Publicada"
         elif not is_td_fechado:
@@ -78,18 +81,27 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
         else:
             is_locked, lock_message = False, "Publicar Demanda Irrestrita"
             
-        # CORREÇÃO POSTGRES: Comparação direta de data sem strftime
+        # 4. QUERY MESTRE: Cálculo Atómico de Receita por Cenário
+        # Aqui resolvemos o "Efeito Mix" calculando a receita linha a linha no banco
         resultados = db.query(
-            FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado,
+            FatoIbpGranular.sku, 
+            DimCliente.razaosocial, 
+            FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('vol_ia'),
             func.sum(FatoIbpGranular.vol_topdown).label('vol_topdown'),
             func.sum(FatoIbpGranular.vol_bottomup).label('vol_bottomup'),
             func.sum(FatoIbpGranular.vol_final).label('vol_final'),
-            func.sum(FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('receita_base'),
-            func.avg(FatoIbpGranular.pmv_aplicado).label('pmv_simples'),
-            DimProduto.descricao, DimProduto.categoria
-        ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
+            # Cálculos Financeiros Precisos (Atómicos)
+            func.sum(FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('rec_ia'),
+            func.sum(FatoIbpGranular.vol_topdown * FatoIbpGranular.pmv_aplicado).label('rec_td'),
+            func.sum(FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('rec_bu'),
+            func.sum(FatoIbpGranular.vol_final * FatoIbpGranular.pmv_aplicado).label('rec_final'),
+            DimProduto.descricao, 
+            DimProduto.categoria
+        ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)\
+         .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
          .filter(
+             FatoIbpGranular.ciclo_sop == ciclo,
              FatoIbpGranular.mes_projetado >= m_plus_2,
              FatoIbpGranular.mes_projetado <= m_plus_4,
              DimCliente.bloqueado != 'INATIVO'
@@ -100,14 +112,23 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
 
         dados_formatados = []
         for r in resultados:
-            vol_ia = int(r.vol_ia or 0)
-            pmv_real = (float(r.receita_base or 0) / vol_ia) if vol_ia > 0 else float(r.pmv_simples or 0)
             dados_formatados.append({
-                "chave_matriz": f"{r.sku}_{r.razaosocial}", "categoria": r.categoria, "produto": r.sku,
-                "descricao": r.descricao, "cliente_razaosocial": r.razaosocial, 
+                "chave_matriz": f"{r.sku}_{r.razaosocial}", 
+                "categoria": r.categoria, 
+                "produto": r.sku,
+                "descricao": r.descricao, 
+                "cliente_razaosocial": r.razaosocial, 
                 "mes_projetado": r.mes_projetado.strftime("%Y-%m-%d") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado),
-                "vol_ia": vol_ia, "vol_td": int(r.vol_topdown or 0), "vol_bu": int(r.vol_bottomup or 0),
-                "vol_irrestrito": int(r.vol_final or 0), "pmv": pmv_real
+                # Volumes
+                "vol_ia": int(r.vol_ia or 0), 
+                "vol_td": int(r.vol_topdown or 0), 
+                "vol_bu": int(r.vol_bottomup or 0),
+                "vol_irrestrito": int(r.vol_final or 0),
+                # Receitas calculadas no BD (O segredo da solução)
+                "rec_ia": float(r.rec_ia or 0),
+                "rec_td": float(r.rec_td or 0),
+                "rec_bu": float(r.rec_bu or 0),
+                "rec_final": float(r.rec_final or 0)
             })
 
         return {"status": "success", "is_locked": is_locked, "lock_message": lock_message, "dados": dados_formatados}
@@ -131,10 +152,12 @@ async def aprovar_dashboard_global(payload: PayloadAprovarGlobal, db: Session = 
                 partes = ajuste.chave.split('_', 1)
                 sku, razaosocial = partes[0], partes[1] if len(partes) > 1 else ""
                 linhas = db.query(FatoIbpGranular).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(
-                    FatoIbpGranular.sku == sku, func.trim(DimCliente.razaosocial) == razaosocial.strip(), FatoIbpGranular.mes_projetado == data_alvo, DimCliente.bloqueado != 'INATIVO'
+                    FatoIbpGranular.sku == sku, 
+                    func.trim(DimCliente.razaosocial) == razaosocial.strip(), 
+                    FatoIbpGranular.mes_projetado == data_alvo, 
+                    FatoIbpGranular.ciclo_sop == ciclo
                 ).all()
                 if linhas:
-                    # O Rateio do Global baseia-se na coluna vol_final (que herdou o trabalho do Comercial e do Gerente)
                     total_base = sum([l.vol_final for l in linhas])
                     soma_dist = 0
                     for i, l in enumerate(linhas):
@@ -145,8 +168,10 @@ async def aprovar_dashboard_global(payload: PayloadAprovarGlobal, db: Session = 
                             l.vol_final = rateado
                             soma_dist += rateado
             elif ajuste.nivel == 'produto':
-                linhas = db.query(FatoIbpGranular).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(
-                    FatoIbpGranular.sku == ajuste.chave, FatoIbpGranular.mes_projetado == data_alvo, DimCliente.bloqueado != 'INATIVO'
+                linhas = db.query(FatoIbpGranular).filter(
+                    FatoIbpGranular.sku == ajuste.chave, 
+                    FatoIbpGranular.mes_projetado == data_alvo,
+                    FatoIbpGranular.ciclo_sop == ciclo
                 ).all()
                 if not linhas: continue
                 total_base = sum([l.vol_final for l in linhas])
@@ -176,18 +201,22 @@ async def exportar_excel_global(db: Session = Depends(get_db), usuario_logado: d
         
     try:
         m_plus_2, m_plus_4 = get_projection_window()
-        # CORREÇÃO POSTGRES: Comparação direta de data sem strftime
+        ciclo = get_current_cycle()
+
         resultados = db.query(
             FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado,
-            func.sum(FatoIbpGranular.vol_ia).label('vol_ia'),
-            func.sum(FatoIbpGranular.vol_topdown).label('vol_td'),
-            func.sum(FatoIbpGranular.vol_bottomup).label('vol_bu'),
-            func.sum(FatoIbpGranular.vol_final).label('vol_final'),
-            func.sum(FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('receita_base'),
-            func.avg(FatoIbpGranular.pmv_aplicado).label('pmv_simples'),
+            func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
+            func.sum(FatoIbpGranular.vol_topdown).label('v_td'),
+            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'),
+            func.sum(FatoIbpGranular.vol_final).label('v_final'),
+            func.sum(FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('r_ia'),
+            func.sum(FatoIbpGranular.vol_topdown * FatoIbpGranular.pmv_aplicado).label('r_td'),
+            func.sum(FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('r_bu'),
+            func.sum(FatoIbpGranular.vol_final * FatoIbpGranular.pmv_aplicado).label('r_final'),
             DimProduto.descricao, DimProduto.categoria
         ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
          .filter(
+             FatoIbpGranular.ciclo_sop == ciclo,
              FatoIbpGranular.mes_projetado >= m_plus_2,
              FatoIbpGranular.mes_projetado <= m_plus_4,
              DimCliente.bloqueado != 'INATIVO'
@@ -201,14 +230,17 @@ async def exportar_excel_global(db: Session = Depends(get_db), usuario_logado: d
 
         dados = []
         for r in resultados:
-            vol_ia = int(r.vol_ia or 0)
-            pmv_real = (float(r.receita_base or 0) / vol_ia) if vol_ia > 0 else float(r.pmv_simples or 0)
             dados.append({
                 "Categoria": r.categoria, "SKU": r.sku, "Produto": r.descricao, "Cliente (Razão Social)": r.razaosocial,
-                "Mês Projetado": r.mes_projetado.strftime("%m/%Y") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado), "Sinal IA (Base)": vol_ia,
-                "Meta Gerencial": int(r.vol_td or 0), "Proposta Comercial": int(r.vol_bu or 0),
-                "Demanda Irrestrita": int(r.vol_final or 0), "PMV Ponderado (R$)": round(pmv_real, 2),
-                "Faturamento Irrestrito (R$)": int(r.vol_final or 0) * pmv_real
+                "Mês Projetado": r.mes_projetado.strftime("%m/%Y"),
+                "Sinal IA (Base)": int(r.v_ia or 0),
+                "Rec. IA (R$)": float(r.r_ia or 0),
+                "Meta Gerencial (Vol)": int(r.v_td or 0),
+                "Meta Gerencial (R$)": float(r.r_td or 0),
+                "Proposta Comercial (Vol)": int(r.v_bu or 0),
+                "Proposta Comercial (R$)": float(r.r_bu or 0),
+                "Demanda Irrestrita (Vol)": int(r.v_final or 0),
+                "Demanda Irrestrita (R$)": float(r.r_final or 0)
             })
 
         df = pd.DataFrame(dados)

@@ -6,6 +6,11 @@
 .env.development.local
 .env.test.local
 *.key
+data/
+*.parquet
+.env
+__pycache__/
+node_modules/
 
 # ==========================================
 # 2. BACKEND (PYTHON / FASTAPI / IA)
