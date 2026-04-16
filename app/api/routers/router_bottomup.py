@@ -39,20 +39,30 @@ class PayloadCongelarBU(BaseModel):
 # =====================================================================
 # ENDPOINTS PRINCIPAIS (A VISÃO DA TRINCHEIRA / EXECUTIVO)
 # =====================================================================
-@router.get("/")
+@router.get("/filtros")
+async def obter_filtros_busca(gerente_nome: str = None, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+    q = db.query(DimCliente)
+    filtro_gerente = usuario.get('gerente_nome') if usuario['funcao'] == 'Gerente' else gerente_nome
+    if filtro_gerente: 
+        q = q.filter(func.trim(DimCliente.gerente_nome) == filtro_gerente.strip())
+    
+    return {
+        "regionais": sorted({str(r.regional).strip() for r in q.distinct(DimCliente.regional).all() if r.regional}),
+        "vendedores": sorted({str(v.vendedor_nome).strip() for v in q.distinct(DimCliente.vendedor_nome).all() if v.vendedor_nome})
+    }
+
+
+@router.get("")  # <-- CORREÇÃO 2: Sem a barra!
 async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
         m2, m4 = get_projection_window()
         ciclo = get_current_cycle()
         
-        # Filtros de Segurança baseados em quem está a fazer login
         filtro_vend = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else (nome_responsavel if nivel_hierarquia == 'vendedor' else None)
         filtro_reg = nome_responsavel if nivel_hierarquia != 'vendedor' and usuario['funcao'] != 'Executivo' else None
 
-        # 1. Busca a Verdade Absoluta
         query_base = get_truth_query(db, ciclo, m2, m4)
         
-        # 2. O Segredo dos 570k vs 346k: Travar o filtro do vendedor estritamente na FatoIbpGranular
         if filtro_vend: 
             query_base = query_base.filter(func.trim(FatoIbpGranular.vendedor_nome) == filtro_vend.strip())
         if filtro_reg: 
@@ -60,12 +70,8 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
         if usuario['funcao'] == 'Gerente': 
             query_base = query_base.filter(func.trim(DimCliente.gerente_nome) == usuario['gerente_nome'].strip())
 
-        # 3. Calcula atómicamente a receita no banco
         resultados = query_base.with_entities(
-            DimCliente.razaosocial, 
-            FatoIbpGranular.sku, 
-            DimProduto.descricao, 
-            FatoIbpGranular.mes_projetado, 
+            DimCliente.razaosocial, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado, 
             func.sum(FatoIbpGranular.vol_ia).label('v_ia'), 
             func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), 
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv'),
@@ -91,7 +97,6 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
             arvore[rz]["produtos"][sku]["id"] = f"{rz}|{sku}"
             arvore[rz]["produtos"][sku]["nome"] = r.descricao
             
-            # Alimenta Cliente e Produto
             for target in [arvore[rz]["meses"][ms], arvore[rz]["produtos"][sku]["meses"][ms]]:
                 target["vol_ia"] += int(r.v_ia or 0)
                 target["vol_ajustado"] += int(r.v_bu or 0)

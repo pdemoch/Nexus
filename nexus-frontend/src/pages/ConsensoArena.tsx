@@ -35,7 +35,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
 
   useEffect(() => {
     // Busca os filtros globais (Vendedores e Regionais)
-    axios.get('/api/v1/consensus/filtros', { params: { gerente_nome: usuarioSessao?.gerente_nome } })
+    axios.get('/api/v1/consensus/micro/filtros', { params: { gerente_nome: usuarioSessao?.gerente_nome } })
          .then(res => setOpcoesBusca(res.data)).catch(console.error);
 
     // Checa se o Top-Down já foi assinado pela diretoria

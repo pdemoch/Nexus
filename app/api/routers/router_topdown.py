@@ -51,28 +51,22 @@ class PayloadCongelar(BaseModel):
 # =====================================================================
 # ENDPOINTS PRINCIPAIS (A VISÃO MACRO)
 # =====================================================================
-@router.get("/")
+@router.get("")  # <-- CORREÇÃO AQUI: Sem a barra! Isso evita o bloqueio da AWS.
 async def listar_macro(db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
         m2, m4 = get_projection_window()
         ciclo = get_current_cycle()
 
-        # O SEGREDO: O filtro mestre de clientes inativos já vem daqui de forma automática
         query_base = get_truth_query(db, ciclo, m2, m4)
         
         projecoes = query_base.with_entities(
-            FatoIbpGranular.sku, 
-            FatoIbpGranular.mes_projetado, 
+            FatoIbpGranular.sku, FatoIbpGranular.mes_projetado, 
             func.sum(FatoIbpGranular.vol_ia).label('v_ia'), 
             func.sum(FatoIbpGranular.vol_topdown).label('v_td'), 
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv_avg'), 
-            # O Banco calcula a receita atómica real!
             func.sum(FatoIbpGranular.vol_topdown * FatoIbpGranular.pmv_aplicado).label('rec_td'), 
-            DimProduto.descricao, 
-            DimProduto.categoria, 
-            DimProduto.segmento, 
-            DimProduto.modelo_vencedor, 
-            DimProduto.acuracia_ia
+            DimProduto.descricao, DimProduto.categoria, DimProduto.segmento, 
+            DimProduto.modelo_vencedor, DimProduto.acuracia_ia
         ).group_by(
             FatoIbpGranular.sku, FatoIbpGranular.mes_projetado, 
             DimProduto.descricao, DimProduto.categoria, DimProduto.segmento, 
@@ -96,10 +90,7 @@ async def listar_macro(db: Session = Depends(get_db), usuario: dict = Depends(re
             p["meses"].append({
                 "mes_banco": str(r.mes_projetado), 
                 "mes_str": r.mes_projetado.strftime("%b/%y").capitalize() if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado), 
-                "vol_ia": int(r.v_ia or 0), 
-                "vol_ajustado": v_td, 
-                "pmv": pmv_real, 
-                "receita": rec_td  # Enviamos a receita já pronta para o React
+                "vol_ia": int(r.v_ia or 0), "vol_ajustado": v_td, "pmv": pmv_real, "receita": rec_td  
             })
             
         return {"status": "success", "dados": list(prod_map.values())}
