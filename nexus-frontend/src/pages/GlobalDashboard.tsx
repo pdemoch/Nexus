@@ -23,7 +23,7 @@ const EditableCell = ({ initialValue, onSave, isChanged, isLocked }: any) => {
     <input
       type="number" value={value} placeholder="0" disabled={isLocked}
       onChange={e => setValue(e.target.value === '' ? '' : Math.round(Number(e.target.value)))}
-      onBlur = {onBlur} onKeyDown={e => e.key === 'Enter' && onBlur()}
+      onBlur={onBlur} onKeyDown={e => e.key === 'Enter' && onBlur()}
       className={`w-full text-center text-sm font-black p-2 rounded-lg border-2 transition-all shadow-sm outline-none
         ${isChanged ? 'bg-emerald-50 border-emerald-500 text-emerald-800' : 'bg-white border-slate-200 hover:border-slate-300 focus:border-indigo-500 text-slate-800'}`}
     />
@@ -61,7 +61,7 @@ export default function GlobalDashboard() {
             cliente: d.cliente_razaosocial, meses: {} 
           });
         }
-        // AGORA CONSUMINDO RECEITAS ATÓMICAS DO BACKEND
+        // AGORA CONSUMINDO RECEITAS ATÓMICAS DO BACKEND DIRETAMENTE DO POSTGRESQL
         clientesMap.get(d.chave_matriz).meses[d.mes_projetado] = { 
           vol_ia: d.vol_ia, vol_td: d.vol_td, vol_bu: d.vol_bu, vol_irrestrito: d.vol_irrestrito,
           rec_ia: d.rec_ia, rec_td: d.rec_td, rec_bu: d.rec_bu, rec_final: d.rec_final
@@ -93,7 +93,7 @@ export default function GlobalDashboard() {
       
       const volFinal = isEdited ? Math.round(Number(editValue)) : Math.round(Number(node.meses[mes]?.vol_irrestrito || 0));
       
-      // Cálculo de Receita para Edição: Proporcional ao volume editado sobre o volume final atual
+      // Cálculo de Receita para Edição Ativa na Tela: Proporcional ao volume editado sobre o volume final atual
       const baseRecFinal = node.meses[mes]?.rec_final || 0;
       const baseVolFinal = node.meses[mes]?.vol_irrestrito || 1; // evita div por zero
       const fatFinal = isEdited ? (volFinal * (baseRecFinal / baseVolFinal)) : baseRecFinal;
