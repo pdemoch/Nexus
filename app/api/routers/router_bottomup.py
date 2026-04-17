@@ -28,8 +28,23 @@ class PayloadCongelarBU(BaseModel):
     ajustes: List[AjusteBottomUp]
 
 # =====================================================================
-# ROTAS DE LISTAGEM E GRÁFICO (O S&OE NA TRINCHEIRA)
+# ROTAS DE FILTROS E LISTAGEM
 # =====================================================================
+
+@router.get("/filtros")
+async def obter_filtros_busca(gerente_nome: str = None, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+    try:
+        q = db.query(DimCliente)
+        filtro_gerente = usuario.get('gerente_nome') if usuario['funcao'] == 'Gerente' else gerente_nome
+        if filtro_gerente: 
+            q = q.filter(func.trim(DimCliente.gerente_nome) == filtro_gerente.strip())
+        
+        regionais = sorted({str(r.regional).strip() for r in q.distinct(DimCliente.regional).all() if r.regional})
+        vendedores = sorted({str(v.vendedor_nome).strip() for v in q.distinct(DimCliente.vendedor_nome).all() if v.vendedor_nome})
+        
+        return {"regionais": regionais, "vendedores": vendedores}
+    except Exception as e:
+        raise HTTPException(500, repr(e))
 
 @router.get("")
 async def listar_micro(nivel: str, chave: str, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
@@ -40,17 +55,16 @@ async def listar_micro(nivel: str, chave: str, db: Session = Depends(get_db), us
         
         # Filtro de Segurança / Contexto
         if nivel == 'vendedor':
-            query_base = query_base.filter(FatoIbpGranular.vendedor_nome == chave)
+            query_base = query_base.filter(func.trim(FatoIbpGranular.vendedor_nome) == chave.strip())
         elif nivel == 'regional' and usuario_logado['funcao'] in ['Administrador', 'Gerente']:
-            query_base = query_base.filter(DimCliente.regional == chave)
+            query_base = query_base.filter(func.trim(DimCliente.regional) == chave.strip())
 
         # O SEGREDO DO PMV PONDERADO: Agrupamos por Razão Social + SKU
         projecoes = query_base.with_entities(
             DimCliente.razaosocial, FatoIbpGranular.sku, FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
-            func.sum(FatoIbpGranular.vol_topdown).label('v_td'), # Meta que a diretoria mandou
-            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), # Meta que o vendedor está editando
-            # PMV Ponderado: (Soma do Faturamento) / (Soma do Volume)
+            func.sum(FatoIbpGranular.vol_topdown).label('v_td'), 
+            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), 
             func.sum(FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('receita_ia'),
             DimProduto.descricao, DimProduto.categoria, DimProduto.segmento
         ).group_by(
@@ -74,7 +88,7 @@ async def listar_micro(nivel: str, chave: str, db: Session = Depends(get_db), us
             vol_bu = int(r.v_bu or 0)
             rec_ia = float(r.receita_ia or 0)
             
-            # Se não tem volume para ponderar, usamos 0. 
+            # PMV Ponderado Perfeito (Fim do Efeito Mix)
             pmv_real = (rec_ia / vol_ia) if vol_ia > 0 else 0
             
             p["meses"].append({
@@ -94,7 +108,6 @@ async def listar_micro(nivel: str, chave: str, db: Session = Depends(get_db), us
 @router.get("/grafico")
 async def grafico_micro(chave: str, db: Session = Depends(get_db)):
     try:
-        # A chave que o React manda é "RAZÃO SOCIAL|SKU"
         razao_alvo, sku_alvo = chave.split('|')
         
         hoje = datetime.date.today()
@@ -103,7 +116,6 @@ async def grafico_micro(chave: str, db: Session = Depends(get_db)):
         ciclo_anterior = get_previous_cycle()
         m2, m4 = get_projection_window()
         
-        # 1. Puxamos o histórico filtrando pelas Lojas daquela Razão Social
         q_hist = db.query(
             func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), 
             func.sum(FatoVendas.qt_pedido).label('vol_real')
@@ -160,7 +172,7 @@ async def grafico_micro(chave: str, db: Session = Depends(get_db)):
             "data_iso": mes_atual_iso,
             "Realizado": hist_dict.get(hoje.strftime('%Y-%m'), 0), 
             "IA": int(proj_atual.vol_ia) if proj_atual else None,   
-            "Consenso": None, # Blindagem: Meta comercial some no mês corrente
+            "Consenso": None, 
             "CicloAnterior": ant_dict.get(mes_atual_iso, None)
         })
 
@@ -193,14 +205,12 @@ async def congelar_micro(payload: PayloadCongelarBU, db: Session = Depends(get_d
         ciclo = get_current_cycle()
         check_global_lock(db, ciclo)
         
-        # Histórico de 12 meses para calcular o peso das lojas (CGC)
         data_limite_str = (datetime.date.today() - relativedelta(months=12)).strftime('%Y-%m-%d')
 
         for ajuste in payload.ajustes:
             razao_alvo, sku_alvo = ajuste.chave.split('|')
             data_alvo = parse_date_safe(ajuste.mes_projetado)
 
-            # Puxa todas as lojas atômicas que formam essa Razão Social para esse SKU
             linhas_atomicas = db.query(FatoIbpGranular).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
                 .filter(
                     FatoIbpGranular.ciclo_sop == ciclo,
@@ -211,7 +221,6 @@ async def congelar_micro(payload: PayloadCongelarBU, db: Session = Depends(get_d
 
             if not linhas_atomicas: continue
 
-            # Descobre quanto a matriz inteira comprou desse SKU no passado
             soma_hist_matriz = db.query(func.sum(FatoVendas.qt_pedido))\
                 .join(DimCliente, FatoVendas.cgc == DimCliente.cgc)\
                 .filter(
@@ -223,7 +232,6 @@ async def congelar_micro(payload: PayloadCongelarBU, db: Session = Depends(get_d
             soma_dist = 0
             volume_total = int(ajuste.novo_volume)
             
-            # Rateia o volume total para cada loja baseada no peso histórico dela
             for i, linha in enumerate(linhas_atomicas):
                 if i == len(linhas_atomicas) - 1:
                     rateado = volume_total - soma_dist 
@@ -237,9 +245,7 @@ async def congelar_micro(payload: PayloadCongelarBU, db: Session = Depends(get_d
                     rateado = int(round(volume_total * peso))
                     soma_dist += rateado
                 
-                # Apenas o Bottom-Up é atualizado. O Top-Down (Diretoria) fica intacto.
                 linha.vol_bottomup = rateado
-                # A Demanda Irrestrita Final passa a ser o Consenso do Vendedor
                 linha.vol_final = rateado
 
         db.commit()

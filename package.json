@@ -1,0 +1,15 @@
+{
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@types/recharts": "^2.0.1",
+    "@types/xlsx": "^0.0.35"
+  },
+  "dependencies": {
+    "@tanstack/react-table": "^8.21.3",
+    "axios": "^1.15.0",
+    "lucide-react": "^1.8.0",
+    "recharts": "^3.8.1",
+    "xlsx": "^0.18.5"
+  }
+}

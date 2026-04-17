@@ -30,6 +30,15 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
 
   const [busca, setBusca] = useState('');
+  
+  // ESTADO DOS FILTROS (MÁGICA DAS CAIXAS DE SELEÇÃO)
+  const [opcoesBusca, setOpcoesBusca] = useState<{vendedores: string[], regionais: string[]}>({vendedores: [], regionais: []});
+
+  useEffect(() => {
+    // Busca os filtros globais (Vendedores e Regionais) assim que a tela abre
+    axios.get('/api/v1/consensus/micro/filtros', { params: { gerente_nome: usuarioSessao?.gerente_nome } })
+         .then(res => setOpcoesBusca(res.data)).catch(console.error);
+  }, [usuarioSessao]);
 
   const fetchData = useCallback(async () => {
     if (!nomeResponsavel) return;
@@ -48,7 +57,9 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     }
   }, [nivelHierarquia, nomeResponsavel]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => { 
+    if (isExecutivo && nomeResponsavel) fetchData(); 
+  }, [fetchData, isExecutivo, nomeResponsavel]);
 
   const handleExportExcel = () => {
     if (dadosFiltrados.length === 0) return alert("Não há dados na tela para exportar.");
@@ -81,7 +92,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
       Object.entries(meses).forEach(([mes, val]: any) => {
         ajustes.push({ 
           nivel: nivelHierarquia, 
-          chave: chave, // Aqui vai a chave_matriz (Razão Social|SKU)
+          chave: chave, 
           mes_projetado: mes, 
           novo_volume: val.novo_volume === '' ? 0 : val.novo_volume 
         });
@@ -189,7 +200,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           const pmvBase = row.meses[0]?.pmv || 0;
           const faturamentoPrevisto = isPendente ? (valorInteiro * pmvBase) : (dadosMes?.receita || 0);
 
-          // Verifica se a meta da diretoria é maior (Pressão Comercial)
           const temPressao = baseTopDown > valorInteiro;
 
           return (
@@ -257,14 +267,37 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
 
         {/* CONTROLES E BUSCA */}
         {!isExecutivo && (
-            <div className="flex items-center gap-4 mb-6 bg-white p-4 rounded-2xl shadow-sm border border-gray-100">
+            <div className="flex items-center gap-4 mb-6 bg-white p-4 rounded-2xl shadow-sm border border-slate-100">
               <span className="text-xs font-black text-slate-500 uppercase tracking-widest">Simular Visão:</span>
-              <select value={nivelHierarquia} onChange={e => {setNivelHierarquia(e.target.value); setNomeResponsavel('');}} className="bg-slate-50 border border-slate-200 text-sm font-bold p-2.5 rounded-xl outline-none text-slate-700">
+              
+              <select 
+                 value={nivelHierarquia} 
+                 onChange={e => {setNivelHierarquia(e.target.value); setNomeResponsavel('');}} 
+                 className="bg-slate-50 border border-slate-200 text-sm font-bold p-2.5 rounded-xl outline-none text-slate-700 cursor-pointer"
+              >
                   <option value="regional">Regional</option>
                   <option value="vendedor">Vendedor Específico</option>
               </select>
-              <input type="text" placeholder={nivelHierarquia === 'vendedor' ? "Nome do Vendedor (ex: JOAO SILVA)" : "Nome da Regional (ex: SUL)"} value={nomeResponsavel} onChange={e => setNomeResponsavel(e.target.value.toUpperCase())} className="flex-1 bg-slate-50 border border-slate-200 p-2.5 rounded-xl text-sm font-bold text-slate-700 outline-none uppercase placeholder:normal-case"/>
-              <button onClick={fetchData} className="bg-indigo-50 text-indigo-600 px-4 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-indigo-100 transition"><Search className="w-4 h-4"/></button>
+              
+              <select 
+                  value={nomeResponsavel} 
+                  onChange={e => setNomeResponsavel(e.target.value)} 
+                  className="flex-1 bg-slate-50 border border-slate-200 p-2.5 rounded-xl text-sm font-bold text-slate-700 outline-none cursor-pointer"
+              >
+                  <option value="">{nivelHierarquia === 'vendedor' ? '-- Selecione um Vendedor --' : '-- Selecione uma Regional --'}</option>
+                  {(nivelHierarquia === 'vendedor' ? opcoesBusca.vendedores : opcoesBusca.regionais).map(opt => (
+                      <option key={opt} value={opt}>{opt}</option>
+                  ))}
+              </select>
+
+              <button 
+                onClick={fetchData} 
+                disabled={!nomeResponsavel || isLoading} 
+                className="bg-indigo-50 text-indigo-600 px-6 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-indigo-100 transition disabled:opacity-50 flex items-center gap-2"
+              >
+                 {isLoading ? <Loader2 className="w-4 h-4 animate-spin"/> : <Search className="w-4 h-4"/>} 
+                 Buscar
+              </button>
             </div>
         )}
 
