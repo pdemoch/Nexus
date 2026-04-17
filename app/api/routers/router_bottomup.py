@@ -44,13 +44,12 @@ async def obter_filtros_busca(gerente_nome: str = None, db: Session = Depends(ge
     q = db.query(DimCliente)
     filtro_gerente = usuario.get('gerente_nome') if usuario['funcao'] == 'Gerente' else gerente_nome
     if filtro_gerente: 
-        q = q.filter(func.trim(DimCliente.gerente_nome) == filtro_gerente.strip())
+        q = q.filter(func.upper(func.trim(DimCliente.gerente_nome)) == filtro_gerente.strip().upper())
     
     return {
         "regionais": sorted({str(r.regional).strip() for r in q.distinct(DimCliente.regional).all() if r.regional}),
         "vendedores": sorted({str(v.vendedor_nome).strip() for v in q.distinct(DimCliente.vendedor_nome).all() if v.vendedor_nome})
     }
-
 
 @router.get("") 
 async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
@@ -63,12 +62,13 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
 
         query_base = get_truth_query(db, ciclo, m2, m4)
         
+        # A MÁGICA DA CORREÇÃO: Usamos o DimCliente e convertemos para UPPER para garantir o "match" perfeito
         if filtro_vend: 
-            query_base = query_base.filter(func.trim(FatoIbpGranular.vendedor_nome) == filtro_vend.strip())
+            query_base = query_base.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
         if filtro_reg: 
-            query_base = query_base.filter(func.trim(DimCliente.regional) == filtro_reg.strip())
+            query_base = query_base.filter(func.upper(func.trim(DimCliente.regional)) == filtro_reg.strip().upper())
         if usuario['funcao'] == 'Gerente': 
-            query_base = query_base.filter(func.trim(DimCliente.gerente_nome) == usuario['gerente_nome'].strip())
+            query_base = query_base.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
 
         resultados = query_base.with_entities(
             DimCliente.razaosocial, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado, 
@@ -119,7 +119,6 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
     except Exception as e: 
         raise HTTPException(500, repr(e))
 
-
 @router.post("/congelar")
 async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: PayloadCongelarBU, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
@@ -127,7 +126,6 @@ async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: 
         check_global_lock(db, ciclo)
         data_limite_str = (datetime.date.today() - relativedelta(months=12)).strftime('%Y-%m-%d')
 
-        # A LENTE DE SEGURANÇA: Garante que o rateio é feito apenas na jurisdição de quem está a salvar
         filtro_vend = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else (nome_responsavel if nivel_hierarquia == 'vendedor' else None)
         filtro_reg = nome_responsavel if nivel_hierarquia != 'vendedor' and usuario['funcao'] != 'Executivo' else None
 
@@ -137,11 +135,11 @@ async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: 
             
             query = get_truth_query(db, ciclo, str(data_alvo), str(data_alvo))
 
-            if filtro_vend: query = query.filter(func.trim(FatoIbpGranular.vendedor_nome) == filtro_vend.strip())
-            if filtro_reg: query = query.filter(func.trim(DimCliente.regional) == filtro_reg.strip())
-            if usuario['funcao'] == 'Gerente': query = query.filter(func.trim(DimCliente.gerente_nome) == usuario['gerente_nome'].strip())
+            # A MÁGICA DA CORREÇÃO: Consistência no filtro para rateio
+            if filtro_vend: query = query.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
+            if filtro_reg: query = query.filter(func.upper(func.trim(DimCliente.regional)) == filtro_reg.strip().upper())
+            if usuario['funcao'] == 'Gerente': query = query.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
 
-            # Define se a alteração foi no Cliente Raiz ou num Produto específico
             if ajuste.nivel in ['cliente', 'produto']: 
                 query = query.filter(func.trim(DimCliente.razaosocial) == partes[0].strip())
             if ajuste.nivel == 'produto': 
@@ -150,7 +148,6 @@ async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: 
             linhas = query.all()
             if not linhas: continue
 
-            # Rateio Histórico Local da Trincheira
             skus = list({l.sku for l in linhas if l.sku})
             cgcs = list({l.cgc for l in linhas if l.cgc})
             
@@ -175,7 +172,6 @@ async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: 
                 l.vol_bottomup = rateado
                 l.vol_final = rateado
 
-        # Trava a carteira
         origem_trava = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else nome_responsavel
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == origem_trava).first()
         if not registro: 
@@ -191,7 +187,6 @@ async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: 
         db.rollback()
         raise HTTPException(500, repr(e))
 
-
 @router.get("/grafico")
 async def grafico_micro(chave_matriz: str, nivel_hierarquia: str = 'vendedor', nome_responsavel: str = '', db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
@@ -202,7 +197,6 @@ async def grafico_micro(chave_matriz: str, nivel_hierarquia: str = 'vendedor', n
         hoje = datetime.date.today()
         ciclo_anterior, ciclo_atual = get_previous_cycle(), get_current_cycle()
         
-        # A MESMA LENTE DA TABELA
         filtro_vend = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else (nome_responsavel if nivel_hierarquia == 'vendedor' else None)
         filtro_reg = nome_responsavel if nivel_hierarquia != 'vendedor' and usuario['funcao'] != 'Executivo' else None
 
@@ -212,25 +206,25 @@ async def grafico_micro(chave_matriz: str, nivel_hierarquia: str = 'vendedor', n
         q_ant = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_bottomup).label('vol_ant'))\
             .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(FatoIbpGranular.ciclo_sop == ciclo_anterior)
             
-        # Utilizamos o truth_query para blindar os inativos
         q_proj = get_truth_query(db, ciclo_atual, hoje.replace(day=1), m4).with_entities(
             FatoIbpGranular.mes_projetado, 
             func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), 
             func.sum(FatoIbpGranular.vol_bottomup).label('vol_consenso')
         )
 
+        # A MÁGICA DA CORREÇÃO: Consistência no gráfico
         if filtro_vend: 
-            q_hist = q_hist.filter(func.trim(FatoVendas.vendedor_nome) == filtro_vend.strip())
-            q_ant = q_ant.filter(func.trim(FatoIbpGranular.vendedor_nome) == filtro_vend.strip())
-            q_proj = q_proj.filter(func.trim(FatoIbpGranular.vendedor_nome) == filtro_vend.strip())
+            q_hist = q_hist.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
+            q_ant = q_ant.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
+            q_proj = q_proj.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
         if filtro_reg: 
-            q_hist = q_hist.filter(func.trim(DimCliente.regional) == filtro_reg.strip())
-            q_ant = q_ant.filter(func.trim(DimCliente.regional) == filtro_reg.strip())
-            q_proj = q_proj.filter(func.trim(DimCliente.regional) == filtro_reg.strip())
+            q_hist = q_hist.filter(func.upper(func.trim(DimCliente.regional)) == filtro_reg.strip().upper())
+            q_ant = q_ant.filter(func.upper(func.trim(DimCliente.regional)) == filtro_reg.strip().upper())
+            q_proj = q_proj.filter(func.upper(func.trim(DimCliente.regional)) == filtro_reg.strip().upper())
         if usuario['funcao'] == 'Gerente':
-            q_hist = q_hist.filter(func.trim(DimCliente.gerente_nome) == usuario['gerente_nome'].strip())
-            q_ant = q_ant.filter(func.trim(DimCliente.gerente_nome) == usuario['gerente_nome'].strip())
-            q_proj = q_proj.filter(func.trim(DimCliente.gerente_nome) == usuario['gerente_nome'].strip())
+            q_hist = q_hist.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
+            q_ant = q_ant.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
+            q_proj = q_proj.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
 
         if razao: 
             q_hist = q_hist.filter(func.trim(DimCliente.razaosocial) == razao.strip())
