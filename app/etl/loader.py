@@ -8,13 +8,12 @@ class NexusLoader:
     def __init__(self):
         pass
 
-    # AQUI ESTÁ A CORREÇÃO: Adicionado o parâmetro log_callback
     def executar_carga_silver(self, df_silver: pl.DataFrame, log_callback=print):
         from app.core.database import SessionLocal
         from app.models.domain_models import DimCliente, FatoVendas, DimProduto
 
         total_registros = len(df_silver)
-        log_callback(f"   -> [SILVER] Processando {total_registros} registros...")
+        log_callback(f"   -> [SILVER] Processando {total_registros} registros para Injeção (Upsert)...")
         if df_silver.is_empty(): return
 
         db = SessionLocal()
@@ -56,14 +55,25 @@ class NexusLoader:
                     }
                 )
                 db.execute(stmt)
-
-            log_callback("      • Limpando tabela Fato_Vendas (Truncate)...")
-            db.execute(text("DELETE FROM fato_vendas")) 
-            db.commit()
             
-            log_callback("      • Iniciando injeção em lote das Fato_Vendas (Chunks de 10k)...")
+            # =================================================================
+            # O NOVO CORAÇÃO DO DELTA LOAD (FATO VENDAS COM UPSERT)
+            # =================================================================
+            log_callback("      • Iniciando injeção inteligente na Fato_Vendas (Upsert em Chunks de 5k)...")
             vendas_dicts = []
             processados = 0
+            
+            # Prepara a query de Upsert uma única vez
+            stmt_vendas = pg_insert(FatoVendas)
+            upsert_vendas = stmt_vendas.on_conflict_do_update(
+                index_elements=['pedido', 'sku', 'cgc'], # A trava exata criada no domain_models
+                set_={
+                    'data_pedido': stmt_vendas.excluded.data_pedido,
+                    'vendedor_nome': stmt_vendas.excluded.vendedor_nome,
+                    'qt_pedido': stmt_vendas.excluded.qt_pedido,
+                    'vl_pedido': stmt_vendas.excluded.vl_pedido
+                }
+            )
             
             for row in df_silver.to_dicts():
                 dt_str = str(row['dtapedido'])
@@ -73,24 +83,29 @@ class NexusLoader:
                     dt_obj = datetime.strptime(dt_str[:10], "%Y-%m-%d").date()
 
                 vendas_dicts.append({
-                    'data_pedido': dt_obj, 'sku': row['produto'], 'cgc': row['cgc'],
-                    'vendedor_nome': row['vendedor_nome'], 'qt_pedido': row['qtpedido'], 'vl_pedido': row['vlpedido']
+                    'pedido': str(row['pedido']), # Adicionado o número do pedido
+                    'data_pedido': dt_obj, 
+                    'sku': row['produto'], 
+                    'cgc': row['cgc'],
+                    'vendedor_nome': row['vendedor_nome'], 
+                    'qt_pedido': row['qtpedido'], 
+                    'vl_pedido': row['vlpedido']
                 })
                 
                 processados += 1
                 
-                # Barra de Progresso Segura
-                if len(vendas_dicts) >= 10000:
-                    db.bulk_insert_mappings(FatoVendas, vendas_dicts)
+                # Dispara o lote de Upserts no banco
+                if len(vendas_dicts) >= 5000:
+                    db.execute(upsert_vendas, vendas_dicts)
                     vendas_dicts.clear()
                     percentual = (processados / total_registros) * 100
                     log_callback(f"      ⏳ Progresso Vendas: {percentual:.1f}% ({processados}/{total_registros})")
             
             if vendas_dicts:
-                db.bulk_insert_mappings(FatoVendas, vendas_dicts)
+                db.execute(upsert_vendas, vendas_dicts)
             
             db.commit()
-            log_callback("   -> [SILVER] Carga concluída com sucesso!")
+            log_callback("   -> [SILVER] Carga concluída com sucesso! Sem duplicação de dados.")
             
         except Exception as e:
             db.rollback()
@@ -98,10 +113,9 @@ class NexusLoader:
         finally:
             db.close()
 
-    # AQUI ESTÁ A CORREÇÃO: Adicionado o parâmetro log_callback
     def executar_carga_forecast(self, df_forecast: pl.DataFrame, df_silver: pl.DataFrame, log_callback=print):
         from app.core.database import SessionLocal
-        from app.models.domain_models import FatoIbpGranular, DimProduto
+        from app.models.domain_models import FatoIbpGranular
         
         if df_forecast.is_empty(): return
         
@@ -113,7 +127,7 @@ class NexusLoader:
             db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo_atual).delete()
             db.commit()
 
-            log_callback("      • Gravando acurácia dos modelos de IA...")
+            log_callback("      • Atualizando acurácia dos modelos de IA...")
             df_ia_meta = df_forecast.select(["produto", "modelo_vencedor", "acuracia"]).unique()
             for row in df_ia_meta.to_dicts():
                 db.execute(

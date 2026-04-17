@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, Date, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Float, Boolean, Date, DateTime, ForeignKey, UniqueConstraint, Index
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime
 
@@ -17,16 +17,16 @@ class Usuario(Base):
     aprovado = Column(Boolean, default=False)
     primeiro_acesso = Column(Boolean, default=True)
     criado_em = Column(DateTime, default=datetime.utcnow)
-    ultima_atividade = Column(DateTime, default=datetime.utcnow) # NOVO CAMPO: MOTOR DE HEARTBEAT
+    ultima_atividade = Column(DateTime, default=datetime.utcnow)
 
 class DimProduto(Base):
     __tablename__ = 'dim_produtos'
     
-    sku = Column(String, primary_key=True)
+    sku = Column(String(50), primary_key=True)
     descricao = Column(String)
     bu = Column(String)
-    categoria = Column(String)
-    segmento = Column(String)
+    categoria = Column(String, index=True)
+    segmento = Column(String, index=True)
     curva = Column(String)
     modelo_vencedor = Column(String, nullable=True) 
     acuracia_ia = Column(Float, nullable=True)
@@ -37,14 +37,14 @@ class DimProduto(Base):
 class DimCliente(Base):
     __tablename__ = 'dim_clientes'
     
-    cgc = Column(String, primary_key=True)
+    cgc = Column(String(50), primary_key=True)
     cod_cliente = Column(String)
     loja = Column(String)
     razaosocial = Column(String)
-    regional = Column(String)
+    regional = Column(String, index=True)
     bloqueado = Column(String)
-    vendedor_nome = Column(String) 
-    gerente_nome = Column(String, nullable=True)
+    vendedor_nome = Column(String(100), index=True) 
+    gerente_nome = Column(String(100), index=True)
 
     vendas = relationship("FatoVendas", back_populates="cliente_rel")
     forecasts = relationship("FatoIbpGranular", back_populates="cliente_rel")
@@ -53,13 +53,20 @@ class FatoVendas(Base):
     __tablename__ = "fato_vendas"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
+    pedido = Column(String(50), nullable=False, index=True) # NOVO: Essencial para o Upsert (Delta)
     data_pedido = Column(Date, nullable=False, index=True)
+    
     sku = Column(String(50), ForeignKey("dim_produtos.sku"), nullable=False)
     cgc = Column(String(50), ForeignKey("dim_clientes.cgc"), nullable=False)
     vendedor_nome = Column(String(100), index=True)
     
     qt_pedido = Column(Float, default=0.0)
     vl_pedido = Column(Float, default=0.0)
+
+    # TRAVA DE UNICIDADE: Impede notas duplicadas e permite o ON CONFLICT DO UPDATE
+    __table_args__ = (
+        UniqueConstraint('pedido', 'sku', 'cgc', name='uix_vendas_pedido'),
+    )
 
     produto_rel = relationship("DimProduto", back_populates="vendas")
     cliente_rel = relationship("DimCliente", back_populates="vendas")
@@ -120,13 +127,15 @@ class FatoAcuracia(Base):
     __tablename__ = "fato_acuracia"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    ciclo_avaliado = Column(String(10), nullable=False) 
-    mes_referencia = Column(Date, nullable=False)       
+    ciclo_avaliado = Column(String(10), nullable=False, index=True) 
+    mes_referencia = Column(Date, nullable=False, index=True)       
+    
     sku = Column(String(50), ForeignKey("dim_produtos.sku"), nullable=False)
-    vendedor_nome = Column(String(100), nullable=False)
+    vendedor_nome = Column(String(100), nullable=False, index=True)
 
     vol_realizado = Column(Integer, default=0)
+    vol_ia = Column(Integer, default=0)       # NOVO: Guardar o que a IA disse
+    vol_consenso = Column(Integer, default=0) # NOVO: Guardar o que o humano disse
     
     acuracia_ia = Column(Float, default=0.0)
-    acuracia_topdown = Column(Float, default=0.0)
-    acuracia_bottomup = Column(Float, default=0.0)
+    acuracia_consenso = Column(Float, default=0.0)

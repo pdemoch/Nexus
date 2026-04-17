@@ -2,8 +2,10 @@ import pandas as pd
 import numpy as np
 import polars as pl
 from datetime import date
+from sqlalchemy import text
 import xgboost as xgb
 import lightgbm as lgb
+from app.core.database import engine  # NOVO: Conexão direta com a AWS
 from app.ml.models_library import (
     HoltModel, HoltWintersModel, ThetaModelWrapper, CrostonModel, MovingAverageModel, 
     ProphetModel, AutoArimaModel, GlobalMLTrainer, calcular_acuracia, LocalMLAutoregressive
@@ -14,7 +16,6 @@ class NexusForecaster:
         self.holdout_months = 6
         self.forecast_horizon = 5
         
-        # A Nova Tropa de Elite (Clássicos + Machine Learning Local)
         self.especialistas = {
             'Prophet_Agressivo': ProphetModel(),
             'AutoARIMA_Sazonal': AutoArimaModel(),
@@ -28,19 +29,45 @@ class NexusForecaster:
             'MediaMovel_3M': MovingAverageModel(window=3)
         }
 
-    def executar_arena(self, df_ia_polars: pl.DataFrame, log_callback=print) -> pl.DataFrame:
+    # ATENÇÃO: Removemos o df_ia_polars. A IA agora puxa os dados do próprio banco!
+    def executar_arena(self, log_callback=print) -> pl.DataFrame:
         hoje = date.today()
         ciclo_atual = hoje.strftime("%m/%Y")
+        mes_atual_str = hoje.strftime("%Y-%m")
         
-        if df_ia_polars.is_empty(): 
-            log_callback(f"❌ [ENGINE] Nenhum dado encontrado na base IA para o ciclo {ciclo_atual}.")
+        log_callback("📥 [ENGINE] Extraindo matriz histórica consolidada do PostgreSQL...")
+        
+        # A MÁGICA ESTÁ AQUI: A IA faz o select agrupado de todo o passado, ignorando o limite do Delta
+        query = text("""
+            SELECT 
+                TO_CHAR(v.data_pedido, 'YYYY-MM') AS mes_ano,
+                v.sku AS produto,
+                p.descricao,
+                p.bu,
+                p.categoria,
+                p.segmento,
+                p.curva AS curva_2026,
+                SUM(v.qt_pedido) AS total_qtpedido,
+                CASE 
+                    WHEN SUM(v.qt_pedido) = 0 THEN 0 
+                    ELSE SUM(v.vl_pedido) / SUM(v.qt_pedido) 
+                END AS pmv
+            FROM fato_vendas v
+            JOIN dim_produtos p ON v.sku = p.sku
+            WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') < :mes_atual
+            GROUP BY 
+                TO_CHAR(v.data_pedido, 'YYYY-MM'),
+                v.sku, p.descricao, p.bu, p.categoria, p.segmento, p.curva
+            ORDER BY produto, mes_ano;
+        """)
+        
+        df = pd.read_sql(query, engine, params={"mes_atual": mes_atual_str})
+        
+        if df.empty: 
+            log_callback(f"❌ [ENGINE] Nenhum histórico de vendas encontrado no banco para o ciclo {ciclo_atual}.")
             return pl.DataFrame()
 
-        df = df_ia_polars.to_pandas()
-        mes_atual_str = hoje.strftime("%Y-%m")
-        df = df[df['mes_ano'] < mes_atual_str].copy()
-        
-        log_callback("⚙️ [ENGINE] Formatando cronologia e matriz global...")
+        log_callback("⚙️ [ENGINE] Formatando cronologia contínua e tratando buracos (NaT resolvido)...")
         df['mes_ano_dt'] = pd.to_datetime(df['mes_ano'])
         data_min, data_max = df['mes_ano_dt'].min(), df['mes_ano_dt'].max()
         data_corte_holdout = data_max - pd.DateOffset(months=self.holdout_months - 1)
@@ -76,15 +103,11 @@ class NexusForecaster:
             lgb_model.fit(df_treino_global[features], df_treino_global['total_qtpedido'])
             xgb_model.fit(df_treino_global[features], df_treino_global['total_qtpedido'])
 
-        # =========================================================================
-        # FUNÇÃO DE LOOP AUTOREGRESSIVO PARA OS MODELOS GLOBAIS (O "MATA-LINHA-RETA")
-        # =========================================================================
         def projetar_ml_global_recursivo(nome_modelo, serie_historica, sku_atual):
             modelo = lgb_model if 'LightGBM' in nome_modelo else xgb_model
             preds = []
             hist = list(serie_historica.values)
             
-            # Recupera as características estáticas codificadas daquele SKU
             df_feat_sku = df_feat[df_feat['produto'] == sku_atual]
             last_feat_row = df_feat_sku.iloc[-1] if not df_feat_sku.empty else {c: 0 for c in features}
 
@@ -92,7 +115,6 @@ class NexusForecaster:
                 dt_alvo = data_inicio_previsao + pd.DateOffset(months=i)
                 mes_alvo = dt_alvo.month
                 
-                # O Segredo: Recalcular as features dinamicamente baseando-se no futuro simulado
                 lag_1 = hist[-1] if len(hist) >= 1 else 0
                 lag_2 = hist[-2] if len(hist) >= 2 else lag_1
                 lag_3 = hist[-3] if len(hist) >= 3 else lag_2
@@ -113,12 +135,12 @@ class NexusForecaster:
                     elif col == 'volatilidade_3m': novo_dado[col] = np.std(hist[-3:]) if len(hist)>=3 else 0
                     elif col == 'diff_1': novo_dado[col] = lag_1 - lag_2
                     elif col == 'diff_2': novo_dado[col] = lag_2 - lag_3
-                    else: novo_dado[col] = last_feat_row.get(col, 0) # Categorias
+                    else: novo_dado[col] = last_feat_row.get(col, 0)
                         
-                df_pred = pd.DataFrame([novo_dado])[features] # Garante a ordem correta
+                df_pred = pd.DataFrame([novo_dado])[features] 
                 pred = max(0, modelo.predict(df_pred)[0])
                 preds.append(pred)
-                hist.append(pred) # Injeta o futuro de volta no passado!
+                hist.append(pred) 
                 
             return np.array(preds)
 
@@ -138,7 +160,6 @@ class NexusForecaster:
             
             avaliacoes_sku = {}
             
-            # --- 1. Avalia Modelos Globais ---
             df_holdout_sku = df_feat[(df_feat['produto'] == sku) & (df_feat['mes_ano_dt'] >= data_corte_holdout)]
             if len(df_holdout_sku) == self.holdout_months:
                 pred_lgb = np.maximum(0, lgb_model.predict(df_holdout_sku[features]))
@@ -146,7 +167,6 @@ class NexusForecaster:
                 avaliacoes_sku['LightGBM_Global'] = {'acc': calcular_acuracia(holdout_real.values, pred_lgb), 'preds': pred_lgb}
                 avaliacoes_sku['XGBoost_Global'] = {'acc': calcular_acuracia(holdout_real.values, pred_xgb), 'preds': pred_xgb}
 
-            # --- 2. Avalia Especialistas Locais (ML e Estatística) ---
             if len(treino_local) >= 12:
                 for nome, modelo in self.especialistas.items():
                     try:
@@ -159,7 +179,6 @@ class NexusForecaster:
                 fallback_pred = self.especialistas['MediaMovel_3M'].fit_predict(treino_local, self.holdout_months)
                 avaliacoes_sku['MediaMovel_3M'] = {'acc': calcular_acuracia(holdout_real.values, fallback_pred), 'preds': fallback_pred}
 
-            # --- 3. O ENSEMBLE (O Consenso da Máquina) ---
             ranking = sorted(avaliacoes_sku.items(), key=lambda item: item[1]['acc'], reverse=True)
             melhor_modelo_nome = ranking[0][0]
             maior_acuracia = ranking[0][1]['acc']
@@ -175,7 +194,6 @@ class NexusForecaster:
                     maior_acuracia = acc_ensemble
                     avaliacoes_sku['__ENSEMBLE_INSTRUCTION__'] = (nome_top1, nome_top2)
 
-            # --- 4. PREVISÃO OFICIAL DO FUTURO (COM AUTOREGRESSÃO GARANTIDA) ---
             if melhor_modelo_nome.startswith("Ensemble"):
                 m1_name, m2_name = avaliacoes_sku['__ENSEMBLE_INSTRUCTION__']
                 
@@ -190,7 +208,6 @@ class NexusForecaster:
                 modelo_final = self.especialistas.get(melhor_modelo_nome, self.especialistas['MediaMovel_3M'])
                 previsao_futura = modelo_final.fit_predict(serie, self.forecast_horizon)
             
-            # --- 5. Gravação no Banco de Dados ---
             for i, vol_proj in enumerate(previsao_futura):
                 data_proj = (data_inicio_previsao + pd.DateOffset(months=i)).to_pydatetime().date()
                 resultados_forecast.append({

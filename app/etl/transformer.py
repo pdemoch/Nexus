@@ -1,10 +1,10 @@
 import polars as pl
 
 class NexusTransformer:
-    # Atenção: Agora recebe e devolve LazyFrames (lf_)
     def processar_camada_silver(self, lf_150: pl.LazyFrame, lf_188: pl.LazyFrame, df_seg: pl.DataFrame) -> pl.LazyFrame:
-        print("\n⚙️ [SILVER] Harmonizando dados e construindo Star Schema (Out-of-Core)...")
+        print("\n⚙️ [SILVER] Harmonizando dados para Injeção no Banco (Upsert)...")
 
+        # 1. Tratamento da Tabela de Vendas (150)
         lf_vendas = lf_150.filter(
             (pl.col("operacao").cast(pl.Utf8).str.strip_chars() != "51") & 
             (~pl.col("regional").cast(pl.Utf8).str.to_uppercase().str.contains("FIFEIRO")) &
@@ -13,11 +13,14 @@ class NexusTransformer:
             pl.col("produto").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars(),
             pl.col("cliente").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars(),
             pl.col("loja").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars(),
-            pl.col("descricao").cast(pl.Utf8).str.strip_chars()
+            pl.col("descricao").cast(pl.Utf8).str.strip_chars(),
+            # BLINDAGEM DO PEDIDO: Se o ERP mandar vazio, cria um identificador genérico para não quebrar o banco
+            pl.col("pedido").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars().fill_null("S/N") 
         ]).with_columns([
             pl.concat_str([pl.col("cliente"), pl.lit("_"), pl.col("loja")]).alias("cliente_loja")
         ])
 
+        # 2. Tratamento do Cadastro de Clientes (188)
         lf_clientes = lf_188.select([
             "cod", "loja", "cgc", "razao social", "bloqueado", "vendedor_nome", "gerente_nome", "supervisor_nome"
         ]).rename({
@@ -32,6 +35,7 @@ class NexusTransformer:
             pl.concat_str([pl.col("cod"), pl.lit("_"), pl.col("loja")]).alias("cod_loja")
         ]).unique(subset=["cod_loja"], keep="first")
             
+        # 3. Cruzamento Vendas x Clientes
         lf_vendas = lf_vendas.join(
             lf_clientes, left_on="cliente_loja", right_on="cod_loja", how="left"
         )
@@ -46,6 +50,7 @@ class NexusTransformer:
             pl.col("vendedor_nome").fill_null("SEM VENDEDOR")
         ])
 
+        # 4. Filtro Rígido de Portfólio (Segmentos.xlsx)
         if not df_seg.is_empty():
             df_portfolio = df_seg.with_columns([
                 pl.col("produto").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars(),
@@ -55,9 +60,6 @@ class NexusTransformer:
                 (pl.col("2026") == "LANÇAMENTO")
             ).unique(subset=["produto"], keep="first")
 
-            print(f"🎯 [SILVER] Portfólio rigorosamente filtrado para {df_portfolio.height} SKUs ativos.")
-
-            # REGRA DE NEGÓCIO MANTIDA: INNER JOIN APAGA O HISTÓRICO DE INATIVOS
             lf_silver = lf_vendas.join(
                 df_portfolio.lazy().select(["produto", "bu", "categoria", "segmento", "2026"]),
                 on="produto",
@@ -83,34 +85,9 @@ class NexusTransformer:
         ]
         
         lf_final = lf_silver.select(colunas_finais + [pl.col("2026").alias("curva_2026")])
+        
+        # BLINDAGEM FINAL PARA O UPSERT: Garante que não há linhas duplicadas no mesmo lote delta
+        # para a mesma chave (pedido + produto + cgc), evitando erros no PostgreSQL.
+        lf_final = lf_final.unique(subset=["pedido", "produto", "cgc"], keep="last")
+        
         return lf_final
-    
-    def preparar_camada_ia(self, df_silver: pl.DataFrame) -> pl.DataFrame:
-        print("\n🧠 [GOLD/IA] Preparando base nativa para IA (Sem Pandas)...")
-        if df_silver.is_empty(): return pl.DataFrame()
-
-        # OOM FIX: Operações puras no Polars, 10x mais rápido que o pandas e gasta pouca RAM
-        df_ia = df_silver.with_columns([
-            pl.col("dtapedido").cast(pl.Utf8).str.strptime(pl.Date, "%Y%m%d", strict=False)
-        ]).drop_nulls("dtapedido")
-
-        df_ia = df_ia.with_columns([
-            pl.col("dtapedido").dt.strftime("%Y-%m").alias("mes_ano")
-        ])
-
-        df_ia = df_ia.group_by([
-            "mes_ano", "produto", "descricao", "bu", "categoria", "segmento", "curva_2026"
-        ]).agg([
-            pl.col("qtpedido").cast(pl.Float64).sum().alias("total_qtpedido"),
-            pl.col("vlpedido").cast(pl.Float64).sum().alias("total_vlpedido")
-        ])
-
-        df_ia = df_ia.with_columns(
-            pl.when(pl.col("total_qtpedido") == 0)
-            .then(0.0)
-            .otherwise(pl.col("total_vlpedido") / pl.col("total_qtpedido"))
-            .alias("pmv")
-        ).sort(["produto", "mes_ano"])
-
-        print(f"🎯 [GOLD/IA] Base agregada gerada para {df_ia.select('produto').n_unique()} SKUs ativos reais.")
-        return df_ia
