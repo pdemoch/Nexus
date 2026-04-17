@@ -103,7 +103,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     });
 
     try {
-      await axios.post('/api/v1/consensus/micro/congelar', { origem_ajuste: "Bottom-Up", ajustes });
+      await axios.post(`/api/v1/consensus/micro/congelar?nivel_hierarquia=${nivelHierarquia}&nome_responsavel=${nomeResponsavel}`, { origem_ajuste: "Comercial", ajustes });
       alert("✅ Volume comercial salvo com sucesso! O rateio (cascata) foi processado.");
       fetchData(); 
     } catch (e: any) {
