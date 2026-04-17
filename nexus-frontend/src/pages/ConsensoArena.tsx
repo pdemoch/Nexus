@@ -3,8 +3,8 @@ import {
   useReactTable, getCoreRowModel, flexRender, getExpandedRowModel, getSortedRowModel, SortingState
 } from '@tanstack/react-table';
 import { 
-  Check, TrendingUp, Filter, Loader2, ChevronDown, ChevronUp, ArrowUpDown, ArrowUp, ArrowDown, 
-  Lock, Search, X, Store, Package, Download, BrainCircuit
+  Check, TrendingUp, Filter, Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
+  Lock, Search, X, Store, Package, Download, BarChart2
 } from 'lucide-react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
@@ -26,16 +26,14 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   const [sorting, setSorting] = useState<SortingState>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   
+  const [chartExpanded, setChartExpanded] = useState<string | null>(null);
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
 
   const [busca, setBusca] = useState('');
-  
-  // ESTADO DOS FILTROS (MÁGICA DAS CAIXAS DE SELEÇÃO)
   const [opcoesBusca, setOpcoesBusca] = useState<{vendedores: string[], regionais: string[]}>({vendedores: [], regionais: []});
 
   useEffect(() => {
-    // Busca os filtros globais (Vendedores e Regionais) assim que a tela abre
     axios.get('/api/v1/consensus/micro/filtros', { params: { gerente_nome: usuarioSessao?.gerente_nome } })
          .then(res => setOpcoesBusca(res.data)).catch(console.error);
   }, [usuarioSessao]);
@@ -49,6 +47,8 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
       });
       setDadosBrutos(res.data.dados || []);
       setCelulasEditadas({});
+      setExpanded({});
+      setChartExpanded(null);
     } catch (e) {
       console.error(e);
       setDadosBrutos([]);
@@ -62,20 +62,23 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   }, [fetchData, isExecutivo, nomeResponsavel]);
 
   const handleExportExcel = () => {
-    if (dadosFiltrados.length === 0) return alert("Não há dados na tela para exportar.");
-    const dadosExcel = dadosFiltrados.map(row => {
-      const pmvBase = row.meses[0]?.pmv || 0;
-      const linha: any = {
-        "RAZÃO SOCIAL": row.razaosocial, "CÓDIGO SKU": row.sku, "DESCRIÇÃO": row.descricao, 
-        "CATEGORIA": row.categoria, "SEGMENTO": row.segmento, "PMV PONDERADO (R$)": pmvBase
-      };
-      row.meses.forEach((m: any) => {
-        const edicao = celulasEditadas[row.chave_matriz]?.[m.mes_banco];
-        const volFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : m.vol_ajustado));
-        linha[`${m.mes_str} (Base IA)`] = Math.round(Number(m.vol_ia));
-        linha[`${m.mes_str} (Comercial)`] = volFinal;
+    if (dadosBrutos.length === 0) return alert("Não há dados no ecrã para exportar.");
+    const dadosExcel: any[] = [];
+    
+    dadosBrutos.forEach(cliente => {
+      cliente.subRows.forEach((prod: any) => {
+        const linha: any = {
+          "RAZÃO SOCIAL": cliente.nome, "CÓDIGO SKU": prod.produto, "DESCRIÇÃO": prod.descricao, 
+          "CATEGORIA": prod.categoria, "SEGMENTO": prod.segmento, "PMV PONDERADO (R$)": prod.meses[0]?.pmv || 0
+        };
+        prod.meses.forEach((m: any) => {
+          const edicao = celulasEditadas[prod.chave_matriz]?.[m.mes_banco];
+          const volFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : m.vol_ajustado));
+          linha[`${m.mes_str} (Base IA)`] = Math.round(Number(m.vol_ia));
+          linha[`${m.mes_str} (Comercial)`] = volFinal;
+        });
+        dadosExcel.push(linha);
       });
-      return linha;
     });
 
     const worksheet = XLSX.utils.json_to_sheet(dadosExcel);
@@ -91,7 +94,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     Object.entries(celulasEditadas).forEach(([chave, meses]: any) => {
       Object.entries(meses).forEach(([mes, val]: any) => {
         ajustes.push({ 
-          nivel: nivelHierarquia, 
+          nivel: chave.includes('|') ? 'produto' : 'cliente', 
           chave: chave, 
           mes_projetado: mes, 
           novo_volume: val.novo_volume === '' ? 0 : val.novo_volume 
@@ -101,42 +104,65 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
 
     try {
       await axios.post('/api/v1/consensus/micro/congelar', { origem_ajuste: "Bottom-Up", ajustes });
-      alert("✅ Volume comercial salvo com sucesso! O rateio por lojas foi processado.");
+      alert("✅ Volume comercial salvo com sucesso! O rateio (cascata) foi processado.");
       fetchData(); 
     } catch (e: any) {
-      alert(e.response?.data?.detail || "Erro ao salvar.");
+      alert(e.response?.data?.detail || "Erro ao guardar.");
     } finally {
       setIsProcessing(false);
     }
   };
 
-  const dadosFiltrados = useMemo(() => dadosBrutos.filter(d => 
-    (d.razaosocial + ' ' + d.sku + ' ' + d.descricao).toLowerCase().includes(busca.toLowerCase())
-  ), [dadosBrutos, busca]);
+  const dadosFiltrados = useMemo(() => {
+    if (!busca) return dadosBrutos;
+    const term = busca.toLowerCase();
+    
+    return dadosBrutos.map(cliente => {
+      // Se o cliente corresponder, mostra todos os seus produtos
+      if (cliente.nome.toLowerCase().includes(term)) return cliente;
+      
+      // Se não, filtra apenas os produtos que correspondem
+      const subRowsFiltradas = cliente.subRows.filter((p: any) => 
+        (p.produto + ' ' + p.descricao).toLowerCase().includes(term)
+      );
+      
+      if (subRowsFiltradas.length > 0) return { ...cliente, subRows: subRowsFiltradas };
+      return null;
+    }).filter(Boolean);
+  }, [dadosBrutos, busca]);
 
   const totaisGerais = useMemo(() => {
     const totais: Record<string, {vol: number, fat: number}> = {};
-    dadosFiltrados.forEach(row => row.meses.forEach((m: any) => totais[m.mes_banco] = {vol: 0, fat: 0}));
+    dadosFiltrados.forEach(cliente => {
+      cliente.meses.forEach((m: any) => totais[m.mes_banco] = {vol: 0, fat: 0});
+    });
     
-    dadosFiltrados.forEach(row => {
-      const pmvBase = row.meses[0]?.pmv || 0;
-      row.meses.forEach((mes: any) => {
-        const edicao = celulasEditadas[row.chave_matriz]?.[mes.mes_banco];
-        const isPendente = edicao !== undefined;
-        const volumeFinal = Math.round(Number(isPendente ? edicao.novo_volume : mes.vol_ajustado));
-        
-        totais[mes.mes_banco].vol += volumeFinal;
-        totais[mes.mes_banco].fat += isPendente ? (volumeFinal * pmvBase) : (mes.receita || 0);
+    dadosFiltrados.forEach(cliente => {
+      cliente.subRows.forEach((prod: any) => {
+        const pmvBase = prod.meses[0]?.pmv || 0;
+        prod.meses.forEach((mes: any) => {
+          // Se o produto foi editado, usa o valor dele. Se não, verifica se o cliente pai foi editado (simulação em tempo real na UI é complexa, usamos o gravado ou a edição direta)
+          const edicaoProd = celulasEditadas[prod.chave_matriz]?.[mes.mes_banco];
+          const isPendente = edicaoProd !== undefined;
+          const volumeFinal = Math.round(Number(isPendente ? edicaoProd.novo_volume : mes.vol_ajustado));
+          
+          totais[mes.mes_banco].vol += volumeFinal;
+          totais[mes.mes_banco].fat += isPendente ? (volumeFinal * pmvBase) : (mes.receita || 0);
+        });
       });
     });
     return totais;
   }, [dadosFiltrados, celulasEditadas]);
 
-  const toggleRow = async (row: any) => {
-    const isExpanding = !row.getIsExpanded();
+  const toggleChart = async (row: any) => {
     const chave = row.original.chave_matriz;
+    if (chartExpanded === chave) {
+      setChartExpanded(null); 
+      return;
+    }
     
-    if (isExpanding && !dadosGraficoCache[chave]) {
+    setChartExpanded(chave);
+    if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
         const res = await axios.get('/api/v1/consensus/micro/grafico', { params: { chave: chave } });
@@ -144,7 +170,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
       } catch (e) { console.error(e); }
       finally { setLoadingGrafico(null); }
     }
-    row.toggleExpanded();
   };
 
   const qtdEdicoes = Object.keys(celulasEditadas).length;
@@ -154,26 +179,44 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     
     const baseCols: any[] = [
       {
-        id: 'expander', enableSorting: false, header: () => null,
-        cell: ({ row }: any) => (
-          <button onClick={() => toggleRow(row)} className="p-2 hover:bg-slate-100 rounded-xl transition-all">
-            {row.getIsExpanded() ? <ChevronUp className="w-5 h-5 text-indigo-600" /> : <ChevronDown className="w-5 h-5 text-slate-400" />}
-          </button>
-        ),
-      },
-      {
         id: 'nome', header: 'Cliente / Produto',
-        accessorFn: (row: any) => row.razaosocial + ' ' + row.descricao,
-        cell: (info: any) => (
-          <div className="flex flex-col py-1 min-w-[280px] max-w-[350px]">
-            <span className="font-black text-slate-900 text-sm truncate uppercase tracking-tight flex items-center gap-1.5"><Store className="w-4 h-4 text-slate-400"/> {info.row.original.razaosocial}</span>
-            <span className="font-bold text-slate-600 text-xs mt-1.5 truncate flex items-center gap-1.5"><Package className="w-3.5 h-3.5 text-indigo-400"/> {info.row.original.descricao}</span>
-            <div className="flex items-center gap-2 mt-1 pl-5">
-              <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest bg-slate-100 px-2 py-0.5 rounded-md">{info.row.original.sku}</span>
-              <span className="text-[9px] text-emerald-600 font-black uppercase tracking-widest bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-100">PMV: {formatMoeda(info.row.original.meses[0]?.pmv || 0)}</span>
+        accessorFn: (row: any) => row.nome,
+        cell: (info: any) => {
+          const row = info.row;
+          const isCliente = row.original.tipo === 'cliente';
+
+          return (
+            <div style={{ paddingLeft: `${row.depth * 2}rem` }} className="flex items-center gap-3 py-2 min-w-[300px]">
+              {isCliente ? (
+                <button onClick={row.getToggleExpandedHandler()} className="p-1.5 hover:bg-indigo-50 text-indigo-500 rounded-lg transition-colors">
+                  {row.getIsExpanded() ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
+                </button>
+              ) : (
+                <div className="w-8"></div> // Espaçador para alinhar os produtos
+              )}
+              
+              <button onClick={() => toggleChart(row)} className={`p-1.5 rounded-lg transition-colors border ${chartExpanded === row.original.chave_matriz ? 'bg-indigo-100 border-indigo-200 text-indigo-600 shadow-sm' : 'hover:bg-slate-100 border-transparent text-slate-400 hover:text-slate-600'}`} title="Ver Gráfico S&OE">
+                <BarChart2 className="w-4 h-4" />
+              </button>
+
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center border flex-shrink-0 ${isCliente ? 'bg-indigo-50 border-indigo-100' : 'bg-slate-50 border-slate-100'}`}>
+                {isCliente ? <Store className="w-4 h-4 text-indigo-600" /> : <Package className="w-4 h-4 text-slate-400" />}
+              </div>
+              
+              <div className="flex flex-col">
+                 <span className={`text-sm ${isCliente ? 'font-black text-slate-800 uppercase tracking-tighter' : 'font-bold text-slate-600 truncate max-w-[250px]'}`}>
+                   {info.getValue()}
+                 </span>
+                 {!isCliente && (
+                   <div className="flex items-center gap-2 mt-1">
+                     <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">{row.original.produto}</span>
+                     <span className="text-[9px] text-emerald-600 font-black uppercase tracking-widest bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100">PMV: {formatMoeda(row.original.meses[0]?.pmv || 0)}</span>
+                   </div>
+                 )}
+              </div>
             </div>
-          </div>
-        )
+          )
+        }
       }
     ];
 
@@ -186,6 +229,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
         accessorFn: (row: any) => row.meses.find((rm: any) => rm.mes_banco === m.mes_banco)?.vol_ajustado || 0,
         cell: (info: any) => {
           const row = info.row.original;
+          const isCliente = row.tipo === 'cliente';
           const dadosMes = row.meses.find((rm: any) => rm.mes_banco === m.mes_banco);
           const meta = info.table.options.meta as any;
           const edicao = meta.celulasEditadas[row.chave_matriz]?.[m.mes_banco];
@@ -197,9 +241,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           const baseTopDown = Math.round(Number(dadosMes?.vol_td || 0));
           const isChanged = valorInteiro !== baseIA;
           
-          const pmvBase = row.meses[0]?.pmv || 0;
-          const faturamentoPrevisto = isPendente ? (valorInteiro * pmvBase) : (dadosMes?.receita || 0);
-
+          const faturamentoPrevisto = isPendente ? (valorInteiro * (dadosMes?.pmv || 0)) : (dadosMes?.receita || 0);
           const temPressao = baseTopDown > valorInteiro;
 
           return (
@@ -212,9 +254,11 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                 type="number" value={valorInteiro === 0 ? '' : valorInteiro} placeholder="0"
                 onChange={(e) => meta.updateCell(row.chave_matriz, m.mes_banco, e.target.value)}
                 className={`text-sm text-center font-black p-2.5 rounded-xl outline-none border-2 transition-all w-full
-                  ${isChanged ? 'bg-indigo-600 border-indigo-700 text-white shadow-md' : 'bg-gray-50 border-transparent text-gray-800 focus:bg-white focus:border-slate-300'}`}
+                  ${isCliente ? 'border-dashed border-indigo-200 focus:border-indigo-500 focus:bg-indigo-50 text-indigo-900 bg-white' : 'border-solid'} 
+                  ${isChanged && !isCliente ? 'bg-indigo-600 border-indigo-700 text-white shadow-md' : !isCliente ? 'bg-slate-50 border-transparent text-slate-800 focus:bg-white focus:border-slate-300' : ''}`}
+                title={isCliente ? "Editar Matriz (Rateia por todos os SKUs)" : "Editar SKU"}
               />
-              <span className="text-[10px] font-black text-emerald-600 text-center tracking-tight">
+              <span className={`text-[10px] font-black text-center tracking-tight ${isCliente ? 'text-indigo-500' : 'text-emerald-600'}`}>
                 {formatMoeda(faturamentoPrevisto)}
               </span>
             </div>
@@ -223,11 +267,12 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
       });
     });
     return baseCols;
-  }, [dadosFiltrados]);
+  }, [dadosFiltrados, chartExpanded]);
 
   const table = useReactTable({
     data: dadosFiltrados, columns, state: { expanded, sorting },
     onExpandedChange: setExpanded, onSortingChange: setSorting,
+    getSubRows: row => row.subRows,
     getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel(), getSortedRowModel: getSortedRowModel(),
     meta: {
       celulasEditadas,
@@ -244,7 +289,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
       <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative">
         
         {/* CABEÇALHO */}
-        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 bg-white p-6 rounded-[32px] shadow-sm border border-gray-100">
+        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100">
           <div>
             <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
               <TrendingUp className="w-8 h-8 text-indigo-600" /> ALINHAMENTO COMERCIAL (BOTTOM-UP)
@@ -302,11 +347,11 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
         )}
 
         <div className="flex flex-col md:flex-row gap-4 mb-6">
-           <div className="flex-1 bg-white p-3 rounded-[24px] shadow-sm border border-gray-100 flex flex-col md:flex-row items-center gap-3">
+           <div className="flex-1 bg-white p-3 rounded-[24px] shadow-sm border border-slate-100 flex flex-col md:flex-row items-center gap-3">
              <div className="flex-1 flex items-center gap-3 px-4 bg-slate-50 rounded-xl border border-slate-100 w-full">
                <Search className="w-5 h-5 text-slate-400" />
                <input 
-                 type="text" placeholder="Buscar por cliente, razão social ou produto..." value={busca} onChange={e => setBusca(e.target.value)}
+                 type="text" placeholder="Pesquisar por cliente ou produto..." value={busca} onChange={e => setBusca(e.target.value)}
                  className="w-full bg-transparent py-3 text-sm font-bold text-slate-800 outline-none placeholder:text-slate-400"
                />
              </div>
@@ -317,11 +362,11 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
         </div>
 
         {/* TABELA DE DADOS */}
-        <div className="bg-white rounded-[40px] shadow-2xl border border-gray-100 overflow-hidden relative min-h-[400px]">
+        <div className="bg-white rounded-[40px] shadow-2xl border border-slate-100 overflow-hidden relative min-h-[400px]">
           {isLoading ? (
              <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 backdrop-blur-sm z-10">
                  <Loader2 className="w-8 h-8 animate-spin text-indigo-500 mb-4" />
-                 <span className="text-slate-400 font-black text-xs tracking-widest uppercase">Carregando Matriz Comercial...</span>
+                 <span className="text-slate-400 font-black text-xs tracking-widest uppercase">A carregar Matriz Comercial...</span>
              </div>
           ) : dadosFiltrados.length === 0 ? (
              <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
@@ -331,7 +376,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           ) : (
           <div className="overflow-x-auto pb-4">
             <table className="w-full text-left border-collapse">
-              <thead className="bg-white border-b-2 border-gray-100 shadow-sm">
+              <thead className="bg-white border-b-2 border-slate-100 shadow-sm">
                 {table.getHeaderGroups().map(hg => (
                   <tr key={hg.id}>
                     {hg.headers.map(header => (
@@ -352,33 +397,33 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
               
               <tbody>
                 {table.getRowModel().rows.map(row => (
-                  <React.Fragment key={row.id}>
-                    <tr className={`border-b border-gray-50 transition-colors ${row.getIsExpanded() ? 'bg-slate-50/60' : 'hover:bg-slate-50/30'}`}>
+                  <Fragment key={row.id}>
+                    <tr className={`border-b border-slate-50 transition-colors ${row.getIsExpanded() ? 'bg-indigo-50/30' : row.original.tipo === 'cliente' ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/50 hover:bg-slate-100'}`}>
                       {row.getVisibleCells().map(cell => (
-                        <td key={cell.id} className="px-8 py-4">
+                        <td key={cell.id} className="px-8 py-3">
                           {flexRender(cell.column.columnDef.cell, cell.getContext())}
                         </td>
                       ))}
                     </tr>
                     
-                    {row.getIsExpanded() && (
+                    {chartExpanded === row.original.chave_matriz && (
                       <tr>
-                        <td colSpan={table.getAllColumns().length} className="bg-slate-50/50 p-8 border-b border-gray-100">
-                          <div className="bg-white rounded-[40px] p-8 shadow-inner border border-gray-100 animate-in fade-in duration-500">
+                        <td colSpan={table.getAllColumns().length} className="bg-slate-900 p-8 border-b border-slate-800">
+                          <div className="bg-slate-950 rounded-[32px] p-8 shadow-inner border border-slate-800 animate-in fade-in duration-500">
                             <div className="flex justify-between items-start mb-6 px-2">
                                <div className="flex flex-col gap-1">
-                                 <h3 className="text-lg font-black text-slate-800 uppercase tracking-tighter">
-                                   Curva Atômica Comercial (S&OE)
+                                 <h3 className="text-lg font-black text-white uppercase tracking-tighter flex items-center gap-2">
+                                   <Activity className="w-5 h-5 text-emerald-400" /> Curva S&OE ({row.original.tipo === 'cliente' ? 'Visão Conta Global' : 'Visão Produto'})
                                  </h3>
                                  <p className="text-xs font-bold text-slate-400 tracking-widest uppercase">
-                                   {row.original.razaosocial} • {row.original.descricao}
+                                   {row.original.nome}
                                  </p>
                                </div>
                             </div>
 
                             <div className="h-[250px] w-full -ml-4">
                               {loadingGrafico === row.original.chave_matriz ? (
-                                <div className="h-full flex items-center justify-center text-slate-800"><Loader2 className="animate-spin w-8 h-8" /></div>
+                                <div className="h-full flex items-center justify-center text-slate-600"><Loader2 className="animate-spin w-8 h-8" /></div>
                               ) : (
                                 <ResponsiveContainer width="100%" height="100%">
                                   <LineChart data={
@@ -389,17 +434,17 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                                           return { ...p, Consenso: valComercial !== null ? valComercial : p.Consenso };
                                       })
                                   }>
-                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                                    <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900}} axisLine={false} tickLine={false} />
-                                    <YAxis tick={{fontSize: 10}} axisLine={false} tickLine={false} />
-                                    <Tooltip contentStyle={{borderRadius: '20px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)'}} />
-                                    <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900'}} />
+                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
+                                    <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
+                                    <YAxis tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} tickLine={false} />
+                                    <Tooltip contentStyle={{borderRadius: '20px', backgroundColor: '#0f172a', border: '1px solid #1e293b', color: '#fff', boxShadow: '0 10px 30px rgba(0,0,0,0.5)'}} />
+                                    <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900', color: '#cbd5e1'}} />
                                     
                                     <Line type="monotone" dataKey="CicloAnterior" name="Sua Promessa (Mês Passado)" stroke="#f59e0b" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
 
-                                    <Line type="monotone" dataKey="Realizado" name="Faturamento Real" stroke="#0f172a" strokeWidth={4} dot={{r: 3, fill: '#0f172a'}} connectNulls={false} />
-                                    <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
-                                    <Line type="monotone" dataKey="Consenso" name="Sua Proposta (Atual)" stroke="#10b981" strokeWidth={5} dot={{r: 6, fill: '#10b981', strokeWidth: 2, stroke: '#fff'}} connectNulls={false} />
+                                    <Line type="monotone" dataKey="Realizado" name="Faturamento Real" stroke="#f8fafc" strokeWidth={4} dot={{r: 3, fill: '#f8fafc'}} connectNulls={false} />
+                                    <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#475569" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
+                                    <Line type="monotone" dataKey="Consenso" name="Sua Proposta (Atual)" stroke="#10b981" strokeWidth={5} dot={{r: 6, fill: '#10b981', strokeWidth: 2, stroke: '#0f172a'}} connectNulls={false} />
                                   </LineChart>
                                 </ResponsiveContainer>
                               )}
@@ -408,7 +453,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                         </td>
                       </tr>
                     )}
-                  </React.Fragment>
+                  </Fragment>
                 ))}
               </tbody>
               
