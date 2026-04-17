@@ -11,7 +11,7 @@ from app.core.database import get_db
 from app.models.domain_models import DimProduto, FatoIbpGranular, ControleCiclo, FatoVendas
 from app.api.routers.router_auth import get_current_user
 
-# Importação do nosso "Cérebro" que garante a Fonte da Verdade
+# Importação do Cérebro compartilhado
 from app.api.routers.shared_ibp import (
     get_current_cycle,
     get_previous_cycle,
@@ -49,9 +49,10 @@ class PayloadCongelar(BaseModel):
     ajustes: List[AjusteTopDown]
 
 # =====================================================================
-# ENDPOINTS PRINCIPAIS (A VISÃO MACRO)
+# ENDPOINTS PRINCIPAIS
 # =====================================================================
-@router.get("")  # <-- CORREÇÃO AQUI: Sem a barra! Isso evita o bloqueio da AWS.
+
+@router.get("") 
 async def listar_macro(db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
         m2, m4 = get_projection_window()
@@ -89,11 +90,99 @@ async def listar_macro(db: Session = Depends(get_db), usuario: dict = Depends(re
             
             p["meses"].append({
                 "mes_banco": str(r.mes_projetado), 
-                "mes_str": r.mes_projetado.strftime("%b/%y").capitalize() if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado), 
+                "mes_str": r.mes_projetado.strftime("%b/%y").capitalize(), 
                 "vol_ia": int(r.v_ia or 0), "vol_ajustado": v_td, "pmv": pmv_real, "receita": rec_td  
             })
             
         return {"status": "success", "dados": list(prod_map.values())}
+    except Exception as e:
+        raise HTTPException(500, repr(e))
+
+
+@router.get("/grafico")
+async def grafico_macro(produto: str, db: Session = Depends(get_db)):
+    try:
+        # 1. Configuração de Janelas
+        hoje = datetime.date.today()
+        mes_atual_inicio = hoje.replace(day=1)
+        ciclo_atual = get_current_cycle()
+        ciclo_anterior = get_previous_cycle()
+        
+        # 2. Queries de Dados
+        # Puxamos o histórico incluindo o mês atual (S&OE)
+        q_hist = db.query(
+            func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), 
+            func.sum(FatoVendas.qt_pedido).label('vol_real')
+        ).filter(
+            FatoVendas.data_pedido >= hoje - relativedelta(years=2), 
+            FatoVendas.sku == produto
+        ).group_by('mes_ano').all()
+
+        q_ant = db.query(
+            FatoIbpGranular.mes_projetado, 
+            func.sum(FatoIbpGranular.vol_topdown).label('vol_ant')
+        ).filter(
+            FatoIbpGranular.ciclo_sop == ciclo_anterior, 
+            FatoIbpGranular.sku == produto
+        ).group_by(FatoIbpGranular.mes_projetado).all()
+            
+        q_proj = db.query(
+            FatoIbpGranular.mes_projetado, 
+            func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), 
+            func.sum(FatoIbpGranular.vol_topdown).label('vol_consenso')
+        ).filter(
+            FatoIbpGranular.ciclo_sop == ciclo_atual, 
+            FatoIbpGranular.sku == produto
+        ).group_by(FatoIbpGranular.mes_projetado).order_by(FatoIbpGranular.mes_projetado).all()
+
+        # Dicionários para busca rápida
+        hist_dict = {h.mes_ano: int(h.vol_real or 0) for h in q_hist}
+        ant_dict = {str(a.mes_projetado): int(a.vol_ant or 0) for a in q_ant}
+
+        timeline = []
+
+        # 3. CONSTRUÇÃO DA TIMELINE S&OE
+        
+        # Fase A: Passado (24 meses atrás até o mês passado)
+        for i in range(24, 0, -1):
+            dt = mes_atual_inicio - relativedelta(months=i)
+            mes_str = dt.strftime('%Y-%m')
+            timeline.append({
+                "name": dt.strftime("%b/%y").capitalize(),
+                "data_iso": dt.strftime("%Y-%m-%d"),
+                "Realizado": hist_dict.get(mes_str, 0),
+                "IA": None, "Consenso": None, "CicloAnterior": None
+            })
+
+        # Fase B: Mês Corrente (O coração do S&OE)
+        mes_atual_iso = mes_atual_inicio.strftime('%Y-%m-%d')
+        proj_atual = next((p for p in q_proj if str(p.mes_projetado) == mes_atual_iso), None)
+        
+        timeline.append({
+            "name": hoje.strftime("%b/%y").capitalize() + " (S&OE)",
+            "data_iso": mes_atual_iso,
+            "Realizado": hist_dict.get(hoje.strftime('%Y-%m'), 0), # Vendas parciais de Abril
+            "IA": int(proj_atual.vol_ia) if proj_atual else None,   # Meta cheia do mês
+            "Consenso": int(proj_atual.vol_consenso) if proj_atual else None,
+            "CicloAnterior": ant_dict.get(mes_atual_iso, None)
+        })
+
+        # Fase C: Futuro (M+1 em diante)
+        for p in q_proj:
+            p_date = p.mes_projetado
+            if p_date <= mes_atual_inicio: continue # Pula o mês corrente que já tratamos acima
+            
+            p_iso = str(p_date)
+            timeline.append({
+                "name": p_date.strftime("%b/%y").capitalize(),
+                "data_iso": p_iso,
+                "Realizado": None,
+                "IA": int(p.vol_ia or 0),
+                "Consenso": int(p.vol_consenso or 0),
+                "CicloAnterior": ant_dict.get(p_iso, None)
+            })
+            
+        return {"status": "success", "dados": timeline}
     except Exception as e:
         raise HTTPException(500, repr(e))
 
@@ -107,43 +196,38 @@ async def congelar_macro(payload: PayloadCongelar, db: Session = Depends(get_db)
 
         for ajuste in payload.ajustes:
             data_alvo = parse_date_safe(ajuste.mes_projetado)
-            
-            # Buscar apenas os registros atômicos permitidos pela Regra de Ouro
-            linhas = get_truth_query(db, ciclo, str(data_alvo), str(data_alvo)).filter(
+            linhas = get_truth_query(db, ciclo, data_alvo, data_alvo).filter(
                 FatoIbpGranular.sku == str(ajuste.produto)
             ).all()
 
             if not linhas: continue
 
-            skus = list({l.sku for l in linhas if l.sku})
-            cgcs = list({l.cgc for l in linhas if l.cgc})
-            
-            # 1. Puxa a representatividade histórica de clientes ativos para o rateio
-            historico = db.query(FatoVendas.sku, FatoVendas.cgc, func.sum(FatoVendas.qt_pedido).label('vol_hist'))\
-                .filter(FatoVendas.sku.in_(skus), FatoVendas.cgc.in_(cgcs), FatoVendas.data_pedido >= data_limite_str)\
-                .group_by(FatoVendas.sku, FatoVendas.cgc).all()
-                
-            dict_hist = {f"{h.sku}_{h.cgc}": float(h.vol_hist or 0) for h in historico}
-            soma_hist = sum([dict_hist.get(f"{l.sku}_{l.cgc}", 0) for l in linhas])
+            soma_hist = db.query(func.sum(FatoVendas.qt_pedido)).filter(
+                FatoVendas.sku == ajuste.produto, 
+                FatoVendas.data_pedido >= data_limite_str
+            ).scalar() or 0
             
             soma_dist = 0
             volume_total = int(ajuste.novo_volume)
             
-            # 2. Executa o rateio cascata
             for i, l in enumerate(linhas):
                 if i == len(linhas) - 1:
                     rateado = volume_total - soma_dist 
                 else:
-                    peso = dict_hist.get(f"{l.sku}_{l.cgc}", 0) / soma_hist if soma_hist > 0 else 1.0 / len(linhas)
+                    # Rateio por representatividade histórica
+                    vol_cli = db.query(func.sum(FatoVendas.qt_pedido)).filter(
+                        FatoVendas.sku == l.sku, FatoVendas.cgc == l.cgc,
+                        FatoVendas.data_pedido >= data_limite_str
+                    ).scalar() or 0
+                    
+                    peso = vol_cli / soma_hist if soma_hist > 0 else 1.0 / len(linhas)
                     rateado = int(round(volume_total * peso))
                     soma_dist += rateado
                     
-                # Como é Top-Down, a alteração empurra as metas para a base (Comercial e Final)
                 l.vol_topdown = rateado
                 l.vol_bottomup = rateado
                 l.vol_final = rateado
 
-        # 3. Trava o Ciclo
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
         if not registro: 
             db.add(ControleCiclo(ciclo_sop=ciclo, origem='Top-Down', status='Fechado'))
@@ -152,75 +236,11 @@ async def congelar_macro(payload: PayloadCongelar, db: Session = Depends(get_db)
             
         db.commit()
         return {"status": "success"}
-    except HTTPException as he: 
-        raise he
+    except HTTPException as he: raise he
     except Exception as e: 
         db.rollback()
         raise HTTPException(500, repr(e))
 
-
-@router.post("/reabrir")
-async def reabrir_macro(db: Session = Depends(get_db), usuario: dict = Depends(require_admin)):
-    try:
-        ciclo = get_current_cycle()
-        check_global_lock(db, ciclo)
-        
-        se_alguem_fechado = db.query(ControleCiclo).filter(
-            ControleCiclo.ciclo_sop == ciclo, 
-            ControleCiclo.status == 'Fechado', 
-            ControleCiclo.origem.notin_(['Top-Down', 'S&OP-Final'])
-        ).count()
-        
-        if se_alguem_fechado > 0:
-            raise HTTPException(403, "Ordem Reversa Violada. Destrave as carteiras dos vendedores primeiro.")
-            
-        reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
-        if reg: 
-            reg.status = 'Aberto'
-            db.commit()
-        return {"status": "success"}
-    except HTTPException as e: 
-        raise e
-    except Exception as e: 
-        db.rollback()
-        raise HTTPException(500, repr(e))
-
-
-@router.get("/grafico")
-async def grafico_macro(produto: str, db: Session = Depends(get_db)):
-    try:
-        m2, m4 = get_projection_window()
-        hoje = datetime.date.today()
-        ciclo_anterior, ciclo_atual = get_previous_cycle(), get_current_cycle()
-        
-        q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol_real'))\
-            .filter(FatoVendas.data_pedido >= hoje - relativedelta(years=2), FatoVendas.sku == produto)
-        
-        q_ant = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_topdown).label('vol_ant'))\
-            .filter(FatoIbpGranular.ciclo_sop == ciclo_anterior, FatoIbpGranular.sku == produto)
-            
-        q_proj = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), func.sum(FatoIbpGranular.vol_topdown).label('vol_consenso'))\
-            .filter(FatoIbpGranular.ciclo_sop == ciclo_atual, FatoIbpGranular.sku == produto)
-
-        hist_dict = {h.mes_ano: int(h.vol_real or 0) for h in q_hist.group_by(func.to_char(FatoVendas.data_pedido, 'YYYY-MM')).all()}
-        ant_dict = {p.mes_projetado.strftime('%Y-%m-%d') if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado): int(p.vol_ant or 0) for p in q_ant.group_by(FatoIbpGranular.mes_projetado).all()}
-        projecoes = q_proj.group_by(FatoIbpGranular.mes_projetado).order_by(FatoIbpGranular.mes_projetado).all()
-
-        timeline = [{"name": (hoje - relativedelta(months=i)).strftime("%b/%y").capitalize(), "data_iso": (hoje - relativedelta(months=i)).replace(day=1).strftime("%Y-%m-%d"), "Realizado": hist_dict.get((hoje - relativedelta(months=i)).strftime('%Y-%m'), 0), "IA": None, "Consenso": None, "CicloAnterior": None} for i in range(24, 0, -1)]
-        
-        for p in projecoes:
-            p_str = p.mes_projetado.strftime('%Y-%m-%d') if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado)
-            timeline.append({
-                "name": p.mes_projetado.strftime("%b/%y").capitalize() if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado), 
-                "data_iso": p_str, "Realizado": None, "IA": int(p.vol_ia or 0), 
-                "Consenso": int(p.vol_consenso or 0) if m2 <= p_str <= m4 else None, 
-                "CicloAnterior": ant_dict.get(p_str, None)
-            })
-            
-        return {"status": "success", "dados": timeline}
-    except Exception as e:
-        raise HTTPException(500, repr(e))
-    
 @router.get("/status")
 async def checar_status_macro(db: Session = Depends(get_db)):
     reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == get_current_cycle(), ControleCiclo.origem == 'Top-Down').first()

@@ -36,7 +36,6 @@ export default function TopDownArena() {
     try {
       const [res, statusRes] = await Promise.all([
         axios.get('/api/v1/consensus/macro'),
-        // Rota atualizada para a nova arquitetura modular
         axios.get('/api/v1/consensus/macro/status')
       ]);
       setDadosBrutos(res.data.dados || []);
@@ -225,8 +224,6 @@ export default function TopDownArena() {
           
           const pmvBase = row.meses[0]?.pmv || 0;
           
-          // A MÁGICA AQUI: O React só faz a conta de padaria se você estiver a editar. 
-          // Se já estiver gravado, ele exibe o Faturamento Real que veio do banco de dados.
           const faturamentoPrevisto = isPendente ? (valorInteiro * pmvBase) : (dadosMes?.receita || 0);
 
           return (
@@ -411,6 +408,8 @@ export default function TopDownArena() {
                                       (dadosGraficoCache[row.original.produto] || []).map((p: any) => {
                                           const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
                                           const edicao = celulasEditadas[row.original.produto]?.[p.data_iso];
+                                          // Se o mês está na tabela (futuro), respeita o que está digitado/gravado. 
+                                          // Se não está na tabela (mês corrente S&OE), puxa a meta consolidada do backend (p.Consenso)
                                           const valDiretoria = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
                                           return { ...p, Consenso: valDiretoria !== null ? valDiretoria : p.Consenso };
                                       })
