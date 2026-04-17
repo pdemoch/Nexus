@@ -107,9 +107,9 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
         mes_atual_inicio = hoje.replace(day=1)
         ciclo_atual = get_current_cycle()
         ciclo_anterior = get_previous_cycle()
+        m2, m4 = get_projection_window() # <-- Puxamos a janela oficial (Jun a Ago)
         
         # 2. Queries de Dados
-        # Puxamos o histórico incluindo o mês atual (S&OE)
         q_hist = db.query(
             func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), 
             func.sum(FatoVendas.qt_pedido).label('vol_real')
@@ -135,7 +135,6 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
             FatoIbpGranular.sku == produto
         ).group_by(FatoIbpGranular.mes_projetado).order_by(FatoIbpGranular.mes_projetado).all()
 
-        # Dicionários para busca rápida
         hist_dict = {h.mes_ano: int(h.vol_real or 0) for h in q_hist}
         ant_dict = {str(a.mes_projetado): int(a.vol_ant or 0) for a in q_ant}
 
@@ -161,16 +160,17 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
         timeline.append({
             "name": hoje.strftime("%b/%y").capitalize() + " (S&OE)",
             "data_iso": mes_atual_iso,
-            "Realizado": hist_dict.get(hoje.strftime('%Y-%m'), 0), # Vendas parciais de Abril
-            "IA": int(proj_atual.vol_ia) if proj_atual else None,   # Meta cheia do mês
-            "Consenso": int(proj_atual.vol_consenso) if proj_atual else None,
+            "Realizado": hist_dict.get(hoje.strftime('%Y-%m'), 0), 
+            "IA": int(proj_atual.vol_ia) if proj_atual else None,   
+            # BLINDAGEM: Forçamos None no mês corrente para sumir a linha azul
+            "Consenso": None,
             "CicloAnterior": ant_dict.get(mes_atual_iso, None)
         })
 
         # Fase C: Futuro (M+1 em diante)
         for p in q_proj:
-            p_date = p.mes_projetado
-            if p_date <= mes_atual_inicio: continue # Pula o mês corrente que já tratamos acima
+            p_date = parse_date_safe(p.mes_projetado)
+            if p_date <= mes_atual_inicio: continue 
             
             p_iso = str(p_date)
             timeline.append({
@@ -178,7 +178,8 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
                 "data_iso": p_iso,
                 "Realizado": None,
                 "IA": int(p.vol_ia or 0),
-                "Consenso": int(p.vol_consenso or 0),
+                # BLINDAGEM: A linha azul só nasce de M+2 (Junho) em diante
+                "Consenso": int(p.vol_consenso or 0) if p_date >= m2 else None,
                 "CicloAnterior": ant_dict.get(p_iso, None)
             })
             
