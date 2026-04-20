@@ -7,7 +7,7 @@ from dateutil.relativedelta import relativedelta
 from sqlalchemy import func
 from app.core.state import AppState
 from app.core.database import SessionLocal
-from app.models.domain_models import FatoVendas
+from app.models.domain_models import FatoVendas, FatoIbpGranular
 from app.etl.extractor import GobiExtractor
 from app.etl.transformer import NexusTransformer
 from app.etl.loader import NexusLoader
@@ -34,14 +34,16 @@ async def executar_pipeline_nexus():
         # =================================================================
         db = SessionLocal()
         ultima_data_banco = db.query(func.max(FatoVendas.data_pedido)).scalar()
+        
+        # CHECAGEM DE BLINDAGEM S&OP: Verifica se o ciclo atual já foi gerado
+        ciclo_atual = date.today().strftime("%m/%Y")
+        ciclo_existe = db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo_atual).first()
         db.close()
 
         if ultima_data_banco:
-            # Se já tem dados, volta só 5 dias para capturar notas fiscais atrasadas ou editadas
             data_inicio = ultima_data_banco - relativedelta(days=5)
             log(f"⚡ [DELTA LOAD] Banco detectado. Baixando notas emitidas desde {data_inicio.strftime('%d/%m/%Y')}...")
         else:
-            # Se o banco está vazio (como agora que dropamos o schema), faz a carga full
             data_inicio = date(2022, 1, 1)                  
             log(f"⚠️ [FULL LOAD] Banco vazio. Iniciando carga histórica profunda desde {data_inicio.strftime('%d/%m/%Y')}...")
         
@@ -50,13 +52,13 @@ async def executar_pipeline_nexus():
         loader = NexusLoader()
         forecaster = NexusForecaster()
         
-        # --- EXTRAÇÃO (Gobi API) ---
+        # --- EXTRAÇÃO ---
         t0 = time.time()
         log("⏳ [EXTRACT] Baixando dados brutos do ERP...")
         lf_150, lf_188, df_seg = await extractor.extrair_tudo(data_inicio, data_fim)
         log(f"✅ [EXTRACT] Aquisição concluída em {time.time() - t0:.2f}s.")
 
-        # --- TRANSFORMAÇÃO (Limpeza para o Banco) ---
+        # --- TRANSFORMAÇÃO ---
         t0 = time.time()
         log("⏳ [TRANSFORM] Processando Camada Silver...")
         lf_silver = transformer.processar_camada_silver(lf_150, lf_188, df_seg)
@@ -66,32 +68,33 @@ async def executar_pipeline_nexus():
         df_silver = pl.read_parquet(caminho_silver)
         log(f"✅ [TRANSFORM] Lote tratado gerado em {time.time() - t0:.2f}s.")
         
-        # --- CARGA SILVER (O Upsert no PostgreSQL) ---
+        # --- CARGA SILVER (Fato Vendas) ---
         t0 = time.time()
         log("⏳ [LOAD] Injetando Fato_Vendas no Banco de Dados (Upsert)...")
         loader.executar_carga_silver(df_silver, log_callback=log)
         log(f"✅ [LOAD] Vendas gravadas em {time.time() - t0:.2f}s.")
 
         # =================================================================
-        # FASE 2: INTELIGÊNCIA ARTIFICIAL E S&OP
+        # FASE 2: INTELIGÊNCIA ARTIFICIAL E S&OP (AGORA BLINDADA)
         # =================================================================
-        
-        # --- MACHINE LEARNING (Lendo direto do DB) ---
-        t0 = time.time()
-        log("🧠 [ML] Acordando a IA para ler a história completa no Banco...")
-        df_forecast = forecaster.executar_arena(log_callback=log)
-        log(f"✅ [ML] Previsões S&OP concluídas em {time.time() - t0:.2f}s.")
+        if ciclo_existe:
+            log(f"⏸️ [S&OP] O ciclo {ciclo_atual} já existe no banco de dados.")
+            log("   -> A IA e o Rateio foram ignorados para manter ESTÁTICOS os ajustes do Top-Down e Bottom-Up.")
+        else:
+            t0 = time.time()
+            log("🧠 [ML] Novo Mês Detectado! Acordando a IA para ler a história e prever...")
+            df_forecast = forecaster.executar_arena(log_callback=log)
+            log(f"✅ [ML] Previsões S&OP concluídas em {time.time() - t0:.2f}s.")
 
-        # --- CARGA S&OP (Distribuição Granular) ---
-        t0 = time.time()
-        log("⏳ [LOAD] Rateando e injetando as metas S&OP no Banco...")
-        loader.executar_carga_forecast(df_forecast, df_silver, log_callback=log)
-        log(f"✅ [LOAD] Metas atomizadas com sucesso em {time.time() - t0:.2f}s.")
+            t0 = time.time()
+            log("⏳ [LOAD] Rateando e injetando as metas S&OP no Banco...")
+            loader.executar_carga_forecast(df_forecast, log_callback=log)
+            log(f"✅ [LOAD] Metas atomizadas com sucesso em {time.time() - t0:.2f}s.")
 
         tempo_total = time.time() - tempo_inicio_total
         minutos, segundos = divmod(tempo_total, 60)
         AppState.pipeline_rodando = False
-        log(f"🏁 [SYSTEM] Pipeline Nexus 4.0 concluído com sucesso! (Tempo: {int(minutos)}m {int(segundos)}s)")
+        log(f"🏁 [SYSTEM] Pipeline Nexus concluído com sucesso! (Tempo: {int(minutos)}m {int(segundos)}s)")
         
     except Exception as e:
         AppState.pipeline_rodando = False

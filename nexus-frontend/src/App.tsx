@@ -18,18 +18,17 @@ export default function App() {
   const [isSystemLocked, setIsSystemLocked] = useState(false);
   const [latestLog, setLatestLog] = useState('');
 
-  // MOTOR DE HEARTBEAT (CONTROLE DE CONCORRÊNCIA)
+  // MOTOR DE HEARTBEAT (APENAS NO ARRANQUE)
   useEffect(() => {
     if (!user) return;
     const enviarPulso = async () => {
       try { await axios.post('/api/v1/auth/heartbeat'); } catch (error) {}
     };
     enviarPulso();
-    const intervalId = setInterval(enviarPulso, 30000);
-    return () => clearInterval(intervalId);
+    // 🗑️ REMOVIDO: setInterval(enviarPulso, 30000) para parar de poluir os logs do servidor
   }, [user]);
 
-  // RADAR DO SISTEMA (POLLING GLOBAL DO PIPELINE)
+  // RADAR DO SISTEMA (APENAS NO ARRANQUE OU REFRESH DA PÁGINA)
   useEffect(() => {
     if (!user) return;
     const checkSystemStatus = async () => {
@@ -42,8 +41,7 @@ export default function App() {
       } catch (error) { console.error("Falha ao verificar status do sistema."); }
     };
     checkSystemStatus();
-    const interval = setInterval(checkSystemStatus, 3000);
-    return () => clearInterval(interval);
+    // 🗑️ REMOVIDO: setInterval(checkSystemStatus, 3000) para evitar o loop de CORS quando o backend cai
   }, [user]);
 
   // GESTÃO DE SESSÃO
@@ -112,7 +110,7 @@ export default function App() {
                     <div className="absolute top-0 left-0 w-1.5 h-full bg-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.8)]"></div>
                     <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-3 flex items-center gap-2">
                        <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-500" />
-                       Interceção de Logs / Tempo Real
+                       Executando Pipeline
                     </span>
                     <code className="text-emerald-400 font-mono text-xs md:text-sm w-full truncate border-l border-slate-800 pl-3 py-1">
                         {latestLog || "Sincronizando com o núcleo do servidor..."}
