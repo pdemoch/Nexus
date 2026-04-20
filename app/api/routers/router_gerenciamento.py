@@ -182,13 +182,31 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
                    .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
                    .filter(FatoIbpGranular.ciclo_sop == ciclo_atual)
 
-        # 2. Aplica Filtros Hierárquicos
-        for q in [q_hist, q_ant, q_proj]:
-            if vendedor_alvo: q = q.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == vendedor_alvo.strip().upper())
-            if cliente_alvo: q = q.filter(func.upper(func.trim(DimCliente.razaosocial)) == cliente_alvo.strip().upper())
-            if sku_alvo: 
-                if q == q_hist: q = q.filter(FatoVendas.sku == sku_alvo.strip())
-                else: q = q.filter(FatoIbpGranular.sku == sku_alvo.strip())
+        # 2. Aplica Filtros Hierárquicos (EXPLICITAMENTE)
+        if usuario['funcao'] == 'Gerente':
+            g_nome = usuario['gerente_nome'].strip().upper()
+            q_hist = q_hist.filter(func.upper(func.trim(DimCliente.gerente_nome)) == g_nome)
+            q_ant = q_ant.filter(func.upper(func.trim(DimCliente.gerente_nome)) == g_nome)
+            q_proj = q_proj.filter(func.upper(func.trim(DimCliente.gerente_nome)) == g_nome)
+
+        if vendedor_alvo: 
+            v_nome = vendedor_alvo.strip().upper()
+            q_hist = q_hist.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == v_nome)
+            q_ant = q_ant.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == v_nome)
+            q_proj = q_proj.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == v_nome)
+            
+        if cliente_alvo: 
+            c_nome = cliente_alvo.strip().upper()
+            q_hist = q_hist.filter(func.upper(func.trim(DimCliente.razaosocial)) == c_nome)
+            q_ant = q_ant.filter(func.upper(func.trim(DimCliente.razaosocial)) == c_nome)
+            q_proj = q_proj.filter(func.upper(func.trim(DimCliente.razaosocial)) == c_nome)
+            
+        if sku_alvo: 
+            s_nome = sku_alvo.strip()
+            # Histórico usa SKU da FatoVendas, Projeção usa SKU da FatoIbp
+            q_hist = q_hist.filter(FatoVendas.sku == s_nome)
+            q_ant = q_ant.filter(FatoIbpGranular.sku == s_nome)
+            q_proj = q_proj.filter(FatoIbpGranular.sku == s_nome)
 
         # 3. Executa e Mapeia
         hist_dict = {h.mes_ano: int(h.vol or 0) for h in q_hist.group_by('mes_ano').all()}
@@ -196,6 +214,7 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
         proj_res = q_proj.group_by(FatoIbpGranular.mes_projetado).all()
 
         timeline = []
+        # Passado (24 meses)
         for i in range(24, 0, -1):
             dt = mes_atual_inicio - relativedelta(months=i)
             timeline.append({
@@ -203,6 +222,7 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
                 "Realizado": hist_dict.get(dt.strftime('%Y-%m'), 0), "IA": None, "Consenso": None, "CicloAnterior": None
             })
         
+        # Mês Corrente (S&OE)
         curr_iso = mes_atual_inicio.strftime('%Y-%m-%d')
         p_atual = next((p for p in proj_res if str(p.mes_projetado) == curr_iso), None)
         timeline.append({
@@ -211,6 +231,7 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
             "IA": int(p_atual.ia) if p_atual else None, "Consenso": None, "CicloAnterior": ant_dict.get(curr_iso)
         })
 
+        # Futuro
         for p in sorted(proj_res, key=lambda x: str(x.mes_projetado)):
             p_date = p.mes_projetado if isinstance(p.mes_projetado, datetime.date) else parse_date_safe(p.mes_projetado)
             if p_date <= mes_atual_inicio: continue
