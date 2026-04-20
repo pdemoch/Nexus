@@ -62,7 +62,6 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
 
         query_base = get_truth_query(db, ciclo, m2, m4)
         
-        # A SOLUÇÃO: O Vendedor filtra estritamente a Dimensão (que provou ter os dados corretos no banco)
         if filtro_vend: 
             query_base = query_base.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
         if filtro_reg: 
@@ -135,7 +134,6 @@ async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: 
             
             query = get_truth_query(db, ciclo, str(data_alvo), str(data_alvo))
 
-            # A SOLUÇÃO: Filtro cravado na Dimensão
             if filtro_vend: query = query.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
             if filtro_reg: query = query.filter(func.upper(func.trim(DimCliente.regional)) == filtro_reg.strip().upper())
             if usuario['funcao'] == 'Gerente': query = query.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
@@ -197,26 +195,27 @@ async def grafico_micro(chave_matriz: str, nivel_hierarquia: str = 'vendedor', n
         p = chave_matriz.split('|')
         razao, sku = p[0], p[1] if len(p) > 1 else None
         
-        m2, m4 = get_projection_window()
+        m2_str, m4_str = get_projection_window()
+        m2_date = parse_date_safe(m2_str) if isinstance(m2_str, str) else m2_str
+        
         hoje = datetime.date.today()
+        mes_atual_inicio = hoje.replace(day=1)
         ciclo_anterior, ciclo_atual = get_previous_cycle(), get_current_cycle()
         
         filtro_vend = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else (nome_responsavel if nivel_hierarquia == 'vendedor' else None)
         filtro_reg = nome_responsavel if nivel_hierarquia != 'vendedor' and usuario['funcao'] != 'Executivo' else None
 
+        # Desacopla do get_truth_query para evitar choques de GROUP BY nativos
         q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol_real'))\
             .join(DimCliente, FatoVendas.cgc == DimCliente.cgc).filter(FatoVendas.data_pedido >= hoje - relativedelta(years=2))
             
         q_ant = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_bottomup).label('vol_ant'))\
             .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(FatoIbpGranular.ciclo_sop == ciclo_anterior)
             
-        q_proj = get_truth_query(db, ciclo_atual, hoje.replace(day=1), m4).with_entities(
-            FatoIbpGranular.mes_projetado, 
-            func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), 
-            func.sum(FatoIbpGranular.vol_bottomup).label('vol_consenso')
-        )
+        q_proj = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), func.sum(FatoIbpGranular.vol_bottomup).label('vol_consenso'))\
+            .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(FatoIbpGranular.ciclo_sop == ciclo_atual)
 
-        # A SOLUÇÃO: Filtro cravado na Dimensão
+        # Filtro Central na Dimensão (Garante os mesmos números da Tabela)
         if filtro_vend: 
             q_hist = q_hist.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
             q_ant = q_ant.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
@@ -239,19 +238,38 @@ async def grafico_micro(chave_matriz: str, nivel_hierarquia: str = 'vendedor', n
             q_ant = q_ant.filter(FatoIbpGranular.sku == sku.strip())
             q_proj = q_proj.filter(FatoIbpGranular.sku == sku.strip())
 
-        hist_dict = {h.mes_ano: int(h.vol_real or 0) for h in q_hist.group_by(func.to_char(FatoVendas.data_pedido, 'YYYY-MM')).all()}
-        ant_dict = {p.mes_projetado.strftime('%Y-%m-%d') if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado): int(p.vol_ant or 0) for p in q_ant.group_by(FatoIbpGranular.mes_projetado).all()}
+        hist_dict = {h.mes_ano: int(h.vol_real or 0) for h in q_hist.group_by('mes_ano').all()}
+        ant_dict = {str(a.mes_projetado): int(a.vol_ant or 0) for a in q_ant.group_by(FatoIbpGranular.mes_projetado).all()}
         projecoes = q_proj.group_by(FatoIbpGranular.mes_projetado).order_by(FatoIbpGranular.mes_projetado).all()
 
-        timeline = [{"name": (hoje - relativedelta(months=i)).strftime("%b/%y").capitalize(), "data_iso": (hoje - relativedelta(months=i)).replace(day=1).strftime("%Y-%m-%d"), "Realizado": hist_dict.get((hoje - relativedelta(months=i)).strftime('%Y-%m'), 0), "IA": None, "Consenso": None, "CicloAnterior": None} for i in range(24, 0, -1)]
-        
-        for p in projecoes:
-            p_str = p.mes_projetado.strftime('%Y-%m-%d') if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado)
+        timeline = []
+        for i in range(24, 0, -1):
+            dt = mes_atual_inicio - relativedelta(months=i)
+            mes_str = dt.strftime('%Y-%m')
             timeline.append({
-                "name": p.mes_projetado.strftime("%b/%y").capitalize() if isinstance(p.mes_projetado, datetime.date) else str(p.mes_projetado), 
-                "data_iso": p_str, "Realizado": None, "IA": int(p.vol_ia or 0), 
-                "Consenso": int(p.vol_consenso or 0) if m2 <= p_str <= m4 else None, 
-                "CicloAnterior": ant_dict.get(p_str, None)
+                "name": dt.strftime("%b/%y").capitalize(), "data_iso": dt.strftime("%Y-%m-%d"),
+                "Realizado": hist_dict.get(mes_str, 0), "IA": None, "Consenso": None, "CicloAnterior": None
+            })
+
+        mes_atual_iso = mes_atual_inicio.strftime('%Y-%m-%d')
+        proj_atual = next((p for p in projecoes if str(p.mes_projetado) == mes_atual_iso), None)
+        timeline.append({
+            "name": hoje.strftime("%b/%y").capitalize() + " (S&OE)", "data_iso": mes_atual_iso,
+            "Realizado": hist_dict.get(hoje.strftime('%Y-%m'), 0), 
+            "IA": int(proj_atual.vol_ia) if proj_atual else None,   
+            "Consenso": None, "CicloAnterior": ant_dict.get(mes_atual_iso, None)
+        })
+
+        for p in projecoes:
+            p_date = p.mes_projetado if isinstance(p.mes_projetado, datetime.date) else parse_date_safe(p.mes_projetado)
+            if p_date <= mes_atual_inicio: continue 
+            
+            p_iso = str(p_date)
+            timeline.append({
+                "name": p_date.strftime("%b/%y").capitalize(), "data_iso": p_iso,
+                "Realizado": None, "IA": int(p.vol_ia or 0),
+                "Consenso": int(p.vol_consenso or 0) if p_date >= m2_date else None,
+                "CicloAnterior": ant_dict.get(p_iso, None)
             })
             
         return {"status": "success", "dados": timeline}
