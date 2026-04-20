@@ -40,7 +40,7 @@ def verificar_vendedor_online(db: Session, vendedor_nome: str):
         raise HTTPException(status_code=403, detail=f"⚠️ CONCORRÊNCIA: O executivo {vendedor_nome} está online e com a plataforma aberta neste exato momento.")
 
 # =====================================================================
-# SCHEMAS (A CORREÇÃO DO ERRO 500 / CORS ESTÁ AQUI)
+# SCHEMAS
 # =====================================================================
 class AjusteGerente(BaseModel):
     nivel: str
@@ -93,7 +93,6 @@ async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = Non
         resultados = query_base.with_entities(
             DimCliente.vendedor_nome, DimCliente.razaosocial, FatoIbpGranular.sku, DimProduto.descricao, 
             FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
-            func.sum(FatoIbpGranular.vol_topdown).label('v_td'),
             func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), 
             func.sum(FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('rec_bu')
         ).group_by(
@@ -102,9 +101,10 @@ async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = Non
 
         status_dict = {c.origem.strip().upper(): c.status for c in db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo).all() if c.origem}
         
+        # AQUI FOI A CORREÇÃO PRINCIPAL: Estrutura alinhada com o Bottom-Up (sem vol_td)
         arvore = defaultdict(lambda: {
             "id": "", "nome": "", "tipo": "vendedor", "status": "Aberto", 
-            "meses": defaultdict(lambda: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0}), 
+            "meses": defaultdict(lambda: {"vol_ia":0, "vol_ajustado":0, "receita":0}), 
             "clientes": defaultdict(lambda: {
                 "id": "", "nome": "", "tipo": "cliente", 
                 "meses": defaultdict(lambda: {"vol_ia":0, "vol_ajustado":0, "receita":0}), 
@@ -130,7 +130,6 @@ async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = Non
             
             for t in [arvore[v]["meses"][ms], arvore[v]["clientes"][rz]["meses"][ms], arvore[v]["clientes"][rz]["produtos"][sku]["meses"][ms]]:
                 t["vol_ia"] += int(r.v_ia or 0)
-                t["vol_td"] += int(r.v_td or 0)
                 t["vol_ajustado"] += int(r.v_bu or 0)
                 t["receita"] += rec
 
@@ -188,7 +187,6 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
             if vendedor_alvo: q = q.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == vendedor_alvo.strip().upper())
             if cliente_alvo: q = q.filter(func.upper(func.trim(DimCliente.razaosocial)) == cliente_alvo.strip().upper())
             if sku_alvo: 
-                # Historico usa SKU da FatoVendas, Projeção usa SKU da FatoIbp
                 if q == q_hist: q = q.filter(FatoVendas.sku == sku_alvo.strip())
                 else: q = q.filter(FatoIbpGranular.sku == sku_alvo.strip())
 
@@ -198,7 +196,6 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
         proj_res = q_proj.group_by(FatoIbpGranular.mes_projetado).all()
 
         timeline = []
-        # Passado (24 meses)
         for i in range(24, 0, -1):
             dt = mes_atual_inicio - relativedelta(months=i)
             timeline.append({
@@ -206,7 +203,6 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
                 "Realizado": hist_dict.get(dt.strftime('%Y-%m'), 0), "IA": None, "Consenso": None, "CicloAnterior": None
             })
         
-        # Mês Corrente (S&OE)
         curr_iso = mes_atual_inicio.strftime('%Y-%m-%d')
         p_atual = next((p for p in proj_res if str(p.mes_projetado) == curr_iso), None)
         timeline.append({
@@ -215,7 +211,6 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
             "IA": int(p_atual.ia) if p_atual else None, "Consenso": None, "CicloAnterior": ant_dict.get(curr_iso)
         })
 
-        # Futuro
         for p in sorted(proj_res, key=lambda x: str(x.mes_projetado)):
             p_date = p.mes_projetado if isinstance(p.mes_projetado, datetime.date) else parse_date_safe(p.mes_projetado)
             if p_date <= mes_atual_inicio: continue
