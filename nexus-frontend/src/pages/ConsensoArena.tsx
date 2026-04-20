@@ -43,7 +43,8 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     setIsLoading(true);
     try {
       const res = await axios.get('/api/v1/consensus/micro', {
-        params: { nivel: nivelHierarquia, chave: nomeResponsavel }
+        // CORREÇÃO 1: Os parâmetros agora casam exatamente com o que o backend exige
+        params: { nivel_hierarquia: nivelHierarquia, nome_responsavel: nomeResponsavel }
       });
       setDadosBrutos(res.data.dados || []);
       setCelulasEditadas({});
@@ -118,10 +119,8 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     const term = busca.toLowerCase();
     
     return dadosBrutos.map(cliente => {
-      // Se o cliente corresponder, mostra todos os seus produtos
       if (cliente.nome.toLowerCase().includes(term)) return cliente;
       
-      // Se não, filtra apenas os produtos que correspondem
       const subRowsFiltradas = cliente.subRows.filter((p: any) => 
         (p.produto + ' ' + p.descricao).toLowerCase().includes(term)
       );
@@ -141,7 +140,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
       cliente.subRows.forEach((prod: any) => {
         const pmvBase = prod.meses[0]?.pmv || 0;
         prod.meses.forEach((mes: any) => {
-          // Se o produto foi editado, usa o valor dele. Se não, verifica se o cliente pai foi editado (simulação em tempo real na UI é complexa, usamos o gravado ou a edição direta)
           const edicaoProd = celulasEditadas[prod.chave_matriz]?.[mes.mes_banco];
           const isPendente = edicaoProd !== undefined;
           const volumeFinal = Math.round(Number(isPendente ? edicaoProd.novo_volume : mes.vol_ajustado));
@@ -165,7 +163,14 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
-        const res = await axios.get('/api/v1/consensus/micro/grafico', { params: { chave: chave } });
+        // CORREÇÃO 2: O gráfico também precisa dos parâmetros com os nomes blindados
+        const res = await axios.get('/api/v1/consensus/micro/grafico', { 
+            params: { 
+                chave_matriz: chave, 
+                nivel_hierarquia: nivelHierarquia, 
+                nome_responsavel: nomeResponsavel 
+            } 
+        });
         setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
       } catch (e) { console.error(e); }
       finally { setLoadingGrafico(null); }
