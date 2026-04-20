@@ -107,7 +107,7 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
         mes_atual_inicio = hoje.replace(day=1)
         ciclo_atual = get_current_cycle()
         ciclo_anterior = get_previous_cycle()
-        m2, m4 = get_projection_window() # <-- Puxamos a janela oficial (Jun a Ago)
+        m2, m4 = get_projection_window() 
         
         # 2. Queries de Dados
         q_hist = db.query(
@@ -141,8 +141,6 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
         timeline = []
 
         # 3. CONSTRUÇÃO DA TIMELINE S&OE
-        
-        # Fase A: Passado (24 meses atrás até o mês passado)
         for i in range(24, 0, -1):
             dt = mes_atual_inicio - relativedelta(months=i)
             mes_str = dt.strftime('%Y-%m')
@@ -153,7 +151,6 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
                 "IA": None, "Consenso": None, "CicloAnterior": None
             })
 
-        # Fase B: Mês Corrente (O coração do S&OE)
         mes_atual_iso = mes_atual_inicio.strftime('%Y-%m-%d')
         proj_atual = next((p for p in q_proj if str(p.mes_projetado) == mes_atual_iso), None)
         
@@ -162,12 +159,10 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
             "data_iso": mes_atual_iso,
             "Realizado": hist_dict.get(hoje.strftime('%Y-%m'), 0), 
             "IA": int(proj_atual.vol_ia) if proj_atual else None,   
-            # BLINDAGEM: Forçamos None no mês corrente para sumir a linha azul
             "Consenso": None,
             "CicloAnterior": ant_dict.get(mes_atual_iso, None)
         })
 
-        # Fase C: Futuro (M+1 em diante)
         for p in q_proj:
             p_date = parse_date_safe(p.mes_projetado)
             if p_date <= mes_atual_inicio: continue 
@@ -178,7 +173,6 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
                 "data_iso": p_iso,
                 "Realizado": None,
                 "IA": int(p.vol_ia or 0),
-                # BLINDAGEM: A linha azul só nasce de M+2 (Junho) em diante
                 "Consenso": int(p.vol_consenso or 0) if p_date >= m2 else None,
                 "CicloAnterior": ant_dict.get(p_iso, None)
             })
@@ -203,10 +197,21 @@ async def congelar_macro(payload: PayloadCongelar, db: Session = Depends(get_db)
 
             if not linhas: continue
 
-            soma_hist = db.query(func.sum(FatoVendas.qt_pedido)).filter(
+            # =========================================================================
+            # CORREÇÃO: OTIMIZAÇÃO EXTREMA DO RATEIO (Evitando Timeout/CORS)
+            # =========================================================================
+            # Faz 1 única query global agrupada pelo CGC em vez de 1 query por cliente
+            historico_agrupado = db.query(
+                FatoVendas.cgc, 
+                func.sum(FatoVendas.qt_pedido).label('vol_cli')
+            ).filter(
                 FatoVendas.sku == ajuste.produto, 
                 FatoVendas.data_pedido >= data_limite_str
-            ).scalar() or 0
+            ).group_by(FatoVendas.cgc).all()
+
+            # Transforma em dicionário na RAM para busca instantânea O(1)
+            mapa_hist = {h.cgc: float(h.vol_cli or 0) for h in historico_agrupado}
+            soma_hist = sum(mapa_hist.values())
             
             soma_dist = 0
             volume_total = int(ajuste.novo_volume)
@@ -215,11 +220,8 @@ async def congelar_macro(payload: PayloadCongelar, db: Session = Depends(get_db)
                 if i == len(linhas) - 1:
                     rateado = volume_total - soma_dist 
                 else:
-                    # Rateio por representatividade histórica
-                    vol_cli = db.query(func.sum(FatoVendas.qt_pedido)).filter(
-                        FatoVendas.sku == l.sku, FatoVendas.cgc == l.cgc,
-                        FatoVendas.data_pedido >= data_limite_str
-                    ).scalar() or 0
+                    # Busca o histórico do cliente diretamente no dicionário na memória
+                    vol_cli = mapa_hist.get(l.cgc, 0.0)
                     
                     peso = vol_cli / soma_hist if soma_hist > 0 else 1.0 / len(linhas)
                     rateado = int(round(volume_total * peso))
