@@ -4,7 +4,7 @@ import {
 } from '@tanstack/react-table';
 import { 
   Check, TrendingUp, Filter, Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
-  Lock, Search, X, Store, Package, Download, BarChart2, Activity
+  Lock, Search, X, Store, Package, Download, BarChart2, Activity, ShieldAlert
 } from 'lucide-react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
@@ -26,6 +26,9 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   const [sorting, setSorting] = useState<SortingState>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   
+  // O NOVO ESTADO DA TRAVA
+  const [isFechado, setIsFechado] = useState(false);
+  
   const [chartExpanded, setChartExpanded] = useState<string | null>(null);
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
@@ -42,11 +45,15 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     if (!nomeResponsavel) return;
     setIsLoading(true);
     try {
-      const res = await axios.get('/api/v1/consensus/micro', {
-        // CORREÇÃO 1: Os parâmetros agora casam exatamente com o que o backend exige
-        params: { nivel_hierarquia: nivelHierarquia, nome_responsavel: nomeResponsavel }
-      });
-      setDadosBrutos(res.data.dados || []);
+      // Fazemos as duas requisições ao mesmo tempo: Puxar Dados e Puxar o Status da Trava
+      const [dadosRes, statusRes] = await Promise.all([
+        axios.get('/api/v1/consensus/micro', { params: { nivel_hierarquia: nivelHierarquia, nome_responsavel: nomeResponsavel } }),
+        axios.get('/api/v1/consensus/micro/status', { params: { nivel_hierarquia: nivelHierarquia, nome_responsavel: nomeResponsavel } })
+      ]);
+      
+      setDadosBrutos(dadosRes.data.dados || []);
+      setIsFechado(statusRes.data.is_fechado); // Atualizamos a UI com a resposta da trava
+      
       setCelulasEditadas({});
       setExpanded({});
       setChartExpanded(null);
@@ -90,6 +97,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   };
 
   const handleSalvar = async () => {
+    if (isFechado) return; // Segurança dupla no frontend
     setIsProcessing(true);
     const ajustes: any[] = [];
     Object.entries(celulasEditadas).forEach(([chave, meses]: any) => {
@@ -163,7 +171,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
-        // CORREÇÃO 2: O gráfico também precisa dos parâmetros com os nomes blindados
         const res = await axios.get('/api/v1/consensus/micro/grafico', { 
             params: { 
                 chave_matriz: chave, 
@@ -197,7 +204,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                   {row.getIsExpanded() ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
                 </button>
               ) : (
-                <div className="w-8"></div> // Espaçador para alinhar os produtos
+                <div className="w-8"></div>
               )}
               
               <button onClick={() => toggleChart(row)} className={`p-1.5 rounded-lg transition-colors border ${chartExpanded === row.original.chave_matriz ? 'bg-indigo-100 border-indigo-200 text-indigo-600 shadow-sm' : 'hover:bg-slate-100 border-transparent text-slate-400 hover:text-slate-600'}`} title="Ver Gráfico S&OE">
@@ -248,6 +255,9 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           
           const faturamentoPrevisto = isPendente ? (valorInteiro * (dadosMes?.pmv || 0)) : (dadosMes?.receita || 0);
           const temPressao = baseTopDown > valorInteiro;
+          
+          // LER O STATUS DA TRAVA PARA BLOQUEAR A TELA
+          const bloqueado = meta.isFechado;
 
           return (
             <div className="flex flex-col w-28 gap-1.5 relative">
@@ -257,13 +267,15 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
               </div>
               <input
                 type="number" value={valorInteiro === 0 ? '' : valorInteiro} placeholder="0"
+                disabled={bloqueado}
                 onChange={(e) => meta.updateCell(row.chave_matriz, m.mes_banco, e.target.value)}
                 className={`text-sm text-center font-black p-2.5 rounded-xl outline-none border-2 transition-all w-full
-                  ${isCliente ? 'border-dashed border-indigo-200 focus:border-indigo-500 focus:bg-indigo-50 text-indigo-900 bg-white' : 'border-solid'} 
-                  ${isChanged && !isCliente ? 'bg-indigo-600 border-indigo-700 text-white shadow-md' : !isCliente ? 'bg-slate-50 border-transparent text-slate-800 focus:bg-white focus:border-slate-300' : ''}`}
-                title={isCliente ? "Editar Matriz (Rateia por todos os SKUs)" : "Editar SKU"}
+                  ${bloqueado ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed opacity-80' : 
+                    isCliente ? 'border-dashed border-indigo-200 focus:border-indigo-500 focus:bg-indigo-50 text-indigo-900 bg-white' : 'border-solid'} 
+                  ${isChanged && !isCliente && !bloqueado ? 'bg-indigo-600 border-indigo-700 text-white shadow-md' : !isCliente && !bloqueado ? 'bg-slate-50 border-transparent text-slate-800 focus:bg-white focus:border-slate-300' : ''}`}
+                title={bloqueado ? "Carteira Trancada pela Gerência" : isCliente ? "Editar Matriz (Rateia por todos os SKUs)" : "Editar SKU"}
               />
-              <span className={`text-[10px] font-black text-center tracking-tight ${isCliente ? 'text-indigo-500' : 'text-emerald-600'}`}>
+              <span className={`text-[10px] font-black text-center tracking-tight ${bloqueado ? 'text-slate-400' : isCliente ? 'text-indigo-500' : 'text-emerald-600'}`}>
                 {formatMoeda(faturamentoPrevisto)}
               </span>
             </div>
@@ -281,7 +293,9 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel(), getSortedRowModel: getSortedRowModel(),
     meta: {
       celulasEditadas,
+      isFechado, // PASSAMOS O STATUS PARA AS LINHAS DA TABELA
       updateCell: (chave: string, mes: string, val: string) => {
+        if (isFechado) return; // Impede atualizações via teclado se trancado
         const v = val === '' ? '' : Math.round(Number(val));
         const finalV = Number.isNaN(v as any) && val !== '' ? 0 : v;
         setCelulasEditadas((prev: any) => ({ ...prev, [chave]: { ...(prev[chave] || {}), [mes]: { novo_volume: finalV } } }));
@@ -293,9 +307,16 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
       <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative">
         
-        {/* CABEÇALHO */}
-        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100">
-          <div>
+        {/* CABEÇALHO COM FEEDBACK DE TRAVA */}
+        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 relative overflow-hidden">
+          {/* Banner Vermelho de Trava */}
+          {isFechado && !isLoading && (
+              <div className="absolute top-0 left-0 w-full bg-rose-500 text-white text-[10px] font-black py-1.5 flex justify-center items-center gap-2 tracking-widest uppercase shadow-sm z-10">
+                  <ShieldAlert className="w-3 h-3" /> CARTEIRA TRANCADA PELA GERÊNCIA - APENAS LEITURA
+              </div>
+          )}
+          
+          <div className={isFechado ? "pt-4" : ""}>
             <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
               <TrendingUp className="w-8 h-8 text-indigo-600" /> ALINHAMENTO COMERCIAL (BOTTOM-UP)
             </h1>
@@ -304,12 +325,12 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
             </p>
           </div>
           
-          <div className="flex items-center gap-4">
+          <div className={`flex items-center gap-4 ${isFechado ? "pt-4" : ""}`}>
               <div className="flex items-center gap-3 h-full">
-                {qtdEdicoes > 0 && (<button onClick={() => setCelulasEditadas({})} className="flex items-center gap-1 text-xs font-black text-rose-500 hover:text-rose-700 transition tracking-widest uppercase px-4 py-3 rounded-2xl hover:bg-rose-50"><X className="w-4 h-4" /> Descartar</button>)}
-                <button onClick={handleSalvar} disabled={isProcessing} className="flex items-center gap-2 bg-slate-900 hover:bg-black text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-slate-900/30 transition-all disabled:opacity-50">
-                    {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : <Check className="w-5 h-5" />}
-                    {qtdEdicoes > 0 ? 'Gravar Proposta Comercial' : 'Proposta Atualizada'}
+                {qtdEdicoes > 0 && !isFechado && (<button onClick={() => setCelulasEditadas({})} className="flex items-center gap-1 text-xs font-black text-rose-500 hover:text-rose-700 transition tracking-widest uppercase px-4 py-3 rounded-2xl hover:bg-rose-50"><X className="w-4 h-4" /> Descartar</button>)}
+                <button onClick={handleSalvar} disabled={isProcessing || isFechado} className={`flex items-center gap-2 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase transition-all shadow-lg ${isFechado ? 'bg-slate-300 cursor-not-allowed shadow-none' : 'bg-slate-900 hover:bg-black shadow-slate-900/30'}`}>
+                    {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : isFechado ? <Lock className="w-5 h-5" /> : <Check className="w-5 h-5" />}
+                    {isFechado ? 'Edição Bloqueada' : qtdEdicoes > 0 ? 'Gravar Proposta Comercial' : 'Proposta Atualizada'}
                 </button>
               </div>
           </div>
