@@ -37,10 +37,10 @@ def require_manager_or_admin(usuario: dict = Depends(get_current_user)):
 def verificar_vendedor_online(db: Session, vendedor_nome: str):
     vendedor_user = db.query(Usuario).filter(func.upper(func.trim(Usuario.nome_vendedor)) == vendedor_nome.strip().upper()).first()
     if vendedor_user and vendedor_user.ultima_atividade and (datetime.datetime.utcnow() - vendedor_user.ultima_atividade).total_seconds() < 60:
-        raise HTTPException(status_code=403, detail=f"⚠️ CONCORRÊNCIA: O executivo {vendedor_nome} está online.")
+        raise HTTPException(status_code=403, detail=f"⚠️ CONCORRÊNCIA: O executivo {vendedor_nome} está online e com a plataforma aberta neste exato momento.")
 
 # =====================================================================
-# SCHEMAS
+# SCHEMAS (A CORREÇÃO DO ERRO 500 / CORS ESTÁ AQUI)
 # =====================================================================
 class AjusteGerente(BaseModel):
     nivel: str
@@ -50,6 +50,13 @@ class AjusteGerente(BaseModel):
 
 class PayloadAprovarGerente(BaseModel):
     ajustes: List[AjusteGerente]
+
+class PayloadLockAll(BaseModel):
+    gerente_nome: str = ""
+    acao: str
+
+class PayloadToggleLock(BaseModel):
+    origem: str
 
 # =====================================================================
 # ROTAS DE FILTROS E LISTAGEM
@@ -284,6 +291,37 @@ async def toggle_lock_gerenciamento(payload: PayloadToggleLock, db: Session = De
         db.commit()
         return {"status": "success"}
     except HTTPException as e: raise e
+    except Exception as e: 
+        db.rollback()
+        raise HTTPException(500, repr(e))
+
+@router.post("/lock-all")
+async def lock_all(payload: PayloadLockAll, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
+    try:
+        ciclo = get_current_cycle()
+        check_global_lock(db, ciclo)
+        m2, m4 = get_projection_window()
+        
+        q = get_truth_query(db, ciclo, m2, m4).with_entities(FatoIbpGranular.vendedor_nome).filter(FatoIbpGranular.vendedor_nome.isnot(None))
+        filtro = usuario.get('gerente_nome') if usuario['funcao'] == 'Gerente' else payload.gerente_nome
+        if filtro: 
+            q = q.filter(func.upper(func.trim(DimCliente.gerente_nome)) == filtro.strip().upper())
+            
+        vendedores = {v[0].strip() for v in q.distinct().all() if v[0]}
+        for v in vendedores: 
+            verificar_vendedor_online(db, v)
+        
+        status_alvo = 'Fechado' if payload.acao == 'Trancar' else 'Aberto'
+        for v in vendedores:
+            reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, func.upper(func.trim(ControleCiclo.origem)) == v.upper()).first()
+            if reg: 
+                reg.status = status_alvo
+            else: 
+                db.add(ControleCiclo(ciclo_sop=ciclo, origem=v, status=status_alvo))
+        db.commit()
+        return {"status": "success"}
+    except HTTPException as he: 
+        raise he
     except Exception as e: 
         db.rollback()
         raise HTTPException(500, repr(e))
