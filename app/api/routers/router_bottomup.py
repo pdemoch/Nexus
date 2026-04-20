@@ -62,9 +62,9 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
 
         query_base = get_truth_query(db, ciclo, m2, m4)
         
-        # A MÁGICA DA CORREÇÃO: Usamos o DimCliente e convertemos para UPPER para garantir o "match" perfeito
+        # A GRANDE MUDANÇA: O Vendedor filtra a FATO, não a Dimensão.
         if filtro_vend: 
-            query_base = query_base.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
+            query_base = query_base.filter(func.upper(func.trim(FatoIbpGranular.vendedor_nome)) == filtro_vend.strip().upper())
         if filtro_reg: 
             query_base = query_base.filter(func.upper(func.trim(DimCliente.regional)) == filtro_reg.strip().upper())
         if usuario['funcao'] == 'Gerente': 
@@ -135,8 +135,7 @@ async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: 
             
             query = get_truth_query(db, ciclo, str(data_alvo), str(data_alvo))
 
-            # A MÁGICA DA CORREÇÃO: Consistência no filtro para rateio
-            if filtro_vend: query = query.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
+            if filtro_vend: query = query.filter(func.upper(func.trim(FatoIbpGranular.vendedor_nome)) == filtro_vend.strip().upper())
             if filtro_reg: query = query.filter(func.upper(func.trim(DimCliente.regional)) == filtro_reg.strip().upper())
             if usuario['funcao'] == 'Gerente': query = query.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
 
@@ -151,9 +150,13 @@ async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: 
             skus = list({l.sku for l in linhas if l.sku})
             cgcs = list({l.cgc for l in linhas if l.cgc})
             
-            historico = db.query(FatoVendas.sku, FatoVendas.cgc, func.sum(FatoVendas.qt_pedido).label('vol_hist'))\
-                .filter(FatoVendas.sku.in_(skus), FatoVendas.cgc.in_(cgcs), FatoVendas.data_pedido >= data_limite_str)\
-                .group_by(FatoVendas.sku, FatoVendas.cgc).all()
+            historico_query = db.query(FatoVendas.sku, FatoVendas.cgc, func.sum(FatoVendas.qt_pedido).label('vol_hist'))\
+                .filter(FatoVendas.sku.in_(skus), FatoVendas.cgc.in_(cgcs), FatoVendas.data_pedido >= data_limite_str)
+            
+            # Rateio S&OE: O peso da loja deve ser baseado apenas nas vendas que ELE fez!
+            if filtro_vend: historico_query = historico_query.filter(func.upper(func.trim(FatoVendas.vendedor_nome)) == filtro_vend.strip().upper())
+
+            historico = historico_query.group_by(FatoVendas.sku, FatoVendas.cgc).all()
                 
             dict_hist = {f"{h.sku}_{h.cgc}": float(h.vol_hist or 0) for h in historico}
             soma_hist = sum([dict_hist.get(f"{l.sku}_{l.cgc}", 0) for l in linhas])
@@ -212,11 +215,10 @@ async def grafico_micro(chave_matriz: str, nivel_hierarquia: str = 'vendedor', n
             func.sum(FatoIbpGranular.vol_bottomup).label('vol_consenso')
         )
 
-        # A MÁGICA DA CORREÇÃO: Consistência no gráfico
         if filtro_vend: 
-            q_hist = q_hist.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
-            q_ant = q_ant.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
-            q_proj = q_proj.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
+            q_hist = q_hist.filter(func.upper(func.trim(FatoVendas.vendedor_nome)) == filtro_vend.strip().upper())
+            q_ant = q_ant.filter(func.upper(func.trim(FatoIbpGranular.vendedor_nome)) == filtro_vend.strip().upper())
+            q_proj = q_proj.filter(func.upper(func.trim(FatoIbpGranular.vendedor_nome)) == filtro_vend.strip().upper())
         if filtro_reg: 
             q_hist = q_hist.filter(func.upper(func.trim(DimCliente.regional)) == filtro_reg.strip().upper())
             q_ant = q_ant.filter(func.upper(func.trim(DimCliente.regional)) == filtro_reg.strip().upper())
