@@ -54,3 +54,18 @@ def check_global_lock(db: Session, ciclo: str):
     
     if registro:
         raise HTTPException(status_code=403, detail="Acesso Negado: S&OP Global já está publicado.")
+
+def check_origin_lock(db: Session, ciclo: str, origem: str):
+    """
+    Verifica se a gerência trancou a carteira deste vendedor/regional específico.
+    """
+    if not origem: return
+    
+    registro = db.query(ControleCiclo).filter(
+        ControleCiclo.ciclo_sop == ciclo, 
+        func.upper(func.trim(ControleCiclo.origem)) == origem.strip().upper(),
+        ControleCiclo.status == 'Fechado'
+    ).first()
+    
+    if registro:
+        raise HTTPException(status_code=403, detail=f"Acesso Negado: A carteira de '{origem}' foi trancada pela Gerência e não pode receber alterações.")

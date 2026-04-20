@@ -18,6 +18,7 @@ from app.api.routers.shared_ibp import (
     get_projection_window,
     get_truth_query,
     check_global_lock,
+    check_origin_lock, # <-- AQUI ESTÁ A NOVA BLINDAGEM IMPORTADA
     parse_date_safe
 )
 
@@ -118,11 +119,37 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
     except Exception as e: 
         raise HTTPException(500, repr(e))
 
+# =====================================================================
+# ROTA DE STATUS DE TRAVA (NOVA)
+# =====================================================================
+@router.get("/status")
+async def verificar_status_micro(nivel_hierarquia: str = 'vendedor', nome_responsavel: str = '', db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+    try:
+        ciclo = get_current_cycle()
+        origem_trava = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else nome_responsavel
+        
+        if not origem_trava:
+            return {"is_fechado": False}
+            
+        registro = db.query(ControleCiclo).filter(
+            ControleCiclo.ciclo_sop == ciclo, 
+            func.upper(func.trim(ControleCiclo.origem)) == origem_trava.strip().upper()
+        ).first()
+        
+        return {"is_fechado": registro.status == 'Fechado' if registro else False}
+    except Exception as e:
+        raise HTTPException(500, repr(e))
+
 @router.post("/congelar")
 async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: PayloadCongelarBU, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
         ciclo = get_current_cycle()
         check_global_lock(db, ciclo)
+        
+        # AQUI O BANCO DE DADOS É BLINDADO CONTRA SALVAMENTOS DE CARTEIRAS TRANCADAS
+        origem_trava = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else nome_responsavel
+        check_origin_lock(db, ciclo, origem_trava)
+        
         data_limite_str = (datetime.date.today() - relativedelta(months=12)).strftime('%Y-%m-%d')
 
         filtro_vend = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else (nome_responsavel if nivel_hierarquia == 'vendedor' else None)
