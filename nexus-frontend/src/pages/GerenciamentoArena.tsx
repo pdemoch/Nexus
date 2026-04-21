@@ -219,7 +219,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           }
         }))
     ];
-  }, [dadosBrutos, chartExpanded, celulasEditadas]);
+  }, [dadosBrutos, chartExpanded]); // 🔒 CORREÇÃO AQUI: Removemos o celulasEditadas das dependências!
 
   const table = useReactTable({
     data: dadosFiltrados, columns, state: { expanded, sorting },
@@ -239,7 +239,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-24">
       <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative">
         
-        {/* FILTROS E BUSCA (ESTILO NEXUS) */}
+        {/* FILTROS E BUSCA */}
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6 mb-8 bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
           <div>
             <h1 className="text-3xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
