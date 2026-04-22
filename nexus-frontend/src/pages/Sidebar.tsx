@@ -1,12 +1,13 @@
-import { BarChart3, Users, LayoutDashboard, Settings, Rocket, LogOut, UserCircle, ShieldAlert } from 'lucide-react';
+import { BarChart3, Users, LayoutDashboard, Settings, Rocket, LogOut, UserCircle, ShieldAlert, Factory } from 'lucide-react'; // <-- FACTORY IMPORTADO
 
 export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout }: any) {
   
-  // Definição das permissões de cada tela
+  // Definição das permissões de cada tela (Ordem Lógica do S&OP)
   const allNavItems = [
     { id: 'dashboard', label: 'S&OP Global', icon: LayoutDashboard, roles: ['Administrador', 'Gerente'] },
-    { id: 'topdown', label: 'Top-Down (Gerência)', icon: BarChart3, roles: ['Administrador', 'Gerente'] },
+    { id: 'topdown', label: 'Top-Down (Diretoria)', icon: BarChart3, roles: ['Administrador', 'Gerente'] },
     { id: 'npd', label: 'Inovações (MKT)', icon: Rocket, roles: ['Administrador', 'Gerente'] },
+    { id: 'supply', label: 'Supply Review', icon: Factory, roles: ['Administrador', 'Supply Chain'] }, // <-- NOVO BOTÃO AQUI
     { id: 'consenso', label: 'Bottom-Up (Comercial)', icon: Users, roles: ['Administrador', 'Gerente', 'Executivo'] },
     { id: 'gerenciamento', label: 'Gerenciamento', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },
     { id: 'admin', label: 'Control Tower', icon: Settings, roles: ['Administrador'] },

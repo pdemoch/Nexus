@@ -145,6 +145,11 @@ async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: 
     try:
         ciclo = get_current_cycle()
         check_global_lock(db, ciclo)
+
+        # NOVA BLINDAGEM: Bottom-Up só inicia após o Supply Review Congelar
+        reg_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
+        if not reg_sp or reg_sp.status != 'Fechado':
+             raise HTTPException(status_code=403, detail="A meta oficial ainda não foi liberada pela equipe de Supply Chain (Fase 3). Aguarde.")
         
         # AQUI O BANCO DE DADOS É BLINDADO CONTRA SALVAMENTOS DE CARTEIRAS TRANCADAS
         origem_trava = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else nome_responsavel

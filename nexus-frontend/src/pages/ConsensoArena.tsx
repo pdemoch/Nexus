@@ -4,7 +4,7 @@ import {
 } from '@tanstack/react-table';
 import { 
   Check, TrendingUp, Filter, Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
-  Lock, Search, X, Store, Package, Download, BarChart2, Activity, ShieldAlert
+  Lock, Search, X, Store, Package, Download, BarChart2, Activity, ShieldAlert, AlertTriangle
 } from 'lucide-react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
@@ -26,8 +26,9 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   const [sorting, setSorting] = useState<SortingState>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   
-  // O NOVO ESTADO DA TRAVA
+  // O NOVO ESTADO DA TRAVA GLOBAL E DA CASCATA
   const [isFechado, setIsFechado] = useState(false);
+  const [isSupplyFechado, setIsSupplyFechado] = useState<boolean | null>(null);
   
   const [chartExpanded, setChartExpanded] = useState<string | null>(null);
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
@@ -37,22 +38,27 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   const [opcoesBusca, setOpcoesBusca] = useState<{vendedores: string[], regionais: string[]}>({vendedores: [], regionais: []});
 
   useEffect(() => {
+    // Busca os filtros
     axios.get('/api/v1/consensus/micro/filtros', { params: { gerente_nome: usuarioSessao?.gerente_nome } })
          .then(res => setOpcoesBusca(res.data)).catch(console.error);
+
+    // NOVO: Verifica se o Supply Chain liberou a meta para a equipa comercial
+    axios.get('/api/v1/consensus/supply/status')
+         .then(res => setIsSupplyFechado(res.data.is_supply_fechado))
+         .catch(() => setIsSupplyFechado(false));
   }, [usuarioSessao]);
 
   const fetchData = useCallback(async () => {
     if (!nomeResponsavel) return;
     setIsLoading(true);
     try {
-      // Fazemos as duas requisições ao mesmo tempo: Puxar Dados e Puxar o Status da Trava
       const [dadosRes, statusRes] = await Promise.all([
         axios.get('/api/v1/consensus/micro', { params: { nivel_hierarquia: nivelHierarquia, nome_responsavel: nomeResponsavel } }),
         axios.get('/api/v1/consensus/micro/status', { params: { nivel_hierarquia: nivelHierarquia, nome_responsavel: nomeResponsavel } })
       ]);
       
       setDadosBrutos(dadosRes.data.dados || []);
-      setIsFechado(statusRes.data.is_fechado); // Atualizamos a UI com a resposta da trava
+      setIsFechado(statusRes.data.is_fechado); 
       
       setCelulasEditadas({});
       setExpanded({});
@@ -66,8 +72,8 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   }, [nivelHierarquia, nomeResponsavel]);
 
   useEffect(() => { 
-    if (isExecutivo && nomeResponsavel) fetchData(); 
-  }, [fetchData, isExecutivo, nomeResponsavel]);
+    if (isExecutivo && nomeResponsavel && isSupplyFechado) fetchData(); 
+  }, [fetchData, isExecutivo, nomeResponsavel, isSupplyFechado]);
 
   const handleExportExcel = () => {
     if (dadosBrutos.length === 0) return alert("Não há dados no ecrã para exportar.");
@@ -97,7 +103,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   };
 
   const handleSalvar = async () => {
-    if (isFechado) return; // Segurança dupla no frontend
+    if (isFechado) return; 
     setIsProcessing(true);
     const ajustes: any[] = [];
     Object.entries(celulasEditadas).forEach(([chave, meses]: any) => {
@@ -256,7 +262,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           const faturamentoPrevisto = isPendente ? (valorInteiro * (dadosMes?.pmv || 0)) : (dadosMes?.receita || 0);
           const temPressao = baseTopDown > valorInteiro;
           
-          // LER O STATUS DA TRAVA PARA BLOQUEAR A TELA
           const bloqueado = meta.isFechado;
 
           return (
@@ -293,9 +298,9 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel(), getSortedRowModel: getSortedRowModel(),
     meta: {
       celulasEditadas,
-      isFechado, // PASSAMOS O STATUS PARA AS LINHAS DA TABELA
+      isFechado, 
       updateCell: (chave: string, mes: string, val: string) => {
-        if (isFechado) return; // Impede atualizações via teclado se trancado
+        if (isFechado) return; 
         const v = val === '' ? '' : Math.round(Number(val));
         const finalV = Number.isNaN(v as any) && val !== '' ? 0 : v;
         setCelulasEditadas((prev: any) => ({ ...prev, [chave]: { ...(prev[chave] || {}), [mes]: { novo_volume: finalV } } }));
@@ -303,13 +308,40 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     }
   });
 
+  // =========================================================================
+  // TELA DE BLOQUEIO DE FASE (AGUARDANDO SUPPLY CHAIN)
+  // =========================================================================
+  if (isSupplyFechado === null) {
+    return (
+      <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
+        <Loader2 className="w-8 h-8 animate-spin text-indigo-500 mb-4" />
+        <span className="text-slate-400 font-black text-xs tracking-widest uppercase">Verificando Status do Ciclo...</span>
+      </div>
+    );
+  }
+
+  if (isSupplyFechado === false) {
+    return (
+      <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans p-6">
+        <div className="bg-white p-12 rounded-[40px] shadow-xl border border-slate-100 flex flex-col items-center max-w-lg text-center animate-in fade-in zoom-in duration-500">
+          <div className="w-20 h-20 bg-amber-50 rounded-full flex items-center justify-center mb-6 border border-amber-100">
+            <AlertTriangle className="w-10 h-10 text-amber-500" />
+          </div>
+          <h2 className="text-2xl font-black text-slate-900 tracking-tighter mb-4">Aguardando Supply Chain</h2>
+          <p className="text-slate-500 font-medium leading-relaxed">
+            A fase Comercial (Bottom-Up) só pode ser iniciada após a aprovação e congelamento do plano de restrições pela equipa de <strong>Supply Chain (Fase 3)</strong>.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
       <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative">
         
         {/* CABEÇALHO COM FEEDBACK DE TRAVA */}
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 relative overflow-hidden">
-          {/* Banner Vermelho de Trava */}
           {isFechado && !isLoading && (
               <div className="absolute top-0 left-0 w-full bg-rose-500 text-white text-[10px] font-black py-1.5 flex justify-center items-center gap-2 tracking-widest uppercase shadow-sm z-10">
                   <ShieldAlert className="w-3 h-3" /> CARTEIRA TRANCADA PELA GERÊNCIA - APENAS LEITURA

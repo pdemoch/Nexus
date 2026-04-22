@@ -9,7 +9,8 @@ from app.api.routers import (
     router_npd, 
     router_topdown, 
     router_bottomup, 
-    router_gerenciamento
+    router_gerenciamento,
+    router_supply
 )
 from app.core.config import settings
 from app.models.domain_models import Base
@@ -53,11 +54,10 @@ app.include_router(router_auth.router)
 app.include_router(router_admin.router)
 app.include_router(router_dashboard.router)
 app.include_router(router_npd.router)
-
-# As 3 novas rotas especializadas do Consenso (S&OP)
 app.include_router(router_topdown.router)
 app.include_router(router_bottomup.router)
 app.include_router(router_gerenciamento.router)
+app.include_router(router_supply.router)
 
 @app.get("/", tags=["Health Check"])
 async def root():

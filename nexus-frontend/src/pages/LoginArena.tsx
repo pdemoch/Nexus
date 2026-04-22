@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Lock, Mail, User, ShieldCheck, ChevronRight, Loader2, KeyRound, Briefcase } from 'lucide-react';
+import { Lock, Mail, User, ShieldCheck, ChevronRight, Loader2, KeyRound, Briefcase, Factory } from 'lucide-react';
 import axios from 'axios';
 
 export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userData: any) => void }) {
@@ -149,7 +149,7 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
 
               <div className="mt-8 text-center">
                 <button onClick={() => setModo('cadastro')} className="text-sm font-bold text-indigo-600 hover:text-indigo-800 transition-colors">
-                  Novo usuário? Cadastre-se aqui.
+                  Novo utilizador? Cadastre-se aqui.
                 </button>
               </div>
             </div>
@@ -159,7 +159,7 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
           {modo === 'cadastro' && (
             <div className="animate-in fade-in slide-in-from-right-8 duration-500">
               <div className="mb-8">
-                <h2 className="text-2xl font-black text-slate-900 tracking-tighter">Cadastro de Usuário</h2>
+                <h2 className="text-2xl font-black text-slate-900 tracking-tighter">Registo de Utilizador</h2>
                 <p className="text-slate-500 font-medium text-sm mt-1">Defina o nível de acesso e o perfil operacional.</p>
               </div>
 
@@ -204,8 +204,15 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
                     <span className={`text-[10px] font-black uppercase tracking-wider ${funcao === 'Gerente' ? 'text-emerald-900' : 'text-slate-500'}`}>Gerente</span>
                   </div>
                   <div 
+                    onClick={() => setFuncao('Supply Chain')}
+                    className={`cursor-pointer border-2 p-3 rounded-xl flex flex-col items-center justify-center gap-1 transition-all ${funcao === 'Supply Chain' ? 'border-amber-600 bg-amber-50' : 'border-slate-200 hover:border-amber-300'}`}
+                  >
+                    <Factory className={`w-5 h-5 ${funcao === 'Supply Chain' ? 'text-amber-600' : 'text-slate-400'}`} />
+                    <span className={`text-[10px] font-black uppercase tracking-wider ${funcao === 'Supply Chain' ? 'text-amber-900' : 'text-slate-500'}`}>Supply Chain</span>
+                  </div>
+                  <div 
                     onClick={() => setFuncao('Executivo')}
-                    className={`cursor-pointer border-2 p-3 rounded-xl flex flex-col items-center justify-center gap-1 col-span-2 transition-all ${funcao === 'Executivo' ? 'border-blue-600 bg-blue-50' : 'border-slate-200 hover:border-blue-300'}`}
+                    className={`cursor-pointer border-2 p-3 rounded-xl flex flex-col items-center justify-center gap-1 transition-all ${funcao === 'Executivo' ? 'border-blue-600 bg-blue-50' : 'border-slate-200 hover:border-blue-300'}`}
                   >
                     <User className={`w-5 h-5 ${funcao === 'Executivo' ? 'text-blue-600' : 'text-slate-400'}`} />
                     <span className={`text-[10px] font-black uppercase tracking-wider ${funcao === 'Executivo' ? 'text-blue-900' : 'text-slate-500'}`}>Executivo (Vendas)</span>
@@ -235,7 +242,7 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
                 )}
                 
                 <button type="submit" disabled={isLoading} className="w-full mt-4 bg-indigo-600 hover:bg-indigo-700 text-white py-3.5 rounded-xl font-black text-sm uppercase tracking-widest transition-all flex justify-center items-center">
-                  {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : "Criar Usuário"}
+                  {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : "Criar Utilizador"}
                 </button>
               </form>
 
@@ -255,7 +262,7 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
                   <KeyRound className="w-6 h-6 text-amber-600" />
                 </div>
                 <h2 className="text-2xl font-black text-amber-900 tracking-tighter">Primeiro Acesso</h2>
-                <p className="text-amber-700 font-medium text-sm mt-2">Por questões de segurança corporativa, você precisa definir uma senha pessoal antes de acessar o sistema.</p>
+                <p className="text-amber-700 font-medium text-sm mt-2">Por questões de segurança corporativa, é necessário definir uma senha pessoal antes de aceder ao sistema.</p>
               </div>
 
               <form onSubmit={handleTrocaSenha} className="flex flex-col gap-5">

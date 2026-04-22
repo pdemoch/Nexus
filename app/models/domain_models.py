@@ -84,6 +84,8 @@ class FatoIbpGranular(Base):
 
     vol_ia = Column(Integer, default=0)
     vol_topdown = Column(Integer, default=0)
+    vol_supply = Column(Integer, default=0) # NOVO
+    justificativa_supply = Column(String, nullable=True) # NOVO
     vol_bottomup = Column(Integer, default=0)
     vol_final = Column(Integer, default=0) 
     

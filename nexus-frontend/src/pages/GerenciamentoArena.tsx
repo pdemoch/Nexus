@@ -4,7 +4,7 @@ import {
 } from '@tanstack/react-table';
 import { 
   Users, Loader2, Search, ArrowUpDown, ArrowUp, ArrowDown, Lock, Unlock, 
-  ShieldAlert, Save, Store, Package, ChevronRight, ChevronDown, BarChart2, X, Filter, Activity 
+  ShieldAlert, Save, Store, Package, ChevronRight, ChevronDown, BarChart2, X, Filter, Activity, AlertTriangle
 } from 'lucide-react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
@@ -24,24 +24,26 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
 
+  // ESTADOS DE TRAVA
   const [isTopDownFechado, setIsTopDownFechado] = useState(false);
+  const [isSupplyFechado, setIsSupplyFechado] = useState<boolean | null>(null);
+  
   const [busca, setBusca] = useState('');
 
-  // ESTADO DOS FILTROS DINÂMICOS
   const [nivelHierarquia, setNivelHierarquia] = useState('vendedor');
   const [nomeResponsavel, setNomeResponsavel] = useState('');
   const [opcoesBusca, setOpcoesBusca] = useState<{vendedores: string[], regionais: string[]}>({vendedores: [], regionais: []});
 
-  // 1. Busca Filtros e Status Inicial
   useEffect(() => {
     const carregarConfig = async () => {
       try {
         const [filtrosRes, statusRes] = await Promise.all([
           axios.get('/api/v1/consensus/gerenciamento/filtros'),
-          axios.get('/api/v1/consensus/macro/status').catch(() => ({ data: { is_topdown_fechado: false } }))
+          axios.get('/api/v1/consensus/supply/status').catch(() => ({ data: { is_supply_fechado: false, is_topdown_fechado: false } }))
         ]);
         setOpcoesBusca(filtrosRes.data);
         setIsTopDownFechado(statusRes.data.is_topdown_fechado);
+        setIsSupplyFechado(statusRes.data.is_supply_fechado);
       } catch (e) { console.error("Erro ao carregar configurações", e); }
     };
     carregarConfig();
@@ -67,7 +69,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     }
   }, [nivelHierarquia, nomeResponsavel]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => { if (isSupplyFechado) fetchData(); }, [fetchData, isSupplyFechado]);
 
   const handleSalvarAjustes = async () => {
     if (!window.confirm("Deseja aplicar estas alterações na carteira dos vendedores afetados?")) return;
@@ -226,7 +228,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           }
         }))
     ];
-  }, [dadosBrutos, chartExpanded]); // FOCO BLINDADO: celulasEditadas removido para manter o cursor no lugar
+  }, [dadosBrutos, chartExpanded]); 
 
   const table = useReactTable({
     data: dadosFiltrados, columns, state: { expanded, sorting },
@@ -241,6 +243,34 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
       }
     }
   });
+
+  // =========================================================================
+  // TELA DE BLOQUEIO DE FASE (AGUARDANDO SUPPLY CHAIN)
+  // =========================================================================
+  if (isSupplyFechado === null) {
+    return (
+      <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
+        <Loader2 className="w-8 h-8 animate-spin text-indigo-500 mb-4" />
+        <span className="text-slate-400 font-black text-xs tracking-widest uppercase">Verificando Status do Ciclo...</span>
+      </div>
+    );
+  }
+
+  if (isSupplyFechado === false) {
+    return (
+      <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans p-6">
+        <div className="bg-white p-12 rounded-[40px] shadow-xl border border-slate-100 flex flex-col items-center max-w-lg text-center animate-in fade-in zoom-in duration-500">
+          <div className="w-20 h-20 bg-amber-50 rounded-full flex items-center justify-center mb-6 border border-amber-100">
+            <AlertTriangle className="w-10 h-10 text-amber-500" />
+          </div>
+          <h2 className="text-2xl font-black text-slate-900 tracking-tighter mb-4">Aguardando Supply Chain</h2>
+          <p className="text-slate-500 font-medium leading-relaxed">
+            A etapa de Gerenciamento Comercial só será liberada após a aprovação e o congelamento oficial do plano de restrições de fábrica <strong>(Fase 3)</strong>.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-24">

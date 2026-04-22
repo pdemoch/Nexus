@@ -6,6 +6,7 @@ import Sidebar from './pages/Sidebar';
 import AdminPanel from './pages/AdminPanel';
 import LoginArena from './pages/LoginArena'; 
 import TopDownArena from './pages/TopDownArena';
+import SupplyReviewArena from './pages/SupplyReviewArena'; // <-- NOVA TELA IMPORTADA
 import ConsensoArena from './pages/ConsensoArena';
 import GlobalDashboard from './pages/GlobalDashboard';
 import NPDArena from './pages/NPDArena';
@@ -18,17 +19,16 @@ export default function App() {
   const [isSystemLocked, setIsSystemLocked] = useState(false);
   const [latestLog, setLatestLog] = useState('');
 
-  // MOTOR DE HEARTBEAT (APENAS NO ARRANQUE)
+  // MOTOR DE HEARTBEAT
   useEffect(() => {
     if (!user) return;
     const enviarPulso = async () => {
       try { await axios.post('/api/v1/auth/heartbeat'); } catch (error) {}
     };
     enviarPulso();
-    // 🗑️ REMOVIDO: setInterval(enviarPulso, 30000) para parar de poluir os logs do servidor
   }, [user]);
 
-  // RADAR DO SISTEMA (APENAS NO ARRANQUE OU REFRESH DA PÁGINA)
+  // RADAR DO SISTEMA
   useEffect(() => {
     if (!user) return;
     const checkSystemStatus = async () => {
@@ -41,7 +41,6 @@ export default function App() {
       } catch (error) { console.error("Falha ao verificar status do sistema."); }
     };
     checkSystemStatus();
-    // 🗑️ REMOVIDO: setInterval(checkSystemStatus, 3000) para evitar o loop de CORS quando o backend cai
   }, [user]);
 
   // GESTÃO DE SESSÃO
@@ -51,16 +50,20 @@ export default function App() {
     if (token && savedUser) {
       const parsedUser = JSON.parse(savedUser);
       setUser(parsedUser);
+      // REGRAS DE ROTA INICIAL POR CARGO
       if (parsedUser.funcao === 'Executivo') setCurrentRoute('consenso');
       else if (parsedUser.funcao === 'Gerente') setCurrentRoute('gerenciamento');
+      else if (parsedUser.funcao === 'Supply Chain') setCurrentRoute('supply'); // <-- NOVO CARGO
       else setCurrentRoute('admin');
     }
   }, []);
 
   const handleLoginSuccess = (userData: any) => {
     setUser(userData);
+    localStorage.setItem('nexus_user', JSON.stringify(userData)); // Adicionado para persistir o usuario no refresh
     if (userData.funcao === 'Executivo') setCurrentRoute('consenso');
     else if (userData.funcao === 'Gerente') setCurrentRoute('gerenciamento');
+    else if (userData.funcao === 'Supply Chain') setCurrentRoute('supply'); // <-- NOVO CARGO
     else setCurrentRoute('admin');
   };
 
@@ -76,6 +79,7 @@ export default function App() {
     switch (currentRoute) {
       case 'dashboard': return <GlobalDashboard />;
       case 'topdown': return <TopDownArena />;
+      case 'supply': return <SupplyReviewArena />; // <-- ROTA DA NOVA TELA
       case 'npd': return <NPDArena />;
       case 'consenso': return <ConsensoArena usuarioSessao={user} />;
       case 'gerenciamento': return <GerenciamentoArena usuarioSessao={user} />;

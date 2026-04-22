@@ -252,6 +252,11 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
     try:
         ciclo = get_current_cycle()
         check_global_lock(db, ciclo)
+
+        # NOVA BLINDAGEM: Bottom-Up só inicia após o Supply Review Congelar
+        reg_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
+        if not reg_sp or reg_sp.status != 'Fechado':
+             raise HTTPException(status_code=403, detail="A meta oficial ainda não foi liberada pela equipe de Supply Chain (Fase 3). Aguarde.")
         
         vendedores_afetados = list({a.chave.split('|')[0].strip() for a in payload.ajustes})
         for v in vendedores_afetados: 
@@ -316,6 +321,12 @@ async def lock_all(payload: PayloadLockAll, db: Session = Depends(get_db), usuar
     try:
         ciclo = get_current_cycle()
         check_global_lock(db, ciclo)
+
+        # NOVA BLINDAGEM: Bottom-Up só inicia após o Supply Review Congelar
+        reg_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
+        if not reg_sp or reg_sp.status != 'Fechado':
+             raise HTTPException(status_code=403, detail="A meta oficial ainda não foi liberada pela equipe de Supply Chain (Fase 3). Aguarde.")
+        
         m2, m4 = get_projection_window()
         
         q = get_truth_query(db, ciclo, m2, m4).with_entities(FatoIbpGranular.vendedor_nome).filter(FatoIbpGranular.vendedor_nome.isnot(None))
