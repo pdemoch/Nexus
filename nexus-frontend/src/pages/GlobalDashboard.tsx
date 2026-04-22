@@ -37,7 +37,7 @@ export default function GlobalDashboard() {
   const [isProcessing, setIsProcessing] = useState(false);
   
   const [isLocked, setIsLocked] = useState(false); 
-  const [lockMessage, setLockMessage] = useState('Publicar Demanda');
+  const [lockMessage, setLockMessage] = useState('Publicar Demanda Irrestrita');
   
   const [expanded, setExpanded] = useState({});
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -47,7 +47,7 @@ export default function GlobalDashboard() {
     try {
       const res = await axios.get(`/api/v1/dashboard/global?t=${new Date().getTime()}`);
       setIsLocked(res.data.is_locked); 
-      setLockMessage(res.data.lock_message || 'Publicar Demanda');
+      setLockMessage(res.data.lock_message || 'Publicar Demanda Irrestrita');
       
       const clientesMap = new Map();
       const mesesSet = new Set<string>();
@@ -140,7 +140,7 @@ export default function GlobalDashboard() {
       const url = window.URL.createObjectURL(new Blob([res.data]));
       const link = document.createElement('a');
       link.href = url;
-      link.setAttribute('download', 'Demanda_Oficial.xlsx');
+      link.setAttribute('download', 'Demanda_Irrestrita_Oficial.xlsx');
       document.body.appendChild(link);
       link.click();
       link.parentNode?.removeChild(link);
@@ -298,19 +298,25 @@ export default function GlobalDashboard() {
           </div>
         </div>
 
-        {/* MUDANÇA: Grelha com 5 Cartões para comportar o Supply Review */}
+        {/* Grelha com 5 Cartões e Variações de Volume/Faturamento */}
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4 mb-10">
           {[
-            { label: 'IA Base', vol: stats.glob.ia, fat: stats.glob.fat_ia, color: 'text-slate-500', border: 'border-slate-200', varVol: 0 },
-            { label: 'Gerencial', vol: stats.glob.td, fat: stats.glob.fat_td, color: 'text-blue-600', border: 'border-blue-200', varVol: calcVar(stats.glob.td, stats.glob.ia) },
-            { label: 'Fábrica (Supply)', vol: stats.glob.supply, fat: stats.glob.fat_supply, color: 'text-fuchsia-600', border: 'border-fuchsia-200', varVol: calcVar(stats.glob.supply, stats.glob.td) },
-            { label: 'Comercial', vol: stats.glob.bu, fat: stats.glob.fat_bu, color: 'text-amber-500', border: 'border-amber-200', varVol: calcVar(stats.glob.bu, stats.glob.supply) },
-            { label: 'Demanda Final', vol: stats.glob.final, fat: stats.glob.fat, color: 'text-emerald-600', border: 'border-emerald-500', varVol: calcVar(stats.glob.final, stats.glob.bu), highlight: true }
+            { label: 'IA Base', vol: stats.glob.ia, fat: stats.glob.fat_ia, color: 'text-slate-500', border: 'border-slate-200', varVol: 0, varFat: 0 },
+            { label: 'Gerencial', vol: stats.glob.td, fat: stats.glob.fat_td, color: 'text-blue-600', border: 'border-blue-200', varVol: calcVar(stats.glob.td, stats.glob.ia), varFat: calcVar(stats.glob.fat_td, stats.glob.fat_ia) },
+            { label: 'Fábrica (Supply)', vol: stats.glob.supply, fat: stats.glob.fat_supply, color: 'text-fuchsia-600', border: 'border-fuchsia-200', varVol: calcVar(stats.glob.supply, stats.glob.td), varFat: calcVar(stats.glob.fat_supply, stats.glob.fat_td) },
+            { label: 'Comercial', vol: stats.glob.bu, fat: stats.glob.fat_bu, color: 'text-amber-500', border: 'border-amber-200', varVol: calcVar(stats.glob.bu, stats.glob.supply), varFat: calcVar(stats.glob.fat_bu, stats.glob.fat_supply) },
+            { label: 'Demanda Irrestrita', vol: stats.glob.final, fat: stats.glob.fat, color: 'text-emerald-600', border: 'border-emerald-500', varVol: calcVar(stats.glob.final, stats.glob.bu), varFat: calcVar(stats.glob.fat, stats.glob.fat_bu), highlight: true }
           ].map((c, i) => (
             <div key={i} className={`bg-white p-6 lg:p-8 rounded-[40px] shadow-sm border-2 ${c.border} flex flex-col justify-between transition-all ${c.highlight ? 'ring-4 ring-emerald-500/10' : ''}`}>
-              <div className="flex justify-between items-start mb-4">
+              <div className="flex flex-col gap-2 xl:flex-row xl:justify-between xl:items-start mb-4">
                  <p className={`text-[10px] font-black uppercase tracking-widest ${c.color}`}>{c.label}</p>
-                 {i > 0 && <div className={`px-2 py-1 rounded-md text-[9px] font-black ${c.varVol > 0 ? 'bg-emerald-50 text-emerald-600' : c.varVol < 0 ? 'bg-rose-50 text-rose-600' : 'bg-slate-100 text-slate-500'}`}>{c.varVol > 0 ? '+' : ''}{c.varVol.toFixed(1)}% Vol.</div>}
+                 {/* ATUALIZADO: Badges de Volume e Faturamento lado a lado */}
+                 {i > 0 && (
+                   <div className="flex flex-wrap gap-1">
+                     <div className={`px-2 py-1 rounded-md text-[9px] font-black ${c.varVol > 0 ? 'bg-emerald-50 text-emerald-600' : c.varVol < 0 ? 'bg-rose-50 text-rose-600' : 'bg-slate-100 text-slate-500'}`}>{c.varVol > 0 ? '+' : ''}{c.varVol.toFixed(1)}% Vol.</div>
+                     <div className={`px-2 py-1 rounded-md text-[9px] font-black ${c.varFat > 0 ? 'bg-emerald-50 text-emerald-600' : c.varFat < 0 ? 'bg-rose-50 text-rose-600' : 'bg-slate-100 text-slate-500'}`}>{c.varFat > 0 ? '+' : ''}{c.varFat.toFixed(1)}% Fat.</div>
+                   </div>
+                 )}
               </div>
               <div>
                  <h3 className="text-2xl lg:text-3xl font-black text-slate-900 mb-1">{formatVolume(c.vol)} <span className="text-[10px] text-slate-400 font-bold uppercase">Caixas</span></h3>
@@ -334,7 +340,7 @@ export default function GlobalDashboard() {
                 <Bar dataKey="fat_td" name="Gerencial" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={12} />
                 <Bar dataKey="fat_supply" name="Fábrica (Supply)" fill="#d946ef" radius={[4, 4, 0, 0]} barSize={12} />
                 <Bar dataKey="fat_bu" name="Comercial" fill="#f59e0b" radius={[4, 4, 0, 0]} barSize={12} />
-                <Bar dataKey="fat" name="Final" fill="#10b981" radius={[4, 4, 0, 0]} barSize={12} />
+                <Bar dataKey="fat" name="Irrestrita" fill="#10b981" radius={[4, 4, 0, 0]} barSize={12} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -352,7 +358,7 @@ export default function GlobalDashboard() {
                 <Bar dataKey="td" name="Gerencial" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={12} />
                 <Bar dataKey="supply" name="Fábrica (Supply)" fill="#d946ef" radius={[4, 4, 0, 0]} barSize={12} />
                 <Bar dataKey="bu" name="Comercial" fill="#f59e0b" radius={[4, 4, 0, 0]} barSize={12} />
-                <Bar dataKey="final" name="Final" fill="#10b981" radius={[4, 4, 0, 0]} barSize={12} />
+                <Bar dataKey="final" name="Irrestrita" fill="#10b981" radius={[4, 4, 0, 0]} barSize={12} />
               </BarChart>
             </ResponsiveContainer>
           </div>

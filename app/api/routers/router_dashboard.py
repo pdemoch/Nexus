@@ -28,8 +28,9 @@ class PayloadAprovarGlobal(BaseModel):
 
 @router.get("/global")
 async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
-        raise HTTPException(status_code=403, detail="Acesso restrito à Diretoria/Gerência.")
+    # ATUALIZADO: Adicionado 'Supply Chain' à permissão de visualização
+    if usuario_logado['funcao'] not in ['Administrador', 'Gerente', 'Supply Chain']:
+        raise HTTPException(status_code=403, detail="Acesso restrito à Diretoria, Gerência ou Supply Chain.")
         
     try:
         ciclo = get_current_cycle()
@@ -41,7 +42,6 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
         status_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
         is_td_fechado = status_td.status == 'Fechado' if status_td else False
 
-        # 1. Utilizamos a Fonte da Verdade Única
         query_base = get_truth_query(db, ciclo, m_plus_2, m_plus_4)
 
         vendedores_ativos = query_base.with_entities(FatoIbpGranular.vendedor_nome).filter(FatoIbpGranular.vendedor_nome.isnot(None)).distinct().all()
@@ -59,17 +59,16 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
         elif pendentes: is_locked, lock_message = True, f"Aguardando {len(pendentes)} Vendedor(es)"
         else: is_locked, lock_message = False, "Publicar Demanda Irrestrita"
             
-        # 2. O Banco de Dados calcula a Receita de TODOS os cenários de forma atómica (Agora com Supply!)
         resultados = query_base.with_entities(
             FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('vol_ia'),
             func.sum(FatoIbpGranular.vol_topdown).label('vol_td'),
-            func.sum(FatoIbpGranular.vol_supply).label('vol_supply'), # NOVO: Supply
+            func.sum(FatoIbpGranular.vol_supply).label('vol_supply'), 
             func.sum(FatoIbpGranular.vol_bottomup).label('vol_bu'),
             func.sum(FatoIbpGranular.vol_final).label('vol_final'),
             func.sum(FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('rec_ia'),
             func.sum(FatoIbpGranular.vol_topdown * FatoIbpGranular.pmv_aplicado).label('rec_td'),
-            func.sum(FatoIbpGranular.vol_supply * FatoIbpGranular.pmv_aplicado).label('rec_supply'), # NOVO: Receita Supply
+            func.sum(FatoIbpGranular.vol_supply * FatoIbpGranular.pmv_aplicado).label('rec_supply'), 
             func.sum(FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('rec_bu'),
             func.sum(FatoIbpGranular.vol_final * FatoIbpGranular.pmv_aplicado).label('rec_final'),
             DimProduto.descricao, DimProduto.categoria
@@ -93,8 +92,9 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
 
 @router.post("/aprovar")
 async def aprovar_dashboard_global(payload: PayloadAprovarGlobal, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
+    # A aprovação continua restrita a Admin/Gerente por governança
     if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
-        raise HTTPException(status_code=403, detail="Acesso restrito.")
+        raise HTTPException(status_code=403, detail="Apenas a Gerência pode publicar o plano final.")
     try:
         ciclo = get_current_cycle()
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
@@ -107,6 +107,7 @@ async def aprovar_dashboard_global(payload: PayloadAprovarGlobal, db: Session = 
             if ajuste.nivel == 'cliente':
                 partes = ajuste.chave.split('_', 1)
                 sku, razaosocial = partes[0], partes[1] if len(partes) > 1 else ""
+                # Corrigido para retornar o objeto e permitir a edição do vol_final
                 linhas = query.filter(FatoIbpGranular.sku == sku, func.trim(DimCliente.razaosocial) == razaosocial.strip()).all()
             elif ajuste.nivel == 'produto':
                 linhas = query.filter(FatoIbpGranular.sku == ajuste.chave).all()
@@ -133,7 +134,9 @@ async def aprovar_dashboard_global(payload: PayloadAprovarGlobal, db: Session = 
 
 @router.get("/export")
 async def exportar_excel_global(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']: raise HTTPException(status_code=403, detail="Acesso restrito.")
+    # ATUALIZADO: Permissão para Supply Chain exportar
+    if usuario_logado['funcao'] not in ['Administrador', 'Gerente', 'Supply Chain']: 
+        raise HTTPException(status_code=403, detail="Acesso restrito.")
     try:
         ciclo = get_current_cycle()
         m_plus_2, m_plus_4 = get_projection_window()
@@ -142,12 +145,12 @@ async def exportar_excel_global(db: Session = Depends(get_db), usuario_logado: d
             FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), 
             func.sum(FatoIbpGranular.vol_topdown).label('vol_td'),
-            func.sum(FatoIbpGranular.vol_supply).label('vol_supply'), # NOVO
+            func.sum(FatoIbpGranular.vol_supply).label('vol_supply'), 
             func.sum(FatoIbpGranular.vol_bottomup).label('vol_bu'), 
             func.sum(FatoIbpGranular.vol_final).label('vol_final'),
             func.sum(FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('rec_ia'), 
             func.sum(FatoIbpGranular.vol_topdown * FatoIbpGranular.pmv_aplicado).label('rec_td'),
-            func.sum(FatoIbpGranular.vol_supply * FatoIbpGranular.pmv_aplicado).label('rec_supply'), # NOVO
+            func.sum(FatoIbpGranular.vol_supply * FatoIbpGranular.pmv_aplicado).label('rec_supply'), 
             func.sum(FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('rec_bu'), 
             func.sum(FatoIbpGranular.vol_final * FatoIbpGranular.pmv_aplicado).label('rec_final'),
             DimProduto.descricao, DimProduto.categoria
@@ -162,7 +165,7 @@ async def exportar_excel_global(db: Session = Depends(get_db), usuario_logado: d
                 "Mês Projetado": r.mes_projetado.strftime("%m/%Y") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado), 
                 "Sinal IA (Base)": int(r.vol_ia or 0), "Receita IA (R$)": float(r.rec_ia or 0),
                 "Meta Gerencial": int(r.vol_td or 0), "Receita Gerencial (R$)": float(r.rec_td or 0),
-                "Meta Restrita (Supply)": int(r.vol_supply or 0), "Receita Supply (R$)": float(r.rec_supply or 0), # NOVO
+                "Meta Restrita (Supply)": int(r.vol_supply or 0), "Receita Supply (R$)": float(r.rec_supply or 0), 
                 "Proposta Comercial": int(r.vol_bu or 0), "Receita Comercial (R$)": float(r.rec_bu or 0),
                 "Demanda Irrestrita": int(r.vol_final or 0), "Faturamento Irrestrito (R$)": float(r.rec_final or 0)
             })
