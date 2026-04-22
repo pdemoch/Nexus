@@ -48,7 +48,7 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
         v_ativos = [v[0].strip() for v in vendedores_ativos if v[0] and v[0].strip()]
         
         vendedores_fechados = db.query(ControleCiclo.origem).filter(
-            ControleCiclo.ciclo_sop == ciclo, ControleCiclo.status == 'Fechado', ControleCiclo.origem.notin_(['Top-Down', 'S&OP-Final'])
+            ControleCiclo.ciclo_sop == ciclo, ControleCiclo.status == 'Fechado', ControleCiclo.origem.notin_(['Top-Down', 'Supply Review', 'S&OP-Final'])
         ).all()
         v_fechados = [v[0].strip() for v in vendedores_fechados if v[0]]
 
@@ -59,15 +59,17 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
         elif pendentes: is_locked, lock_message = True, f"Aguardando {len(pendentes)} Vendedor(es)"
         else: is_locked, lock_message = False, "Publicar Demanda Irrestrita"
             
-        # 2. O Banco de Dados calcula a Receita de TODOS os cenários de forma atómica
+        # 2. O Banco de Dados calcula a Receita de TODOS os cenários de forma atómica (Agora com Supply!)
         resultados = query_base.with_entities(
             FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('vol_ia'),
             func.sum(FatoIbpGranular.vol_topdown).label('vol_td'),
+            func.sum(FatoIbpGranular.vol_supply).label('vol_supply'), # NOVO: Supply
             func.sum(FatoIbpGranular.vol_bottomup).label('vol_bu'),
             func.sum(FatoIbpGranular.vol_final).label('vol_final'),
             func.sum(FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('rec_ia'),
             func.sum(FatoIbpGranular.vol_topdown * FatoIbpGranular.pmv_aplicado).label('rec_td'),
+            func.sum(FatoIbpGranular.vol_supply * FatoIbpGranular.pmv_aplicado).label('rec_supply'), # NOVO: Receita Supply
             func.sum(FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('rec_bu'),
             func.sum(FatoIbpGranular.vol_final * FatoIbpGranular.pmv_aplicado).label('rec_final'),
             DimProduto.descricao, DimProduto.categoria
@@ -81,8 +83,8 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
                 "chave_matriz": f"{r.sku}_{r.razaosocial}", "categoria": r.categoria, "produto": r.sku,
                 "descricao": r.descricao, "cliente_razaosocial": r.razaosocial, 
                 "mes_projetado": r.mes_projetado.strftime("%Y-%m-%d") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado),
-                "vol_ia": int(r.vol_ia or 0), "vol_td": int(r.vol_td or 0), "vol_bu": int(r.vol_bu or 0), "vol_irrestrito": int(r.vol_final or 0), 
-                "rec_ia": float(r.rec_ia or 0), "rec_td": float(r.rec_td or 0), "rec_bu": float(r.rec_bu or 0), "rec_final": float(r.rec_final or 0)
+                "vol_ia": int(r.vol_ia or 0), "vol_td": int(r.vol_td or 0), "vol_supply": int(r.vol_supply or 0), "vol_bu": int(r.vol_bu or 0), "vol_irrestrito": int(r.vol_final or 0), 
+                "rec_ia": float(r.rec_ia or 0), "rec_td": float(r.rec_td or 0), "rec_supply": float(r.rec_supply or 0), "rec_bu": float(r.rec_bu or 0), "rec_final": float(r.rec_final or 0)
             })
 
         return {"status": "success", "is_locked": is_locked, "lock_message": lock_message, "dados": dados_formatados}
@@ -138,10 +140,16 @@ async def exportar_excel_global(db: Session = Depends(get_db), usuario_logado: d
         
         resultados = get_truth_query(db, ciclo, m_plus_2, m_plus_4).with_entities(
             FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado,
-            func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), func.sum(FatoIbpGranular.vol_topdown).label('vol_td'),
-            func.sum(FatoIbpGranular.vol_bottomup).label('vol_bu'), func.sum(FatoIbpGranular.vol_final).label('vol_final'),
-            func.sum(FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('rec_ia'), func.sum(FatoIbpGranular.vol_topdown * FatoIbpGranular.pmv_aplicado).label('rec_td'),
-            func.sum(FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('rec_bu'), func.sum(FatoIbpGranular.vol_final * FatoIbpGranular.pmv_aplicado).label('rec_final'),
+            func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), 
+            func.sum(FatoIbpGranular.vol_topdown).label('vol_td'),
+            func.sum(FatoIbpGranular.vol_supply).label('vol_supply'), # NOVO
+            func.sum(FatoIbpGranular.vol_bottomup).label('vol_bu'), 
+            func.sum(FatoIbpGranular.vol_final).label('vol_final'),
+            func.sum(FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('rec_ia'), 
+            func.sum(FatoIbpGranular.vol_topdown * FatoIbpGranular.pmv_aplicado).label('rec_td'),
+            func.sum(FatoIbpGranular.vol_supply * FatoIbpGranular.pmv_aplicado).label('rec_supply'), # NOVO
+            func.sum(FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('rec_bu'), 
+            func.sum(FatoIbpGranular.vol_final * FatoIbpGranular.pmv_aplicado).label('rec_final'),
             DimProduto.descricao, DimProduto.categoria
         ).group_by(FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado, DimProduto.descricao, DimProduto.categoria).all()
 
@@ -154,6 +162,7 @@ async def exportar_excel_global(db: Session = Depends(get_db), usuario_logado: d
                 "Mês Projetado": r.mes_projetado.strftime("%m/%Y") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado), 
                 "Sinal IA (Base)": int(r.vol_ia or 0), "Receita IA (R$)": float(r.rec_ia or 0),
                 "Meta Gerencial": int(r.vol_td or 0), "Receita Gerencial (R$)": float(r.rec_td or 0),
+                "Meta Restrita (Supply)": int(r.vol_supply or 0), "Receita Supply (R$)": float(r.rec_supply or 0), # NOVO
                 "Proposta Comercial": int(r.vol_bu or 0), "Receita Comercial (R$)": float(r.rec_bu or 0),
                 "Demanda Irrestrita": int(r.vol_final or 0), "Faturamento Irrestrito (R$)": float(r.rec_final or 0)
             })

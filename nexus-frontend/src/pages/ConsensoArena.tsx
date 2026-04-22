@@ -350,7 +350,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           
           <div className={isFechado ? "pt-4" : ""}>
             <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
-              <TrendingUp className="w-8 h-8 text-indigo-600" /> ALINHAMENTO COMERCIAL (BOTTOM-UP)
+              <TrendingUp className="w-8 h-8 text-indigo-600" /> Metas por Cliente
             </h1>
             <p className="text-sm font-bold text-slate-400 mt-1 uppercase tracking-widest pl-11">
               Visão Executiva: {nivelHierarquia === 'vendedor' ? 'Vendedor(a)' : 'Regional'} <span className="text-indigo-600">{nomeResponsavel}</span>

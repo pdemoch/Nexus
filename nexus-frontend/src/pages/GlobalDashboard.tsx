@@ -37,7 +37,7 @@ export default function GlobalDashboard() {
   const [isProcessing, setIsProcessing] = useState(false);
   
   const [isLocked, setIsLocked] = useState(false); 
-  const [lockMessage, setLockMessage] = useState('Publicar Demanda Irrestrita');
+  const [lockMessage, setLockMessage] = useState('Publicar Demanda');
   
   const [expanded, setExpanded] = useState({});
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -47,7 +47,7 @@ export default function GlobalDashboard() {
     try {
       const res = await axios.get(`/api/v1/dashboard/global?t=${new Date().getTime()}`);
       setIsLocked(res.data.is_locked); 
-      setLockMessage(res.data.lock_message || 'Publicar Demanda Irrestrita');
+      setLockMessage(res.data.lock_message || 'Publicar Demanda');
       
       const clientesMap = new Map();
       const mesesSet = new Set<string>();
@@ -61,10 +61,9 @@ export default function GlobalDashboard() {
             cliente: d.cliente_razaosocial, meses: {} 
           });
         }
-        // Lê as receitas exatas
         clientesMap.get(d.chave_matriz).meses[d.mes_projetado] = { 
-          vol_ia: d.vol_ia, vol_td: d.vol_td, vol_bu: d.vol_bu, vol_irrestrito: d.vol_irrestrito,
-          rec_ia: d.rec_ia, rec_td: d.rec_td, rec_bu: d.rec_bu, rec_final: d.rec_final
+          vol_ia: d.vol_ia, vol_td: d.vol_td, vol_supply: d.vol_supply, vol_bu: d.vol_bu, vol_irrestrito: d.vol_irrestrito,
+          rec_ia: d.rec_ia, rec_td: d.rec_td, rec_supply: d.rec_supply, rec_bu: d.rec_bu, rec_final: d.rec_final
         };
       });
       setMesesUnicos(Array.from(mesesSet).sort());
@@ -92,20 +91,16 @@ export default function GlobalDashboard() {
       const isEdited = editValue !== undefined;
       
       const volFinal = isEdited ? Math.round(Number(editValue)) : Math.round(Number(node.meses[mes]?.vol_irrestrito || 0));
-      
       const baseRecFinal = node.meses[mes]?.rec_final || 0;
       const baseVolFinal = node.meses[mes]?.vol_irrestrito || 1;
       const fatFinal = isEdited ? (volFinal * (baseRecFinal / baseVolFinal)) : baseRecFinal;
 
       return { 
-        vol: volFinal, 
-        fat: fatFinal, 
-        ia: Math.round(Number(node.meses[mes]?.vol_ia || 0)), 
-        fat_ia: node.meses[mes]?.rec_ia || 0, 
-        td: Math.round(Number(node.meses[mes]?.vol_td || 0)), 
-        fat_td: node.meses[mes]?.rec_td || 0, 
-        bu: Math.round(Number(node.meses[mes]?.vol_bu || 0)), 
-        fat_bu: node.meses[mes]?.rec_bu || 0 
+        vol: volFinal, fat: fatFinal, 
+        ia: Math.round(Number(node.meses[mes]?.vol_ia || 0)), fat_ia: node.meses[mes]?.rec_ia || 0, 
+        td: Math.round(Number(node.meses[mes]?.vol_td || 0)), fat_td: node.meses[mes]?.rec_td || 0, 
+        supply: Math.round(Number(node.meses[mes]?.vol_supply || 0)), fat_supply: node.meses[mes]?.rec_supply || 0, 
+        bu: Math.round(Number(node.meses[mes]?.vol_bu || 0)), fat_bu: node.meses[mes]?.rec_bu || 0 
       };
     }
     
@@ -115,9 +110,10 @@ export default function GlobalDashboard() {
         vol: acc.vol + r.vol, fat: acc.fat + r.fat, 
         ia: acc.ia + r.ia, fat_ia: acc.fat_ia + r.fat_ia, 
         td: acc.td + r.td, fat_td: acc.fat_td + r.fat_td, 
+        supply: acc.supply + r.supply, fat_supply: acc.fat_supply + r.fat_supply, 
         bu: acc.bu + r.bu, fat_bu: acc.fat_bu + r.fat_bu 
       };
-    }, { vol: 0, fat: 0, ia: 0, fat_ia: 0, td: 0, fat_td: 0, bu: 0, fat_bu: 0 });
+    }, { vol: 0, fat: 0, ia: 0, fat_ia: 0, td: 0, fat_td: 0, supply: 0, fat_supply: 0, bu: 0, fat_bu: 0 });
   }, []);
 
   const handleDistribuirVolume = (produtoNode: any, mes: string) => {
@@ -144,7 +140,7 @@ export default function GlobalDashboard() {
       const url = window.URL.createObjectURL(new Blob([res.data]));
       const link = document.createElement('a');
       link.href = url;
-      link.setAttribute('download', 'Demanda_Irrestrita_Oficial.xlsx');
+      link.setAttribute('download', 'Demanda_Oficial.xlsx');
       document.body.appendChild(link);
       link.click();
       link.parentNode?.removeChild(link);
@@ -163,14 +159,14 @@ export default function GlobalDashboard() {
     } catch (e: any) { alert("Erro ao salvar."); } finally { setIsProcessing(false); }
   };
 
-  // Os totais dos Cards agora são fiéis aos cêntimos!
   const stats = useMemo(() => {
     const dataMes: any[] = mesesUnicos.map(m => {
-      let mTot = { ia: 0, fat_ia: 0, td: 0, fat_td: 0, bu: 0, fat_bu: 0, final: 0, fat: 0 };
+      let mTot = { ia: 0, fat_ia: 0, td: 0, fat_td: 0, supply: 0, fat_supply: 0, bu: 0, fat_bu: 0, final: 0, fat: 0 };
       arvoreDados.forEach(cat => {
         const r = getMetricasNode(cat, m, celulasEditadas);
         mTot.ia += r.ia; mTot.fat_ia += r.fat_ia;
         mTot.td += r.td; mTot.fat_td += r.fat_td;
+        mTot.supply += r.supply; mTot.fat_supply += r.fat_supply;
         mTot.bu += r.bu; mTot.fat_bu += r.fat_bu;
         mTot.final += r.vol; mTot.fat += r.fat;
       });
@@ -180,9 +176,10 @@ export default function GlobalDashboard() {
     const glob = dataMes.reduce((acc, curr) => ({ 
       ia: acc.ia + curr.ia, fat_ia: acc.fat_ia + curr.fat_ia, 
       td: acc.td + curr.td, fat_td: acc.fat_td + curr.fat_td, 
+      supply: acc.supply + curr.supply, fat_supply: acc.fat_supply + curr.fat_supply,
       bu: acc.bu + curr.bu, fat_bu: acc.fat_bu + curr.fat_bu, 
       final: acc.final + curr.final, fat: acc.fat + curr.fat 
-    }), { ia: 0, fat_ia: 0, td: 0, fat_td: 0, bu: 0, fat_bu: 0, final: 0, fat: 0 });
+    }), { ia: 0, fat_ia: 0, td: 0, fat_td: 0, supply: 0, fat_supply: 0, bu: 0, fat_bu: 0, final: 0, fat: 0 });
     
     return { dataMes, glob };
   }, [arvoreDados, mesesUnicos, celulasEditadas, getMetricasNode]);
@@ -218,7 +215,7 @@ export default function GlobalDashboard() {
       cols.push({
         id: `mes_${m}`, accessorFn: (row: any) => getMetricasNode(row, m, celulasEditadas).vol,
         header: ({ column }: any) => (
-          <button onClick={() => column.toggleSorting()} className="flex items-center justify-center gap-2 bg-slate-900 text-white py-2 px-4 rounded-xl text-[11px] font-black tracking-widest w-[160px] hover:bg-slate-800 transition-colors">
+          <button onClick={() => column.toggleSorting()} className="flex items-center justify-center gap-2 bg-slate-900 text-white py-2 px-4 rounded-xl text-[11px] font-black tracking-widest w-[170px] hover:bg-slate-800 transition-colors">
             {m.split('-').reverse().slice(1).join('/')}
           </button>
         ),
@@ -229,7 +226,7 @@ export default function GlobalDashboard() {
 
           if (row.original.tipo === 'categoria') {
             return (
-              <div className="flex flex-col items-center py-2 min-w-[160px] bg-slate-50/50 rounded-xl border-b-4 border-indigo-100">
+              <div className="flex flex-col items-center py-2 min-w-[170px] bg-slate-50/50 rounded-xl border-b-4 border-indigo-100">
                 <span className="font-black text-slate-900">{formatVolume(res.vol)} <span className="text-[9px] text-slate-400">CX</span></span>
                 <span className="text-[10px] font-bold text-emerald-600">{formatMoeda(res.fat)}</span>
               </div>
@@ -237,7 +234,7 @@ export default function GlobalDashboard() {
           }
 
           return (
-            <div className="flex flex-col items-center justify-center gap-1.5 min-w-[160px] bg-white p-2 rounded-xl border border-slate-100 shadow-sm hover:shadow-md transition-all group">
+            <div className="flex flex-col items-center justify-center gap-1.5 min-w-[170px] bg-white p-2 rounded-xl border border-slate-100 shadow-sm hover:shadow-md transition-all group">
               <div className="w-full flex items-center justify-between gap-2">
                 <EditableCell initialValue={res.vol} isChanged={isChanged} isLocked={isLocked} onSave={(newVal: number) => setCelulasEditadas((p: any) => ({ ...p, [editKey]: newVal }))} />
                 {row.original.tipo === 'produto' && !isLocked && (
@@ -248,18 +245,22 @@ export default function GlobalDashboard() {
               </div>
               <span className="text-[10px] font-black text-emerald-600">{formatMoeda(res.fat)}</span>
               
-              <div className="grid grid-cols-3 w-full border-t border-slate-100 pt-1 mt-1">
-                 <div className="flex flex-col items-center justify-center border-r border-slate-100 px-1" title="Meta Gerencial">
-                    <span className="text-[7px] font-black text-blue-400 uppercase tracking-tighter">GER</span>
-                    <span className="text-[9px] font-bold text-blue-700">{formatVolume(res.td)}</span>
+              <div className="grid grid-cols-4 w-full border-t border-slate-100 pt-1 mt-1">
+                 <div className="flex flex-col items-center justify-center border-r border-slate-100 px-0.5" title="Meta Gerencial">
+                    <span className="text-[6px] font-black text-blue-400 uppercase tracking-tighter">GER</span>
+                    <span className="text-[8px] font-bold text-blue-700">{formatVolume(res.td)}</span>
                  </div>
-                 <div className="flex flex-col items-center justify-center border-r border-slate-100 px-1" title="Proposta Comercial">
-                    <span className="text-[7px] font-black text-amber-400 uppercase tracking-tighter">COM</span>
-                    <span className="text-[9px] font-bold text-amber-600">{formatVolume(res.bu)}</span>
+                 <div className="flex flex-col items-center justify-center border-r border-slate-100 px-0.5" title="Meta Restrita (Fábrica)">
+                    <span className="text-[6px] font-black text-fuchsia-400 uppercase tracking-tighter">SUP</span>
+                    <span className="text-[8px] font-bold text-fuchsia-700">{formatVolume(res.supply)}</span>
                  </div>
-                 <div className="flex flex-col items-center justify-center px-1" title="Sinal IA">
-                    <span className="text-[7px] font-black text-slate-400 uppercase tracking-tighter">IA</span>
-                    <span className="text-[9px] font-bold text-slate-600">{formatVolume(res.ia)}</span>
+                 <div className="flex flex-col items-center justify-center border-r border-slate-100 px-0.5" title="Proposta Comercial">
+                    <span className="text-[6px] font-black text-amber-400 uppercase tracking-tighter">COM</span>
+                    <span className="text-[8px] font-bold text-amber-600">{formatVolume(res.bu)}</span>
+                 </div>
+                 <div className="flex flex-col items-center justify-center px-0.5" title="Sinal IA">
+                    <span className="text-[6px] font-black text-slate-400 uppercase tracking-tighter">IA</span>
+                    <span className="text-[8px] font-bold text-slate-600">{formatVolume(res.ia)}</span>
                  </div>
               </div>
             </div>
@@ -297,21 +298,23 @@ export default function GlobalDashboard() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6 mb-10">
+        {/* MUDANÇA: Grelha com 5 Cartões para comportar o Supply Review */}
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4 mb-10">
           {[
             { label: 'IA Base', vol: stats.glob.ia, fat: stats.glob.fat_ia, color: 'text-slate-500', border: 'border-slate-200', varVol: 0 },
             { label: 'Gerencial', vol: stats.glob.td, fat: stats.glob.fat_td, color: 'text-blue-600', border: 'border-blue-200', varVol: calcVar(stats.glob.td, stats.glob.ia) },
-            { label: 'Comercial', vol: stats.glob.bu, fat: stats.glob.fat_bu, color: 'text-amber-500', border: 'border-amber-200', varVol: calcVar(stats.glob.bu, stats.glob.td) },
-            { label: 'Demanda Irrestrita', vol: stats.glob.final, fat: stats.glob.fat, color: 'text-emerald-600', border: 'border-emerald-500', varVol: calcVar(stats.glob.final, stats.glob.bu), highlight: true }
+            { label: 'Fábrica (Supply)', vol: stats.glob.supply, fat: stats.glob.fat_supply, color: 'text-fuchsia-600', border: 'border-fuchsia-200', varVol: calcVar(stats.glob.supply, stats.glob.td) },
+            { label: 'Comercial', vol: stats.glob.bu, fat: stats.glob.fat_bu, color: 'text-amber-500', border: 'border-amber-200', varVol: calcVar(stats.glob.bu, stats.glob.supply) },
+            { label: 'Demanda Final', vol: stats.glob.final, fat: stats.glob.fat, color: 'text-emerald-600', border: 'border-emerald-500', varVol: calcVar(stats.glob.final, stats.glob.bu), highlight: true }
           ].map((c, i) => (
-            <div key={i} className={`bg-white p-8 rounded-[40px] shadow-sm border-2 ${c.border} flex flex-col justify-between transition-all ${c.highlight ? 'ring-4 ring-emerald-500/10' : ''}`}>
+            <div key={i} className={`bg-white p-6 lg:p-8 rounded-[40px] shadow-sm border-2 ${c.border} flex flex-col justify-between transition-all ${c.highlight ? 'ring-4 ring-emerald-500/10' : ''}`}>
               <div className="flex justify-between items-start mb-4">
                  <p className={`text-[10px] font-black uppercase tracking-widest ${c.color}`}>{c.label}</p>
-                 {i > 0 && <div className={`px-2 py-1 rounded-md text-[9px] font-black ${c.varVol > 0 ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'}`}>{c.varVol > 0 ? '+' : ''}{c.varVol.toFixed(1)}% Vol.</div>}
+                 {i > 0 && <div className={`px-2 py-1 rounded-md text-[9px] font-black ${c.varVol > 0 ? 'bg-emerald-50 text-emerald-600' : c.varVol < 0 ? 'bg-rose-50 text-rose-600' : 'bg-slate-100 text-slate-500'}`}>{c.varVol > 0 ? '+' : ''}{c.varVol.toFixed(1)}% Vol.</div>}
               </div>
               <div>
-                 <h3 className="text-3xl font-black text-slate-900 mb-1">{formatVolume(c.vol)} <span className="text-[10px] text-slate-400 font-bold uppercase">Caixas</span></h3>
-                 <div className={`text-sm font-black flex items-center gap-1.5 ${c.highlight ? 'text-emerald-600' : 'text-slate-500'}`}>{formatMoeda(c.fat)} Previsto</div>
+                 <h3 className="text-2xl lg:text-3xl font-black text-slate-900 mb-1">{formatVolume(c.vol)} <span className="text-[10px] text-slate-400 font-bold uppercase">Caixas</span></h3>
+                 <div className={`text-xs lg:text-sm font-black flex items-center gap-1.5 ${c.highlight ? 'text-emerald-600' : 'text-slate-500'}`}>{formatMoeda(c.fat)} Previsto</div>
               </div>
             </div>
           ))}
@@ -327,10 +330,11 @@ export default function GlobalDashboard() {
                 <YAxis tickFormatter={v => `R$${(v/1e6).toFixed(1)}M`} tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} />
                 <RechartsTooltip formatter={(v: any) => formatMoeda(v)} contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 20px 40px rgba(0,0,0,0.1)'}} />
                 <Legend iconType="circle" wrapperStyle={{fontSize: '10px', fontWeight: 'bold'}}/>
-                <Bar dataKey="fat_ia" name="IA Base" fill="#cbd5e1" radius={[4, 4, 0, 0]} barSize={15} />
-                <Bar dataKey="fat_td" name="Gerencial" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={15} />
-                <Bar dataKey="fat_bu" name="Comercial" fill="#f59e0b" radius={[4, 4, 0, 0]} barSize={15} />
-                <Bar dataKey="fat" name="Irrestrita" fill="#10b981" radius={[4, 4, 0, 0]} barSize={15} />
+                <Bar dataKey="fat_ia" name="IA Base" fill="#cbd5e1" radius={[4, 4, 0, 0]} barSize={12} />
+                <Bar dataKey="fat_td" name="Gerencial" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={12} />
+                <Bar dataKey="fat_supply" name="Fábrica (Supply)" fill="#d946ef" radius={[4, 4, 0, 0]} barSize={12} />
+                <Bar dataKey="fat_bu" name="Comercial" fill="#f59e0b" radius={[4, 4, 0, 0]} barSize={12} />
+                <Bar dataKey="fat" name="Final" fill="#10b981" radius={[4, 4, 0, 0]} barSize={12} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -344,10 +348,11 @@ export default function GlobalDashboard() {
                 <YAxis tickFormatter={v => formatVolume(v)} tick={{fontSize: 10, fill: '#94a3b8'}} axisLine={false} tickLine={false} />
                 <RechartsTooltip formatter={(v: any) => formatVolume(v)} contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 20px 40px rgba(0,0,0,0.1)'}} />
                 <Legend iconType="circle" wrapperStyle={{fontSize: '10px', fontWeight: 'bold'}}/>
-                <Bar dataKey="ia" name="IA Base" fill="#cbd5e1" radius={[4, 4, 0, 0]} barSize={15} />
-                <Bar dataKey="td" name="Gerencial" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={15} />
-                <Bar dataKey="bu" name="Comercial" fill="#f59e0b" radius={[4, 4, 0, 0]} barSize={15} />
-                <Bar dataKey="final" name="Irrestrita" fill="#10b981" radius={[4, 4, 0, 0]} barSize={15} />
+                <Bar dataKey="ia" name="IA Base" fill="#cbd5e1" radius={[4, 4, 0, 0]} barSize={12} />
+                <Bar dataKey="td" name="Gerencial" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={12} />
+                <Bar dataKey="supply" name="Fábrica (Supply)" fill="#d946ef" radius={[4, 4, 0, 0]} barSize={12} />
+                <Bar dataKey="bu" name="Comercial" fill="#f59e0b" radius={[4, 4, 0, 0]} barSize={12} />
+                <Bar dataKey="final" name="Final" fill="#10b981" radius={[4, 4, 0, 0]} barSize={12} />
               </BarChart>
             </ResponsiveContainer>
           </div>

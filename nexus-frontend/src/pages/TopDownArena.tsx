@@ -279,7 +279,7 @@ export default function TopDownArena() {
         {/* CABEÇALHO */}
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 bg-white p-6 rounded-[32px] shadow-sm border border-gray-100">
           <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
-            <Activity className="w-8 h-8 text-slate-800" /> REVISÃO EXECUTIVA (TOP-DOWN)
+            <Activity className="w-8 h-8 text-slate-800" /> Plano de Demanda Irrestrita
           </h1>
           <div className="flex items-center gap-4">
             {isCicloFechado ? (

@@ -9,6 +9,7 @@ export default function AdminPanel() {
   const [isExporting, setIsExporting] = useState(false);
   
   const [usuariosPendentes, setUsuariosPendentes] = useState<any[]>([]);
+  const [vendedores, setVendedores] = useState<string[]>([]);
   
   // ESTADOS DO DESCONGELAMENTO
   const [origemDesbloqueio, setOrigemDesbloqueio] = useState('');
@@ -37,6 +38,12 @@ export default function AdminPanel() {
         const pendentesRes = await axios.get('/api/v1/auth/pendentes');
         setUsuariosPendentes(pendentesRes.data.dados || []);
       } catch(e) { console.error("Erro ao buscar pendentes"); }
+
+      // 3. Busca a lista de vendedores para a caixa de seleção de destrancamento
+      try {
+        const filtrosRes = await axios.get('/api/v1/consensus/gerenciamento/filtros');
+        setVendedores(filtrosRes.data.vendedores || []);
+      } catch(e) { console.error("Erro ao buscar vendedores"); }
 
     } catch (e) {
       console.error(e);
@@ -113,7 +120,7 @@ export default function AdminPanel() {
   };
 
   const handleDescongelar = async () => {
-    if (!origemDesbloqueio) return alert("Selecione ou digite a origem que deseja descongelar.");
+    if (!origemDesbloqueio) return alert("Selecione a origem que deseja descongelar.");
     if (!window.confirm(`Deseja realmente forçar a reabertura da tela para: ${origemDesbloqueio}?`)) return;
 
     setIsUnlocking(true);
@@ -129,6 +136,9 @@ export default function AdminPanel() {
       setIsUnlocking(false);
     }
   };
+
+  const isGlobalSelected = ['Top-Down', 'Supply Review', 'S&OP-Final'].includes(origemDesbloqueio);
+  const isVendedorSelected = !isGlobalSelected && origemDesbloqueio !== '';
 
   if (isLoading) {
     return (
@@ -222,22 +232,26 @@ export default function AdminPanel() {
                  </p>
 
                  <select
-                   value={origemDesbloqueio}
+                   value={isGlobalSelected ? origemDesbloqueio : ''}
                    onChange={(e) => setOrigemDesbloqueio(e.target.value)}
                    className="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-xl focus:ring-amber-500 focus:border-amber-500 block w-full p-3 font-bold outline-none cursor-pointer"
                  >
                    <option value="">Selecione um nível global...</option>
                    <option value="Top-Down">Visão Gerencial (Top-Down)</option>
+                   <option value="Supply Review">Fábrica (Supply Review)</option>
                    <option value="S&OP-Final">S&OP Global (Dashboard Final)</option>
                  </select>
 
-                 <input
-                    type="text"
-                    placeholder="Ou digite o nome de um Vendedor..."
-                    value={origemDesbloqueio}
-                    onChange={(e) => setOrigemDesbloqueio(e.target.value.toUpperCase())}
-                    className="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-xl focus:ring-amber-500 focus:border-amber-500 block w-full p-3 font-bold outline-none placeholder:text-slate-400"
-                 />
+                 <select
+                   value={isVendedorSelected ? origemDesbloqueio : ''}
+                   onChange={(e) => setOrigemDesbloqueio(e.target.value)}
+                   className="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-xl focus:ring-amber-500 focus:border-amber-500 block w-full p-3 font-bold outline-none cursor-pointer"
+                 >
+                   <option value="">Ou selecione a carteira de um Vendedor...</option>
+                   {vendedores.map(v => (
+                     <option key={v} value={v}>{v}</option>
+                   ))}
+                 </select>
 
                  <button
                    onClick={handleDescongelar}
