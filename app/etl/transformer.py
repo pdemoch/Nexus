@@ -77,9 +77,11 @@ class NexusTransformer:
 
         lf_silver = lf_silver.with_columns(pl.col("cliente").alias("cod_cliente"))
         
+        # ATUALIZAÇÃO S&OE: Adicionadas as colunas 'qtfatura' e 'qtcorte' para garantir
+        # que o saldo ativo do pedido possa ser calculado!
         colunas_finais = [
             "dtapedido", "pedido", "cod_cliente", "loja", "cgc", "cliente_razaosocial", 
-            "regional", "produto", "descricao", "qtpedido", "vlpedido", 
+            "regional", "produto", "descricao", "qtpedido", "vlpedido", "qtfatura", "qtcorte",
             "vendedor_nome", "gerente_nome", "supervisor_nome", "bu", "categoria", "segmento",
             "bloqueado"
         ]

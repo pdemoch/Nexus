@@ -33,6 +33,8 @@ class DimProduto(Base):
 
     vendas = relationship("FatoVendas", back_populates="produto_rel")
     forecasts = relationship("FatoIbpGranular", back_populates="produto_rel")
+    estoque = relationship("FatoEstoqueD0", back_populates="produto_rel")
+    inbound = relationship("FatoInboundProducao", back_populates="produto_rel")
 
 class DimCliente(Base):
     __tablename__ = 'dim_clientes'
@@ -53,7 +55,7 @@ class FatoVendas(Base):
     __tablename__ = "fato_vendas"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    pedido = Column(String(50), nullable=False, index=True) # NOVO: Essencial para o Upsert (Delta)
+    pedido = Column(String(50), nullable=False, index=True) 
     data_pedido = Column(Date, nullable=False, index=True)
     
     sku = Column(String(50), ForeignKey("dim_produtos.sku"), nullable=False)
@@ -62,14 +64,50 @@ class FatoVendas(Base):
     
     qt_pedido = Column(Float, default=0.0)
     vl_pedido = Column(Float, default=0.0)
+    
+    # NOVAS COLUNAS PARA S&OE (BACKLOG REAL)
+    qtfatura = Column(Float, default=0.0) # O que já saiu do ERP
+    qtcorte = Column(Float, default=0.0)  # O que foi cancelado/perdido
 
-    # TRAVA DE UNICIDADE: Impede notas duplicadas e permite o ON CONFLICT DO UPDATE
     __table_args__ = (
         UniqueConstraint('pedido', 'sku', 'cgc', name='uix_vendas_pedido'),
     )
 
     produto_rel = relationship("DimProduto", back_populates="vendas")
     cliente_rel = relationship("DimCliente", back_populates="vendas")
+
+# =========================================================================
+# NOVAS TABELAS NATIVAS DO MÓDULO S&OE
+# =========================================================================
+
+class FatoEstoqueD0(Base):
+    """Guarda a posição consolidada do armazém 05 (API 90)"""
+    __tablename__ = "fato_estoque_d0"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    sku = Column(String(50), ForeignKey("dim_produtos.sku"), nullable=False, index=True)
+    qtd_dispo = Column(Float, default=0.0)
+    data_atualizacao = Column(DateTime, default=datetime.utcnow)
+
+    produto_rel = relationship("DimProduto", back_populates="estoque")
+
+class FatoInboundProducao(Base):
+    """Entradas futuras programadas (Input do Supply Chain)"""
+    __tablename__ = "fato_inbound_producao"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    sku = Column(String(50), ForeignKey("dim_produtos.sku"), nullable=False, index=True)
+    data_entrada = Column(Date, nullable=False, index=True)
+    vol_caixas = Column(Integer, nullable=False)
+    justificativa = Column(String, nullable=True)
+    usuario_nome = Column(String, nullable=True) # Nome de quem inseriu a programação
+    criado_em = Column(DateTime, default=datetime.utcnow)
+
+    produto_rel = relationship("DimProduto", back_populates="inbound")
+
+# =========================================================================
+# MODELOS ORIGINAIS DO S&OP (MANTIDOS)
+# =========================================================================
 
 class FatoIbpGranular(Base):
     __tablename__ = "fato_ibp_granular"
@@ -84,8 +122,8 @@ class FatoIbpGranular(Base):
 
     vol_ia = Column(Integer, default=0)
     vol_topdown = Column(Integer, default=0)
-    vol_supply = Column(Integer, default=0) # NOVO
-    justificativa_supply = Column(String, nullable=True) # NOVO
+    vol_supply = Column(Integer, default=0) 
+    justificativa_supply = Column(String, nullable=True) 
     vol_bottomup = Column(Integer, default=0)
     vol_final = Column(Integer, default=0) 
     
@@ -136,8 +174,8 @@ class FatoAcuracia(Base):
     vendedor_nome = Column(String(100), nullable=False, index=True)
 
     vol_realizado = Column(Integer, default=0)
-    vol_ia = Column(Integer, default=0)       # NOVO: Guardar o que a IA disse
-    vol_consenso = Column(Integer, default=0) # NOVO: Guardar o que o humano disse
+    vol_ia = Column(Integer, default=0)       
+    vol_consenso = Column(Integer, default=0) 
     
     acuracia_ia = Column(Float, default=0.0)
     acuracia_consenso = Column(Float, default=0.0)

@@ -6,11 +6,16 @@ import Sidebar from './pages/Sidebar';
 import AdminPanel from './pages/AdminPanel';
 import LoginArena from './pages/LoginArena'; 
 import TopDownArena from './pages/TopDownArena';
-import SupplyReviewArena from './pages/SupplyReviewArena'; // <-- NOVA TELA IMPORTADA
+
 import ConsensoArena from './pages/ConsensoArena';
 import GlobalDashboard from './pages/GlobalDashboard';
 import NPDArena from './pages/NPDArena';
 import GerenciamentoArena from './pages/GerenciamentoArena';
+import SupplyReviewArena from './pages/SupplyReviewArena';
+
+// IMPORTS DO S&OE (Substituindo o antigo SupplyReviewArena)
+import SoeDashboard from './pages/SoeDashboard';
+import InboundArena from './pages/InboundArena';
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
@@ -53,7 +58,7 @@ export default function App() {
       // REGRAS DE ROTA INICIAL POR CARGO
       if (parsedUser.funcao === 'Executivo') setCurrentRoute('consenso');
       else if (parsedUser.funcao === 'Gerente') setCurrentRoute('gerenciamento');
-      else if (parsedUser.funcao === 'Supply Chain') setCurrentRoute('supply'); // <-- NOVO CARGO
+      else if (parsedUser.funcao === 'Supply Chain') setCurrentRoute('soe-radar'); // Direcionado para o S&OE
       else setCurrentRoute('admin');
     }
   }, []);
@@ -63,7 +68,7 @@ export default function App() {
     localStorage.setItem('nexus_user', JSON.stringify(userData)); // Adicionado para persistir o usuario no refresh
     if (userData.funcao === 'Executivo') setCurrentRoute('consenso');
     else if (userData.funcao === 'Gerente') setCurrentRoute('gerenciamento');
-    else if (userData.funcao === 'Supply Chain') setCurrentRoute('supply'); // <-- NOVO CARGO
+    else if (userData.funcao === 'Supply Chain') setCurrentRoute('soe-radar'); // Direcionado para o S&OE
     else setCurrentRoute('admin');
   };
 
@@ -79,11 +84,16 @@ export default function App() {
     switch (currentRoute) {
       case 'dashboard': return <GlobalDashboard />;
       case 'topdown': return <TopDownArena />;
-      case 'supply': return <SupplyReviewArena />; // <-- ROTA DA NOVA TELA
+      case 'supply': return <SupplyReviewArena />; 
       case 'npd': return <NPDArena />;
       case 'consenso': return <ConsensoArena usuarioSessao={user} />;
       case 'gerenciamento': return <GerenciamentoArena usuarioSessao={user} />;
       case 'admin': return <AdminPanel />;
+      
+      // ROTAS DO S&OE
+      case 'soe-radar': return <SoeDashboard />; 
+      case 'inbound': return <InboundArena />;
+      
       default: return <AdminPanel />;
     }
   };
