@@ -399,21 +399,24 @@ export default function TopDownArena() {
                                </div>
                             </div>
 
-                            <div className="h-[250px] w-full -ml-4">
+                            {/* REMOVIDO: -ml-4 para evitar que o gráfico empurre contra a parede */}
+                            <div className="h-[250px] w-full">
                               {loadingGrafico === row.original.produto ? (
                                 <div className="h-full flex items-center justify-center text-slate-800"><Loader2 className="animate-spin w-8 h-8" /></div>
                               ) : (
                                 <ResponsiveContainer width="100%" height="100%">
-                                  <LineChart data={
+                                  <LineChart 
+                                    data={
                                       (dadosGraficoCache[row.original.produto] || []).map((p: any) => {
                                           const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
                                           const edicao = celulasEditadas[row.original.produto]?.[p.data_iso];
-                                          // Se o mês está na tabela (futuro), respeita o que está digitado/gravado. 
-                                          // Se não está na tabela (mês corrente S&OE), puxa a meta consolidada do backend (p.Consenso)
                                           const valDiretoria = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
                                           return { ...p, Consenso: valDiretoria !== null ? valDiretoria : p.Consenso };
                                       })
-                                  }>
+                                    }
+                                    // ADICIONADO: Margem de respiro para as bolinhas não serem cortadas
+                                    margin={{ top: 20, right: 30, left: 20, bottom: 10 }}
+                                  >
                                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                                     <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900}} axisLine={false} tickLine={false} />
                                     <YAxis tick={{fontSize: 10}} axisLine={false} tickLine={false} />

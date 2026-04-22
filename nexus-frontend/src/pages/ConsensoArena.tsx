@@ -479,19 +479,24 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                                </div>
                             </div>
 
-                            <div className="h-[250px] w-full -ml-4">
+                            {/* REMOVIDO: -ml-4 */}
+                            <div className="h-[250px] w-full">
                               {loadingGrafico === row.original.chave_matriz ? (
                                 <div className="h-full flex items-center justify-center text-slate-600"><Loader2 className="animate-spin w-8 h-8" /></div>
                               ) : (
                                 <ResponsiveContainer width="100%" height="100%">
-                                  <LineChart data={
+                                  <LineChart 
+                                    data={
                                       (dadosGraficoCache[row.original.chave_matriz] || []).map((p: any) => {
                                           const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
                                           const edicao = celulasEditadas[row.original.chave_matriz]?.[p.data_iso];
                                           const valComercial = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
                                           return { ...p, Consenso: valComercial !== null ? valComercial : p.Consenso };
                                       })
-                                  }>
+                                    }
+                                    // ADICIONADO: Respiro nas laterais
+                                    margin={{ top: 20, right: 30, left: 20, bottom: 10 }}
+                                  >
                                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
                                     <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
                                     <YAxis tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} tickLine={false} />

@@ -309,7 +309,7 @@ export default function SupplyReviewArena() {
                   {qtdEdicoes > 0 && (<button onClick={() => setCelulasEditadas({})} className="flex items-center gap-1 text-xs font-black text-rose-500 hover:text-rose-700 transition tracking-widest uppercase px-4 py-3 rounded-2xl hover:bg-rose-50"><X className="w-4 h-4" /> Descartar</button>)}
                   <button onClick={handleCongelarCiclo} disabled={isProcessing} className="flex items-center gap-2 bg-slate-900 hover:bg-black text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-slate-900/30 transition-all disabled:opacity-50">
                       {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : qtdEdicoes > 0 ? 'Gravar Restrições' : <ShieldCheck className="w-5 h-5" />}
-                      {qtdEdicoes > 0 ? '' : 'Aprovar Plano Irrestrito'}
+                      {qtdEdicoes > 0 ? '' : 'Aprovar Plano Restrito'}
                   </button>
                 </div>
             )}
@@ -401,19 +401,22 @@ export default function SupplyReviewArena() {
                                </div>
                             </div>
 
-                            <div className="h-[250px] w-full -ml-4">
+                            <div className="h-[250px] w-full">
                               {loadingGrafico === row.original.produto ? (
                                 <div className="h-full flex items-center justify-center text-slate-800"><Loader2 className="animate-spin w-8 h-8" /></div>
                               ) : (
                                 <ResponsiveContainer width="100%" height="100%">
-                                  <LineChart data={
+                                  <LineChart 
+                                    data={
                                       (dadosGraficoCache[row.original.produto] || []).map((p: any) => {
                                           const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
                                           const edicao = celulasEditadas[row.original.produto]?.[p.data_iso];
                                           const valSupply = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
                                           return { ...p, Consenso: valSupply !== null ? valSupply : p.Consenso };
                                       })
-                                  }>
+                                    }
+                                    margin={{ top: 20, right: 30, left: 20, bottom: 10 }}
+                                  >
                                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                                     <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900}} axisLine={false} tickLine={false} />
                                     <YAxis tick={{fontSize: 10}} axisLine={false} tickLine={false} />

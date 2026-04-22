@@ -151,7 +151,7 @@ export default function AdminPanel() {
 
   return (
     <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
-      <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative flex flex-col h-[calc(100vh-2rem)]">
+      <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative flex flex-col">
         
         {/* CABEÇALHO */}
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-6 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 flex-shrink-0">
@@ -172,13 +172,14 @@ export default function AdminPanel() {
           </button>
         </div>
 
-        <div className="flex flex-col lg:flex-row gap-6 flex-1 min-h-0">
+        {/* MUDANÇA: Layout solto com items-stretch em vez de forçar altura min-h-0 */}
+        <div className="flex flex-col lg:flex-row gap-6 items-stretch">
           
           {/* COLUNA ESQUERDA: GESTÃO DE UTILIZADORES E TRAVAS */}
-          <div className="w-full lg:w-1/3 flex flex-col gap-6 min-h-0">
+          <div className="w-full lg:w-1/3 flex flex-col gap-6">
              
-             {/* CARD 1: APROVAÇÕES PENDENTES */}
-             <div className="bg-white rounded-[32px] p-8 shadow-sm border border-slate-100 flex flex-col overflow-hidden flex-1 min-h-0">
+             {/* CARD 1: APROVAÇÕES PENDENTES (Altura Fixa Garantida) */}
+             <div className="bg-white rounded-[32px] p-6 lg:p-8 shadow-sm border border-slate-100 flex flex-col h-[400px]">
                  <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slate-100 flex-shrink-0">
                    <UserPlus className="w-5 h-5 text-indigo-500" />
                    <h2 className="text-sm font-black text-slate-700 uppercase tracking-widest">Aprovações Pendentes</h2>
@@ -220,7 +221,7 @@ export default function AdminPanel() {
              </div>
 
              {/* CARD 2: DESCONGELAMENTO DE TELAS */}
-             <div className="bg-white rounded-[32px] p-8 shadow-sm border border-slate-100 flex flex-col shrink-0">
+             <div className="bg-white rounded-[32px] p-6 lg:p-8 shadow-sm border border-slate-100 flex flex-col">
                <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slate-100 flex-shrink-0">
                  <Unlock className="w-5 h-5 text-amber-500" />
                  <h2 className="text-sm font-black text-slate-700 uppercase tracking-widest">Descongelar Telas</h2>
@@ -267,7 +268,7 @@ export default function AdminPanel() {
           </div>
 
           {/* COLUNA DIREITA: MOTOR DE IA & TERMINAL */}
-          <div className="w-full lg:w-2/3 bg-slate-950 rounded-[32px] p-2 shadow-2xl border border-slate-800 flex flex-col relative overflow-hidden">
+          <div className="w-full lg:w-2/3 bg-slate-950 rounded-[32px] p-2 shadow-2xl border border-slate-800 flex flex-col relative min-h-[500px]">
             
             {/* PAINEL DE CONTROLE DO MOTOR */}
             <div className="bg-slate-900 rounded-[24px] p-6 border border-slate-800 m-2 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 flex-shrink-0">
@@ -289,7 +290,7 @@ export default function AdminPanel() {
             </div>
 
             {/* TERMINAL DE LOGS */}
-            <div className="flex-1 bg-slate-950 p-6 flex flex-col overflow-hidden relative min-h-0">
+            <div className="flex-1 bg-slate-950 p-6 flex flex-col overflow-hidden relative">
               <div className="flex items-center gap-2 mb-4 pb-4 border-b border-slate-800 flex-shrink-0">
                  <Terminal className="w-5 h-5 text-slate-500" />
                  <span className="text-xs font-black text-slate-500 uppercase tracking-widest">NEXUS SERVER // CONSOLE OUTPUT</span>

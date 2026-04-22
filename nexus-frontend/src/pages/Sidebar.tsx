@@ -4,10 +4,10 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
   
   // Definição das permissões de cada tela (Ordem Lógica do S&OP)
   const allNavItems = [
-    { id: 'dashboard', label: 'Demanda Final', icon: LayoutDashboard, roles: ['Administrador', 'Gerente'] },
+    { id: 'dashboard', label: 'Demanda Final', icon: LayoutDashboard, roles: ['Administrador', 'Gerente', 'Supply Chain'] },
     { id: 'topdown', label: 'Demanda Irrestrita', icon: BarChart3, roles: ['Administrador', 'Gerente'] },
     { id: 'npd', label: 'Inovações', icon: Rocket, roles: ['Administrador', 'Gerente'] },
-    { id: 'supply', label: 'Supply Review', icon: Factory, roles: ['Administrador', 'Supply Chain'] }, // <-- NOVO BOTÃO AQUI
+    { id: 'supply', label: 'Supply Review', icon: Factory, roles: ['Administrador', 'Supply Chain'] }, 
     { id: 'consenso', label: 'Metas Cliente', icon: Users, roles: ['Administrador', 'Gerente', 'Executivo'] },
     { id: 'gerenciamento', label: 'Metas Executivo', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },
     { id: 'admin', label: 'Control Tower', icon: Settings, roles: ['Administrador'] },
