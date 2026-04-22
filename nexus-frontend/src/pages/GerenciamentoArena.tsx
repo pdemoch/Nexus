@@ -99,11 +99,18 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   };
 
   const handleLockAll = async (acao: 'Trancar' | 'Destrancar') => {
-    if (!window.confirm(`Deseja ${acao.toLowerCase()} as carteiras de todos os vendedores?`)) return;
+    const msg = acao === 'Trancar' 
+      ? "Deseja TRANCAR as carteiras de TODOS os vendedores exibidos nesta busca?" 
+      : "Deseja ABRIR/DESTRANCAR as carteiras de TODOS os vendedores exibidos nesta busca?";
+      
+    if (!window.confirm(msg)) return;
+    
+    setIsProcessing(true);
     try {
       await axios.post('/api/v1/consensus/gerenciamento/lock-all', { acao });
       fetchData();
     } catch (e: any) { alert(e.response?.data?.detail || "Erro ao executar ação em lote."); }
+    finally { setIsProcessing(false); }
   };
 
   const dadosFiltrados = useMemo(() => {
@@ -219,7 +226,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           }
         }))
     ];
-  }, [dadosBrutos, chartExpanded]); // 🔒 CORREÇÃO AQUI: Removemos o celulasEditadas das dependências!
+  }, [dadosBrutos, chartExpanded]); // FOCO BLINDADO: celulasEditadas removido para manter o cursor no lugar
 
   const table = useReactTable({
     data: dadosFiltrados, columns, state: { expanded, sorting },
@@ -241,26 +248,49 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
         
         {/* FILTROS E BUSCA */}
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6 mb-8 bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
-          <div>
+          <div className="shrink-0">
             <h1 className="text-3xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
               <Users className="w-8 h-8 text-blue-600" /> VISÃO GERENCIAL
             </h1>
             <p className="text-slate-500 font-medium mt-1">Supervisão, controle e aprovação da equipa comercial.</p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-4 bg-slate-50 p-4 rounded-[32px] border border-slate-100">
-              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest pl-2">Filtrar:</span>
-              <select value={nivelHierarquia} onChange={e => {setNivelHierarquia(e.target.value); setNomeResponsavel('');}} className="bg-white border border-slate-200 text-xs font-bold p-2.5 rounded-2xl outline-none text-slate-700 cursor-pointer">
-                  <option value="regional">Regional</option>
-                  <option value="vendedor">Vendedor</option>
-              </select>
-              <select value={nomeResponsavel} onChange={e => setNomeResponsavel(e.target.value)} className="bg-white border border-slate-200 text-xs font-bold p-2.5 rounded-2xl outline-none text-slate-700 cursor-pointer min-w-[200px]">
-                  <option value="">{nivelHierarquia === 'vendedor' ? '-- Todos os Vendedores --' : '-- Todas as Regionais --'}</option>
-                  {(nivelHierarquia === 'vendedor' ? opcoesBusca.vendedores : opcoesBusca.regionais).map(opt => <option key={opt} value={opt}>{opt}</option>)}
-              </select>
-              <button onClick={fetchData} className="bg-indigo-600 text-white px-5 py-2.5 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-indigo-700 transition flex items-center gap-2 shadow-lg shadow-indigo-200">
-                <Search className="w-4 h-4" /> Buscar
-              </button>
+          <div className="flex flex-wrap items-center gap-3 bg-slate-50 p-3 rounded-[32px] border border-slate-100">
+              <div className="flex items-center gap-2 px-3">
+                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Filtrar:</span>
+                <select value={nivelHierarquia} onChange={e => {setNivelHierarquia(e.target.value); setNomeResponsavel('');}} className="bg-white border border-slate-200 text-xs font-bold p-2 rounded-xl outline-none text-slate-700 cursor-pointer">
+                    <option value="regional">Regional</option>
+                    <option value="vendedor">Vendedor</option>
+                </select>
+                <select value={nomeResponsavel} onChange={e => setNomeResponsavel(e.target.value)} className="bg-white border border-slate-200 text-xs font-bold p-2 rounded-xl outline-none text-slate-700 cursor-pointer min-w-[200px]">
+                    <option value="">{nivelHierarquia === 'vendedor' ? '-- Todos os Vendedores --' : '-- Todas as Regionais --'}</option>
+                    {(nivelHierarquia === 'vendedor' ? opcoesBusca.vendedores : opcoesBusca.regionais).map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                </select>
+                <button onClick={fetchData} className="bg-indigo-600 text-white px-5 py-2.5 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-indigo-700 transition flex items-center gap-2 shadow-lg shadow-indigo-100">
+                  <Search className="w-4 h-4" /> Buscar
+                </button>
+              </div>
+
+              <div className="h-8 w-[2px] bg-slate-200 mx-1" />
+
+              {/* AÇÕES EM MASSA */}
+              <div className="flex items-center gap-2 px-2">
+                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Massa:</span>
+                <button 
+                  onClick={() => handleLockAll('Trancar')} 
+                  disabled={isProcessing}
+                  className="bg-rose-50 text-rose-600 border border-rose-100 hover:bg-rose-100 px-4 py-2.5 rounded-2xl text-[10px] font-black uppercase tracking-widest transition flex items-center gap-2"
+                >
+                  <Lock className="w-3.5 h-3.5" /> Trancar
+                </button>
+                <button 
+                  onClick={() => handleLockAll('Destrancar')} 
+                  disabled={isProcessing}
+                  className="bg-emerald-50 text-emerald-600 border border-emerald-100 hover:bg-emerald-100 px-4 py-2.5 rounded-2xl text-[10px] font-black uppercase tracking-widest transition flex items-center gap-2"
+                >
+                  <Unlock className="w-3.5 h-3.5" /> Abrir
+                </button>
+              </div>
           </div>
         </div>
 
@@ -295,7 +325,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                       {row.getVisibleCells().map(cell => <td key={cell.id} className="px-8 py-4">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}
                     </tr>
 
-                    {/* GRÁFICO MULTI-NÍVEL (S&OE) */}
                     {chartExpanded === row.original.chave_matriz && (
                       <tr>
                         <td colSpan={table.getAllColumns().length} className="bg-slate-900 p-8 border-b border-slate-800">
