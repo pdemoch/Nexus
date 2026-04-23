@@ -193,4 +193,4 @@ async def carregar_radar_soe(db: Session = Depends(get_db)):
     }
 
 # Auxiliar para o SQL
-from sqlalchemy import CASE
+from sqlalchemy import case
