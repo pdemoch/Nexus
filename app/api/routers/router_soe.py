@@ -118,9 +118,9 @@ async def carregar_radar_soe(db: Session = Depends(get_db)):
     backlog_query = db.query(
         FatoVendas.sku,
         func.sum(FatoVendas.qt_pedido - (FatoVendas.qtfatura + FatoVendas.qtcorte)).label('saldo_vendas'),
-        func.sum(case([(FatoVendas.data_pedido >= primeiro_dia_mes, FatoVendas.qt_pedido)], else_=0)).label('pedidos_m0'),
-        func.sum(case([(FatoVendas.data_pedido >= primeiro_dia_mes, FatoVendas.qtfatura)], else_=0)).label('faturado_m0'),
-        func.sum(case([(FatoVendas.data_pedido < primeiro_dia_mes, FatoVendas.qt_pedido - (FatoVendas.qtfatura + FatoVendas.qtcorte))], else_=0)).label('divida_m1')
+        func.sum(case((FatoVendas.data_pedido >= primeiro_dia_mes, FatoVendas.qt_pedido), else_=0)).label('pedidos_m0'),
+        func.sum(case((FatoVendas.data_pedido >= primeiro_dia_mes, FatoVendas.qtfatura), else_=0)).label('faturado_m0'),
+        func.sum(case((FatoVendas.data_pedido < primeiro_dia_mes, FatoVendas.qt_pedido - (FatoVendas.qtfatura + FatoVendas.qtcorte)), else_=0)).label('divida_m1')
     ).group_by(FatoVendas.sku).all()
     
     backlog_map = {r.sku: r for r in backlog_query}
