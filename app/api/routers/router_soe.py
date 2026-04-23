@@ -26,13 +26,12 @@ class InboundEntry(BaseModel):
     justificativa: Optional[str] = None
 
 # --- ROTA 1: SINCRONIZAÇÃO DE ESTOQUE (API 90) ---
-# --- ROTA 1: SINCRONIZAÇÃO DE ESTOQUE (API 90) ---
 @router.post("/sync-stock")
 async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     """Puxa a API 90, filtra Armazém 05 e atualiza a FatoEstoqueD0."""
     
-    # CORREÇÃO: Adicionado '/data' no final do URL (Padrão da API Gobi)
-    url = "https://gobi-api.lineaalimentos.com.br/v1/reports/90/data"
+    # URL atualizada com os parâmetros do seu código M
+    url = "https://gobi-api.lineaalimentos.com.br/v1/reports/90/data?streaming=true&format=json"
     headers = {"Authorization": f"Bearer {settings.GOBI_TOKEN}"}
     
     try:
@@ -41,47 +40,62 @@ async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict
             async with session.get(url, headers=headers) as resp:
                 if resp.status != 200:
                     texto_erro = await resp.text()
-                    print(f"❌ [SYNC-STOCK] Erro na API 90: Status {resp.status} - {texto_erro}")
                     raise HTTPException(status_code=resp.status, detail=f"Erro ERP: {texto_erro}")
                 
                 dados = await resp.json(content_type=None)
 
-        # BLINDAGEM: Protege contra respostas que não sejam listas
-        if isinstance(dados, dict):
-            if "data" in dados:
-                dados = dados["data"]
-            else:
-                print(f"⚠️ [SYNC-STOCK] O ERP não retornou a lista de itens esperada. Retornou: {dados}")
-                raise HTTPException(status_code=500, detail="Formato inesperado de dados da API 90 (Metadados em vez de Registos).")
-                
+        if isinstance(dados, dict) and "data" in dados:
+            dados = dados["data"]
         if not isinstance(dados, list):
             dados = []
 
         print(f"✅ [SYNC-STOCK] Dados recebidos do ERP: {len(dados)} linhas de estoque lidas.")
         
-        # 1. Limpa a foto anterior
         db.query(FatoEstoqueD0).delete()
         
-        # 2. Consolida os lotes do Armazém 05 por SKU
         estoque_agrupado = {}
+        linhas_processadas = 0
+
         for item in dados:
-            # Ignora se a linha vier corrompida do ERP
-            if not isinstance(item, dict):
-                continue 
+            if not isinstance(item, dict): continue 
+            
+            # 1. TRATAMENTO DO ARMAZÉM (Blinda contra "5", "05", 5, 5.0)
+            arm_raw = str(item.get('arm', '')).strip()
+            try:
+                is_arm_05 = int(float(arm_raw)) == 5
+            except ValueError:
+                is_arm_05 = (arm_raw == '05' or arm_raw == '5')
+
+            if is_arm_05:
+                linhas_processadas += 1
                 
-            if str(item.get('arm')).strip() == '05':
-                sku = str(item.get('produto')).strip()
-                qtd = float(item.get('qtd_dispo') or 0)
+                # 2. TRATAMENTO DO PRODUTO (Remove zeros à esquerda e decimais)
+                prod_raw = item.get('produto', '')
+                try:
+                    sku = str(int(float(prod_raw)))
+                except ValueError:
+                    sku = str(prod_raw).strip()
+                
+                # 3. TRATAMENTO DA QUANTIDADE (Focado estritamente na qtd_dispo, conforme seu Power Query)
+                qtd_raw = item.get('qtd_dispo', 0)
+                # Garante que valores nulos ou vazios não quebrem a soma
+                try:
+                    qtd = float(qtd_raw) if qtd_raw else 0.0
+                except (ValueError, TypeError):
+                    qtd = 0.0
+                
                 estoque_agrupado[sku] = estoque_agrupado.get(sku, 0) + qtd
         
-        # 3. Insere a nova foto
+        print(f"🔎 [SYNC-STOCK] Linhas que passaram no filtro do Arm 05: {linhas_processadas}")
+
         novas_linhas = [
             FatoEstoqueD0(sku=sku, qtd_dispo=vol) 
             for sku, vol in estoque_agrupado.items()
         ]
+        
         db.bulk_save_objects(novas_linhas)
         db.commit()
-        print(f"✅ [SYNC-STOCK] Concluído: {len(novas_linhas)} SKUs salvos no Armazém 05.")
+        print(f"✅ [SYNC-STOCK] Concluído: {len(novas_linhas)} SKUs agrupados e salvos no Armazém 05.")
         
         return {"status": "success", "mensagem": f"{len(novas_linhas)} SKUs atualizados no estoque."}
     
@@ -91,7 +105,6 @@ async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict
     except Exception as e:
         db.rollback()
         import traceback
-        print("❌ [SYNC-STOCK] ERRO CRÍTICO NO PROCESSAMENTO:")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
     
