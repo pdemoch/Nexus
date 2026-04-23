@@ -30,7 +30,6 @@ class InboundEntry(BaseModel):
 async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     """Puxa a API 90, filtra Armazém 05 e atualiza a FatoEstoqueD0."""
     
-    # URL atualizada com os parâmetros do seu código M
     url = "https://gobi-api.lineaalimentos.com.br/v1/reports/90/data?streaming=true&format=json"
     headers = {"Authorization": f"Bearer {settings.GOBI_TOKEN}"}
     
@@ -76,9 +75,8 @@ async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict
                 except ValueError:
                     sku = str(prod_raw).strip()
                 
-                # 3. TRATAMENTO DA QUANTIDADE (Focado estritamente na qtd_dispo, conforme seu Power Query)
+                # 3. TRATAMENTO DA QUANTIDADE (Focado estritamente na qtd_dispo)
                 qtd_raw = item.get('qtd_dispo', 0)
-                # Garante que valores nulos ou vazios não quebrem a soma
                 try:
                     qtd = float(qtd_raw) if qtd_raw else 0.0
                 except (ValueError, TypeError):
@@ -111,7 +109,6 @@ async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict
 # --- ROTA 2: GESTÃO DE INBOUND (CALENDÁRIO DE FÁBRICA) ---
 @router.get("/inbound")
 async def listar_inbound(db: Session = Depends(get_db)):
-    # Retorna o plano futuro de produção
     hoje = datetime.date.today()
     return db.query(FatoInboundProducao).filter(FatoInboundProducao.data_entrada >= hoje).all()
 
@@ -158,14 +155,34 @@ async def carregar_radar_soe(db: Session = Depends(get_db)):
     
     forecast_map = {r.sku: {"sop": r.vol_sop, "pmv": r.pmv} for r in forecast_query}
 
-    # 2. BUSCAR BACKLOG REAL (M-1 + M0)
-    # Fórmula: qtpedido - (qtfatura + qtcorte) > 0
+    # 2. BUSCAR BACKLOG REAL (M-1 + M0 BLINDADO)
+    data_m1 = primeiro_dia_mes - relativedelta(months=1)
+    
     backlog_query = db.query(
         FatoVendas.sku,
-        func.sum(FatoVendas.qt_pedido - (FatoVendas.qtfatura + FatoVendas.qtcorte)).label('saldo_vendas'),
-        func.sum(case((FatoVendas.data_pedido >= primeiro_dia_mes, FatoVendas.qt_pedido), else_=0)).label('pedidos_m0'),
-        func.sum(case((FatoVendas.data_pedido >= primeiro_dia_mes, FatoVendas.qtfatura), else_=0)).label('faturado_m0'),
-        func.sum(case((FatoVendas.data_pedido < primeiro_dia_mes, FatoVendas.qt_pedido - (FatoVendas.qtfatura + FatoVendas.qtcorte)), else_=0)).label('divida_m1')
+        # Backlog Total: Apenas o que sobrou aberto de M-1 até hoje
+        func.sum(case((
+            FatoVendas.data_pedido >= data_m1, 
+            FatoVendas.qt_pedido - (FatoVendas.qtfatura + FatoVendas.qtcorte)
+        ), else_=0)).label('saldo_vendas'),
+        
+        # Pedidos feitos dentro do mês atual (M0)
+        func.sum(case((
+            FatoVendas.data_pedido >= primeiro_dia_mes, 
+            FatoVendas.qt_pedido
+        ), else_=0)).label('pedidos_m0'),
+        
+        # Faturado dentro do mês atual (M0)
+        func.sum(case((
+            FatoVendas.data_pedido >= primeiro_dia_mes, 
+            FatoVendas.qtfatura
+        ), else_=0)).label('faturado_m0'),
+        
+        # Dívida M-1: Estritamente os pedidos do mês passado que continuam abertos
+        func.sum(case((
+            and_(FatoVendas.data_pedido >= data_m1, FatoVendas.data_pedido < primeiro_dia_mes), 
+            FatoVendas.qt_pedido - (FatoVendas.qtfatura + FatoVendas.qtcorte)
+        ), else_=0)).label('divida_m1')
     ).group_by(FatoVendas.sku).all()
     
     backlog_map = {r.sku: r for r in backlog_query}
