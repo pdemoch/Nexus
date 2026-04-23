@@ -95,7 +95,7 @@ async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
     
-# --- ROTA 2: GESTÃO DE INBOUND (CALENDÁRIO DE FÁBRICA) ---
+# -- ROTA 2: GESTÃO DE INBOUND (CALENDÁRIO DE FÁBRICA) --
 @router.get("/inbound")
 async def listar_inbound(db: Session = Depends(get_db)):
     # Retorna o plano futuro de produção
