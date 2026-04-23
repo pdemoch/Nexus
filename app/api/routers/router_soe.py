@@ -33,12 +33,19 @@ async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict
     headers = {"Authorization": f"Bearer {settings.GOBI_TOKEN}"}
     
     try:
+        print("⏳ [SYNC-STOCK] Iniciando sincronização com a API 90...")
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as resp:
                 if resp.status != 200:
-                    raise HTTPException(status_code=resp.status, detail="Erro na API do ERP.")
-                dados = await resp.json()
+                    texto_erro = await resp.text()
+                    print(f"❌ [SYNC-STOCK] Erro na API 90: Status {resp.status} - {texto_erro}")
+                    raise HTTPException(status_code=resp.status, detail=f"Erro ERP: {texto_erro}")
+                
+                # O segredo: content_type=None (Igual você já usava no extractor.py)
+                dados = await resp.json(content_type=None)
 
+        print(f"✅ [SYNC-STOCK] Dados recebidos do ERP: {len(dados)} registros.")
+        
         # 1. Limpa a foto anterior
         db.query(FatoEstoqueD0).delete()
         
@@ -57,12 +64,20 @@ async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict
         ]
         db.bulk_save_objects(novas_linhas)
         db.commit()
+        print(f"✅ [SYNC-STOCK] Concluído: {len(novas_linhas)} SKUs salvos no Armazém 05.")
         
         return {"status": "success", "mensagem": f"{len(novas_linhas)} SKUs atualizados no estoque."}
+    
+    except HTTPException as he:
+        db.rollback()
+        raise he
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-
+        import traceback
+        print("❌ [SYNC-STOCK] ERRO CRÍTICO NO PROCESSAMENTO:")
+        traceback.print_exc() # Isso vai cuspir o erro exato no terminal do Docker
+        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
+    
 # --- ROTA 2: GESTÃO DE INBOUND (CALENDÁRIO DE FÁBRICA) ---
 @router.get("/inbound")
 async def listar_inbound(db: Session = Depends(get_db)):
