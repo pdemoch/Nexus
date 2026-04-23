@@ -36,15 +36,16 @@ app = FastAPI(
 # =========================================================================
 origins = [
     "https://lineanexus.com.br",
+    "https://www.lineanexus.com.br", # Adicionado para cobrir acessos via www
     "http://localhost:5173",
-    "http://localhost:3000", # para seus testes locais
+    "http://localhost:3000",
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], # Especificando métodos
     allow_headers=["*"],
 )
 
