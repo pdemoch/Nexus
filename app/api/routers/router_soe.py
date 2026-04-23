@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from sqlalchemy.orm import Session
-from sqlalchemy import func, text, extract, and_
+from sqlalchemy import func, text, extract, and_, case
 from pydantic import BaseModel
 from typing import List, Optional
 import datetime
@@ -118,9 +118,9 @@ async def carregar_radar_soe(db: Session = Depends(get_db)):
     backlog_query = db.query(
         FatoVendas.sku,
         func.sum(FatoVendas.qt_pedido - (FatoVendas.qtfatura + FatoVendas.qtcorte)).label('saldo_vendas'),
-        func.sum(CASE([(FatoVendas.data_pedido >= primeiro_dia_mes, FatoVendas.qt_pedido)], else_=0)).label('pedidos_m0'),
-        func.sum(CASE([(FatoVendas.data_pedido >= primeiro_dia_mes, FatoVendas.qtfatura)], else_=0)).label('faturado_m0'),
-        func.sum(CASE([(FatoVendas.data_pedido < primeiro_dia_mes, FatoVendas.qt_pedido - (FatoVendas.qtfatura + FatoVendas.qtcorte))], else_=0)).label('divida_m1')
+        func.sum(case([(FatoVendas.data_pedido >= primeiro_dia_mes, FatoVendas.qt_pedido)], else_=0)).label('pedidos_m0'),
+        func.sum(case([(FatoVendas.data_pedido >= primeiro_dia_mes, FatoVendas.qtfatura)], else_=0)).label('faturado_m0'),
+        func.sum(case([(FatoVendas.data_pedido < primeiro_dia_mes, FatoVendas.qt_pedido - (FatoVendas.qtfatura + FatoVendas.qtcorte))], else_=0)).label('divida_m1')
     ).group_by(FatoVendas.sku).all()
     
     backlog_map = {r.sku: r for r in backlog_query}
@@ -191,6 +191,3 @@ async def carregar_radar_soe(db: Session = Depends(get_db)):
         "total_skus": len(resultado_final),
         "dados": resultado_final
     }
-
-# Auxiliar para o SQL
-from sqlalchemy import case
