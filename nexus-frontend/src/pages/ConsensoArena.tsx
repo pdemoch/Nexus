@@ -4,7 +4,7 @@ import {
 } from '@tanstack/react-table';
 import { 
   Check, TrendingUp, Filter, Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
-  Lock, Search, X, Store, Package, Download, BarChart2, Activity, ShieldAlert, AlertTriangle
+  Lock, Search, X, Store, Package, Download, BarChart2, Activity, ShieldAlert
 } from 'lucide-react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
@@ -26,9 +26,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   const [sorting, setSorting] = useState<SortingState>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   
-  // =========================================================================
-  // CORREÇÃO: O Bottom-Up agora espera pelo Top-Down (Fase 1)
-  // =========================================================================
+  // STATUS DAS FASES
   const [isFechado, setIsFechado] = useState(false);
   const [isTopDownFechado, setIsTopDownFechado] = useState<boolean | null>(null);
   
@@ -40,11 +38,11 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   const [opcoesBusca, setOpcoesBusca] = useState<{vendedores: string[], regionais: string[]}>({vendedores: [], regionais: []});
 
   useEffect(() => {
-    // Busca os filtros
+    // Busca os filtros disponíveis
     axios.get('/api/v1/consensus/micro/filtros', { params: { gerente_nome: usuarioSessao?.gerente_nome } })
          .then(res => setOpcoesBusca(res.data)).catch(console.error);
 
-    // CORREÇÃO: Consulta a rota macro (Top-Down) para saber se pode liberar a tela
+    // Consulta a rota macro (Top-Down) para saber se a Fase 1 já abriu os portões
     axios.get('/api/v1/consensus/macro/status')
          .then(res => setIsTopDownFechado(res.data.is_topdown_fechado))
          .catch(() => setIsTopDownFechado(false));
@@ -183,6 +181,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
         const res = await axios.get('/api/v1/consensus/micro/grafico', { 
             params: { 
                 chave_matriz: chave, 
+                tipo_linha: row.original.tipo,
                 nivel_hierarquia: nivelHierarquia, 
                 nome_responsavel: nomeResponsavel 
             } 
@@ -311,9 +310,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     }
   });
 
-  // =========================================================================
-  // CORREÇÃO: TELA DE BLOQUEIO DE FASE (AGUARDANDO TOP-DOWN)
-  // =========================================================================
+  // TELA DE BLOQUEIO DE FASE
   if (isTopDownFechado === null) {
     return (
       <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
@@ -332,7 +329,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           </div>
           <h2 className="text-2xl font-black text-slate-900 tracking-tighter mb-4">Aguardando Diretoria (Top-Down)</h2>
           <p className="text-slate-500 font-medium leading-relaxed">
-            A fase Comercial (Bottom-Up) só pode ser iniciada após a aprovação e congelamento da demanda macro pela <strong>Diretoria (Fase 1)</strong>.
+            A fase Comercial só pode ser iniciada após a aprovação e congelamento da demanda macro pela Diretoria (Fase 1).
           </p>
         </div>
       </div>
@@ -343,11 +340,11 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
       <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative">
         
-        {/* CABEÇALHO COM FEEDBACK DE TRAVA */}
+        {/* CABEÇALHO */}
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 relative overflow-hidden">
           {isFechado && !isLoading && (
               <div className="absolute top-0 left-0 w-full bg-rose-500 text-white text-[10px] font-black py-1.5 flex justify-center items-center gap-2 tracking-widest uppercase shadow-sm z-10">
-                  <ShieldAlert className="w-3 h-3" /> CARTEIRA TRANCADA PELA GERÊNCIA - APENAS LEITURA
+                  <ShieldAlert className="w-3 h-3" /> CARTEIRA TRANCADA - APENAS LEITURA
               </div>
           )}
           
@@ -356,7 +353,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
               <TrendingUp className="w-8 h-8 text-indigo-600" /> Metas por Cliente
             </h1>
             <p className="text-sm font-bold text-slate-400 mt-1 uppercase tracking-widest pl-11">
-              Visão Executiva: {nivelHierarquia === 'vendedor' ? 'Vendedor(a)' : 'Regional'} <span className="text-indigo-600">{nomeResponsavel}</span>
+              Visão Comercial: {nivelHierarquia === 'vendedor' ? 'Vendedor(a)' : 'Regional'} <span className="text-indigo-600">{nomeResponsavel}</span>
             </p>
           </div>
           

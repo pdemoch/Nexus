@@ -11,7 +11,6 @@ from app.core.database import get_db
 from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, ControleCiclo, FatoVendas
 from app.api.routers.router_auth import get_current_user
 
-# O Cérebro Mestre
 from app.api.routers.shared_ibp import (
     get_current_cycle,
     get_previous_cycle,
@@ -24,9 +23,6 @@ from app.api.routers.shared_ibp import (
 
 router = APIRouter(prefix="/api/v1/consensus/micro", tags=["Consenso Bottom-Up"])
 
-# =====================================================================
-# SCHEMAS
-# =====================================================================
 class AjusteBottomUp(BaseModel):
     nivel: str
     chave: str
@@ -37,9 +33,6 @@ class PayloadCongelarBU(BaseModel):
     origem_ajuste: str
     ajustes: List[AjusteBottomUp]
 
-# =====================================================================
-# ENDPOINTS PRINCIPAIS (A VISÃO DA TRINCHEIRA / EXECUTIVO)
-# =====================================================================
 @router.get("/filtros")
 async def obter_filtros_busca(gerente_nome: str = None, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     q = db.query(DimCliente)
@@ -63,18 +56,16 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
 
         query_base = get_truth_query(db, ciclo, m2, m4)
         
-        if filtro_vend: 
-            query_base = query_base.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
-        if filtro_reg: 
-            query_base = query_base.filter(func.upper(func.trim(DimCliente.regional)) == filtro_reg.strip().upper())
-        if usuario['funcao'] == 'Gerente': 
-            query_base = query_base.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
+        if filtro_vend: query_base = query_base.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
+        if filtro_reg: query_base = query_base.filter(func.upper(func.trim(DimCliente.regional)) == filtro_reg.strip().upper())
+        if usuario['funcao'] == 'Gerente': query_base = query_base.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
 
+        # CORREÇÃO: Removido o nível do vendedor. A árvore volta a ser apenas Cliente -> Produto.
         resultados = query_base.with_entities(
             DimCliente.razaosocial, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado, 
             func.sum(FatoIbpGranular.vol_ia).label('v_ia'), 
             func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), 
-            func.sum(FatoIbpGranular.vol_topdown).label('v_td'), # Traz o TD para o card de pressão
+            func.sum(FatoIbpGranular.vol_topdown).label('v_td'), 
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv'),
             func.sum(FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('rec_bu')
         ).group_by(
@@ -91,7 +82,9 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
         })
         
         for r in resultados:
-            rz, sku, ms = str(r.razaosocial or "DESC"), r.sku, str(r.mes_projetado)
+            rz = str(r.razaosocial or "DESC").strip()
+            sku = r.sku
+            ms = str(r.mes_projetado)
             rec = float(r.rec_bu or 0)
             
             arvore[rz]["id"] = arvore[rz]["nome"] = rz
@@ -145,9 +138,6 @@ async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: 
         ciclo = get_current_cycle()
         check_global_lock(db, ciclo)
 
-        # ---------------------------------------------------------------------
-        # NOVA BLINDAGEM: Bottom-Up só inicia após o Top-Down Congelar
-        # ---------------------------------------------------------------------
         reg_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
         if not reg_td or reg_td.status != 'Fechado':
              raise HTTPException(status_code=403, detail="A estratégia macro ainda não foi liberada pela Diretoria (Fase 1). Aguarde.")
