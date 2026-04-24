@@ -26,9 +26,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   const [sorting, setSorting] = useState<SortingState>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   
-  // =========================================================================
-  // CORREÇÃO: O Gerenciamento agora espera pelo Top-Down (Fase 1)
-  // =========================================================================
+  // STATUS DAS FASES
   const [isFechado, setIsFechado] = useState(false);
   const [isTopDownFechado, setIsTopDownFechado] = useState<boolean | null>(null);
   
@@ -44,7 +42,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     axios.get('/api/v1/consensus/micro/filtros', { params: { gerente_nome: usuarioSessao?.gerente_nome } })
          .then(res => setOpcoesBusca(res.data)).catch(console.error);
 
-    // CORREÇÃO: Consulta a rota macro (Top-Down) para saber se pode liberar a tela
+    // Consulta a rota macro (Top-Down) para saber se pode liberar a tela
     axios.get('/api/v1/consensus/macro/status')
          .then(res => setIsTopDownFechado(res.data.is_topdown_fechado))
          .catch(() => setIsTopDownFechado(false));
@@ -92,7 +90,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           const volFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : m.vol_ajustado));
           linha[`${m.mes_str} (Base IA)`] = Math.round(Number(m.vol_ia));
           linha[`${m.mes_str} (Top-Down)`] = Math.round(Number(m.vol_td || 0));
-          linha[`${m.mes_str} (Comercial)`] = volFinal;
+          linha[`${m.mes_str} (Gerencial)`] = volFinal;
         });
         dadosExcel.push(linha);
       });
@@ -122,7 +120,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
 
     try {
       await axios.post(`/api/v1/consensus/micro/congelar?nivel_hierarquia=${nivelHierarquia}&nome_responsavel=${nomeResponsavel}`, { origem_ajuste: "Gerencial", ajustes });
-      alert("✅ Volume salvo com sucesso! O rateio (cascata) foi processado.");
+      alert("✅ Volume gerencial salvo com sucesso! O rateio (cascata) foi processado.");
       fetchData(); 
     } catch (e: any) {
       alert(e.response?.data?.detail || "Erro ao guardar.");
@@ -311,9 +309,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     }
   });
 
-  // =========================================================================
-  // TELA DE BLOQUEIO DE FASE (AGUARDANDO TOP-DOWN)
-  // =========================================================================
+  // TELA DE BLOQUEIO
   if (isTopDownFechado === null) {
     return (
       <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
@@ -332,7 +328,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           </div>
           <h2 className="text-2xl font-black text-slate-900 tracking-tighter mb-4">Aguardando Diretoria (Top-Down)</h2>
           <p className="text-slate-500 font-medium leading-relaxed">
-            A fase de Gerenciamento só pode ser iniciada após a aprovação e congelamento da demanda macro pela <strong>Diretoria (Fase 1)</strong>.
+            A fase de <strong>Gerenciamento</strong> só pode ser iniciada após a aprovação e congelamento da demanda macro pela Diretoria (Fase 1).
           </p>
         </div>
       </div>
@@ -343,7 +339,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
       <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative">
         
-        {/* CABEÇALHO COM FEEDBACK DE TRAVA */}
+        {/* CABEÇALHO */}
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 relative overflow-hidden">
           {isFechado && !isLoading && (
               <div className="absolute top-0 left-0 w-full bg-rose-500 text-white text-[10px] font-black py-1.5 flex justify-center items-center gap-2 tracking-widest uppercase shadow-sm z-10">
@@ -526,7 +522,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                   {table.getHeaderGroups()[0].headers.map(header => {
                     if (header.id === 'nome') return (
                       <td key={header.id} className="px-8 py-5 text-right">
-                        <div className="flex flex-col"><span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Meta de Receita</span><span className="font-bold text-sm text-white">TOTAL COMERCIAL</span></div>
+                        <div className="flex flex-col"><span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Meta de Receita</span><span className="font-bold text-sm text-white">TOTAL GERENCIAL</span></div>
                       </td>
                     );
                     if (header.id.startsWith('mes_')) {
