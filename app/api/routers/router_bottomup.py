@@ -10,23 +10,13 @@ from collections import defaultdict
 from app.core.database import get_db
 from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, ControleCiclo, FatoVendas
 from app.api.routers.router_auth import get_current_user
-
-# O Cérebro Mestre
 from app.api.routers.shared_ibp import (
-    get_current_cycle,
-    get_previous_cycle,
-    get_projection_window,
-    get_truth_query,
-    check_global_lock,
-    check_origin_lock, # <-- AQUI ESTÁ A NOVA BLINDAGEM IMPORTADA
-    parse_date_safe
+    get_current_cycle, get_previous_cycle, get_projection_window, get_truth_query,
+    check_global_lock, check_origin_lock, parse_date_safe
 )
 
 router = APIRouter(prefix="/api/v1/consensus/micro", tags=["Consenso Bottom-Up"])
 
-# =====================================================================
-# SCHEMAS
-# =====================================================================
 class AjusteBottomUp(BaseModel):
     nivel: str
     chave: str
@@ -37,9 +27,6 @@ class PayloadCongelarBU(BaseModel):
     origem_ajuste: str
     ajustes: List[AjusteBottomUp]
 
-# =====================================================================
-# ENDPOINTS PRINCIPAIS (A VISÃO DA TRINCHEIRA / EXECUTIVO)
-# =====================================================================
 @router.get("/filtros")
 async def obter_filtros_busca(gerente_nome: str = None, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     q = db.query(DimCliente)
@@ -63,12 +50,9 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
 
         query_base = get_truth_query(db, ciclo, m2, m4)
         
-        if filtro_vend: 
-            query_base = query_base.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
-        if filtro_reg: 
-            query_base = query_base.filter(func.upper(func.trim(DimCliente.regional)) == filtro_reg.strip().upper())
-        if usuario['funcao'] == 'Gerente': 
-            query_base = query_base.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
+        if filtro_vend: query_base = query_base.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
+        if filtro_reg: query_base = query_base.filter(func.upper(func.trim(DimCliente.regional)) == filtro_reg.strip().upper())
+        if usuario['funcao'] == 'Gerente': query_base = query_base.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
 
         resultados = query_base.with_entities(
             DimCliente.razaosocial, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado, 
@@ -116,29 +100,20 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
             } for v in arvore.values()
         ]
         return {"status": "success", "dados": dados}
-    except Exception as e: 
-        raise HTTPException(500, repr(e))
+    except Exception as e: raise HTTPException(500, repr(e))
 
-# =====================================================================
-# ROTA DE STATUS DE TRAVA (NOVA)
-# =====================================================================
 @router.get("/status")
 async def verificar_status_micro(nivel_hierarquia: str = 'vendedor', nome_responsavel: str = '', db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
         ciclo = get_current_cycle()
         origem_trava = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else nome_responsavel
-        
-        if not origem_trava:
-            return {"is_fechado": False}
+        if not origem_trava: return {"is_fechado": False}
             
         registro = db.query(ControleCiclo).filter(
-            ControleCiclo.ciclo_sop == ciclo, 
-            func.upper(func.trim(ControleCiclo.origem)) == origem_trava.strip().upper()
+            ControleCiclo.ciclo_sop == ciclo, func.upper(func.trim(ControleCiclo.origem)) == origem_trava.strip().upper()
         ).first()
-        
         return {"is_fechado": registro.status == 'Fechado' if registro else False}
-    except Exception as e:
-        raise HTTPException(500, repr(e))
+    except Exception as e: raise HTTPException(500, repr(e))
 
 @router.post("/congelar")
 async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: PayloadCongelarBU, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
@@ -146,38 +121,36 @@ async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: 
         ciclo = get_current_cycle()
         check_global_lock(db, ciclo)
 
-        # NOVA BLINDAGEM: Bottom-Up só inicia após o Supply Review Congelar
-        reg_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
-        if not reg_sp or reg_sp.status != 'Fechado':
-             raise HTTPException(status_code=403, detail="A meta oficial ainda não foi liberada pela equipe de Supply Chain (Fase 3). Aguarde.")
+        # ---------------------------------------------------------------------
+        # NOVA REGRA (FASE 2): O Bottom-Up agora exige que o Top-Down esteja fechado
+        # ---------------------------------------------------------------------
+        reg_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
+        if not reg_td or reg_td.status != 'Fechado':
+             raise HTTPException(status_code=403, detail="A Estratégia Macro (Top-Down) ainda não foi liberada pela Diretoria. Aguarde para iniciar o Bottom-Up.")
         
-        # AQUI O BANCO DE DADOS É BLINDADO CONTRA SALVAMENTOS DE CARTEIRAS TRANCADAS
         origem_trava = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else nome_responsavel
         check_origin_lock(db, ciclo, origem_trava)
         
         data_limite_str = (datetime.date.today() - relativedelta(months=12)).strftime('%Y-%m-%d')
-
         filtro_vend = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else (nome_responsavel if nivel_hierarquia == 'vendedor' else None)
         filtro_reg = nome_responsavel if nivel_hierarquia != 'vendedor' and usuario['funcao'] != 'Executivo' else None
 
         for ajuste in payload.ajustes:
             data_alvo = parse_date_safe(ajuste.mes_projetado)
             partes = ajuste.chave.split('|')
-            
             query = get_truth_query(db, ciclo, str(data_alvo), str(data_alvo))
 
             if filtro_vend: query = query.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
             if filtro_reg: query = query.filter(func.upper(func.trim(DimCliente.regional)) == filtro_reg.strip().upper())
             if usuario['funcao'] == 'Gerente': query = query.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
 
-            if ajuste.nivel in ['cliente', 'produto']: 
-                query = query.filter(func.trim(DimCliente.razaosocial) == partes[0].strip())
-            if ajuste.nivel == 'produto': 
-                query = query.filter(FatoIbpGranular.sku == partes[1].strip())
+            if ajuste.nivel in ['cliente', 'produto']: query = query.filter(func.trim(DimCliente.razaosocial) == partes[0].strip())
+            if ajuste.nivel == 'produto': query = query.filter(FatoIbpGranular.sku == partes[1].strip())
 
             linhas = query.all()
             if not linhas: continue
 
+            # Se o ajuste for em nível macro, quebra o volume pelos clientes usando histórico de vendas do ERP (Nesta fase ainda faz sentido olhar para o passado)
             skus = list({l.sku for l in linhas if l.sku})
             cgcs = list({l.cgc for l in linhas if l.cgc})
             
@@ -186,7 +159,6 @@ async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: 
                 .filter(FatoVendas.sku.in_(skus), FatoVendas.cgc.in_(cgcs), FatoVendas.data_pedido >= data_limite_str)
             
             if filtro_vend: historico_query = historico_query.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
-
             historico = historico_query.group_by(FatoVendas.sku, FatoVendas.cgc).all()
                 
             dict_hist = {f"{h.sku}_{h.cgc}": float(h.vol_hist or 0) for h in historico}
@@ -196,27 +168,24 @@ async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: 
             volume_total = int(ajuste.novo_volume)
             
             for i, l in enumerate(linhas):
-                if i == len(linhas) - 1:
-                    rateado = volume_total - soma_dist 
+                if i == len(linhas) - 1: rateado = volume_total - soma_dist 
                 else:
                     peso = dict_hist.get(f"{l.sku}_{l.cgc}", 0) / soma_hist if soma_hist > 0 else 1.0 / len(linhas)
                     rateado = int(round(volume_total * peso))
                     soma_dist += rateado
                 
+                # Preenche a intenção comercial e projeta para o final
                 l.vol_bottomup = rateado
                 l.vol_final = rateado
 
         origem_trava = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else nome_responsavel
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == origem_trava).first()
-        if not registro: 
-            db.add(ControleCiclo(ciclo_sop=ciclo, origem=origem_trava, status='Fechado'))
-        else: 
-            registro.status = 'Fechado'
+        if not registro: db.add(ControleCiclo(ciclo_sop=ciclo, origem=origem_trava, status='Fechado'))
+        else: registro.status = 'Fechado'
             
         db.commit()
         return {"status": "success"}
-    except HTTPException as he: 
-        raise he
+    except HTTPException as he: raise he
     except Exception as e: 
         db.rollback()
         raise HTTPException(500, repr(e))
@@ -237,7 +206,6 @@ async def grafico_micro(chave_matriz: str, nivel_hierarquia: str = 'vendedor', n
         filtro_vend = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else (nome_responsavel if nivel_hierarquia == 'vendedor' else None)
         filtro_reg = nome_responsavel if nivel_hierarquia != 'vendedor' and usuario['funcao'] != 'Executivo' else None
 
-        # Desacopla do get_truth_query para evitar choques de GROUP BY nativos
         q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol_real'))\
             .join(DimCliente, FatoVendas.cgc == DimCliente.cgc).filter(FatoVendas.data_pedido >= hoje - relativedelta(years=2))
             
@@ -247,7 +215,6 @@ async def grafico_micro(chave_matriz: str, nivel_hierarquia: str = 'vendedor', n
         q_proj = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), func.sum(FatoIbpGranular.vol_bottomup).label('vol_consenso'))\
             .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(FatoIbpGranular.ciclo_sop == ciclo_atual)
 
-        # Filtro Central na Dimensão (Garante os mesmos números da Tabela)
         if filtro_vend: 
             q_hist = q_hist.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
             q_ant = q_ant.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == filtro_vend.strip().upper())
@@ -305,5 +272,4 @@ async def grafico_micro(chave_matriz: str, nivel_hierarquia: str = 'vendedor', n
             })
             
         return {"status": "success", "dados": timeline}
-    except Exception as e:
-        raise HTTPException(500, repr(e))
+    except Exception as e: raise HTTPException(500, repr(e))

@@ -107,7 +107,6 @@ async def aprovar_dashboard_global(payload: PayloadAprovarGlobal, db: Session = 
             if ajuste.nivel == 'cliente':
                 partes = ajuste.chave.split('_', 1)
                 sku, razaosocial = partes[0], partes[1] if len(partes) > 1 else ""
-                # Corrigido para retornar o objeto e permitir a edição do vol_final
                 linhas = query.filter(FatoIbpGranular.sku == sku, func.trim(DimCliente.razaosocial) == razaosocial.strip()).all()
             elif ajuste.nivel == 'produto':
                 linhas = query.filter(FatoIbpGranular.sku == ajuste.chave).all()
@@ -126,6 +125,15 @@ async def aprovar_dashboard_global(payload: PayloadAprovarGlobal, db: Session = 
 
         if not registro: db.add(ControleCiclo(ciclo_sop=ciclo, origem='S&OP-Final', status='Fechado'))
         else: registro.status = 'Fechado'
+        
+        # =====================================================================
+        # GATILHO DE ATUALIZAÇÃO DA META
+        # Copia o 'vol_final' para o 'vol_meta' criando a fotografia de execução
+        # =====================================================================
+        db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo).update(
+            {"vol_meta": FatoIbpGranular.vol_final}, synchronize_session=False
+        )
+
         db.commit()
         return {"status": "success"}
     except Exception as e:
@@ -148,6 +156,7 @@ async def exportar_excel_global(db: Session = Depends(get_db), usuario_logado: d
             func.sum(FatoIbpGranular.vol_supply).label('vol_supply'), 
             func.sum(FatoIbpGranular.vol_bottomup).label('vol_bu'), 
             func.sum(FatoIbpGranular.vol_final).label('vol_final'),
+            func.sum(FatoIbpGranular.vol_meta).label('vol_meta'), # INCLUÍDO AQUI
             func.sum(FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('rec_ia'), 
             func.sum(FatoIbpGranular.vol_topdown * FatoIbpGranular.pmv_aplicado).label('rec_td'),
             func.sum(FatoIbpGranular.vol_supply * FatoIbpGranular.pmv_aplicado).label('rec_supply'), 
@@ -167,7 +176,8 @@ async def exportar_excel_global(db: Session = Depends(get_db), usuario_logado: d
                 "Meta Gerencial": int(r.vol_td or 0), "Receita Gerencial (R$)": float(r.rec_td or 0),
                 "Meta Restrita (Supply)": int(r.vol_supply or 0), "Receita Supply (R$)": float(r.rec_supply or 0), 
                 "Proposta Comercial": int(r.vol_bu or 0), "Receita Comercial (R$)": float(r.rec_bu or 0),
-                "Demanda Irrestrita": int(r.vol_final or 0), "Faturamento Irrestrito (R$)": float(r.rec_final or 0)
+                "Demanda Irrestrita": int(r.vol_final or 0), "Faturamento Irrestrito (R$)": float(r.rec_final or 0),
+                "Meta Oficial de Execução": int(r.vol_meta or 0) # COLUNA NOVA NO EXCEL
             })
 
         df = pd.DataFrame(dados)

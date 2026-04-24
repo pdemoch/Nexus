@@ -8,7 +8,7 @@ from dateutil.relativedelta import relativedelta
 from collections import defaultdict
 
 from app.core.database import get_db
-from app.models.domain_models import DimProduto, FatoIbpGranular, ControleCiclo, FatoVendas
+from app.models.domain_models import DimProduto, FatoIbpGranular, ControleCiclo
 from app.api.routers.router_auth import get_current_user
 from app.api.routers.shared_ibp import (
     get_current_cycle, get_projection_window, get_truth_query, check_global_lock, parse_date_safe
@@ -16,17 +16,11 @@ from app.api.routers.shared_ibp import (
 
 router = APIRouter(prefix="/api/v1/consensus/supply", tags=["Consenso Supply Review"])
 
-# =====================================================================
-# PERMISSÕES
-# =====================================================================
 def require_supply_or_admin(usuario: dict = Depends(get_current_user)):
     if usuario['funcao'] not in ['Administrador', 'Supply Chain']:
         raise HTTPException(status_code=403, detail="Acesso Restrito ao time de Supply Chain.")
     return usuario
 
-# =====================================================================
-# SCHEMAS
-# =====================================================================
 class AjusteSupply(BaseModel):
     produto: str
     mes_projetado: str
@@ -37,9 +31,6 @@ class PayloadCongelarSupply(BaseModel):
     origem_ajuste: str
     ajustes: List[AjusteSupply]
 
-# =====================================================================
-# ENDPOINTS
-# =====================================================================
 @router.get("/status")
 async def checar_status_supply(db: Session = Depends(get_db)):
     reg_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == get_current_cycle(), ControleCiclo.origem == 'Top-Down').first()
@@ -59,7 +50,7 @@ async def listar_supply(db: Session = Depends(get_db), usuario: dict = Depends(r
         
         projecoes = query_base.with_entities(
             FatoIbpGranular.sku, FatoIbpGranular.mes_projetado, 
-            func.sum(FatoIbpGranular.vol_topdown).label('v_td'), # Referência agora é o TopDown
+            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), # Referência do Supply agora é o Bottom-Up!
             func.sum(FatoIbpGranular.vol_supply).label('v_sp'), 
             func.max(FatoIbpGranular.justificativa_supply).label('justificativa'),
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv_avg'), 
@@ -85,7 +76,7 @@ async def listar_supply(db: Session = Depends(get_db), usuario: dict = Depends(r
             p["meses"].append({
                 "mes_banco": str(r.mes_projetado), 
                 "mes_str": r.mes_projetado.strftime("%b/%y").capitalize(), 
-                "vol_ref": int(r.v_td or 0), # Mostra o TopDown como "Base"
+                "vol_ref": int(r.v_bu or 0), # Front-end verá a intenção do comercial
                 "vol_ajustado": v_sp, 
                 "justificativa": r.justificativa or "",
                 "pmv": pmv_real, 
@@ -102,11 +93,10 @@ async def congelar_supply(payload: PayloadCongelarSupply, db: Session = Depends(
         ciclo = get_current_cycle()
         check_global_lock(db, ciclo)
         
+        # Garante que pelo menos o macro começou. Não trava por Vendedor pois eles trancam individualmente.
         reg_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
         if not reg_td or reg_td.status != 'Fechado':
-             raise HTTPException(status_code=403, detail="O Top-Down Comercial ainda não foi congelado. Aguarde a liberação da Diretoria.")
-
-        data_limite_str = (datetime.date.today() - relativedelta(months=12)).strftime('%Y-%m-%d')
+             raise HTTPException(status_code=403, detail="O Ciclo ainda não foi iniciado pela Diretoria.")
 
         for ajuste in payload.ajustes:
             data_alvo = parse_date_safe(ajuste.mes_projetado)
@@ -114,12 +104,10 @@ async def congelar_supply(payload: PayloadCongelarSupply, db: Session = Depends(
 
             if not linhas: continue
 
-            historico_agrupado = db.query(FatoVendas.cgc, func.sum(FatoVendas.qt_pedido).label('vol_cli'))\
-                .filter(FatoVendas.sku == ajuste.produto, FatoVendas.data_pedido >= data_limite_str)\
-                .group_by(FatoVendas.cgc).all()
-
-            mapa_hist = {h.cgc: float(h.vol_cli or 0) for h in historico_agrupado}
-            soma_hist = sum(mapa_hist.values())
+            # ---------------------------------------------------------------------
+            # NOVA REGRA DE RATEIO (FASE 3): Pesa pela Intenção Comercial (Bottom-Up)
+            # ---------------------------------------------------------------------
+            soma_bu_total = sum([float(l.vol_bottomup or 0) for l in linhas])
             
             soma_dist = 0
             volume_total = int(ajuste.novo_volume)
@@ -128,16 +116,20 @@ async def congelar_supply(payload: PayloadCongelarSupply, db: Session = Depends(
                 if i == len(linhas) - 1:
                     rateado = volume_total - soma_dist 
                 else:
-                    vol_cli = mapa_hist.get(l.cgc, 0.0)
-                    peso = vol_cli / soma_hist if soma_hist > 0 else 1.0 / len(linhas)
+                    # Proteção contra "Divisão por Zero" (Caso o comercial tenha zerado tudo)
+                    if soma_bu_total > 0:
+                        peso = float(l.vol_bottomup or 0) / soma_bu_total
+                    else:
+                        peso = 1.0 / len(linhas) # Fallback: divide igual
+                        
                     rateado = int(round(volume_total * peso))
                     soma_dist += rateado
                     
                 l.vol_supply = rateado
                 l.justificativa_supply = ajuste.justificativa
-                # Efeito Cascata: Sobrescreve as fases sucessoras
-                l.vol_bottomup = rateado
-                l.vol_final = rateado
+                
+                # IMPORTANTE: vol_bottomup NÃO É SOBRESCRITO AQUI! Fica preservado.
+                l.vol_final = rateado # O Final herda do Supply
 
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
         if not registro: 

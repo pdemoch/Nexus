@@ -106,7 +106,7 @@ class FatoInboundProducao(Base):
     produto_rel = relationship("DimProduto", back_populates="inbound")
 
 # =========================================================================
-# MODELOS ORIGINAIS DO S&OP (MANTIDOS)
+# MODELOS ORIGINAIS DO S&OP (MANTIDOS E ATUALIZADOS)
 # =========================================================================
 
 class FatoIbpGranular(Base):
@@ -126,6 +126,7 @@ class FatoIbpGranular(Base):
     justificativa_supply = Column(String, nullable=True) 
     vol_bottomup = Column(Integer, default=0)
     vol_final = Column(Integer, default=0) 
+    vol_meta = Column(Integer, default=0) # NOVA COLUNA: Meta congelada após aprovação global
     
     pmv_aplicado = Column(Float, default=0.0)
     
