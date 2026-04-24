@@ -26,9 +26,11 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   const [sorting, setSorting] = useState<SortingState>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   
-  // O NOVO ESTADO DA TRAVA GLOBAL E DA CASCATA
+  // =========================================================================
+  // CORREÇÃO: O Bottom-Up agora espera pelo Top-Down (Fase 1)
+  // =========================================================================
   const [isFechado, setIsFechado] = useState(false);
-  const [isSupplyFechado, setIsSupplyFechado] = useState<boolean | null>(null);
+  const [isTopDownFechado, setIsTopDownFechado] = useState<boolean | null>(null);
   
   const [chartExpanded, setChartExpanded] = useState<string | null>(null);
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
@@ -42,10 +44,10 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     axios.get('/api/v1/consensus/micro/filtros', { params: { gerente_nome: usuarioSessao?.gerente_nome } })
          .then(res => setOpcoesBusca(res.data)).catch(console.error);
 
-    // NOVO: Verifica se o Supply Chain liberou a meta para a equipa comercial
-    axios.get('/api/v1/consensus/supply/status')
-         .then(res => setIsSupplyFechado(res.data.is_supply_fechado))
-         .catch(() => setIsSupplyFechado(false));
+    // CORREÇÃO: Consulta a rota macro (Top-Down) para saber se pode liberar a tela
+    axios.get('/api/v1/consensus/macro/status')
+         .then(res => setIsTopDownFechado(res.data.is_topdown_fechado))
+         .catch(() => setIsTopDownFechado(false));
   }, [usuarioSessao]);
 
   const fetchData = useCallback(async () => {
@@ -72,8 +74,8 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   }, [nivelHierarquia, nomeResponsavel]);
 
   useEffect(() => { 
-    if (isExecutivo && nomeResponsavel && isSupplyFechado) fetchData(); 
-  }, [fetchData, isExecutivo, nomeResponsavel, isSupplyFechado]);
+    if (isExecutivo && nomeResponsavel && isTopDownFechado) fetchData(); 
+  }, [fetchData, isExecutivo, nomeResponsavel, isTopDownFechado]);
 
   const handleExportExcel = () => {
     if (dadosBrutos.length === 0) return alert("Não há dados no ecrã para exportar.");
@@ -89,6 +91,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           const edicao = celulasEditadas[prod.chave_matriz]?.[m.mes_banco];
           const volFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : m.vol_ajustado));
           linha[`${m.mes_str} (Base IA)`] = Math.round(Number(m.vol_ia));
+          linha[`${m.mes_str} (Top-Down)`] = Math.round(Number(m.vol_td || 0));
           linha[`${m.mes_str} (Comercial)`] = volFinal;
         });
         dadosExcel.push(linha);
@@ -309,9 +312,9 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   });
 
   // =========================================================================
-  // TELA DE BLOQUEIO DE FASE (AGUARDANDO SUPPLY CHAIN)
+  // CORREÇÃO: TELA DE BLOQUEIO DE FASE (AGUARDANDO TOP-DOWN)
   // =========================================================================
-  if (isSupplyFechado === null) {
+  if (isTopDownFechado === null) {
     return (
       <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
         <Loader2 className="w-8 h-8 animate-spin text-indigo-500 mb-4" />
@@ -320,16 +323,16 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     );
   }
 
-  if (isSupplyFechado === false) {
+  if (isTopDownFechado === false) {
     return (
       <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans p-6">
         <div className="bg-white p-12 rounded-[40px] shadow-xl border border-slate-100 flex flex-col items-center max-w-lg text-center animate-in fade-in zoom-in duration-500">
-          <div className="w-20 h-20 bg-amber-50 rounded-full flex items-center justify-center mb-6 border border-amber-100">
-            <AlertTriangle className="w-10 h-10 text-amber-500" />
+          <div className="w-20 h-20 bg-blue-50 rounded-full flex items-center justify-center mb-6 border border-blue-100">
+            <Lock className="w-10 h-10 text-blue-500" />
           </div>
-          <h2 className="text-2xl font-black text-slate-900 tracking-tighter mb-4">Aguardando Supply Chain</h2>
+          <h2 className="text-2xl font-black text-slate-900 tracking-tighter mb-4">Aguardando Diretoria (Top-Down)</h2>
           <p className="text-slate-500 font-medium leading-relaxed">
-            A fase Comercial (Bottom-Up) só pode ser iniciada após a aprovação e congelamento do plano de restrições pela equipa de <strong>Supply Chain (Fase 3)</strong>.
+            A fase Comercial (Bottom-Up) só pode ser iniciada após a aprovação e congelamento da demanda macro pela <strong>Diretoria (Fase 1)</strong>.
           </p>
         </div>
       </div>
@@ -479,7 +482,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                                </div>
                             </div>
 
-                            {/* REMOVIDO: -ml-4 */}
                             <div className="h-[250px] w-full">
                               {loadingGrafico === row.original.chave_matriz ? (
                                 <div className="h-full flex items-center justify-center text-slate-600"><Loader2 className="animate-spin w-8 h-8" /></div>
@@ -494,7 +496,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                                           return { ...p, Consenso: valComercial !== null ? valComercial : p.Consenso };
                                       })
                                     }
-                                    // ADICIONADO: Respiro nas laterais
                                     margin={{ top: 20, right: 30, left: 20, bottom: 10 }}
                                   >
                                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
