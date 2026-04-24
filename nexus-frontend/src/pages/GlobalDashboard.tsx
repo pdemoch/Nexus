@@ -4,9 +4,11 @@ import {
 } from '@tanstack/react-table';
 import { 
   Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
-  Layers, Lock, Download, AlertTriangle, ShieldCheck, Check, Activity, Globe, Package, Users
+  Layers, Lock, Download, AlertTriangle, ShieldCheck, Check, Activity, Globe, Package, Users, Search, Filter, BarChart3, TrendingUp, DollarSign
 } from 'lucide-react';
 import axios from 'axios';
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart } from 'recharts';
+import * as XLSX from 'xlsx';
 
 const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor));
 const formatVolume = (val: number) => Math.round(val).toLocaleString('pt-BR');
@@ -16,15 +18,17 @@ export default function GlobalDashboard() {
   const [isLoading, setIsLoading] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false);
   
-  // =========================================================================
   // STATUS DO CICLO (BLINDAGEM EM CASCATA)
-  // =========================================================================
   const [isLocked, setIsLocked] = useState(false);
   const [lockMessage, setLockMessage] = useState('');
   
   const [celulasEditadas, setCelulasEditadas] = useState<any>({});
   const [expanded, setExpanded] = useState({});
   const [sorting, setSorting] = useState<SortingState>([]);
+
+  // FILTROS
+  const [busca, setBusca] = useState('');
+  const [categoriaSelecionada, setCategoriaSelecionada] = useState('TODAS');
 
   const fetchData = useCallback(async () => {
     setIsLoading(true);
@@ -87,13 +91,20 @@ export default function GlobalDashboard() {
     }
   };
 
+  const categoriasUnicas = useMemo(() => Array.from(new Set(dadosBrutos.map(d => d.categoria).filter(Boolean))).sort(), [dadosBrutos]);
+
+  const dadosFiltrados = useMemo(() => dadosBrutos.filter(d => 
+    (d.produto + ' ' + d.descricao + ' ' + d.cliente_razaosocial).toLowerCase().includes(busca.toLowerCase()) &&
+    (categoriaSelecionada === 'TODAS' || d.categoria === categoriaSelecionada)
+  ), [dadosBrutos, busca, categoriaSelecionada]);
+
   // Agrupamento de dados para a Tabela (Hierarquia: Produto -> Cliente)
   const dadosAgrupados = useMemo(() => {
-    if (!dadosBrutos || dadosBrutos.length === 0) return [];
+    if (!dadosFiltrados || dadosFiltrados.length === 0) return [];
     
     const mapaProdutos = new Map();
     
-    dadosBrutos.forEach(r => {
+    dadosFiltrados.forEach(r => {
       const pKey = r.produto;
       if (!mapaProdutos.has(pKey)) {
         mapaProdutos.set(pKey, {
@@ -111,10 +122,8 @@ export default function GlobalDashboard() {
           });
       }
       const cli = prod.subRowsMap.get(cKey);
-      
       const mStr = r.mes_projetado;
       
-      // Agrega no Produto
       if (!prod.meses.has(mStr)) {
           prod.meses.set(mStr, { mes_banco: mStr, vol_ia: 0, vol_td: 0, vol_supply: 0, vol_bu: 0, vol_final: 0, receita: 0 });
       }
@@ -122,7 +131,6 @@ export default function GlobalDashboard() {
       mProd.vol_ia += r.vol_ia; mProd.vol_td += r.vol_td; mProd.vol_supply += r.vol_supply; 
       mProd.vol_bu += r.vol_bu; mProd.vol_final += r.vol_irrestrito; mProd.receita += r.rec_final;
       
-      // Atribui no Cliente
       cli.meses.set(mStr, {
           mes_banco: mStr, vol_ia: r.vol_ia, vol_td: r.vol_td, vol_supply: r.vol_supply, 
           vol_bu: r.vol_bu, vol_final: r.vol_irrestrito, receita: r.rec_final
@@ -136,23 +144,47 @@ export default function GlobalDashboard() {
             ...c, meses: Array.from(c.meses.values()).sort((a: any, b: any) => a.mes_banco.localeCompare(b.mes_banco))
         }))
     }));
-  }, [dadosBrutos]);
+  }, [dadosFiltrados]);
 
   const totaisGerais = useMemo(() => {
-    const totais: Record<string, {vol: number, fat: number}> = {};
+    const totais: Record<string, {vol: number, fat: number, bu: number, sp: number}> = {};
+    let totalVolumeGlobal = 0;
+    let totalReceitaGlobal = 0;
+
     dadosAgrupados.forEach(prod => {
       prod.meses.forEach((m: any) => {
-        if (!totais[m.mes_banco]) totais[m.mes_banco] = {vol: 0, fat: 0};
+        if (!totais[m.mes_banco]) totais[m.mes_banco] = {vol: 0, fat: 0, bu: 0, sp: 0};
         
         const edicaoProd = celulasEditadas[prod.chave_matriz]?.[m.mes_banco];
         const isPendente = edicaoProd !== undefined;
         const volumeFinal = Math.round(Number(isPendente ? edicaoProd.novo_volume : m.vol_final));
         
         totais[m.mes_banco].vol += volumeFinal;
-        totais[m.mes_banco].fat += m.receita; // Faturamento mantido base S&OP para simplificação visual
+        totais[m.mes_banco].bu += m.vol_bu;
+        totais[m.mes_banco].sp += m.vol_supply;
+        
+        const pmvAprox = m.vol_final > 0 ? (m.receita / m.vol_final) : 0;
+        const receitaCalculada = isPendente ? (volumeFinal * pmvAprox) : m.receita;
+        
+        totais[m.mes_banco].fat += receitaCalculada;
+        totalVolumeGlobal += volumeFinal;
+        totalReceitaGlobal += receitaCalculada;
       });
     });
-    return totais;
+
+    const chartData = Object.keys(totais).sort().map(mes => {
+      const parts = mes.split('-');
+      const shortMes = parts.length === 3 ? `${parts[1]}/${parts[0].slice(2)}` : mes;
+      return {
+        name: shortMes,
+        Comercial: totais[mes].bu,
+        Supply: totais[mes].sp,
+        Final: totais[mes].vol,
+        Receita: totais[mes].fat
+      };
+    });
+
+    return { porMes: totais, totalVolume: totalVolumeGlobal, totalReceita: totalReceitaGlobal, skus: dadosAgrupados.length, chartData };
   }, [dadosAgrupados, celulasEditadas]);
 
   const columns = useMemo(() => {
@@ -214,13 +246,12 @@ export default function GlobalDashboard() {
           
           const isProduto = row.tipo === 'produto';
           const bloqueado = meta.isLocked;
-          
           const isGlobalFechado = meta.lockMessage === "Demanda Irrestrita Publicada";
 
           return (
             <div className="flex flex-col w-36 gap-1.5 relative group">
               <div className="flex justify-between items-center px-1">
-                 <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest" title="Proposta Comercial Base">BU: {Math.round(dadosMes?.vol_bu || 0)}</span>
+                 <span className="text-[9px] text-indigo-500 font-black uppercase tracking-widest" title="Proposta Comercial Base">BU: {Math.round(dadosMes?.vol_bu || 0)}</span>
                  <span className="text-[9px] text-amber-500 font-black uppercase tracking-widest" title="Capacidade Supply">SP: {Math.round(dadosMes?.vol_supply || 0)}</span>
               </div>
               
@@ -278,7 +309,7 @@ export default function GlobalDashboard() {
           
           <div className={isLocked && !isLoading ? "pt-4" : ""}>
             <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
-              <Globe className="w-8 h-8 text-indigo-600" /> S&OP Global
+              <Globe className="w-8 h-8 text-indigo-600" /> S&OP Global Dashboard
             </h1>
             <p className="text-sm font-bold text-slate-400 mt-1 uppercase tracking-widest pl-11">
               Visão Executiva & Aprovação de Demanda Irrestrita
@@ -307,7 +338,82 @@ export default function GlobalDashboard() {
           </div>
         </div>
 
-        {/* TABELA DE APROVAÇÃO (SÓ RENDERIZA SE HOUVER DADOS) */}
+        {/* ========================================== */}
+        {/* NOVA SEÇÃO: CARDS E GRÁFICO MACRO DE VISÃO */}
+        {/* ========================================== */}
+        {!isLoading && dadosAgrupados.length > 0 && (
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-6">
+            {/* CARDS */}
+            <div className="lg:col-span-1 flex flex-col gap-4">
+              <div className="bg-indigo-600 rounded-[24px] p-6 shadow-lg shadow-indigo-600/20 text-white relative overflow-hidden">
+                <div className="absolute top-0 right-0 p-4 opacity-20"><Package className="w-16 h-16" /></div>
+                <h3 className="text-[10px] font-black uppercase tracking-widest text-indigo-200 mb-1">SKUs no Pipeline</h3>
+                <p className="text-4xl font-black">{totaisGerais.skus}</p>
+              </div>
+              
+              <div className="bg-white rounded-[24px] p-6 shadow-sm border border-slate-100">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="bg-amber-100 p-1.5 rounded-lg"><BarChart3 className="w-4 h-4 text-amber-600" /></div>
+                  <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-500">Volume Total Planejado</h3>
+                </div>
+                <p className="text-2xl font-black text-slate-800">{formatVolume(totaisGerais.totalVolume)} <span className="text-sm text-slate-400 font-bold">CX</span></p>
+              </div>
+
+              <div className="bg-white rounded-[24px] p-6 shadow-sm border border-slate-100">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="bg-emerald-100 p-1.5 rounded-lg"><DollarSign className="w-4 h-4 text-emerald-600" /></div>
+                  <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-500">Receita Total Projetada</h3>
+                </div>
+                <p className="text-2xl font-black text-slate-800 tracking-tight">{formatMoeda(totaisGerais.totalReceita)}</p>
+              </div>
+            </div>
+
+            {/* GRÁFICO MACRO */}
+            <div className="lg:col-span-3 bg-white rounded-[32px] p-6 shadow-sm border border-slate-100 flex flex-col h-full min-h-[300px]">
+               <div className="flex items-center justify-between mb-4">
+                 <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest flex items-center gap-2">
+                   <TrendingUp className="w-4 h-4 text-indigo-500" /> Comparativo de Fases S&OP
+                 </h3>
+               </div>
+               <div className="flex-1 w-full min-h-[250px]">
+                 <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={totaisGerais.chartData} margin={{ top: 20, right: 20, left: 20, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                      <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
+                      <YAxis yAxisId="left" tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} tickLine={false} tickFormatter={(val) => `${(val/1000).toFixed(0)}k`} />
+                      <Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{borderRadius: '16px', border: '1px solid #e2e8f0', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}} />
+                      <Legend wrapperStyle={{fontSize: '11px', fontWeight: '900'}} />
+                      <Bar yAxisId="left" dataKey="Comercial" name="Comercial (BU)" fill="#818cf8" radius={[4, 4, 0, 0]} maxBarSize={40} />
+                      <Bar yAxisId="left" dataKey="Supply" name="Supply (SP)" fill="#f59e0b" radius={[4, 4, 0, 0]} maxBarSize={40} />
+                      <Line yAxisId="left" type="monotone" dataKey="Final" name="Demanda Irrestrita (Final)" stroke="#0f172a" strokeWidth={4} dot={{r: 4, fill: '#0f172a'}} />
+                    </ComposedChart>
+                 </ResponsiveContainer>
+               </div>
+            </div>
+          </div>
+        )}
+
+        {/* BUSCA E FILTROS */}
+        <div className="flex flex-col md:flex-row gap-4 mb-6">
+           <div className="flex-1 bg-white p-3 rounded-[24px] shadow-sm border border-slate-100 flex flex-col md:flex-row items-center gap-3">
+             <div className="flex-1 flex items-center gap-3 px-4 bg-slate-50 rounded-xl border border-slate-100 w-full">
+               <Search className="w-5 h-5 text-slate-400" />
+               <input 
+                 type="text" placeholder="Filtrar por Produto ou Cliente..." value={busca} onChange={e => setBusca(e.target.value)}
+                 className="w-full bg-transparent py-3 text-sm font-bold text-slate-800 outline-none placeholder:text-slate-400"
+               />
+             </div>
+             <div className="flex items-center gap-2 px-4 bg-slate-50 rounded-xl border border-slate-100 w-full md:w-auto">
+               <Filter className="w-4 h-4 text-slate-400" />
+               <select value={categoriaSelecionada} onChange={e => setCategoriaSelecionada(e.target.value)} className="bg-transparent py-3 text-sm font-bold text-slate-700 outline-none cursor-pointer">
+                 <option value="TODAS">TODAS AS CATEGORIAS</option>
+                 {categoriasUnicas.map(c => <option key={c as string} value={c as string}>{c as string}</option>)}
+               </select>
+             </div>
+           </div>
+        </div>
+
+        {/* TABELA DE APROVAÇÃO */}
         <div className="bg-white rounded-[40px] shadow-2xl border border-slate-100 overflow-hidden relative min-h-[400px]">
           {isLoading ? (
              <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 backdrop-blur-sm z-10">
@@ -366,8 +472,8 @@ export default function GlobalDashboard() {
                       return (
                         <td key={header.id} className="px-8 py-5">
                           <div className="flex flex-col items-center justify-center min-w-[100px]">
-                            <span className="font-black text-white">{formatVolume(totaisGerais[m]?.vol || 0)} <span className="text-[9px] text-slate-400">CX</span></span>
-                            <span className="font-black text-emerald-400 text-[13px] tracking-tight mt-0.5">{formatMoeda(totaisGerais[m]?.fat || 0)}</span>
+                            <span className="font-black text-white">{formatVolume(totaisGerais.porMes[m]?.vol || 0)} <span className="text-[9px] text-slate-400">CX</span></span>
+                            <span className="font-black text-emerald-400 text-[13px] tracking-tight mt-0.5">{formatMoeda(totaisGerais.porMes[m]?.fat || 0)}</span>
                           </div>
                         </td>
                       );
