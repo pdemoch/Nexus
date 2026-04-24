@@ -253,10 +253,12 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
         ciclo = get_current_cycle()
         check_global_lock(db, ciclo)
 
-        # NOVA BLINDAGEM: Bottom-Up só inicia após o Supply Review Congelar
-        reg_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
-        if not reg_sp or reg_sp.status != 'Fechado':
-             raise HTTPException(status_code=403, detail="A meta oficial ainda não foi liberada pela equipe de Supply Chain (Fase 3). Aguarde.")
+        # =================================================================
+        # CORREÇÃO FASE 2: Exige que a Fase 1 (Top-Down) esteja fechada
+        # =================================================================
+        reg_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
+        if not reg_td or reg_td.status != 'Fechado':
+             raise HTTPException(status_code=403, detail="A estratégia macro ainda não foi liberada pela Diretoria (Fase 1). Aguarde.")
         
         vendedores_afetados = list({a.chave.split('|')[0].strip() for a in payload.ajustes})
         for v in vendedores_afetados: 
@@ -322,10 +324,12 @@ async def lock_all(payload: PayloadLockAll, db: Session = Depends(get_db), usuar
         ciclo = get_current_cycle()
         check_global_lock(db, ciclo)
 
-        # NOVA BLINDAGEM: Bottom-Up só inicia após o Supply Review Congelar
-        reg_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
-        if not reg_sp or reg_sp.status != 'Fechado':
-             raise HTTPException(status_code=403, detail="A meta oficial ainda não foi liberada pela equipe de Supply Chain (Fase 3). Aguarde.")
+        # =================================================================
+        # CORREÇÃO FASE 2: Exige que a Fase 1 (Top-Down) esteja fechada
+        # =================================================================
+        reg_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
+        if not reg_td or reg_td.status != 'Fechado':
+             raise HTTPException(status_code=403, detail="A estratégia macro ainda não foi liberada pela Diretoria (Fase 1). Aguarde.")
         
         m2, m4 = get_projection_window()
         

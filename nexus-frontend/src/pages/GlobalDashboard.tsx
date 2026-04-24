@@ -1,419 +1,384 @@
-import { useState, useMemo, useEffect, useCallback } from 'react';
-import { useReactTable, getCoreRowModel, flexRender, getExpandedRowModel, getSortedRowModel, SortingState } from '@tanstack/react-table';
-import { Loader2, ChevronDown, ChevronRight, Save, Layers, Package, Users, ArrowUpDown, ArrowUp, ArrowDown, TrendingUp, ChevronLast, Lock, Download, BarChart2 } from 'lucide-react';
+import React, { useState, useMemo, useEffect, useCallback, Fragment } from 'react';
+import {
+  useReactTable, getCoreRowModel, flexRender, getExpandedRowModel, getSortedRowModel, SortingState
+} from '@tanstack/react-table';
+import { 
+  Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
+  Layers, Lock, Download, AlertTriangle, ShieldCheck, Check, Activity, Globe, Package, Users
+} from 'lucide-react';
 import axios from 'axios';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer } from 'recharts';
 
 const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor));
 const formatVolume = (val: number) => Math.round(val).toLocaleString('pt-BR');
-const calcVar = (atual: number, base: number) => base > 0 ? ((atual - base) / base) * 100 : 0;
-
-const EditableCell = ({ initialValue, onSave, isChanged, isLocked }: any) => {
-  const safeInt = initialValue === 0 ? '' : Math.round(Number(initialValue));
-  const [value, setValue] = useState<any>(safeInt);
-  
-  useEffect(() => { setValue(initialValue === 0 ? '' : Math.round(Number(initialValue))); }, [initialValue]);
-  const onBlur = () => { if (value !== (initialValue===0?'':Math.round(Number(initialValue)))) onSave(value === '' ? 0 : value); };
-
-  if (isLocked) {
-    return <div className="w-full text-center text-sm font-black p-2 text-slate-600 bg-slate-50 border border-slate-200 rounded-lg">{initialValue === 0 ? '-' : Math.round(Number(initialValue)).toLocaleString('pt-BR')}</div>;
-  }
-
-  return (
-    <input
-      type="number" value={value} placeholder="0" disabled={isLocked}
-      onChange={e => setValue(e.target.value === '' ? '' : Math.round(Number(e.target.value)))}
-      onBlur={onBlur} onKeyDown={e => e.key === 'Enter' && onBlur()}
-      className={`w-full text-center text-sm font-black p-2 rounded-lg border-2 transition-all shadow-sm outline-none
-        ${isChanged ? 'bg-emerald-50 border-emerald-500 text-emerald-800' : 'bg-white border-slate-200 hover:border-slate-300 focus:border-indigo-500 text-slate-800'}`}
-    />
-  );
-};
 
 export default function GlobalDashboard() {
-  const [clientesArray, setClientesArray] = useState<any[]>([]);
-  const [mesesUnicos, setMesesUnicos] = useState<string[]>([]);
+  const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false);
   
-  const [isLocked, setIsLocked] = useState(false); 
-  const [lockMessage, setLockMessage] = useState('Publicar Demanda Irrestrita');
+  // =========================================================================
+  // STATUS DO CICLO (BLINDAGEM EM CASCATA)
+  // =========================================================================
+  const [isLocked, setIsLocked] = useState(false);
+  const [lockMessage, setLockMessage] = useState('');
   
+  const [celulasEditadas, setCelulasEditadas] = useState<any>({});
   const [expanded, setExpanded] = useState({});
   const [sorting, setSorting] = useState<SortingState>([]);
-  const [celulasEditadas, setCelulasEditadas] = useState<any>({});
 
   const fetchData = useCallback(async () => {
+    setIsLoading(true);
     try {
-      const res = await axios.get(`/api/v1/dashboard/global?t=${new Date().getTime()}`);
-      setIsLocked(res.data.is_locked); 
-      setLockMessage(res.data.lock_message || 'Publicar Demanda Irrestrita');
-      
-      const clientesMap = new Map();
-      const mesesSet = new Set<string>();
-      
-      res.data.dados.forEach((d: any) => {
-        mesesSet.add(d.mes_projetado);
-        if (!clientesMap.has(d.chave_matriz)) {
-          clientesMap.set(d.chave_matriz, { 
-            id: d.chave_matriz, categoria: d.categoria || 'SEM CATEGORIA', 
-            produto: d.produto, descricao: d.descricao, 
-            cliente: d.cliente_razaosocial, meses: {} 
-          });
-        }
-        clientesMap.get(d.chave_matriz).meses[d.mes_projetado] = { 
-          vol_ia: d.vol_ia, vol_td: d.vol_td, vol_supply: d.vol_supply, vol_bu: d.vol_bu, vol_irrestrito: d.vol_irrestrito,
-          rec_ia: d.rec_ia, rec_td: d.rec_td, rec_supply: d.rec_supply, rec_bu: d.rec_bu, rec_final: d.rec_final
-        };
-      });
-      setMesesUnicos(Array.from(mesesSet).sort());
-      setClientesArray(Array.from(clientesMap.values()));
-    } catch (e) { console.error(e); }
-    finally { setIsLoading(false); }
+      const res = await axios.get('/api/v1/dashboard/global');
+      setDadosBrutos(res.data.dados || []);
+      setIsLocked(res.data.is_locked);
+      setLockMessage(res.data.lock_message);
+      setCelulasEditadas({});
+      setExpanded({});
+    } catch (e) {
+      console.error(e);
+      setDadosBrutos([]);
+    } finally {
+      setIsLoading(false);
+    }
   }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const arvoreDados = useMemo(() => {
-    const catMap = new Map();
-    clientesArray.forEach(cli => {
-      if(!catMap.has(cli.categoria)) catMap.set(cli.categoria, { tipo: 'categoria', id: cli.categoria, nome_exibicao: cli.categoria, childrenMap: new Map() });
-      const catNode = catMap.get(cli.categoria);
-      if(!catNode.childrenMap.has(cli.produto)) catNode.childrenMap.set(cli.produto, { tipo: 'produto', id: cli.produto, chave_produto: cli.produto, nome_exibicao: cli.descricao, children: [] });
-      catNode.childrenMap.get(cli.produto).children.push({ ...cli, tipo: 'cliente', nome_exibicao: cli.cliente });
-    });
-    return Array.from(catMap.values()).map(cat => ({ ...cat, children: Array.from(cat.childrenMap.values()) }));
-  }, [clientesArray]);
-
-  const getMetricasNode = useCallback((node: any, mes: string, editadas: any): any => {
-    if (node.tipo === 'cliente') {
-      const editValue = editadas[`cliente|${node.id}|${mes}`];
-      const isEdited = editValue !== undefined;
-      
-      const volFinal = isEdited ? Math.round(Number(editValue)) : Math.round(Number(node.meses[mes]?.vol_irrestrito || 0));
-      const baseRecFinal = node.meses[mes]?.rec_final || 0;
-      const baseVolFinal = node.meses[mes]?.vol_irrestrito || 1;
-      const fatFinal = isEdited ? (volFinal * (baseRecFinal / baseVolFinal)) : baseRecFinal;
-
-      return { 
-        vol: volFinal, fat: fatFinal, 
-        ia: Math.round(Number(node.meses[mes]?.vol_ia || 0)), fat_ia: node.meses[mes]?.rec_ia || 0, 
-        td: Math.round(Number(node.meses[mes]?.vol_td || 0)), fat_td: node.meses[mes]?.rec_td || 0, 
-        supply: Math.round(Number(node.meses[mes]?.vol_supply || 0)), fat_supply: node.meses[mes]?.rec_supply || 0, 
-        bu: Math.round(Number(node.meses[mes]?.vol_bu || 0)), fat_bu: node.meses[mes]?.rec_bu || 0 
-      };
+  const handleExportExcel = async () => {
+    try {
+        const response = await axios.get('/api/v1/dashboard/export', { responseType: 'blob' });
+        const url = window.URL.createObjectURL(new Blob([response.data]));
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', 'Demanda_Irrestrita_Oficial.xlsx');
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+    } catch (e) {
+        alert("Erro ao exportar. Verifique se tem permissões e se há dados.");
     }
-    
-    return node.children.reduce((acc: any, c: any) => {
-      const r = getMetricasNode(c, mes, editadas);
-      return { 
-        vol: acc.vol + r.vol, fat: acc.fat + r.fat, 
-        ia: acc.ia + r.ia, fat_ia: acc.fat_ia + r.fat_ia, 
-        td: acc.td + r.td, fat_td: acc.fat_td + r.fat_td, 
-        supply: acc.supply + r.supply, fat_supply: acc.fat_supply + r.fat_supply, 
-        bu: acc.bu + r.bu, fat_bu: acc.fat_bu + r.fat_bu 
-      };
-    }, { vol: 0, fat: 0, ia: 0, fat_ia: 0, td: 0, fat_td: 0, supply: 0, fat_supply: 0, bu: 0, fat_bu: 0 });
-  }, []);
-
-  const handleDistribuirVolume = (produtoNode: any, mes: string) => {
-    if (isLocked) return;
-    const editKeyProd = `produto|${produtoNode.chave_produto}|${mes}`;
-    const novoVolumeTotal = celulasEditadas[editKeyProd];
-    if (novoVolumeTotal === undefined) return alert("Digite um valor no produto primeiro para distribuir.");
-    
-    const metricasOriginais = produtoNode.children.map((cli: any) => ({ id: cli.id, base: Math.round(Number(cli.meses[mes]?.vol_irrestrito || 0)) }));
-    const totalBase = metricasOriginais.reduce((acc: number, curr: any) => acc + curr.base, 0);
-    
-    const novasEdicoes: any = { ...celulasEditadas };
-    metricasOriginais.forEach((cli: any) => {
-      const peso = totalBase > 0 ? (cli.base / totalBase) : (1 / metricasOriginais.length);
-      novasEdicoes[`cliente|${cli.id}|${mes}`] = Math.round(novoVolumeTotal * peso);
-    });
-    delete novasEdicoes[editKeyProd];
-    setCelulasEditadas(novasEdicoes);
   };
 
-  const handleManualExport = async () => {
-    try {
-      const res = await axios.get('/api/v1/dashboard/export', { responseType: 'blob' });
-      const url = window.URL.createObjectURL(new Blob([res.data]));
-      const link = document.createElement('a');
-      link.href = url;
-      link.setAttribute('download', 'Demanda_Irrestrita_Oficial.xlsx');
-      document.body.appendChild(link);
-      link.click();
-      link.parentNode?.removeChild(link);
-    } catch (e) { alert("Erro ao exportar."); }
-  };
-
-  const handleSave = async () => {
-    if (isLocked) return;
-    if (!window.confirm("Atenção: A Publicação bloqueará a tela. Deseja aprovar este plano oficial?")) return;
+  const handleAprovar = async () => {
+    if (isLocked) return; 
     setIsProcessing(true);
+    const ajustes: any[] = [];
+    
+    Object.entries(celulasEditadas).forEach(([chave, meses]: any) => {
+      Object.entries(meses).forEach(([mes, val]: any) => {
+        ajustes.push({ 
+          nivel: chave.includes('_') ? 'cliente' : 'produto', 
+          chave: chave, 
+          mes_projetado: mes, 
+          novo_volume: val.novo_volume === '' ? 0 : val.novo_volume
+        });
+      });
+    });
+
     try {
-      const ajustes = Object.entries(celulasEditadas).map(([k, v]) => ({ nivel: k.split('|')[0], chave: k.split('|')[1], mes_projetado: k.split('|')[2], novo_volume: v === '' ? 0 : v }));
       await axios.post('/api/v1/dashboard/aprovar', { ajustes });
-      setCelulasEditadas({});
-      await fetchData(); 
-    } catch (e: any) { alert("Erro ao salvar."); } finally { setIsProcessing(false); }
+      alert("✅ S&OP Global Aprovado! A Demanda Irrestrita foi congelada como Meta Oficial (vol_meta).");
+      fetchData(); 
+    } catch (e: any) {
+      alert(e.response?.data?.detail || "Erro ao aprovar o ciclo.");
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
-  const stats = useMemo(() => {
-    const dataMes: any[] = mesesUnicos.map(m => {
-      let mTot = { ia: 0, fat_ia: 0, td: 0, fat_td: 0, supply: 0, fat_supply: 0, bu: 0, fat_bu: 0, final: 0, fat: 0 };
-      arvoreDados.forEach(cat => {
-        const r = getMetricasNode(cat, m, celulasEditadas);
-        mTot.ia += r.ia; mTot.fat_ia += r.fat_ia;
-        mTot.td += r.td; mTot.fat_td += r.fat_td;
-        mTot.supply += r.supply; mTot.fat_supply += r.fat_supply;
-        mTot.bu += r.bu; mTot.fat_bu += r.fat_bu;
-        mTot.final += r.vol; mTot.fat += r.fat;
+  // Agrupamento de dados para a Tabela (Hierarquia: Produto -> Cliente)
+  const dadosAgrupados = useMemo(() => {
+    if (!dadosBrutos || dadosBrutos.length === 0) return [];
+    
+    const mapaProdutos = new Map();
+    
+    dadosBrutos.forEach(r => {
+      const pKey = r.produto;
+      if (!mapaProdutos.has(pKey)) {
+        mapaProdutos.set(pKey, {
+            id: pKey, chave_matriz: pKey, nome: r.descricao, produto: r.produto, categoria: r.categoria, tipo: 'produto',
+            meses: new Map(), subRowsMap: new Map()
+        });
+      }
+      
+      const prod = mapaProdutos.get(pKey);
+      const cKey = `${r.produto}_${r.cliente_razaosocial}`;
+      
+      if (!prod.subRowsMap.has(cKey)) {
+          prod.subRowsMap.set(cKey, {
+              id: cKey, chave_matriz: cKey, nome: r.cliente_razaosocial, tipo: 'cliente', meses: new Map()
+          });
+      }
+      const cli = prod.subRowsMap.get(cKey);
+      
+      const mStr = r.mes_projetado;
+      
+      // Agrega no Produto
+      if (!prod.meses.has(mStr)) {
+          prod.meses.set(mStr, { mes_banco: mStr, vol_ia: 0, vol_td: 0, vol_supply: 0, vol_bu: 0, vol_final: 0, receita: 0 });
+      }
+      const mProd = prod.meses.get(mStr);
+      mProd.vol_ia += r.vol_ia; mProd.vol_td += r.vol_td; mProd.vol_supply += r.vol_supply; 
+      mProd.vol_bu += r.vol_bu; mProd.vol_final += r.vol_irrestrito; mProd.receita += r.rec_final;
+      
+      // Atribui no Cliente
+      cli.meses.set(mStr, {
+          mes_banco: mStr, vol_ia: r.vol_ia, vol_td: r.vol_td, vol_supply: r.vol_supply, 
+          vol_bu: r.vol_bu, vol_final: r.vol_irrestrito, receita: r.rec_final
       });
-      return { mesLabel: m.split('-').reverse().slice(1).join('/'), ...mTot };
     });
     
-    const glob = dataMes.reduce((acc, curr) => ({ 
-      ia: acc.ia + curr.ia, fat_ia: acc.fat_ia + curr.fat_ia, 
-      td: acc.td + curr.td, fat_td: acc.fat_td + curr.fat_td, 
-      supply: acc.supply + curr.supply, fat_supply: acc.fat_supply + curr.fat_supply,
-      bu: acc.bu + curr.bu, fat_bu: acc.fat_bu + curr.fat_bu, 
-      final: acc.final + curr.final, fat: acc.fat + curr.fat 
-    }), { ia: 0, fat_ia: 0, td: 0, fat_td: 0, supply: 0, fat_supply: 0, bu: 0, fat_bu: 0, final: 0, fat: 0 });
-    
-    return { dataMes, glob };
-  }, [arvoreDados, mesesUnicos, celulasEditadas, getMetricasNode]);
+    return Array.from(mapaProdutos.values()).map((p: any) => ({
+        ...p,
+        meses: Array.from(p.meses.values()).sort((a: any, b: any) => a.mes_banco.localeCompare(b.mes_banco)),
+        subRows: Array.from(p.subRowsMap.values()).map((c: any) => ({
+            ...c, meses: Array.from(c.meses.values()).sort((a: any, b: any) => a.mes_banco.localeCompare(b.mes_banco))
+        }))
+    }));
+  }, [dadosBrutos]);
+
+  const totaisGerais = useMemo(() => {
+    const totais: Record<string, {vol: number, fat: number}> = {};
+    dadosAgrupados.forEach(prod => {
+      prod.meses.forEach((m: any) => {
+        if (!totais[m.mes_banco]) totais[m.mes_banco] = {vol: 0, fat: 0};
+        
+        const edicaoProd = celulasEditadas[prod.chave_matriz]?.[m.mes_banco];
+        const isPendente = edicaoProd !== undefined;
+        const volumeFinal = Math.round(Number(isPendente ? edicaoProd.novo_volume : m.vol_final));
+        
+        totais[m.mes_banco].vol += volumeFinal;
+        totais[m.mes_banco].fat += m.receita; // Faturamento mantido base S&OP para simplificação visual
+      });
+    });
+    return totais;
+  }, [dadosAgrupados, celulasEditadas]);
 
   const columns = useMemo(() => {
-    const cols: any[] = [
+    if (dadosAgrupados.length === 0) return [];
+    
+    const baseCols: any[] = [
       {
-        id: 'hierarquia', accessorKey: 'nome_exibicao',
-        header: ({ column }: any) => (
-          <button className="flex items-center gap-2 hover:text-slate-900 transition font-black" onClick={() => column.toggleSorting()}>
-            NÍVEIS DE DECISÃO {column.getIsSorted() ? (column.getIsSorted() === 'asc' ? <ArrowUp className="w-3 h-3"/> : <ArrowDown className="w-3 h-3"/>) : <ArrowUpDown className="w-3 h-3 text-slate-300"/>}
-          </button>
-        ),
-        cell: ({ row }: any) => (
-          <div className="flex items-center gap-2" style={{ paddingLeft: `${row.depth * 2.5}rem` }}>
-            {row.getCanExpand() && (
-              <button onClick={row.getToggleExpandedHandler()} className="p-1.5 hover:bg-slate-200 rounded-lg">
-                {row.getIsExpanded() ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
-              </button>
-            )}
-            <div className="flex items-center gap-2 truncate">
-              {row.depth === 0 ? <Layers className="w-5 h-5 text-indigo-600"/> : row.depth === 1 ? <Package className="w-4 h-4 text-amber-500"/> : <Users className="w-3 h-3 text-slate-400"/>}
-              <span className={`uppercase truncate ${row.depth === 0 ? 'font-black text-slate-900 text-sm tracking-tight' : row.depth === 1 ? 'font-bold text-slate-700 text-xs' : 'text-slate-500 text-[11px]'}`}>
-                {row.original.nome_exibicao}
-              </span>
+        id: 'nome', header: 'SKU / Clientes',
+        accessorFn: (row: any) => row.nome,
+        cell: (info: any) => {
+          const row = info.row;
+          const isProduto = row.original.tipo === 'produto';
+
+          return (
+            <div style={{ paddingLeft: `${row.depth * 2}rem` }} className="flex items-center gap-3 py-2 min-w-[350px]">
+              {isProduto ? (
+                <button onClick={row.getToggleExpandedHandler()} className="p-1.5 hover:bg-slate-100 text-slate-500 rounded-lg transition-colors">
+                  {row.getIsExpanded() ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
+                </button>
+              ) : <div className="w-8"></div>}
+              
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center border flex-shrink-0 ${isProduto ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-400'}`}>
+                {isProduto ? <Package className="w-4 h-4" /> : <Users className="w-4 h-4" />}
+              </div>
+              
+              <div className="flex flex-col">
+                 <span className={`text-sm ${isProduto ? 'font-black text-slate-800 uppercase tracking-tighter' : 'font-bold text-slate-600 truncate max-w-[250px]'}`}>
+                   {info.getValue()}
+                 </span>
+                 {isProduto && (
+                   <div className="flex items-center gap-2 mt-1">
+                     <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">{row.original.produto}</span>
+                     <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">{row.original.categoria}</span>
+                   </div>
+                 )}
+              </div>
             </div>
-          </div>
-        )
+          )
+        }
       }
     ];
 
-    mesesUnicos.forEach(m => {
-      cols.push({
-        id: `mes_${m}`, accessorFn: (row: any) => getMetricasNode(row, m, celulasEditadas).vol,
-        header: ({ column }: any) => (
-          <button onClick={() => column.toggleSorting()} className="flex items-center justify-center gap-2 bg-slate-900 text-white py-2 px-4 rounded-xl text-[11px] font-black tracking-widest w-[170px] hover:bg-slate-800 transition-colors">
-            {m.split('-').reverse().slice(1).join('/')}
-          </button>
-        ),
-        cell: ({ row }: any) => {
-          const res = getMetricasNode(row.original, m, celulasEditadas);
-          const editKey = row.original.tipo === 'cliente' ? `cliente|${row.original.id}|${m}` : row.original.tipo === 'produto' ? `produto|${row.original.chave_produto}|${m}` : '';
-          const isChanged = celulasEditadas[editKey] !== undefined;
-
-          if (row.original.tipo === 'categoria') {
-            return (
-              <div className="flex flex-col items-center py-2 min-w-[170px] bg-slate-50/50 rounded-xl border-b-4 border-indigo-100">
-                <span className="font-black text-slate-900">{formatVolume(res.vol)} <span className="text-[9px] text-slate-400">CX</span></span>
-                <span className="text-[10px] font-bold text-emerald-600">{formatMoeda(res.fat)}</span>
-              </div>
-            );
-          }
+    const mesesExemplo = dadosAgrupados[0].meses;
+    mesesExemplo.forEach((m: any) => {
+      const mesStr = m.mes_banco.split('-').reverse().slice(1).join('/'); // yyyy-mm-dd -> mm/yyyy
+      
+      baseCols.push({
+        id: `mes_${m.mes_banco}`, header: mesStr,
+        accessorFn: (row: any) => row.meses.find((rm: any) => rm.mes_banco === m.mes_banco)?.vol_final || 0,
+        cell: (info: any) => {
+          const row = info.row.original;
+          const dadosMes = row.meses.find((rm: any) => rm.mes_banco === m.mes_banco);
+          const meta = info.table.options.meta as any;
+          const edicao = meta.celulasEditadas[row.chave_matriz]?.[m.mes_banco];
+          
+          const isPendente = edicao !== undefined;
+          const valorReal = isPendente ? edicao.novo_volume : (dadosMes?.vol_final || 0);
+          const valorInteiro = Math.round(Number(valorReal));
+          
+          const isProduto = row.tipo === 'produto';
+          const bloqueado = meta.isLocked;
+          
+          const isGlobalFechado = meta.lockMessage === "Demanda Irrestrita Publicada";
 
           return (
-            <div className="flex flex-col items-center justify-center gap-1.5 min-w-[170px] bg-white p-2 rounded-xl border border-slate-100 shadow-sm hover:shadow-md transition-all group">
-              <div className="w-full flex items-center justify-between gap-2">
-                <EditableCell initialValue={res.vol} isChanged={isChanged} isLocked={isLocked} onSave={(newVal: number) => setCelulasEditadas((p: any) => ({ ...p, [editKey]: newVal }))} />
-                {row.original.tipo === 'produto' && !isLocked && (
-                  <button onClick={() => handleDistribuirVolume(row.original, m)} className="p-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded-lg transition-colors">
-                    <ChevronLast className="w-4 h-4 rotate-90" />
-                  </button>
-                )}
+            <div className="flex flex-col w-36 gap-1.5 relative group">
+              <div className="flex justify-between items-center px-1">
+                 <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest" title="Proposta Comercial Base">BU: {Math.round(dadosMes?.vol_bu || 0)}</span>
+                 <span className="text-[9px] text-amber-500 font-black uppercase tracking-widest" title="Capacidade Supply">SP: {Math.round(dadosMes?.vol_supply || 0)}</span>
               </div>
-              <span className="text-[10px] font-black text-emerald-600">{formatMoeda(res.fat)}</span>
               
-              <div className="grid grid-cols-4 w-full border-t border-slate-100 pt-1 mt-1">
-                 <div className="flex flex-col items-center justify-center border-r border-slate-100 px-0.5" title="Meta Gerencial">
-                    <span className="text-[6px] font-black text-blue-400 uppercase tracking-tighter">GER</span>
-                    <span className="text-[8px] font-bold text-blue-700">{formatVolume(res.td)}</span>
-                 </div>
-                 <div className="flex flex-col items-center justify-center border-r border-slate-100 px-0.5" title="Meta Restrita (Fábrica)">
-                    <span className="text-[6px] font-black text-fuchsia-400 uppercase tracking-tighter">SUP</span>
-                    <span className="text-[8px] font-bold text-fuchsia-700">{formatVolume(res.supply)}</span>
-                 </div>
-                 <div className="flex flex-col items-center justify-center border-r border-slate-100 px-0.5" title="Proposta Comercial">
-                    <span className="text-[6px] font-black text-amber-400 uppercase tracking-tighter">COM</span>
-                    <span className="text-[8px] font-bold text-amber-600">{formatVolume(res.bu)}</span>
-                 </div>
-                 <div className="flex flex-col items-center justify-center px-0.5" title="Sinal IA">
-                    <span className="text-[6px] font-black text-slate-400 uppercase tracking-tighter">IA</span>
-                    <span className="text-[8px] font-bold text-slate-600">{formatVolume(res.ia)}</span>
-                 </div>
-              </div>
+              <input
+                type="number" value={valorInteiro === 0 ? '' : valorInteiro} placeholder="0" disabled={bloqueado}
+                onChange={(e) => meta.updateCell(row.chave_matriz, m.mes_banco, e.target.value)}
+                className={`text-sm text-center font-black p-2.5 rounded-xl outline-none border-2 transition-all w-full
+                  ${isGlobalFechado ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 
+                    bloqueado ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed opacity-80' : 
+                    isProduto ? 'border-dashed border-indigo-200 focus:border-indigo-500 focus:bg-indigo-50 text-indigo-900 bg-white' : 'border-solid bg-slate-50 border-transparent focus:bg-white focus:border-slate-300 text-slate-800'} 
+                  ${isPendente && !bloqueado ? 'bg-indigo-600 border-indigo-700 text-white shadow-md' : ''}`}
+                title={isGlobalFechado ? "Meta Oficial de Execução Congelada" : bloqueado ? "Aprovação pendente em fases anteriores" : "Ajuste Fino da Diretoria"}
+              />
             </div>
           );
         }
       });
     });
-    return cols;
-  }, [mesesUnicos, celulasEditadas, getMetricasNode, isLocked]);
+    return baseCols;
+  }, [dadosAgrupados, celulasEditadas]);
 
   const table = useReactTable({
-    data: arvoreDados, columns, state: { expanded, sorting },
+    data: dadosAgrupados, columns, state: { expanded, sorting },
     onExpandedChange: setExpanded, onSortingChange: setSorting,
-    getSubRows: (r: any) => r.children,
-    getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel(), getSortedRowModel: getSortedRowModel()
+    getSubRows: row => row.subRows,
+    getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel(), getSortedRowModel: getSortedRowModel(),
+    meta: {
+      celulasEditadas,
+      isLocked,
+      lockMessage,
+      updateCell: (chave: string, mes: string, val: string) => {
+        if (isLocked) return; 
+        const v = val === '' ? '' : Math.round(Number(val));
+        const finalV = Number.isNaN(v as any) && val !== '' ? 0 : v;
+        setCelulasEditadas((prev: any) => ({ ...prev, [chave]: { ...(prev[chave] || {}), [mes]: { novo_volume: finalV } } }));
+      }
+    }
   });
 
-  if (isLoading) return <div className="h-screen w-full bg-slate-50 flex flex-col items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-indigo-500 mb-4" /><span className="text-slate-400 font-black text-xs tracking-widest uppercase">Iniciando S&OP Oficial...</span></div>;
-
   return (
-    <div className="w-full bg-slate-50 font-sans min-h-screen pb-20">
-      <div className="max-w-[1600px] mx-auto p-6 lg:p-12">
-        <div className="sticky top-0 z-40 bg-slate-50/90 backdrop-blur-xl py-6 mb-8 border-b border-slate-200 flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6">
-          <div>
-            <h1 className="text-5xl font-black text-slate-900 tracking-tighter flex items-center gap-4">
-              <Layers className="w-12 h-12 text-indigo-600" /> DASHBOARD GLOBAL
+    <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
+      <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative">
+        
+        {/* CABEÇALHO DO PAINEL EXECUTIVO */}
+        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-6 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 relative overflow-hidden">
+          
+          {/* BANNER DE AVISO (A MÁGICA DA CASCATA ACONTECE AQUI) */}
+          {isLocked && !isLoading && (
+              <div className={`absolute top-0 left-0 w-full text-white text-[10px] font-black py-1.5 flex justify-center items-center gap-2 tracking-widest uppercase shadow-sm z-10 
+                ${lockMessage === "Demanda Irrestrita Publicada" ? "bg-emerald-500" : "bg-amber-500"}`}>
+                  {lockMessage === "Demanda Irrestrita Publicada" ? <ShieldCheck className="w-3 h-3" /> : <AlertTriangle className="w-3 h-3" />} 
+                  STATUS: {lockMessage}
+              </div>
+          )}
+          
+          <div className={isLocked && !isLoading ? "pt-4" : ""}>
+            <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
+              <Globe className="w-8 h-8 text-indigo-600" /> S&OP Global
             </h1>
-          </div>
-          <div className="flex items-center gap-4">
-            <button onClick={handleManualExport} className="flex items-center gap-2 px-6 py-5 rounded-[24px] text-xs font-black transition-all border-2 border-slate-200 text-slate-600 hover:bg-white shadow-sm tracking-widest uppercase"><Download className="w-5 h-5" /> Exportar</button>
-            <button onClick={handleSave} disabled={isLocked} className={`group flex items-center gap-4 px-12 py-5 rounded-[24px] text-sm font-black transition-all shadow-xl tracking-tighter uppercase ${isLocked ? 'bg-emerald-50 border-2 border-emerald-200 text-emerald-600 shadow-none' : 'bg-slate-900 hover:bg-black text-white hover:scale-105'}`}>
-              {isProcessing ? <Loader2 className="animate-spin" /> : isLocked ? <Lock className="w-5 h-5" /> : <Save className="w-5 h-5" />}
-              {isProcessing ? 'A Gravar...' : lockMessage}
-            </button>
-          </div>
-        </div>
-
-        {/* Grelha com 5 Cartões e Variações de Volume/Faturamento */}
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4 mb-10">
-          {[
-            { label: 'IA Base', vol: stats.glob.ia, fat: stats.glob.fat_ia, color: 'text-slate-500', border: 'border-slate-200', varVol: 0, varFat: 0 },
-            { label: 'Gerencial', vol: stats.glob.td, fat: stats.glob.fat_td, color: 'text-blue-600', border: 'border-blue-200', varVol: calcVar(stats.glob.td, stats.glob.ia), varFat: calcVar(stats.glob.fat_td, stats.glob.fat_ia) },
-            { label: 'Fábrica (Supply)', vol: stats.glob.supply, fat: stats.glob.fat_supply, color: 'text-fuchsia-600', border: 'border-fuchsia-200', varVol: calcVar(stats.glob.supply, stats.glob.td), varFat: calcVar(stats.glob.fat_supply, stats.glob.fat_td) },
-            { label: 'Comercial', vol: stats.glob.bu, fat: stats.glob.fat_bu, color: 'text-amber-500', border: 'border-amber-200', varVol: calcVar(stats.glob.bu, stats.glob.supply), varFat: calcVar(stats.glob.fat_bu, stats.glob.fat_supply) },
-            { label: 'Demanda Irrestrita', vol: stats.glob.final, fat: stats.glob.fat, color: 'text-emerald-600', border: 'border-emerald-500', varVol: calcVar(stats.glob.final, stats.glob.bu), varFat: calcVar(stats.glob.fat, stats.glob.fat_bu), highlight: true }
-          ].map((c, i) => (
-            <div key={i} className={`bg-white p-6 lg:p-8 rounded-[40px] shadow-sm border-2 ${c.border} flex flex-col justify-between transition-all ${c.highlight ? 'ring-4 ring-emerald-500/10' : ''}`}>
-              <div className="flex flex-col gap-2 xl:flex-row xl:justify-between xl:items-start mb-4">
-                 <p className={`text-[10px] font-black uppercase tracking-widest ${c.color}`}>{c.label}</p>
-                 {/* ATUALIZADO: Badges de Volume e Faturamento lado a lado */}
-                 {i > 0 && (
-                   <div className="flex flex-wrap gap-1">
-                     <div className={`px-2 py-1 rounded-md text-[9px] font-black ${c.varVol > 0 ? 'bg-emerald-50 text-emerald-600' : c.varVol < 0 ? 'bg-rose-50 text-rose-600' : 'bg-slate-100 text-slate-500'}`}>{c.varVol > 0 ? '+' : ''}{c.varVol.toFixed(1)}% Vol.</div>
-                     <div className={`px-2 py-1 rounded-md text-[9px] font-black ${c.varFat > 0 ? 'bg-emerald-50 text-emerald-600' : c.varFat < 0 ? 'bg-rose-50 text-rose-600' : 'bg-slate-100 text-slate-500'}`}>{c.varFat > 0 ? '+' : ''}{c.varFat.toFixed(1)}% Fat.</div>
-                   </div>
-                 )}
-              </div>
-              <div>
-                 <h3 className="text-2xl lg:text-3xl font-black text-slate-900 mb-1">{formatVolume(c.vol)} <span className="text-[10px] text-slate-400 font-bold uppercase">Caixas</span></h3>
-                 <div className={`text-xs lg:text-sm font-black flex items-center gap-1.5 ${c.highlight ? 'text-emerald-600' : 'text-slate-500'}`}>{formatMoeda(c.fat)} Previsto</div>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-10">
-          <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100 h-[400px] flex flex-col">
-            <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-6 flex items-center gap-2"><TrendingUp className="w-4 h-4 text-emerald-500"/> Faturamento (R$) por Cenário</h3>
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={stats.dataMes} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                <XAxis dataKey="mesLabel" tick={{fontSize: 11, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                <YAxis tickFormatter={v => `R$${(v/1e6).toFixed(1)}M`} tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} />
-                <RechartsTooltip formatter={(v: any) => formatMoeda(v)} contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 20px 40px rgba(0,0,0,0.1)'}} />
-                <Legend iconType="circle" wrapperStyle={{fontSize: '10px', fontWeight: 'bold'}}/>
-                <Bar dataKey="fat_ia" name="IA Base" fill="#cbd5e1" radius={[4, 4, 0, 0]} barSize={12} />
-                <Bar dataKey="fat_td" name="Gerencial" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={12} />
-                <Bar dataKey="fat_supply" name="Fábrica (Supply)" fill="#d946ef" radius={[4, 4, 0, 0]} barSize={12} />
-                <Bar dataKey="fat_bu" name="Comercial" fill="#f59e0b" radius={[4, 4, 0, 0]} barSize={12} />
-                <Bar dataKey="fat" name="Irrestrita" fill="#10b981" radius={[4, 4, 0, 0]} barSize={12} />
-              </BarChart>
-            </ResponsiveContainer>
+            <p className="text-sm font-bold text-slate-400 mt-1 uppercase tracking-widest pl-11">
+              Visão Executiva & Aprovação de Demanda Irrestrita
+            </p>
           </div>
           
-          <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100 h-[400px] flex flex-col">
-            <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-6 flex items-center gap-2"><BarChart2 className="w-4 h-4 text-indigo-500"/> Volumes (Cx) Consolidados</h3>
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={stats.dataMes} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                <XAxis dataKey="mesLabel" tick={{fontSize: 11, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                <YAxis tickFormatter={v => formatVolume(v)} tick={{fontSize: 10, fill: '#94a3b8'}} axisLine={false} tickLine={false} />
-                <RechartsTooltip formatter={(v: any) => formatVolume(v)} contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 20px 40px rgba(0,0,0,0.1)'}} />
-                <Legend iconType="circle" wrapperStyle={{fontSize: '10px', fontWeight: 'bold'}}/>
-                <Bar dataKey="ia" name="IA Base" fill="#cbd5e1" radius={[4, 4, 0, 0]} barSize={12} />
-                <Bar dataKey="td" name="Gerencial" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={12} />
-                <Bar dataKey="supply" name="Fábrica (Supply)" fill="#d946ef" radius={[4, 4, 0, 0]} barSize={12} />
-                <Bar dataKey="bu" name="Comercial" fill="#f59e0b" radius={[4, 4, 0, 0]} barSize={12} />
-                <Bar dataKey="final" name="Irrestrita" fill="#10b981" radius={[4, 4, 0, 0]} barSize={12} />
-              </BarChart>
-            </ResponsiveContainer>
+          <div className={`flex items-center gap-4 ${isLocked && !isLoading ? "pt-4" : ""}`}>
+              <button onClick={handleExportExcel} className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-5 py-3 rounded-2xl text-xs font-black tracking-widest uppercase transition-all border border-slate-200">
+                  <Download className="w-4 h-4" /> Relatório Oficial
+              </button>
+
+              <button 
+                 onClick={handleAprovar} 
+                 disabled={isProcessing || (isLocked && lockMessage !== "Demanda Irrestrita Publicada")} 
+                 className={`flex items-center gap-2 text-white px-6 py-3 rounded-2xl text-sm font-black tracking-widest uppercase transition-all shadow-lg 
+                   ${lockMessage === "Demanda Irrestrita Publicada" ? 'bg-emerald-500 cursor-default shadow-none' : 
+                     isLocked ? 'bg-slate-300 cursor-not-allowed shadow-none' : 'bg-slate-900 hover:bg-black shadow-slate-900/30'}`}
+              >
+                  {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : 
+                   lockMessage === "Demanda Irrestrita Publicada" ? <ShieldCheck className="w-5 h-5" /> : 
+                   isLocked ? <Lock className="w-5 h-5" /> : <Check className="w-5 h-5" />}
+                  
+                  {lockMessage === "Demanda Irrestrita Publicada" ? 'Meta Congelada' : 
+                   isLocked ? 'Aprovação Bloqueada' : 'Aprovar e Publicar Demanda'}
+              </button>
           </div>
         </div>
 
-        <div className="bg-white rounded-[40px] shadow-2xl border border-slate-100 overflow-hidden">
-          <div className="p-8 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
-            <h3 className="font-black text-slate-900 uppercase tracking-widest text-sm flex items-center gap-3"><Package className="w-5 h-5 text-indigo-600"/> Matriz de Cenários (Volume & Faturamento)</h3>
-          </div>
+        {/* TABELA DE APROVAÇÃO (SÓ RENDERIZA SE HOUVER DADOS) */}
+        <div className="bg-white rounded-[40px] shadow-2xl border border-slate-100 overflow-hidden relative min-h-[400px]">
+          {isLoading ? (
+             <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 backdrop-blur-sm z-10">
+                 <Loader2 className="w-8 h-8 animate-spin text-indigo-500 mb-4" />
+                 <span className="text-slate-400 font-black text-xs tracking-widest uppercase">A compilar Visão Global S&OP...</span>
+             </div>
+          ) : dadosAgrupados.length === 0 ? (
+             <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
+                 <Layers className="w-12 h-12 mb-4 opacity-20" />
+                 <span className="font-black text-sm tracking-widest uppercase">O motor de dados está vazio</span>
+             </div>
+          ) : (
           <div className="overflow-x-auto pb-4">
-            <table className="w-full border-collapse">
-              <thead className="bg-white border-b-2 border-slate-100">
+            <table className="w-full text-left border-collapse">
+              <thead className="bg-white border-b-2 border-slate-100 shadow-sm">
                 {table.getHeaderGroups().map(hg => (
                   <tr key={hg.id}>
-                    {hg.headers.map(h => (
-                      <th key={h.id} className="px-6 py-6 text-left align-bottom">
-                        {flexRender(h.column.columnDef.header, h.getContext())}
+                    {hg.headers.map(header => (
+                      <th key={header.id} className={`px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest ${header.column.getCanSort() ? 'cursor-pointer hover:bg-slate-50 transition-colors' : ''}`} onClick={header.column.getToggleSortingHandler()}>
+                        <div className="flex items-center gap-2">
+                          {flexRender(header.column.columnDef.header, header.getContext())}
+                          {header.column.getCanSort() && (
+                            <span className="text-slate-300">
+                              {{ asc: <ArrowUp className="w-4 h-4 text-slate-500" />, desc: <ArrowDown className="w-4 h-4 text-slate-500" /> }[header.column.getIsSorted() as string] ?? <ArrowUpDown className="w-4 h-4 opacity-30" />}
+                            </span>
+                          )}
+                        </div>
                       </th>
                     ))}
                   </tr>
                 ))}
               </thead>
+              
               <tbody>
                 {table.getRowModel().rows.map(row => (
-                  <tr key={row.id} className={`group transition-all ${row.depth === 0 ? 'bg-slate-50/70' : 'hover:bg-indigo-50/10'}`}>
+                  <tr key={row.id} className={`border-b border-slate-50 transition-colors ${row.getIsExpanded() ? 'bg-slate-50/50' : row.original.tipo === 'produto' ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/30 hover:bg-slate-100'}`}>
                     {row.getVisibleCells().map(cell => (
-                      <td key={cell.id} className="px-6 py-4 border-b border-slate-50">
+                      <td key={cell.id} className="px-8 py-3">
                         {flexRender(cell.column.columnDef.cell, cell.getContext())}
                       </td>
                     ))}
                   </tr>
                 ))}
               </tbody>
+              
               <tfoot className="bg-slate-900 text-white">
                 <tr>
                   {table.getHeaderGroups()[0].headers.map(header => {
-                    if (header.id === 'hierarquia') return <td key={header.id} className="px-6 py-6 text-right font-bold text-sm">TOTAL OFICIAL</td>;
+                    if (header.id === 'nome') return (
+                      <td key={header.id} className="px-8 py-5 text-right">
+                        <div className="flex flex-col"><span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Receita Final</span><span className="font-bold text-sm text-white">PROJEÇÃO GLOBAL</span></div>
+                      </td>
+                    );
                     if (header.id.startsWith('mes_')) {
                       const m = header.id.replace('mes_', '');
-                      const tot = stats.dataMes.find(d => d.mesLabel === m.split('-').reverse().slice(1).join('/'));
                       return (
-                        <td key={header.id} className="px-6 py-6 text-center">
-                           <div className="flex flex-col">
-                              <span className="font-black">{formatVolume(tot?.final || 0)} <span className="text-[10px] text-slate-400">CX</span></span>
-                              <span className="text-sm font-black text-emerald-400">{formatMoeda(tot?.fat || 0)}</span>
-                           </div>
+                        <td key={header.id} className="px-8 py-5">
+                          <div className="flex flex-col items-center justify-center min-w-[100px]">
+                            <span className="font-black text-white">{formatVolume(totaisGerais[m]?.vol || 0)} <span className="text-[9px] text-slate-400">CX</span></span>
+                            <span className="font-black text-emerald-400 text-[13px] tracking-tight mt-0.5">{formatMoeda(totaisGerais[m]?.fat || 0)}</span>
+                          </div>
                         </td>
                       );
                     }
-                    return <td key={header.id}></td>;
+                    return <td key={header.id} className="px-8 py-5"></td>;
                   })}
                 </tr>
               </tfoot>
             </table>
           </div>
+          )}
         </div>
       </div>
     </div>

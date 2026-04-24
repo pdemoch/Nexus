@@ -28,7 +28,6 @@ class PayloadAprovarGlobal(BaseModel):
 
 @router.get("/global")
 async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    # ATUALIZADO: Adicionado 'Supply Chain' à permissão de visualização
     if usuario_logado['funcao'] not in ['Administrador', 'Gerente', 'Supply Chain']:
         raise HTTPException(status_code=403, detail="Acesso restrito à Diretoria, Gerência ou Supply Chain.")
         
@@ -42,6 +41,10 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
         status_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
         is_td_fechado = status_td.status == 'Fechado' if status_td else False
 
+        # FASE 3: Verifica se o Supply Chain fechou o rateio
+        status_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
+        is_sp_fechado = status_sp.status == 'Fechado' if status_sp else False
+
         query_base = get_truth_query(db, ciclo, m_plus_2, m_plus_4)
 
         vendedores_ativos = query_base.with_entities(FatoIbpGranular.vendedor_nome).filter(FatoIbpGranular.vendedor_nome.isnot(None)).distinct().all()
@@ -54,10 +57,17 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
 
         pendentes = [v for v in v_ativos if v not in v_fechados]
 
-        if is_global_fechado: is_locked, lock_message = True, "Demanda Irrestrita Publicada"
-        elif not is_td_fechado: is_locked, lock_message = True, "Aguardando Visão Gerencial"
-        elif pendentes: is_locked, lock_message = True, f"Aguardando {len(pendentes)} Vendedor(es)"
-        else: is_locked, lock_message = False, "Publicar Demanda Irrestrita"
+        # AVALIAÇÃO EM CASCATA DA MENSAGEM DE TRAVA
+        if is_global_fechado: 
+            is_locked, lock_message = True, "Demanda Irrestrita Publicada"
+        elif not is_td_fechado: 
+            is_locked, lock_message = True, "Aguardando Diretoria (Top-Down)"
+        elif pendentes: 
+            is_locked, lock_message = True, f"Aguardando {len(pendentes)} Equipe(s) Comercial(is)"
+        elif not is_sp_fechado: 
+            is_locked, lock_message = True, "Aguardando Supply Chain (Fase 3)"
+        else: 
+            is_locked, lock_message = False, "Publicar Demanda Irrestrita"
             
         resultados = query_base.with_entities(
             FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado,
@@ -92,13 +102,17 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
 
 @router.post("/aprovar")
 async def aprovar_dashboard_global(payload: PayloadAprovarGlobal, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    # A aprovação continua restrita a Admin/Gerente por governança
     if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
         raise HTTPException(status_code=403, detail="Apenas a Gerência pode publicar o plano final.")
     try:
         ciclo = get_current_cycle()
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
         if registro and registro.status == 'Fechado': raise HTTPException(status_code=403, detail="O Ciclo já está fechado.")
+
+        # BLINDAGEM EXTRA: Exige que a Fase 3 (Supply Review) esteja fechada antes de permitir guardar
+        status_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
+        if not status_sp or status_sp.status != 'Fechado':
+             raise HTTPException(status_code=403, detail="O Supply Chain (Fase 3) ainda não finalizou o rateio restrito.")
 
         for ajuste in payload.ajustes:
             data_alvo = parse_date_safe(ajuste.mes_projetado)
@@ -126,10 +140,7 @@ async def aprovar_dashboard_global(payload: PayloadAprovarGlobal, db: Session = 
         if not registro: db.add(ControleCiclo(ciclo_sop=ciclo, origem='S&OP-Final', status='Fechado'))
         else: registro.status = 'Fechado'
         
-        # =====================================================================
-        # GATILHO DE ATUALIZAÇÃO DA META
         # Copia o 'vol_final' para o 'vol_meta' criando a fotografia de execução
-        # =====================================================================
         db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo).update(
             {"vol_meta": FatoIbpGranular.vol_final}, synchronize_session=False
         )
@@ -142,7 +153,6 @@ async def aprovar_dashboard_global(payload: PayloadAprovarGlobal, db: Session = 
 
 @router.get("/export")
 async def exportar_excel_global(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    # ATUALIZADO: Permissão para Supply Chain exportar
     if usuario_logado['funcao'] not in ['Administrador', 'Gerente', 'Supply Chain']: 
         raise HTTPException(status_code=403, detail="Acesso restrito.")
     try:
@@ -156,7 +166,7 @@ async def exportar_excel_global(db: Session = Depends(get_db), usuario_logado: d
             func.sum(FatoIbpGranular.vol_supply).label('vol_supply'), 
             func.sum(FatoIbpGranular.vol_bottomup).label('vol_bu'), 
             func.sum(FatoIbpGranular.vol_final).label('vol_final'),
-            func.sum(FatoIbpGranular.vol_meta).label('vol_meta'), # INCLUÍDO AQUI
+            func.sum(FatoIbpGranular.vol_meta).label('vol_meta'),
             func.sum(FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('rec_ia'), 
             func.sum(FatoIbpGranular.vol_topdown * FatoIbpGranular.pmv_aplicado).label('rec_td'),
             func.sum(FatoIbpGranular.vol_supply * FatoIbpGranular.pmv_aplicado).label('rec_supply'), 
@@ -177,7 +187,7 @@ async def exportar_excel_global(db: Session = Depends(get_db), usuario_logado: d
                 "Meta Restrita (Supply)": int(r.vol_supply or 0), "Receita Supply (R$)": float(r.rec_supply or 0), 
                 "Proposta Comercial": int(r.vol_bu or 0), "Receita Comercial (R$)": float(r.rec_bu or 0),
                 "Demanda Irrestrita": int(r.vol_final or 0), "Faturamento Irrestrito (R$)": float(r.rec_final or 0),
-                "Meta Oficial de Execução": int(r.vol_meta or 0) # COLUNA NOVA NO EXCEL
+                "Meta Oficial de Execução": int(r.vol_meta or 0)
             })
 
         df = pd.DataFrame(dados)

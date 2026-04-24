@@ -3,14 +3,15 @@ import {
   useReactTable, getCoreRowModel, flexRender, getExpandedRowModel, getSortedRowModel, SortingState
 } from '@tanstack/react-table';
 import { 
-  Loader2, ChevronDown, ChevronUp, ArrowUpDown, ArrowUp, ArrowDown, 
-  Activity, Factory, ShieldCheck, Check, Hash, Search, Filter, Download, X, AlertTriangle 
+  Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
+  Activity, Factory, ShieldCheck, Check, Hash, Search, Filter, Download, X, AlertTriangle, Lock, ShieldAlert
 } from 'lucide-react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import * as XLSX from 'xlsx';
 
 const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor));
+const formatVolume = (val: number) => Math.round(val).toLocaleString('pt-BR');
 
 export default function SupplyReviewArena() {
   const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
@@ -20,16 +21,18 @@ export default function SupplyReviewArena() {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   
-  // Status das Fases
+  // =========================================================================
+  // STATUS DAS FASES (BLINDAGEM EM CASCATA)
+  // =========================================================================
   const [isTopDownFechado, setIsTopDownFechado] = useState(false);
+  const [isFase2Fechada, setIsFase2Fechada] = useState<boolean | null>(null);
+  const [qtdPendentes, setQtdPendentes] = useState(0);
   const [isSupplyFechado, setIsSupplyFechado] = useState(false);
-  
+
+  const [busca, setBusca] = useState('');
+  const [chartExpanded, setChartExpanded] = useState<string | null>(null);
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
-  
-  const [busca, setBusca] = useState('');
-  const [categoriaSelecionada, setCategoriaSelecionada] = useState('TODAS');
-  const [segmentoSelecionado, setSegmentoSelecionado] = useState('TODOS');
 
   const fetchData = useCallback(async () => {
     setIsLoading(true);
@@ -39,8 +42,15 @@ export default function SupplyReviewArena() {
         axios.get('/api/v1/consensus/supply/status')
       ]);
       setDadosBrutos(res.data.dados || []);
+      
       setIsTopDownFechado(statusRes.data.is_topdown_fechado);
+      setIsFase2Fechada(statusRes.data.is_fase2_fechada);
+      setQtdPendentes(statusRes.data.qtd_pendentes);
       setIsSupplyFechado(statusRes.data.is_supply_fechado);
+      
+      setCelulasEditadas({});
+      setExpanded({});
+      setChartExpanded(null);
     } catch (e) {
       console.error(e);
       setDadosBrutos([]);
@@ -51,99 +61,96 @@ export default function SupplyReviewArena() {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const handleExportExcel = (isSnapshot = false) => {
-    if (dadosFiltrados.length === 0) return alert("Não há dados na tela para exportar.");
-    const dadosExcel = dadosFiltrados.map(row => {
-      const pmvBase = row.meses[0]?.pmv || 0;
+  const handleExportExcel = () => {
+    if (dadosBrutos.length === 0) return alert("Não há dados no ecrã para exportar.");
+    const dadosExcel: any[] = [];
+    
+    dadosBrutos.forEach(prod => {
       const linha: any = {
-        "CÓDIGO SKU": row.produto, "DESCRIÇÃO": row.descricao, "CATEGORIA": row.categoria,
-        "SEGMENTO": row.segmento, "PMV PONDERADO (R$)": pmvBase
+        "SKU": prod.produto,
+        "DESCRIÇÃO": prod.descricao,
+        "CATEGORIA": prod.categoria,
+        "SEGMENTO": prod.segmento
       };
-      row.meses.forEach((m: any) => {
-        const edicao = celulasEditadas[row.produto]?.[m.mes_banco];
+      
+      prod.meses.forEach((m: any) => {
+        const edicao = celulasEditadas[prod.produto]?.[m.mes_banco];
         const volFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : m.vol_ajustado));
-        const justFinal = edicao !== undefined ? edicao.justificativa : (m.justificativa || "");
-        linha[`${m.mes_str} (Top-Down Ref)`] = Math.round(Number(m.vol_ref));
-        linha[`${m.mes_str} (Supply Restrito)`] = volFinal;
-        linha[`${m.mes_str} (Justificativa)`] = justFinal;
+        
+        linha[`${m.mes_str} (Pedido Comercial)`] = Math.round(Number(m.vol_ref || 0));
+        linha[`${m.mes_str} (Fábrica)`] = volFinal;
+        linha[`${m.mes_str} (Motivo)`] = edicao?.justificativa || m.justificativa || '';
       });
-      return linha;
+      dadosExcel.push(linha);
     });
 
     const worksheet = XLSX.utils.json_to_sheet(dadosExcel);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Supply_Review");
-    XLSX.writeFile(workbook, `SOP_Nexus_Supply_${isSnapshot ? 'CONGELADO' : 'DRAFT'}_${new Date().toISOString().split('T')[0]}.xlsx`);
+    XLSX.writeFile(workbook, `SOP_Nexus_SupplyReview_${new Date().toISOString().split('T')[0]}.xlsx`);
   };
 
-  const handleCongelarCiclo = async () => {
-    if (!window.confirm("Atenção: Ao assinar o Supply Review, a meta restrita será passada para a equipe Comercial. Deseja continuar?")) return;
+  const handleSalvar = async () => {
+    if (isSupplyFechado) return; 
     setIsProcessing(true);
-    
     const ajustes: any[] = [];
-    Object.entries(celulasEditadas).forEach(([produto, meses]: any) => {
+    
+    Object.entries(celulasEditadas).forEach(([sku, meses]: any) => {
       Object.entries(meses).forEach(([mes, val]: any) => {
         ajustes.push({ 
-            produto: produto, 
-            mes_projetado: mes, 
-            novo_volume: val.novo_volume === '' ? 0 : val.novo_volume,
-            justificativa: val.justificativa || ""
+          produto: sku, 
+          mes_projetado: mes, 
+          novo_volume: val.novo_volume === '' ? 0 : val.novo_volume,
+          justificativa: val.justificativa || ''
         });
       });
     });
 
     try {
-      handleExportExcel(true); 
       await axios.post('/api/v1/consensus/supply/congelar', { origem_ajuste: "Supply Review", ajustes });
-      alert("🔒 Ciclo de Supply Review congelado com sucesso!");
-      setCelulasEditadas({});
+      alert("✅ Volume de Supply e Restrições salvos com sucesso! O rateio proporcional para as carteiras foi aplicado.");
       fetchData(); 
-    } catch (e: any) { 
-      alert(e.response?.data?.detail || "Erro ao processar Supply Review."); 
-    } finally { 
-      setIsProcessing(false); 
+    } catch (e: any) {
+      alert(e.response?.data?.detail || "Erro ao guardar restrições.");
+    } finally {
+      setIsProcessing(false);
     }
   };
 
-  const categoriasUnicas = useMemo(() => Array.from(new Set(dadosBrutos.map(d => d.categoria).filter(Boolean))).sort(), [dadosBrutos]);
-  const segmentosUnicos = useMemo(() => Array.from(new Set(dadosBrutos.map(d => d.segmento).filter(Boolean))).sort(), [dadosBrutos]);
-
-  const dadosFiltrados = useMemo(() => dadosBrutos.filter(d => 
-    (d.produto + ' ' + d.descricao).toLowerCase().includes(busca.toLowerCase()) &&
-    (categoriaSelecionada === 'TODAS' || d.categoria === categoriaSelecionada) &&
-    (segmentoSelecionado === 'TODOS' || d.segmento === segmentoSelecionado)
-  ), [dadosBrutos, busca, categoriaSelecionada, segmentoSelecionado]);
+  const dadosFiltrados = useMemo(() => {
+    if (!busca) return dadosBrutos;
+    const term = busca.toLowerCase();
+    return dadosBrutos.filter(p => (p.produto + ' ' + p.descricao).toLowerCase().includes(term));
+  }, [dadosBrutos, busca]);
 
   const totaisFaturamento = useMemo(() => {
     const totais: Record<string, number> = {};
-    dadosFiltrados.forEach(row => row.meses.forEach((m: any) => totais[m.mes_banco] = 0));
-    
-    dadosFiltrados.forEach(row => {
-      const pmvBase = row.meses[0]?.pmv || 0;
-      row.meses.forEach((mes: any) => {
-        const edicao = celulasEditadas[row.produto]?.[mes.mes_banco];
-        const isPendente = edicao !== undefined;
-        const volumeFinal = Math.round(Number(isPendente ? edicao.novo_volume : mes.vol_ajustado));
-        const receitaReal = isPendente ? (volumeFinal * pmvBase) : (mes.receita || 0);
-        totais[mes.mes_banco] += receitaReal;
+    dadosFiltrados.forEach(prod => {
+      prod.meses.forEach((mes: any) => {
+        const edicaoProd = celulasEditadas[prod.produto]?.[mes.mes_banco];
+        const isPendente = edicaoProd !== undefined;
+        const volumeFinal = Math.round(Number(isPendente ? edicaoProd.novo_volume : mes.vol_ajustado));
+        
+        if (!totais[mes.mes_banco]) totais[mes.mes_banco] = 0;
+        totais[mes.mes_banco] += isPendente ? (volumeFinal * (mes.pmv || 0)) : (mes.receita || 0);
       });
     });
     return totais;
   }, [dadosFiltrados, celulasEditadas]);
 
-  const toggleRow = async (row: any) => {
-    const isExpanding = !row.getIsExpanded();
+  const toggleChart = async (row: any) => {
     const chave = row.original.produto;
+    if (chartExpanded === chave) { setChartExpanded(null); return; }
+    setChartExpanded(chave);
     
-    if (isExpanding && !dadosGraficoCache[chave]) {
+    if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
-        const res = await axios.get('/api/v1/consensus/macro/grafico', { params: { produto: chave } });
+        const res = await axios.get('/api/v1/consensus/micro/grafico', { params: { chave_matriz: `|${chave}` } });
         setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
       } catch (e) { console.error(e); }
       finally { setLoadingGrafico(null); }
     }
-    row.toggleExpanded();
   };
 
   const qtdEdicoes = Object.keys(celulasEditadas).length;
@@ -153,36 +160,28 @@ export default function SupplyReviewArena() {
     
     const baseCols: any[] = [
       {
-        id: 'expander', enableSorting: false, header: () => null,
-        cell: ({ row }: any) => (
-          <button onClick={() => toggleRow(row)} className="p-2 hover:bg-slate-100 rounded-xl transition-all">
-            {row.getIsExpanded() ? <ChevronUp className="w-5 h-5 text-indigo-600" /> : <ChevronDown className="w-5 h-5 text-slate-400" />}
-          </button>
-        ),
-      },
-      {
-        id: 'info', header: 'SKU (Visão Brasil)',
+        id: 'nome', header: 'SKU / Descrição do Produto',
         accessorFn: (row: any) => row.descricao,
-        cell: (info: any) => (
-          <div className="flex flex-col py-1">
-            <span className="font-bold text-gray-900 text-sm truncate max-w-[320px]">{info.row.original.descricao}</span>
-            <div className="flex items-center gap-2 mt-1">
-              <span className="text-[10px] text-slate-400 font-black uppercase tracking-tighter bg-slate-100 px-2 py-0.5 rounded-md">{info.row.original.produto}</span>
-              <span className="text-[10px] text-indigo-400 font-black uppercase tracking-tighter">{info.row.original.categoria}</span>
+        cell: (info: any) => {
+          const row = info.row.original;
+          return (
+            <div className="flex items-center gap-3 py-2 min-w-[300px]">
+              <button onClick={() => toggleChart(info.row)} className={`p-1.5 rounded-lg transition-colors border ${chartExpanded === row.produto ? 'bg-indigo-100 border-indigo-200 text-indigo-600 shadow-sm' : 'hover:bg-slate-100 border-transparent text-slate-400 hover:text-slate-600'}`}>
+                <Activity className="w-4 h-4" />
+              </button>
+              <div className="w-8 h-8 rounded-full bg-slate-50 border border-slate-100 flex items-center justify-center flex-shrink-0">
+                <Hash className="w-4 h-4 text-slate-400" />
+              </div>
+              <div className="flex flex-col">
+                 <span className="font-bold text-slate-700">{info.getValue()}</span>
+                 <div className="flex items-center gap-2 mt-1">
+                   <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">{row.produto}</span>
+                   <span className="text-[9px] text-emerald-600 font-black uppercase tracking-widest bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100">PMV: {formatMoeda(row.meses[0]?.pmv || 0)}</span>
+                 </div>
+              </div>
             </div>
-          </div>
-        )
-      },
-      {
-        id: 'pmv_base', header: 'PMV Base',
-        accessorFn: (row: any) => row.meses[0]?.pmv || 0,
-        cell: (info: any) => (
-          <div className="flex flex-col py-1">
-            <span className="font-bold text-slate-700 text-[13px] bg-slate-100 px-3 py-1.5 rounded-lg inline-block w-max border border-slate-200">
-              {formatMoeda(info.getValue())}
-            </span>
-          </div>
-        )
+          )
+        }
       }
     ];
 
@@ -201,37 +200,43 @@ export default function SupplyReviewArena() {
           
           const isPendente = edicao !== undefined;
           const valorReal = isPendente ? edicao.novo_volume : (dadosMes?.vol_ajustado || 0);
-          const justReal = isPendente ? edicao.justificativa : (dadosMes?.justificativa || "");
-          
           const valorInteiro = Math.round(Number(valorReal));
-          const baseTD = Math.round(Number(dadosMes?.vol_ref || 0)); // A Base agora é o Top-Down!
-          const isChanged = valorInteiro !== baseTD;
-          const isCorte = valorInteiro < baseTD;
+          const volBottomUp = Math.round(Number(dadosMes?.vol_ref || 0)); // O Volume pedido pelo comercial
           
-          const pmvBase = row.meses[0]?.pmv || 0;
-          const faturamentoPrevisto = isPendente ? (valorInteiro * pmvBase) : (dadosMes?.receita || 0);
+          const faturamentoPrevisto = isPendente ? (valorInteiro * (dadosMes?.pmv || 0)) : (dadosMes?.receita || 0);
+          
+          const bloqueado = meta.isFechado;
+          const temCorte = valorInteiro < volBottomUp;
 
           return (
-            <div className="flex flex-col w-32 gap-1.5 relative">
+            <div className="flex flex-col w-36 gap-1.5 relative">
               <div className="flex justify-between items-center px-1">
-                 <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest">Base TD: {baseTD.toLocaleString('pt-BR')}</span>
+                 <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest" title="Pedido Consolidado do Comercial">BU: {volBottomUp}</span>
+                 {temCorte && <span className="text-[9px] text-rose-500 font-black uppercase tracking-widest bg-rose-50 px-1 rounded border border-rose-100" title="Corte de Fábrica">CORTE</span>}
               </div>
               
               <input
-                type="number" disabled={isSupplyFechado || !isTopDownFechado} value={valorInteiro === 0 ? '' : valorInteiro} placeholder="0"
-                onChange={(e) => meta.updateCell(row.produto, m.mes_banco, e.target.value, justReal)}
-                className={`text-sm text-center font-black p-2.5 rounded-xl outline-none border-2 transition-all w-full
-                  ${isSupplyFechado || !isTopDownFechado ? 'cursor-not-allowed opacity-50 bg-slate-100 border-gray-200' : isCorte ? 'bg-rose-50 border-rose-300 text-rose-900 shadow-sm' : isChanged ? 'bg-slate-800 border-slate-700 text-white shadow-md' : 'bg-gray-50 border-transparent text-gray-800 focus:bg-white focus:border-indigo-300'}`}
+                type="number" value={valorInteiro === 0 ? '' : valorInteiro} placeholder="0" disabled={bloqueado}
+                onChange={(e) => meta.updateCell(row.produto, m.mes_banco, e.target.value)}
+                className={`text-sm text-center font-black p-2.5 rounded-t-xl outline-none border-2 transition-all w-full
+                  ${bloqueado ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed opacity-80' : 'bg-white border-slate-200 focus:border-indigo-500 text-slate-800'} 
+                  ${isPendente && !bloqueado ? 'border-amber-400 bg-amber-50 shadow-sm' : ''}`}
+                title={bloqueado ? "Aprovação de Supply Fechada" : "Definir capacidade de entrega"}
               />
               
-              <input
-                type="text" disabled={isSupplyFechado || !isTopDownFechado} value={justReal} placeholder={isCorte ? "Justifique o corte..." : "Justificativa..."}
-                onChange={(e) => meta.updateCell(row.produto, m.mes_banco, valorReal, e.target.value)}
-                className={`text-[9px] font-bold p-1.5 rounded-lg outline-none border transition-all w-full placeholder:text-slate-300
-                  ${isSupplyFechado || !isTopDownFechado ? 'cursor-not-allowed opacity-50 bg-slate-50 border-slate-100' : isCorte && !justReal ? 'bg-rose-50 border-rose-200 focus:border-rose-400 text-rose-800' : 'bg-white border-slate-200 focus:border-indigo-300 text-slate-600'}`}
-              />
+              {!bloqueado && (isPendente || temCorte || dadosMes?.justificativa) && (
+                 <input 
+                   type="text"
+                   value={isPendente ? (edicao.justificativa || '') : (dadosMes?.justificativa || '')}
+                   onChange={(e) => meta.updateJustificativa(row.produto, m.mes_banco, e.target.value)}
+                   placeholder="Motivo (Opcional)"
+                   className={`text-[9px] p-1.5 rounded-b-xl border-x-2 border-b-2 outline-none w-full text-center font-bold transition-all
+                     ${isPendente ? 'border-amber-400 bg-amber-50/50 text-amber-700' : 'border-slate-200 bg-white text-slate-500'}
+                     focus:border-indigo-500 focus:bg-indigo-50`}
+                 />
+              )}
 
-              <span className="text-[10px] font-black text-emerald-600 text-center tracking-tight mt-1">
+              <span className={`text-[10px] font-black text-center tracking-tight mt-1 ${bloqueado ? 'text-slate-400' : 'text-emerald-600'}`}>
                 {formatMoeda(faturamentoPrevisto)}
               </span>
             </div>
@@ -240,7 +245,7 @@ export default function SupplyReviewArena() {
       });
     });
     return baseCols;
-  }, [dadosFiltrados, isSupplyFechado, isTopDownFechado]);
+  }, [dadosFiltrados, chartExpanded]);
 
   const table = useReactTable({
     data: dadosFiltrados, columns, state: { expanded, sorting },
@@ -248,38 +253,47 @@ export default function SupplyReviewArena() {
     getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel(), getSortedRowModel: getSortedRowModel(),
     meta: {
       celulasEditadas,
-      updateCell: (chave: string, mes: string, valVol: any, valJust: string) => {
-        if (isSupplyFechado || !isTopDownFechado) return;
-        const v = valVol === '' ? '' : Math.round(Number(valVol));
-        const finalV = Number.isNaN(v as any) && valVol !== '' ? 0 : v;
-        setCelulasEditadas((prev: any) => ({ 
-            ...prev, [chave]: { ...(prev[chave] || {}), [mes]: { novo_volume: finalV, justificativa: valJust } } 
-        }));
+      isFechado: isSupplyFechado, 
+      updateCell: (sku: string, mes: string, val: string) => {
+        if (isSupplyFechado) return; 
+        const v = val === '' ? '' : Math.round(Number(val));
+        const finalV = Number.isNaN(v as any) && val !== '' ? 0 : v;
+        setCelulasEditadas((prev: any) => ({ ...prev, [sku]: { ...(prev[sku] || {}), [mes]: { ...((prev[sku]||{})[mes]||{}), novo_volume: finalV } } }));
+      },
+      updateJustificativa: (sku: string, mes: string, just: string) => {
+        if (isSupplyFechado) return;
+        setCelulasEditadas((prev: any) => ({ ...prev, [sku]: { ...(prev[sku] || {}), [mes]: { ...((prev[sku]||{})[mes]||{}), justificativa: just } } }));
       }
     }
   });
 
-  if (isLoading) {
+  // =========================================================================
+  // TELA DE BLOQUEIO DE FASE (AGUARDANDO COMERCIAL)
+  // =========================================================================
+  if (isFase2Fechada === null) {
     return (
       <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
         <Loader2 className="w-8 h-8 animate-spin text-indigo-500 mb-4" />
-        <span className="text-slate-400 font-black text-xs tracking-widest uppercase">Iniciando Supply Review...</span>
+        <span className="text-slate-400 font-black text-xs tracking-widest uppercase">Verificando Status das Equipes Comerciais...</span>
       </div>
     );
   }
 
-  // TELA DE BLOQUEIO SE O TOP-DOWN NÃO ESTIVER PRONTO
-  if (!isTopDownFechado) {
+  if (isFase2Fechada === false) {
     return (
       <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans p-6">
-        <div className="bg-white p-12 rounded-[40px] shadow-xl border border-slate-100 flex flex-col items-center max-w-lg text-center">
+        <div className="bg-white p-12 rounded-[40px] shadow-xl border border-slate-100 flex flex-col items-center max-w-lg text-center animate-in fade-in zoom-in duration-500">
           <div className="w-20 h-20 bg-amber-50 rounded-full flex items-center justify-center mb-6 border border-amber-100">
             <AlertTriangle className="w-10 h-10 text-amber-500" />
           </div>
-          <h2 className="text-2xl font-black text-slate-900 tracking-tighter mb-4">Aguardando Diretoria (Top-Down)</h2>
+          <h2 className="text-2xl font-black text-slate-900 tracking-tighter mb-4">Aguardando Fase Comercial</h2>
           <p className="text-slate-500 font-medium leading-relaxed">
-            A fase de <strong>Supply Review</strong> só pode ser iniciada após a aprovação e congelamento da demanda comercial pelo nível Gerencial (Fase 2).
+            A fase de <strong>Supply Review (Fase 3)</strong> só pode ser iniciada após a aprovação e congelamento da demanda de toda a equipe de Vendas e Gerência.
           </p>
+          <div className="mt-8 inline-flex flex-col items-center gap-2 p-4 bg-rose-50 border border-rose-100 rounded-2xl w-full">
+            <span className="text-rose-600 font-black uppercase tracking-widest text-xs">Atenção</span>
+            <span className="text-rose-700 font-bold text-sm">Faltam trancar as carteiras de <strong>{qtdPendentes} equipe(s)</strong> comercial(is).</span>
+          </div>
         </div>
       </div>
     );
@@ -290,72 +304,63 @@ export default function SupplyReviewArena() {
       <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative">
         
         {/* CABEÇALHO */}
-        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100">
-          <div>
-              <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
-                <Factory className="w-8 h-8 text-slate-800" /> SUPPLY REVIEW (RESTRIÇÃO)
-              </h1>
-              <p className="text-sm font-bold text-slate-400 mt-1 uppercase tracking-widest pl-11">Ajuste de Capacidade e Trade-offs de Produção</p>
+        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-8 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 relative overflow-hidden">
+          {isSupplyFechado && !isLoading && (
+              <div className="absolute top-0 left-0 w-full bg-slate-800 text-white text-[10px] font-black py-1.5 flex justify-center items-center gap-2 tracking-widest uppercase shadow-sm z-10">
+                  <ShieldCheck className="w-3 h-3 text-emerald-400" /> SUPPLY CHAIN APROVADO E CONGELADO
+              </div>
+          )}
+          
+          <div className={isSupplyFechado ? "pt-4" : ""}>
+            <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
+              <Factory className="w-8 h-8 text-indigo-600" /> Supply Review
+            </h1>
+            <p className="text-sm font-bold text-slate-400 mt-1 uppercase tracking-widest pl-11">
+              Restrições de Fábrica e Rateio Automático S&OP
+            </p>
           </div>
-          <div className="flex items-center gap-4">
-            {isSupplyFechado ? (
-                <div className="flex items-center gap-3">
-                  <div className="flex items-center gap-2 bg-slate-800 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-slate-800/20">
-                      <Check className="w-5 h-5 text-emerald-400" /> Supply Review Congelado
-                  </div>
-                </div>
-            ) : (
-                <div className="flex items-center gap-3 h-full">
-                  {qtdEdicoes > 0 && (<button onClick={() => setCelulasEditadas({})} className="flex items-center gap-1 text-xs font-black text-rose-500 hover:text-rose-700 transition tracking-widest uppercase px-4 py-3 rounded-2xl hover:bg-rose-50"><X className="w-4 h-4" /> Descartar</button>)}
-                  <button onClick={handleCongelarCiclo} disabled={isProcessing} className="flex items-center gap-2 bg-slate-900 hover:bg-black text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-slate-900/30 transition-all disabled:opacity-50">
-                      {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : qtdEdicoes > 0 ? 'Gravar Restrições' : <ShieldCheck className="w-5 h-5" />}
-                      {qtdEdicoes > 0 ? '' : 'Aprovar Plano Restrito'}
-                  </button>
-                </div>
-            )}
+          
+          <div className={`flex items-center gap-4 ${isSupplyFechado ? "pt-4" : ""}`}>
+              <div className="flex items-center gap-3 h-full">
+                {qtdEdicoes > 0 && !isSupplyFechado && (<button onClick={() => setCelulasEditadas({})} className="flex items-center gap-1 text-xs font-black text-rose-500 hover:text-rose-700 transition tracking-widest uppercase px-4 py-3 rounded-2xl hover:bg-rose-50"><X className="w-4 h-4" /> Descartar</button>)}
+                
+                <button onClick={handleSalvar} disabled={isProcessing || isSupplyFechado} className={`flex items-center gap-2 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase transition-all shadow-lg ${isSupplyFechado ? 'bg-slate-300 cursor-not-allowed shadow-none' : 'bg-slate-900 hover:bg-black shadow-slate-900/30'}`}>
+                    {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : isSupplyFechado ? <Lock className="w-5 h-5" /> : <Check className="w-5 h-5" />}
+                    {isSupplyFechado ? 'Edição Bloqueada' : qtdEdicoes > 0 ? 'Aplicar Restrições de Fábrica' : 'Confirmar Capacidade Total'}
+                </button>
+              </div>
           </div>
         </div>
 
-        {/* BARRA DE FILTROS */}
+        {/* BUSCA */}
         <div className="flex flex-col md:flex-row gap-4 mb-6">
-           <div className="bg-emerald-600 text-white px-8 py-4 rounded-[24px] flex items-center gap-4 shadow-lg shadow-emerald-600/20 flex-shrink-0">
-             <div className="bg-emerald-500 p-2 rounded-full"><Activity className="w-6 h-6 text-white" /></div>
-             <div>
-               <p className="text-[10px] font-black uppercase tracking-widest text-emerald-200 mb-0.5">Skus Avaliados</p>
-               <p className="text-2xl font-black leading-none">{dadosFiltrados.length}</p>
-             </div>
-           </div>
-
            <div className="flex-1 bg-white p-3 rounded-[24px] shadow-sm border border-slate-100 flex flex-col md:flex-row items-center gap-3">
              <div className="flex-1 flex items-center gap-3 px-4 bg-slate-50 rounded-xl border border-slate-100 w-full">
                <Search className="w-5 h-5 text-slate-400" />
                <input 
-                 type="text" placeholder="Buscar por SKU..." value={busca} onChange={e => setBusca(e.target.value)}
+                 type="text" placeholder="Filtrar por SKU ou Descrição..." value={busca} onChange={e => setBusca(e.target.value)}
                  className="w-full bg-transparent py-3 text-sm font-bold text-slate-800 outline-none placeholder:text-slate-400"
                />
              </div>
-             <div className="flex items-center gap-2 px-4 bg-slate-50 rounded-xl border border-slate-100 w-full md:w-auto">
-               <Filter className="w-4 h-4 text-slate-400" />
-               <select value={categoriaSelecionada} onChange={e => setCategoriaSelecionada(e.target.value)} className="bg-transparent py-3 text-sm font-bold text-slate-700 outline-none cursor-pointer">
-                 <option value="TODAS">TODAS AS CATEGORIAS</option>
-                 {categoriasUnicas.map(c => <option key={c as string} value={c as string}>{c as string}</option>)}
-               </select>
-             </div>
-             <div className="flex items-center gap-2 px-4 bg-slate-50 rounded-xl border border-slate-100 w-full md:w-auto">
-               <Filter className="w-4 h-4 text-slate-400" />
-               <select value={segmentoSelecionado} onChange={e => setSegmentoSelecionado(e.target.value)} className="bg-transparent py-3 text-sm font-bold text-slate-700 outline-none cursor-pointer">
-                 <option value="TODOS">TODOS OS SEGMENTOS</option>
-                 {segmentosUnicos.map(s => <option key={s as string} value={s as string}>{s as string}</option>)}
-               </select>
-             </div>
-             <button onClick={() => handleExportExcel(false)} className="flex items-center gap-2 bg-slate-100 hover:bg-emerald-50 text-slate-700 px-6 py-3 rounded-xl text-xs font-black tracking-widest uppercase transition-all border border-slate-200 ml-auto whitespace-nowrap">
-                <Download className="w-4 h-4" /> Exportar
+             <button onClick={handleExportExcel} className="flex items-center gap-2 bg-slate-100 hover:bg-indigo-50 text-slate-700 px-6 py-3 rounded-xl text-xs font-black tracking-widest uppercase transition-all border border-slate-200 ml-auto whitespace-nowrap">
+                <Download className="w-4 h-4" /> Exportar Relatório
              </button>
            </div>
         </div>
 
-        {/* TABELA DE DADOS E GRÁFICOS */}
-        <div className="bg-white rounded-[40px] shadow-2xl border border-slate-100 overflow-hidden relative">
+        {/* TABELA */}
+        <div className="bg-white rounded-[40px] shadow-2xl border border-slate-100 overflow-hidden relative min-h-[400px]">
+          {isLoading ? (
+             <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 backdrop-blur-sm z-10">
+                 <Loader2 className="w-8 h-8 animate-spin text-indigo-500 mb-4" />
+                 <span className="text-slate-400 font-black text-xs tracking-widest uppercase">A carregar Capacidade de Fábrica...</span>
+             </div>
+          ) : dadosFiltrados.length === 0 ? (
+             <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
+                 <Filter className="w-12 h-12 mb-4 opacity-20" />
+                 <span className="font-black text-sm tracking-widest uppercase">Nenhum SKU encontrado no radar</span>
+             </div>
+          ) : (
           <div className="overflow-x-auto pb-4">
             <table className="w-full text-left border-collapse">
               <thead className="bg-white border-b-2 border-slate-100 shadow-sm">
@@ -379,31 +384,33 @@ export default function SupplyReviewArena() {
               
               <tbody>
                 {table.getRowModel().rows.map(row => (
-                  <React.Fragment key={row.id}>
-                    <tr className={`border-b border-slate-50 transition-colors ${row.getIsExpanded() ? 'bg-slate-50/60' : 'hover:bg-slate-50/30'}`}>
+                  <Fragment key={row.id}>
+                    <tr className={`border-b border-slate-50 transition-colors bg-white hover:bg-slate-50`}>
                       {row.getVisibleCells().map(cell => (
-                        <td key={cell.id} className="px-8 py-4 align-top">
+                        <td key={cell.id} className="px-8 py-4">
                           {flexRender(cell.column.columnDef.cell, cell.getContext())}
                         </td>
                       ))}
                     </tr>
                     
-                    {row.getIsExpanded() && (
+                    {chartExpanded === row.original.produto && (
                       <tr>
-                        <td colSpan={table.getAllColumns().length} className="bg-slate-50/50 p-8 border-b border-slate-100">
-                          <div className="bg-white rounded-[40px] p-8 shadow-inner border border-slate-100 animate-in fade-in duration-500">
-                            
+                        <td colSpan={table.getAllColumns().length} className="bg-slate-900 p-8 border-b border-slate-800">
+                          <div className="bg-slate-950 rounded-[32px] p-8 shadow-inner border border-slate-800 animate-in fade-in duration-500">
                             <div className="flex justify-between items-start mb-6 px-2">
-                               <div className="flex flex-col gap-3">
-                                 <h3 className="text-lg font-black text-slate-800 uppercase tracking-tighter">
-                                   Curva Consolidada Brasil (Real x Supply)
+                               <div className="flex flex-col gap-1">
+                                 <h3 className="text-lg font-black text-white uppercase tracking-tighter flex items-center gap-2">
+                                   <Activity className="w-5 h-5 text-emerald-400" /> Curva Histórica de Demanda
                                  </h3>
+                                 <p className="text-xs font-bold text-slate-400 tracking-widest uppercase">
+                                   {row.original.produto} - {row.original.descricao}
+                                 </p>
                                </div>
                             </div>
 
                             <div className="h-[250px] w-full">
                               {loadingGrafico === row.original.produto ? (
-                                <div className="h-full flex items-center justify-center text-slate-800"><Loader2 className="animate-spin w-8 h-8" /></div>
+                                <div className="h-full flex items-center justify-center text-slate-600"><Loader2 className="animate-spin w-8 h-8" /></div>
                               ) : (
                                 <ResponsiveContainer width="100%" height="100%">
                                   <LineChart 
@@ -411,21 +418,21 @@ export default function SupplyReviewArena() {
                                       (dadosGraficoCache[row.original.produto] || []).map((p: any) => {
                                           const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
                                           const edicao = celulasEditadas[row.original.produto]?.[p.data_iso];
-                                          const valSupply = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
-                                          return { ...p, Consenso: valSupply !== null ? valSupply : p.Consenso };
+                                          const valFinal = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
+                                          return { ...p, Consenso: valFinal !== null ? valFinal : p.Consenso };
                                       })
                                     }
                                     margin={{ top: 20, right: 30, left: 20, bottom: 10 }}
                                   >
-                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                                    <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900}} axisLine={false} tickLine={false} />
-                                    <YAxis tick={{fontSize: 10}} axisLine={false} tickLine={false} />
-                                    <Tooltip contentStyle={{borderRadius: '20px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)'}} />
-                                    <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900'}} />
+                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
+                                    <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
+                                    <YAxis tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} tickLine={false} />
+                                    <Tooltip contentStyle={{borderRadius: '20px', backgroundColor: '#0f172a', border: '1px solid #1e293b', color: '#fff', boxShadow: '0 10px 30px rgba(0,0,0,0.5)'}} />
+                                    <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900', color: '#cbd5e1'}} />
                                     
-                                    <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={4} dot={{r: 3, fill: '#0f172a'}} connectNulls={false} />
-                                    <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
-                                    <Line type="monotone" dataKey="Consenso" name="Meta Restrita (Supply)" stroke="#10b981" strokeWidth={5} dot={{r: 6, fill: '#10b981', strokeWidth: 2, stroke: '#fff'}} connectNulls={false} />
+                                    <Line type="monotone" dataKey="Realizado" name="Faturamento Real" stroke="#f8fafc" strokeWidth={4} dot={{r: 3, fill: '#f8fafc'}} connectNulls={false} />
+                                    <Line type="monotone" dataKey="IA" name="Sinal IA (Base)" stroke="#475569" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
+                                    <Line type="monotone" dataKey="Consenso" name="Capacidade Fábrica (Atual)" stroke="#10b981" strokeWidth={5} dot={{r: 6, fill: '#10b981', strokeWidth: 2, stroke: '#0f172a'}} connectNulls={false} />
                                   </LineChart>
                                 </ResponsiveContainer>
                               )}
@@ -434,15 +441,14 @@ export default function SupplyReviewArena() {
                         </td>
                       </tr>
                     )}
-                  </React.Fragment>
+                  </Fragment>
                 ))}
               </tbody>
               
               <tfoot className="bg-slate-900 text-white">
                 <tr>
                   {table.getHeaderGroups()[0].headers.map(header => {
-                    if (header.id === 'expander' || header.id === 'pmv_base') return <td key={header.id} className="px-8 py-5"></td>;
-                    if (header.id === 'info') return (
+                    if (header.id === 'nome') return (
                       <td key={header.id} className="px-8 py-5 text-right">
                         <div className="flex flex-col">
                           <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Receita Consolidada</span>
@@ -454,8 +460,8 @@ export default function SupplyReviewArena() {
                       const mesBanco = header.id.replace('mes_', '');
                       return (
                         <td key={header.id} className="px-8 py-5">
-                          <div className="bg-slate-800/80 inline-block px-3 py-1.5 rounded-xl border border-slate-700/50">
-                            <span className="font-black text-emerald-400 text-[13px] tracking-tight">{formatMoeda(totaisFaturamento[mesBanco] || 0)}</span>
+                          <div className="flex flex-col items-center justify-center min-w-[100px]">
+                            <span className="font-black text-emerald-400 text-[13px] tracking-tight mt-0.5">{formatMoeda(totaisFaturamento[mesBanco] || 0)}</span>
                           </div>
                         </td>
                       );
@@ -466,6 +472,7 @@ export default function SupplyReviewArena() {
               </tfoot>
             </table>
           </div>
+          )}
         </div>
       </div>
     </div>
