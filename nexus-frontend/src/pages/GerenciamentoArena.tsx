@@ -13,7 +13,7 @@ import * as XLSX from 'xlsx';
 const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor));
 const formatVolume = (val: number) => Math.round(val).toLocaleString('pt-BR');
 
-export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }) {
+export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: any }) {
   const isExecutivo = usuarioSessao?.funcao === 'Executivo';
 
   const [nivelHierarquia, setNivelHierarquia] = useState(isExecutivo ? 'vendedor' : 'regional');
@@ -26,9 +26,11 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   const [sorting, setSorting] = useState<SortingState>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   
-  // O NOVO ESTADO DA TRAVA GLOBAL E DA CASCATA
+  // =========================================================================
+  // CORREÇÃO: O Gerenciamento agora espera pelo Top-Down (Fase 1)
+  // =========================================================================
   const [isFechado, setIsFechado] = useState(false);
-  const [isSupplyFechado, setIsSupplyFechado] = useState<boolean | null>(null);
+  const [isTopDownFechado, setIsTopDownFechado] = useState<boolean | null>(null);
   
   const [chartExpanded, setChartExpanded] = useState<string | null>(null);
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
@@ -42,10 +44,10 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     axios.get('/api/v1/consensus/micro/filtros', { params: { gerente_nome: usuarioSessao?.gerente_nome } })
          .then(res => setOpcoesBusca(res.data)).catch(console.error);
 
-    // NOVO: Verifica se o Supply Chain liberou a meta para a equipa comercial
-    axios.get('/api/v1/consensus/supply/status')
-         .then(res => setIsSupplyFechado(res.data.is_supply_fechado))
-         .catch(() => setIsSupplyFechado(false));
+    // CORREÇÃO: Consulta a rota macro (Top-Down) para saber se pode liberar a tela
+    axios.get('/api/v1/consensus/macro/status')
+         .then(res => setIsTopDownFechado(res.data.is_topdown_fechado))
+         .catch(() => setIsTopDownFechado(false));
   }, [usuarioSessao]);
 
   const fetchData = useCallback(async () => {
@@ -72,8 +74,8 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   }, [nivelHierarquia, nomeResponsavel]);
 
   useEffect(() => { 
-    if (isExecutivo && nomeResponsavel && isSupplyFechado) fetchData(); 
-  }, [fetchData, isExecutivo, nomeResponsavel, isSupplyFechado]);
+    if (isExecutivo && nomeResponsavel && isTopDownFechado) fetchData(); 
+  }, [fetchData, isExecutivo, nomeResponsavel, isTopDownFechado]);
 
   const handleExportExcel = () => {
     if (dadosBrutos.length === 0) return alert("Não há dados no ecrã para exportar.");
@@ -89,6 +91,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           const edicao = celulasEditadas[prod.chave_matriz]?.[m.mes_banco];
           const volFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : m.vol_ajustado));
           linha[`${m.mes_str} (Base IA)`] = Math.round(Number(m.vol_ia));
+          linha[`${m.mes_str} (Top-Down)`] = Math.round(Number(m.vol_td || 0));
           linha[`${m.mes_str} (Comercial)`] = volFinal;
         });
         dadosExcel.push(linha);
@@ -97,9 +100,9 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
 
     const worksheet = XLSX.utils.json_to_sheet(dadosExcel);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Bottom_Up_Consenso");
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Gerenciamento_Consenso");
     worksheet['!cols'] = [{ wch: 30 }, { wch: 15 }, { wch: 40 }, { wch: 20 }, { wch: 20 }, { wch: 18 }];
-    XLSX.writeFile(workbook, `SOP_Nexus_BottomUp_${nomeResponsavel}_${new Date().toISOString().split('T')[0]}.xlsx`);
+    XLSX.writeFile(workbook, `SOP_Nexus_Gerenciamento_${nomeResponsavel}_${new Date().toISOString().split('T')[0]}.xlsx`);
   };
 
   const handleSalvar = async () => {
@@ -118,8 +121,8 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     });
 
     try {
-      await axios.post(`/api/v1/consensus/micro/congelar?nivel_hierarquia=${nivelHierarquia}&nome_responsavel=${nomeResponsavel}`, { origem_ajuste: "Comercial", ajustes });
-      alert("✅ Volume comercial salvo com sucesso! O rateio (cascata) foi processado.");
+      await axios.post(`/api/v1/consensus/micro/congelar?nivel_hierarquia=${nivelHierarquia}&nome_responsavel=${nomeResponsavel}`, { origem_ajuste: "Gerencial", ajustes });
+      alert("✅ Volume salvo com sucesso! O rateio (cascata) foi processado.");
       fetchData(); 
     } catch (e: any) {
       alert(e.response?.data?.detail || "Erro ao guardar.");
@@ -309,9 +312,9 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   });
 
   // =========================================================================
-  // TELA DE BLOQUEIO DE FASE (AGUARDANDO SUPPLY CHAIN)
+  // TELA DE BLOQUEIO DE FASE (AGUARDANDO TOP-DOWN)
   // =========================================================================
-  if (isSupplyFechado === null) {
+  if (isTopDownFechado === null) {
     return (
       <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
         <Loader2 className="w-8 h-8 animate-spin text-indigo-500 mb-4" />
@@ -320,16 +323,16 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     );
   }
 
-  if (isSupplyFechado === false) {
+  if (isTopDownFechado === false) {
     return (
       <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans p-6">
         <div className="bg-white p-12 rounded-[40px] shadow-xl border border-slate-100 flex flex-col items-center max-w-lg text-center animate-in fade-in zoom-in duration-500">
-          <div className="w-20 h-20 bg-amber-50 rounded-full flex items-center justify-center mb-6 border border-amber-100">
-            <AlertTriangle className="w-10 h-10 text-amber-500" />
+          <div className="w-20 h-20 bg-blue-50 rounded-full flex items-center justify-center mb-6 border border-blue-100">
+            <Lock className="w-10 h-10 text-blue-500" />
           </div>
-          <h2 className="text-2xl font-black text-slate-900 tracking-tighter mb-4">Aguardando Supply Chain</h2>
+          <h2 className="text-2xl font-black text-slate-900 tracking-tighter mb-4">Aguardando Diretoria (Top-Down)</h2>
           <p className="text-slate-500 font-medium leading-relaxed">
-            A fase Comercial (Bottom-Up) só pode ser iniciada após a aprovação e congelamento do plano de restrições pela equipa de <strong>Supply Chain (Fase 3)</strong>.
+            A fase de Gerenciamento só pode ser iniciada após a aprovação e congelamento da demanda macro pela <strong>Diretoria (Fase 1)</strong>.
           </p>
         </div>
       </div>
@@ -350,10 +353,10 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           
           <div className={isFechado ? "pt-4" : ""}>
             <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
-              <TrendingUp className="w-8 h-8 text-indigo-600" /> Metas por Cliente
+              <TrendingUp className="w-8 h-8 text-indigo-600" /> Metas por Cliente (Gerenciamento)
             </h1>
             <p className="text-sm font-bold text-slate-400 mt-1 uppercase tracking-widest pl-11">
-              Visão Executiva: {nivelHierarquia === 'vendedor' ? 'Vendedor(a)' : 'Regional'} <span className="text-indigo-600">{nomeResponsavel}</span>
+              Visão Gerencial: {nivelHierarquia === 'vendedor' ? 'Vendedor(a)' : 'Regional'} <span className="text-indigo-600">{nomeResponsavel}</span>
             </p>
           </div>
           
@@ -362,7 +365,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                 {qtdEdicoes > 0 && !isFechado && (<button onClick={() => setCelulasEditadas({})} className="flex items-center gap-1 text-xs font-black text-rose-500 hover:text-rose-700 transition tracking-widest uppercase px-4 py-3 rounded-2xl hover:bg-rose-50"><X className="w-4 h-4" /> Descartar</button>)}
                 <button onClick={handleSalvar} disabled={isProcessing || isFechado} className={`flex items-center gap-2 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase transition-all shadow-lg ${isFechado ? 'bg-slate-300 cursor-not-allowed shadow-none' : 'bg-slate-900 hover:bg-black shadow-slate-900/30'}`}>
                     {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : isFechado ? <Lock className="w-5 h-5" /> : <Check className="w-5 h-5" />}
-                    {isFechado ? 'Edição Bloqueada' : qtdEdicoes > 0 ? 'Gravar Proposta Comercial' : 'Proposta Atualizada'}
+                    {isFechado ? 'Edição Bloqueada' : qtdEdicoes > 0 ? 'Gravar Proposta Gerencial' : 'Proposta Atualizada'}
                 </button>
               </div>
           </div>
@@ -424,7 +427,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           {isLoading ? (
              <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 backdrop-blur-sm z-10">
                  <Loader2 className="w-8 h-8 animate-spin text-indigo-500 mb-4" />
-                 <span className="text-slate-400 font-black text-xs tracking-widest uppercase">A carregar Matriz Comercial...</span>
+                 <span className="text-slate-400 font-black text-xs tracking-widest uppercase">A carregar Matriz Gerencial...</span>
              </div>
           ) : dadosFiltrados.length === 0 ? (
              <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
@@ -479,7 +482,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                                </div>
                             </div>
 
-                            {/* REMOVIDO: -ml-4 */}
                             <div className="h-[250px] w-full">
                               {loadingGrafico === row.original.chave_matriz ? (
                                 <div className="h-full flex items-center justify-center text-slate-600"><Loader2 className="animate-spin w-8 h-8" /></div>
@@ -494,7 +496,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                                           return { ...p, Consenso: valComercial !== null ? valComercial : p.Consenso };
                                       })
                                     }
-                                    // ADICIONADO: Respiro nas laterais
                                     margin={{ top: 20, right: 30, left: 20, bottom: 10 }}
                                   >
                                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
