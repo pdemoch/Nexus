@@ -21,9 +21,7 @@ export default function SupplyReviewArena() {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   
-  // =========================================================================
-  // STATUS DAS FASES (BLINDAGEM EM CASCATA)
-  // =========================================================================
+  // STATUS DAS FASES
   const [isTopDownFechado, setIsTopDownFechado] = useState(false);
   const [isFase2Fechada, setIsFase2Fechada] = useState<boolean | null>(null);
   const [qtdPendentes, setQtdPendentes] = useState(0);
@@ -75,7 +73,7 @@ export default function SupplyReviewArena() {
       
       prod.meses.forEach((m: any) => {
         const edicao = celulasEditadas[prod.produto]?.[m.mes_banco];
-        const volFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : m.vol_ajustado));
+        const volFinal = Math.round(Number(edicao !== undefined && edicao.novo_volume !== undefined && edicao.novo_volume !== '' ? edicao.novo_volume : m.vol_ajustado));
         
         linha[`${m.mes_str} (Pedido Comercial)`] = Math.round(Number(m.vol_ref || 0));
         linha[`${m.mes_str} (Fábrica)`] = volFinal;
@@ -92,15 +90,43 @@ export default function SupplyReviewArena() {
 
   const handleSalvar = async () => {
     if (isSupplyFechado) return; 
+
+    // =====================================================================
+    // 1. VALIDAÇÃO EXPLÍCITA DE ERRO (A pedido do utilizador)
+    // =====================================================================
+    let erroValidacao = false;
+    Object.values(celulasEditadas).forEach((meses: any) => {
+      Object.values(meses).forEach((val: any) => {
+        // Se ele tocou no volume e deixou em branco ou digitou algo inválido (NaN)
+        if (val.novo_volume === '' || Number.isNaN(val.novo_volume)) {
+          erroValidacao = true;
+        }
+      });
+    });
+
+    if (erroValidacao) {
+      alert("⚠️ Atenção: Há campos de volume em branco ou com formato inválido. Por favor, preencha um número válido em todos os campos alterados antes de gravar.");
+      return; // Trava a execução e impede de enviar ao Backend
+    }
+
     setIsProcessing(true);
     const ajustes: any[] = [];
     
     Object.entries(celulasEditadas).forEach(([sku, meses]: any) => {
       Object.entries(meses).forEach(([mes, val]: any) => {
+        
+        let volFinal = val.novo_volume;
+        // Só faz fallback se o volume estiver 100% intocado (ex: ele apenas digitou a justificativa)
+        if (volFinal === undefined) {
+            const prodOriginal = dadosBrutos.find(p => p.produto === sku);
+            const mesOriginal = prodOriginal?.meses.find((m: any) => m.mes_banco === mes);
+            volFinal = mesOriginal ? mesOriginal.vol_ajustado : 0;
+        }
+
         ajustes.push({ 
           produto: sku, 
           mes_projetado: mes, 
-          novo_volume: val.novo_volume === '' ? 0 : val.novo_volume,
+          novo_volume: Number(volFinal),
           justificativa: val.justificativa || ''
         });
       });
@@ -128,11 +154,11 @@ export default function SupplyReviewArena() {
     dadosFiltrados.forEach(prod => {
       prod.meses.forEach((mes: any) => {
         const edicaoProd = celulasEditadas[prod.produto]?.[mes.mes_banco];
-        const isPendente = edicaoProd !== undefined;
-        const volumeFinal = Math.round(Number(isPendente ? edicaoProd.novo_volume : mes.vol_ajustado));
+        const hasNovoVol = edicaoProd !== undefined && edicaoProd.novo_volume !== undefined && edicaoProd.novo_volume !== '';
+        const volumeFinal = Math.round(Number(hasNovoVol ? edicaoProd.novo_volume : mes.vol_ajustado));
         
         if (!totais[mes.mes_banco]) totais[mes.mes_banco] = 0;
-        totais[mes.mes_banco] += isPendente ? (volumeFinal * (mes.pmv || 0)) : (mes.receita || 0);
+        totais[mes.mes_banco] += hasNovoVol ? (volumeFinal * (mes.pmv || 0)) : (mes.receita || 0);
       });
     });
     return totais;
@@ -146,7 +172,7 @@ export default function SupplyReviewArena() {
     if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
-        const res = await axios.get('/api/v1/consensus/micro/grafico', { params: { chave_matriz: `|${chave}` } });
+        const res = await axios.get('/api/v1/consensus/micro/grafico', { params: { chave_matriz: `|${chave}`, tipo_linha: 'produto' } });
         setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
       } catch (e) { console.error(e); }
       finally { setLoadingGrafico(null); }
@@ -198,46 +224,51 @@ export default function SupplyReviewArena() {
           const meta = info.table.options.meta as any;
           const edicao = meta.celulasEditadas[row.produto]?.[m.mes_banco];
           
-          const isPendente = edicao !== undefined;
-          const valorReal = isPendente ? edicao.novo_volume : (dadosMes?.vol_ajustado || 0);
-          const valorInteiro = Math.round(Number(valorReal));
-          const volBottomUp = Math.round(Number(dadosMes?.vol_ref || 0)); // O Volume pedido pelo comercial
+          const hasNovoVol = edicao !== undefined && edicao.novo_volume !== undefined;
+          const erroNoCampo = hasNovoVol && (edicao.novo_volume === '' || Number.isNaN(edicao.novo_volume));
+          const valorReal = hasNovoVol ? edicao.novo_volume : (dadosMes?.vol_ajustado || 0);
           
-          const faturamentoPrevisto = isPendente ? (valorInteiro * (dadosMes?.pmv || 0)) : (dadosMes?.receita || 0);
+          // Se houver erro de digitação, mostramos o texto vazio/inválido. Se não, mostramos formatado.
+          const valorInput = erroNoCampo ? valorReal : Math.round(Number(valorReal));
+          const volBottomUp = Math.round(Number(dadosMes?.vol_ref || 0)); 
+          
+          const faturamentoPrevisto = (hasNovoVol && !erroNoCampo) ? (valorInput * (dadosMes?.pmv || 0)) : (dadosMes?.receita || 0);
           
           const bloqueado = meta.isFechado;
-          const temCorte = valorInteiro < volBottomUp;
+          const temCorte = (!erroNoCampo && valorInput < volBottomUp);
 
           return (
             <div className="flex flex-col w-36 gap-1.5 relative">
               <div className="flex justify-between items-center px-1">
                  <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest" title="Pedido Consolidado do Comercial">BU: {volBottomUp}</span>
                  {temCorte && <span className="text-[9px] text-rose-500 font-black uppercase tracking-widest bg-rose-50 px-1 rounded border border-rose-100" title="Corte de Fábrica">CORTE</span>}
+                 {erroNoCampo && <span className="text-[9px] text-rose-500 font-black uppercase tracking-widest bg-rose-50 px-1 rounded border border-rose-100" title="Valor Inválido">INVÁLIDO</span>}
               </div>
               
               <input
-                type="number" value={valorInteiro === 0 ? '' : valorInteiro} placeholder="0" disabled={bloqueado}
+                type="number" value={valorInput === 0 ? '' : valorInput} placeholder="0" disabled={bloqueado}
                 onChange={(e) => meta.updateCell(row.produto, m.mes_banco, e.target.value)}
                 className={`text-sm text-center font-black p-2.5 rounded-t-xl outline-none border-2 transition-all w-full
-                  ${bloqueado ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed opacity-80' : 'bg-white border-slate-200 focus:border-indigo-500 text-slate-800'} 
-                  ${isPendente && !bloqueado ? 'border-amber-400 bg-amber-50 shadow-sm' : ''}`}
-                title={bloqueado ? "Aprovação de Supply Fechada" : "Definir capacidade de entrega"}
+                  ${bloqueado ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed opacity-80' : 
+                    erroNoCampo ? 'border-rose-500 bg-rose-50 text-rose-700' : 'bg-white border-slate-200 focus:border-indigo-500 text-slate-800'} 
+                  ${hasNovoVol && !bloqueado && !erroNoCampo ? 'border-amber-400 bg-amber-50 shadow-sm' : ''}`}
+                title={bloqueado ? "Aprovação de Supply Fechada" : erroNoCampo ? "Preencha um número válido" : "Definir capacidade de entrega"}
               />
               
-              {!bloqueado && (isPendente || temCorte || dadosMes?.justificativa) && (
+              {!bloqueado && (edicao !== undefined || temCorte || dadosMes?.justificativa) && (
                  <input 
                    type="text"
-                   value={isPendente ? (edicao.justificativa || '') : (dadosMes?.justificativa || '')}
+                   value={edicao?.justificativa !== undefined ? edicao.justificativa : (dadosMes?.justificativa || '')}
                    onChange={(e) => meta.updateJustificativa(row.produto, m.mes_banco, e.target.value)}
                    placeholder="Motivo (Opcional)"
                    className={`text-[9px] p-1.5 rounded-b-xl border-x-2 border-b-2 outline-none w-full text-center font-bold transition-all
-                     ${isPendente ? 'border-amber-400 bg-amber-50/50 text-amber-700' : 'border-slate-200 bg-white text-slate-500'}
+                     ${erroNoCampo ? 'border-rose-300 bg-rose-50 text-rose-700' : edicao?.justificativa !== undefined ? 'border-amber-400 bg-amber-50/50 text-amber-700' : 'border-slate-200 bg-white text-slate-500'}
                      focus:border-indigo-500 focus:bg-indigo-50`}
                  />
               )}
 
-              <span className={`text-[10px] font-black text-center tracking-tight mt-1 ${bloqueado ? 'text-slate-400' : 'text-emerald-600'}`}>
-                {formatMoeda(faturamentoPrevisto)}
+              <span className={`text-[10px] font-black text-center tracking-tight mt-1 ${bloqueado ? 'text-slate-400' : erroNoCampo ? 'text-rose-500' : 'text-emerald-600'}`}>
+                {erroNoCampo ? 'R$ 0' : formatMoeda(faturamentoPrevisto)}
               </span>
             </div>
           );
@@ -256,8 +287,10 @@ export default function SupplyReviewArena() {
       isFechado: isSupplyFechado, 
       updateCell: (sku: string, mes: string, val: string) => {
         if (isSupplyFechado) return; 
-        const v = val === '' ? '' : Math.round(Number(val));
-        const finalV = Number.isNaN(v as any) && val !== '' ? 0 : v;
+        
+        // Se o utilizador apagar tudo (texto vazio) ou digitar algo inválido, mantemos o valor real para a validação apanhar
+        const finalV = val === '' ? '' : Number.isNaN(Number(val)) ? NaN : Math.round(Number(val));
+
         setCelulasEditadas((prev: any) => ({ ...prev, [sku]: { ...(prev[sku] || {}), [mes]: { ...((prev[sku]||{})[mes]||{}), novo_volume: finalV } } }));
       },
       updateJustificativa: (sku: string, mes: string, just: string) => {
@@ -267,9 +300,6 @@ export default function SupplyReviewArena() {
     }
   });
 
-  // =========================================================================
-  // TELA DE BLOQUEIO DE FASE (AGUARDANDO COMERCIAL)
-  // =========================================================================
   if (isFase2Fechada === null) {
     return (
       <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
@@ -332,7 +362,6 @@ export default function SupplyReviewArena() {
           </div>
         </div>
 
-        {/* BUSCA */}
         <div className="flex flex-col md:flex-row gap-4 mb-6">
            <div className="flex-1 bg-white p-3 rounded-[24px] shadow-sm border border-slate-100 flex flex-col md:flex-row items-center gap-3">
              <div className="flex-1 flex items-center gap-3 px-4 bg-slate-50 rounded-xl border border-slate-100 w-full">
@@ -348,7 +377,6 @@ export default function SupplyReviewArena() {
            </div>
         </div>
 
-        {/* TABELA */}
         <div className="bg-white rounded-[40px] shadow-2xl border border-slate-100 overflow-hidden relative min-h-[400px]">
           {isLoading ? (
              <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 backdrop-blur-sm z-10">
@@ -418,7 +446,7 @@ export default function SupplyReviewArena() {
                                       (dadosGraficoCache[row.original.produto] || []).map((p: any) => {
                                           const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
                                           const edicao = celulasEditadas[row.original.produto]?.[p.data_iso];
-                                          const valFinal = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
+                                          const valFinal = mesNaTab ? Math.round(Number(edicao !== undefined && edicao.novo_volume !== undefined && edicao.novo_volume !== '' ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
                                           return { ...p, Consenso: valFinal !== null ? valFinal : p.Consenso };
                                       })
                                     }
