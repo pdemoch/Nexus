@@ -49,6 +49,29 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
 
         resultados = query.all()
         
+        # CORREÇÃO CRUCIAL: Transformar explicitamente cada linha em um dicionário (Objeto JSON)
+        dados_formatados = []
+        for r in resultados:
+            dados_formatados.append({
+                "categoria": r.categoria,
+                "sku": r.sku,
+                "descricao": r.descricao,
+                "razaosocial": r.razaosocial,
+                "mes_projetado": str(r.mes_projetado),
+                "vol_ia": int(r.vol_ia or 0),
+                "vol_topdown": int(r.vol_topdown or 0),
+                "vol_bottomup": int(r.vol_bottomup or 0),
+                "vol_supply": int(r.vol_supply or 0),
+                "vol_final": int(r.vol_final or 0),
+                "vol_meta": int(r.vol_meta or 0),
+                "pmv_aplicado": float(r.pmv_aplicado or 0),
+                "rec_ia": float(r.rec_ia or 0),
+                "rec_td": float(r.rec_td or 0),
+                "rec_bu": float(r.rec_bu or 0),
+                "rec_supply": float(r.rec_supply or 0),
+                "rec_final": float(r.rec_final or 0)
+            })
+        
         # Verifica Status Global
         reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
         is_locked = reg.status == 'Fechado' if reg else False
@@ -58,13 +81,13 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
         if not is_locked and (not reg_sp or reg_sp.status != 'Fechado'):
             return {
                 "status": "success", "is_locked": True, 
-                "lock_message": "Aguardando encerramento do Supply Review (Fase 3)", "dados": resultados
+                "lock_message": "Aguardando encerramento do Supply Review (Fase 3)", "dados": dados_formatados
             }
 
         return {
             "status": "success", "is_locked": is_locked, 
             "lock_message": "Demanda Irrestrita Publicada" if is_locked else "Plano Aberto para Aprovação Final", 
-            "dados": resultados
+            "dados": dados_formatados
         }
     except Exception as e:
         raise HTTPException(500, repr(e))
@@ -84,12 +107,9 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
             
             query = get_truth_query(db, ciclo, data_alvo, data_alvo)
 
-            # Lógica de filtro baseada na árvore Categoria|SKU|Cliente
             if ajuste.nivel == 'cliente':
-                # Chave completa: Categoria|SKU|RazaoSocial
                 query = query.filter(FatoIbpGranular.sku == partes[1], DimCliente.razaosocial == partes[2])
             else:
-                # Chave: Categoria|SKU
                 query = query.filter(FatoIbpGranular.sku == partes[1])
 
             linhas = query.all()
@@ -107,7 +127,6 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
                     rateado = int(round(volume_alvo * peso))
                     soma_dist += rateado
                 
-                # REGRA 5: Ajuste final dita o vol_final e já prepara a vol_meta
                 l.vol_final = rateado
                 l.vol_meta = rateado
 
@@ -118,7 +137,7 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
         else:
             registro.status = 'Fechado'
 
-        # 3. CONGELAMENTO TOTAL: A Demanda Irrestrita oficial torna-se a Meta Executiva (Cascata Meta)
+        # 3. CONGELAMENTO TOTAL
         db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo).update({
             FatoIbpGranular.vol_meta: FatoIbpGranular.vol_final
         }, synchronize_session=False)
@@ -156,8 +175,8 @@ async def exportar_oficial(db: Session = Depends(get_db), usuario: dict = Depend
                 "Categoria": r.categoria, "SKU": r.sku, "Produto": r.descricao, "Cliente": r.razaosocial,
                 "Mês": r.mes_projetado.strftime("%m/%Y") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado), 
                 "Sinal IA": int(r.vol_ia or 0),
-                "Meta Gerencial": int(r.vol_td or 0),
-                "Proposta Comercial": int(r.vol_bu or 0),
+                "Meta Gerencial": int(r.vol_topdown or 0),
+                "Proposta Comercial": int(r.vol_bottomup or 0),
                 "Capacidade Fábrica": int(r.vol_supply or 0),
                 "Demanda Irrestrita": int(r.vol_final or 0),
                 "Meta Oficial": int(r.vol_meta or 0),
