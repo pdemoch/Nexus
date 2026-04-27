@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { Settings, RefreshCw, Terminal, Play, ShieldAlert, Loader2, Download, UserPlus, Check, X, Unlock } from 'lucide-react';
+import { Settings, RefreshCw, Terminal, Play, ShieldAlert, Loader2, Download, UserPlus, Check, X, Unlock, Calendar } from 'lucide-react';
 
 export default function AdminPanel() {
   const [logs, setLogs] = useState<string[]>([]);
@@ -14,6 +14,11 @@ export default function AdminPanel() {
   // ESTADOS DO DESCONGELAMENTO
   const [origemDesbloqueio, setOrigemDesbloqueio] = useState('');
   const [isUnlocking, setIsUnlocking] = useState(false);
+
+  // ESTADOS DA MÁQUINA DO TEMPO (NOVO)
+  const [cicloAtivo, setCicloAtivo] = useState('');
+  const [novoCicloInput, setNovoCicloInput] = useState('');
+  const [isChangingCiclo, setIsChangingCiclo] = useState(false);
 
   const terminalScrollRef = useRef<HTMLDivElement>(null);
 
@@ -45,6 +50,13 @@ export default function AdminPanel() {
         setVendedores(filtrosRes.data.vendedores || []);
       } catch(e) { console.error("Erro ao buscar vendedores"); }
 
+      // 4. Busca o Ciclo Ativo da Máquina do Tempo (NOVO)
+      try {
+        const cicloRes = await axios.get('/api/v1/admin/ciclo-ativo');
+        setCicloAtivo(cicloRes.data.ciclo_ativo);
+        setNovoCicloInput(cicloRes.data.ciclo_ativo);
+      } catch(e) { console.error("Erro ao buscar ciclo ativo"); }
+
     } catch (e) {
       console.error(e);
     } finally {
@@ -65,7 +77,7 @@ export default function AdminPanel() {
   }, [fetchData, isPipelineRunning]);
 
   const handleRunPipeline = async () => {
-    if (!window.confirm("⚠️ ATENÇÃO: Iniciar a Engenharia de Dados irá bloquear todo o sistema para os utilizadores. Deseja continuar?")) return;
+    if (!window.confirm(`⚠️ ATENÇÃO: O pipeline rodará para o mês focado atualmente (${cicloAtivo}). Iniciar a Engenharia de Dados irá bloquear todo o sistema. Deseja continuar?`)) return;
     
     setIsPipelineRunning(true);
     setLogs(["[SISTEMA] Iniciando requisição para o núcleo de IA..."]);
@@ -108,12 +120,12 @@ export default function AdminPanel() {
       const url = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = url;
-      link.setAttribute('download', `SOP_Nexus_Base_Granular_${new Date().toISOString().split('T')[0]}.xlsx`);
+      link.setAttribute('download', `SOP_Nexus_Base_Granular_${cicloAtivo.replace('/','_')}.xlsx`);
       document.body.appendChild(link);
       link.click();
       link.remove();
-    } catch (e) {
-      alert("Erro ao exportar a base de dados. Verifique se existem dados no ciclo atual.");
+    } catch (e: any) {
+      alert(e.response?.data?.detail || "Erro ao exportar a base de dados. Verifique se existem dados no ciclo atual.");
     } finally {
       setIsExporting(false);
     }
@@ -121,7 +133,7 @@ export default function AdminPanel() {
 
   const handleDescongelar = async () => {
     if (!origemDesbloqueio) return alert("Selecione a origem que deseja descongelar.");
-    if (!window.confirm(`Deseja realmente forçar a reabertura da tela para: ${origemDesbloqueio}?`)) return;
+    if (!window.confirm(`Deseja realmente forçar a reabertura da tela para: ${origemDesbloqueio} no ciclo ${cicloAtivo}?`)) return;
 
     setIsUnlocking(true);
     try {
@@ -134,6 +146,22 @@ export default function AdminPanel() {
       alert(e.response?.data?.detail || "Erro ao destrancar a tela.");
     } finally {
       setIsUnlocking(false);
+    }
+  };
+
+  // MUDAR O RELÓGIO GLOBAL (NOVO)
+  const handleChangeCiclo = async () => {
+    if (!novoCicloInput) return;
+    if (!window.confirm(`MÁQUINA DO TEMPO: Deseja alterar o relógio global do sistema para o ciclo ${novoCicloInput}? \n\nIsto irá mudar a visão de todos os utilizadores na plataforma imediatamente.`)) return;
+    
+    setIsChangingCiclo(true);
+    try {
+      await axios.post('/api/v1/admin/ciclo-ativo', { novo_ciclo: novoCicloInput });
+      alert(`✅ Relógio do sistema alterado para ${novoCicloInput} com sucesso! A página será recarregada.`);
+      window.location.reload(); // Força o refresh para limpar toda a cache do navegador
+    } catch (e: any) {
+      alert(e.response?.data?.detail || "Erro ao alterar o ciclo.");
+      setIsChangingCiclo(false);
     }
   };
 
@@ -172,18 +200,47 @@ export default function AdminPanel() {
           </button>
         </div>
 
-        {/* MUDANÇA: Layout solto com items-stretch em vez de forçar altura min-h-0 */}
         <div className="flex flex-col lg:flex-row gap-6 items-stretch">
           
           {/* COLUNA ESQUERDA: GESTÃO DE UTILIZADORES E TRAVAS */}
           <div className="w-full lg:w-1/3 flex flex-col gap-6">
              
-             {/* CARD 1: APROVAÇÕES PENDENTES (Altura Fixa Garantida) */}
+             {/* NOVO CARD: MÁQUINA DO TEMPO */}
+             <div className="bg-white rounded-[32px] p-6 lg:p-8 shadow-sm border border-slate-100 flex flex-col relative overflow-hidden">
+               <div className="absolute top-0 left-0 w-full h-1.5 bg-indigo-500"></div>
+               <div className="flex items-center gap-3 mb-4 pb-4 border-b border-slate-100 flex-shrink-0">
+                 <Calendar className="w-5 h-5 text-indigo-500" />
+                 <h2 className="text-sm font-black text-slate-700 uppercase tracking-widest">Controlo de Ciclo (Tempo)</h2>
+               </div>
+               <div className="flex flex-col gap-4">
+                 <p className="text-xs font-medium text-slate-500 leading-relaxed">
+                   O sistema inteiro (IA, Relatórios e Travas) está focado no ciclo abaixo. Altere o valor para viajar para um mês passado.
+                 </p>
+                 <div className="flex items-center gap-3 mt-2">
+                   <input 
+                     type="text" 
+                     placeholder="MM/YYYY" 
+                     value={novoCicloInput}
+                     onChange={e => setNovoCicloInput(e.target.value)}
+                     className="flex-1 bg-slate-50 border-2 border-slate-200 text-slate-800 text-lg text-center rounded-xl p-3 font-black outline-none focus:border-indigo-500 transition-all"
+                   />
+                   <button 
+                     onClick={handleChangeCiclo}
+                     disabled={isChangingCiclo || novoCicloInput === cicloAtivo}
+                     className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-md shadow-indigo-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                   >
+                     {isChangingCiclo ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Ativar'}
+                   </button>
+                 </div>
+               </div>
+             </div>
+
+             {/* CARD 1: APROVAÇÕES PENDENTES */}
              <div className="bg-white rounded-[32px] p-6 lg:p-8 shadow-sm border border-slate-100 flex flex-col h-[400px]">
                  <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slate-100 flex-shrink-0">
-                   <UserPlus className="w-5 h-5 text-indigo-500" />
+                   <UserPlus className="w-5 h-5 text-blue-500" />
                    <h2 className="text-sm font-black text-slate-700 uppercase tracking-widest">Aprovações Pendentes</h2>
-                   <div className="ml-auto bg-indigo-100 text-indigo-700 font-black text-xs px-2 py-1 rounded-lg">{usuariosPendentes.length}</div>
+                   <div className="ml-auto bg-blue-100 text-blue-700 font-black text-xs px-2 py-1 rounded-lg">{usuariosPendentes.length}</div>
                  </div>
 
                  <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-4">
@@ -229,7 +286,7 @@ export default function AdminPanel() {
 
                <div className="flex flex-col gap-4">
                  <p className="text-xs font-medium text-slate-500 leading-relaxed">
-                   Force a reabertura de uma etapa do S&OP que já foi assinada e congelada.
+                   Force a reabertura de uma etapa do S&OP que já foi assinada e congelada <strong className="text-slate-800">no ciclo ativo ({cicloAtivo})</strong>.
                  </p>
 
                  <select
@@ -277,7 +334,9 @@ export default function AdminPanel() {
                     <RefreshCw className={`w-4 h-4 text-emerald-400 ${isPipelineRunning ? 'animate-spin' : ''}`} />
                     Motor de Engenharia S&OP
                   </h2>
-                  <p className="text-xs font-medium text-slate-400 mt-1">Aciona a pipeline de Machine Learning e recria a matriz estatística global.</p>
+                  <p className="text-xs font-medium text-slate-400 mt-1">
+                    Aciona a pipeline de Machine Learning e recria a matriz no ciclo: <strong className="text-emerald-400">{cicloAtivo}</strong>
+                  </p>
                </div>
                <button 
                  onClick={handleRunPipeline}
