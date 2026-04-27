@@ -36,11 +36,9 @@ async def checar_status_supply(db: Session = Depends(get_db)):
     ciclo = get_current_cycle()
     m2, m4 = get_projection_window()
     
-    # 1. Checa Fase 1 (Top-Down)
     reg_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
     is_td_fechado = reg_td.status == 'Fechado' if reg_td else False
 
-    # 2. Checa Fase 2 (Comercial / Gerenciamento)
     query_base = get_truth_query(db, ciclo, m2, m4)
     vendedores_ativos = query_base.with_entities(FatoIbpGranular.vendedor_nome).filter(FatoIbpGranular.vendedor_nome.isnot(None)).distinct().all()
     v_ativos = [v[0].strip() for v in vendedores_ativos if v[0] and v[0].strip()]
@@ -53,7 +51,6 @@ async def checar_status_supply(db: Session = Depends(get_db)):
     pendentes = [v for v in v_ativos if v not in v_fechados]
     is_fase2_fechada = len(pendentes) == 0
 
-    # 3. Checa a própria Fase 3 (Supply)
     reg_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
     
     return {
@@ -68,6 +65,11 @@ async def listar_supply(db: Session = Depends(get_db), usuario: dict = Depends(r
     try:
         m2, m4 = get_projection_window()
         ciclo = get_current_cycle()
+        
+        # OPÇÃO 1: Deteta se é a primeira vez que o Supply abre a tela
+        reg_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
+        is_supply_fechado = reg_sp.status == 'Fechado' if reg_sp else False
+
         query_base = get_truth_query(db, ciclo, m2, m4)
         
         projecoes = query_base.with_entities(
@@ -77,6 +79,7 @@ async def listar_supply(db: Session = Depends(get_db), usuario: dict = Depends(r
             func.max(FatoIbpGranular.justificativa_supply).label('justificativa'),
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv_avg'), 
             func.sum(FatoIbpGranular.vol_supply * FatoIbpGranular.pmv_aplicado).label('rec_sp'), 
+            func.sum(FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('rec_bu'), 
             DimProduto.descricao, DimProduto.categoria, DimProduto.segmento
         ).group_by(
             FatoIbpGranular.sku, FatoIbpGranular.mes_projetado, 
@@ -91,18 +94,26 @@ async def listar_supply(db: Session = Depends(get_db), usuario: dict = Depends(r
                     "produto": r.sku, "descricao": r.descricao, "categoria": r.categoria, "segmento": r.segmento
                 })
             
-            v_sp = int(r.v_sp or 0)
-            rec_sp = float(r.rec_sp or 0)
-            pmv_real = (rec_sp / v_sp) if v_sp > 0 else float(r.pmv_avg or 0)
+            v_bu = int(r.v_bu or 0)
+            v_sp_banco = int(r.v_sp or 0)
+            
+            # A MÁGICA DA OPÇÃO 1: Mostra o Comercial se o Supply ainda não salvou
+            v_exibido = v_sp_banco if is_supply_fechado else v_bu
+            
+            rec_sp_banco = float(r.rec_sp or 0)
+            rec_bu_banco = float(r.rec_bu or 0)
+            rec_exibida = rec_sp_banco if is_supply_fechado else rec_bu_banco
+            
+            pmv_real = (rec_exibida / v_exibido) if v_exibido > 0 else float(r.pmv_avg or 0)
             
             p["meses"].append({
                 "mes_banco": str(r.mes_projetado), 
                 "mes_str": r.mes_projetado.strftime("%b/%y").capitalize(), 
-                "vol_ref": int(r.v_bu or 0), 
-                "vol_ajustado": v_sp, 
+                "vol_ref": v_bu, 
+                "vol_ajustado": v_exibido, 
                 "justificativa": r.justificativa or "",
                 "pmv": pmv_real, 
-                "receita": rec_sp  
+                "receita": rec_exibida  
             })
             
         return {"status": "success", "dados": list(prod_map.values())}
@@ -115,9 +126,7 @@ async def congelar_supply(payload: PayloadCongelarSupply, db: Session = Depends(
         ciclo = get_current_cycle()
         check_global_lock(db, ciclo)
         
-        # BLINDAGEM: Supply só fecha se Comercial e Gerência (Fase 2) estiverem 100% trancados
         m2, m4 = get_projection_window()
-        
         v_ativos_tuples = get_truth_query(db, ciclo, m2, m4).with_entities(FatoIbpGranular.vendedor_nome).filter(FatoIbpGranular.vendedor_nome.isnot(None)).distinct().all()
         v_ativos = [v[0].strip() for v in v_ativos_tuples if v[0]]
         
@@ -129,10 +138,23 @@ async def congelar_supply(payload: PayloadCongelarSupply, db: Session = Depends(
         v_fechados = [v[0].strip() for v in v_fechados_tuples if v[0]]
         
         pendentes = [v for v in v_ativos if v not in v_fechados]
-        
         if pendentes:
             raise HTTPException(status_code=403, detail=f"A Fase Comercial ainda não foi concluída. Faltam {len(pendentes)} equipes trancarem as carteiras.")
 
+        # ===============================================================================
+        # A MÁGICA DA OPÇÃO 2: HERANÇA FORÇADA
+        # ===============================================================================
+        registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
+        
+        if not registro: 
+            # É a primeira vez! O backend copia tudo do Comercial para o Supply e para o Final ANTES de fazer os cortes.
+            db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo).update({
+                FatoIbpGranular.vol_supply: FatoIbpGranular.vol_bottomup,
+                FatoIbpGranular.vol_final: FatoIbpGranular.vol_bottomup
+            }, synchronize_session=False)
+            db.commit()
+
+        # RATEIO DOS CORTES DA TELA
         for ajuste in payload.ajustes:
             data_alvo = parse_date_safe(ajuste.mes_projetado)
             linhas = get_truth_query(db, ciclo, data_alvo, data_alvo).filter(FatoIbpGranular.sku == str(ajuste.produto)).all()
@@ -140,7 +162,6 @@ async def congelar_supply(payload: PayloadCongelarSupply, db: Session = Depends(
             if not linhas: continue
 
             soma_bu_total = sum([float(l.vol_bottomup or 0) for l in linhas])
-            
             soma_dist = 0
             volume_total = int(ajuste.novo_volume)
             
@@ -158,10 +179,10 @@ async def congelar_supply(payload: PayloadCongelarSupply, db: Session = Depends(
                     
                 l.vol_supply = rateado
                 l.justificativa_supply = ajuste.justificativa
-
+                
+                # CASCATA OBRIGATÓRIA: O Final recebe a decisão da Fábrica!
                 l.vol_final = rateado 
 
-        registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
         if not registro: 
             db.add(ControleCiclo(ciclo_sop=ciclo, origem='Supply Review', status='Fechado'))
         else: 
