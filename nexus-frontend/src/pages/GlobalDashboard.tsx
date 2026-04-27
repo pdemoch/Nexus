@@ -2,10 +2,10 @@ import React, { useState, useMemo, useEffect, useCallback, Fragment } from 'reac
 import { useReactTable, getCoreRowModel, flexRender, getExpandedRowModel, getSortedRowModel, SortingState } from '@tanstack/react-table';
 import { 
   Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
-  Layers, Lock, Download, AlertTriangle, ShieldCheck, Check, Globe, Package, Users, Search, Filter, BarChart3, TrendingUp, TrendingDown, Activity, Hash, X
+  Layers, Lock, Download, AlertTriangle, ShieldCheck, Check, Globe, Package, Users, Search, Filter, BarChart3, TrendingUp, TrendingDown, Activity, Hash
 } from 'lucide-react';
 import axios from 'axios';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor || 0));
 const formatVolume = (val: number) => Math.round(val || 0).toLocaleString('pt-BR');
@@ -86,7 +86,6 @@ export default function GlobalDashboard() {
     if (!dadosBrutos.length) return [];
     const term = busca.toLowerCase();
     
-    // CORREÇÃO: Usando sku e razaosocial como o backend envia
     const filtered = dadosBrutos.filter(d => (d.sku + ' ' + d.descricao + ' ' + d.razaosocial + ' ' + d.categoria).toLowerCase().includes(term));
 
     const tree = new Map();
@@ -113,7 +112,6 @@ export default function GlobalDashboard() {
         if (!node.meses.has(m)) node.meses.set(m, { mes_banco: m, vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, rec_ia:0, rec_td:0, rec_bu:0, rec_sp:0, rec_final:0 });
         const target = node.meses.get(m);
         
-        // CORREÇÃO: Mapeamento blindado contra undefined e com os nomes corretos do backend
         target.vol_ia += (r.vol_ia || 0); 
         target.vol_td += (r.vol_topdown || 0); 
         target.vol_bu += (r.vol_bottomup || 0); 
@@ -148,7 +146,6 @@ export default function GlobalDashboard() {
       if (!porMes[r.mes_projetado]) porMes[r.mes_projetado] = { vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, rec_ia:0, rec_td:0, rec_bu:0, rec_sp:0, rec_final:0 };
       const m = porMes[r.mes_projetado];
       
-      // CORREÇÃO: Nomes exatos da API com fallback para 0 (Anti-NaN)
       m.vol_ia += (r.vol_ia || 0); 
       m.vol_td += (r.vol_topdown || 0); 
       m.vol_bu += (r.vol_bottomup || 0); 
@@ -187,14 +184,47 @@ export default function GlobalDashboard() {
     const chave = row.original.chave_matriz;
     if (chartExpanded === chave) { setChartExpanded(null); return; }
     setChartExpanded(chave);
+    
     if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
-        const partes = chave.split('|');
-        const queryChave = partes.length === 3 ? `${partes[2]}|${partes[1]}` : (partes.length === 2 ? `|${partes[1]}` : partes[0]);
-        const res = await axios.get('/api/v1/consensus/micro/grafico', { params: { chave_matriz: queryChave, tipo_linha: row.original.tipo } });
-        setDadosGraficoCache((p: any) => ({ ...p, [chave]: res.data.dados }));
-      } catch (e) { console.error(e); } finally { setLoadingGrafico(null); }
+        let historico = [];
+        if (row.original.tipo !== 'categoria') {
+          const partes = chave.split('|');
+          const queryChave = partes.length === 3 ? `${partes[2]}|${partes[1]}` : (partes.length === 2 ? `|${partes[1]}` : partes[0]);
+          const res = await axios.get('/api/v1/consensus/micro/grafico', { params: { chave_matriz: queryChave } });
+          historico = res.data.dados || [];
+        }
+
+        const projectionData = row.original.meses.map((m: any) => ({
+          name: m.mes_banco.split('-').reverse().slice(1).join('/'),
+          data_iso: m.mes_banco,
+          IA: m.vol_ia,
+          Comercial: m.vol_bu,
+          Supply: m.vol_sp,
+          Final: m.vol_final,
+          Realizado: null
+        }));
+
+        const merged: any[] = [];
+        historico.forEach((h: any) => {
+           const isProjection = projectionData.find((p: any) => p.data_iso === h.data_iso);
+           if (!isProjection && h.Realizado !== null) {
+               merged.push({ name: h.name, data_iso: h.data_iso, Realizado: h.Realizado, IA: null, Comercial: null, Supply: null, Final: null });
+           }
+        });
+
+        const finalTimeline = [...merged, ...projectionData].sort((a: any, b: any) => a.data_iso.localeCompare(b.data_iso));
+        setDadosGraficoCache((p: any) => ({ ...p, [chave]: finalTimeline }));
+      } catch (e) {
+        console.error(e);
+        const fallbackData = row.original.meses.map((m: any) => ({
+            name: m.mes_banco.split('-').reverse().slice(1).join('/'),
+            data_iso: m.mes_banco,
+            IA: m.vol_ia, Comercial: m.vol_bu, Supply: m.vol_sp, Final: m.vol_final, Realizado: null
+        }));
+        setDadosGraficoCache((p: any) => ({ ...p, [chave]: fallbackData }));
+      } finally { setLoadingGrafico(null); }
     }
   };
 
@@ -241,11 +271,23 @@ export default function GlobalDashboard() {
           const dadosMes = row.meses.find((rm: any) => rm.mes_banco === m.mes_banco);
           const meta = info.table.options.meta as any;
           const edicao = meta.celulasEditadas[row.id]?.[m.mes_banco];
+          
           const valorReal = edicao !== undefined ? edicao.novo_volume : (dadosMes?.vol_final || 0);
           const valorInteiro = Math.round(Number(valorReal));
+          
+          let receitaExibida = dadosMes?.rec_final || 0;
+          if (edicao !== undefined && dadosMes?.vol_final > 0) {
+             const pmv = dadosMes.rec_final / dadosMes.vol_final;
+             receitaExibida = valorInteiro * pmv;
+          }
 
-          if (row.tipo === 'categoria') {
-            return <div className="text-center font-black text-slate-900 text-sm">{formatVolume(valorInteiro)}</div>;
+          if (row.tipo === 'categoria' || row.tipo === 'produto') {
+            return (
+              <div className="flex flex-col items-center justify-center">
+                <div className="font-black text-slate-900 text-sm">{formatVolume(valorInteiro)}</div>
+                <div className="text-[10px] font-bold text-emerald-600 mt-0.5">{formatMoeda(receitaExibida)}</div>
+              </div>
+            );
           }
 
           return (
@@ -257,10 +299,13 @@ export default function GlobalDashboard() {
               <input
                 type="text" value={valorInteiro === 0 ? '' : valorInteiro.toLocaleString('pt-BR')} disabled={meta.isLocked}
                 onChange={(e) => meta.updateCell(row.id, m.mes_banco, e.target.value.replace(/\D/g, ''))}
-                className={`text-[13px] text-center font-black p-2 rounded-xl outline-none border-2 transition-all w-full
-                  ${meta.lockMessage.includes('Publicada') ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : meta.isLocked ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed' : row.tipo === 'produto' ? 'border-dashed border-indigo-200 focus:border-indigo-500 bg-white' : 'bg-slate-50 border-transparent focus:bg-white text-slate-800'} 
+                className={`text-[13px] text-center font-black p-1.5 rounded-xl outline-none border-2 transition-all w-full
+                  ${meta.lockMessage.includes('Publicada') ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : meta.isLocked ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed' : 'bg-slate-50 border-transparent focus:bg-white text-slate-800 focus:border-indigo-500'} 
                   ${edicao !== undefined && !meta.isLocked ? 'bg-indigo-600 border-indigo-700 text-white' : ''}`}
               />
+              <div className="text-center mt-0.5">
+                <span className="text-[10px] font-bold text-emerald-600">{formatMoeda(receitaExibida)}</span>
+              </div>
             </div>
           );
         }
@@ -352,7 +397,7 @@ export default function GlobalDashboard() {
                         formatter={(val: any) => idx === 0 ? formatVolume(val) : formatMoeda(val)}
                       />
                       <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: 900}} />
-                      <Bar dataKey={idx === 0 ? "IA" : "RIA"} name="IA" fill="#e2e8f0" radius={[4, 4, 0, 0]} />
+                      <Bar dataKey={idx === 0 ? "IA" : "RIA"} name="Sinal IA" fill="#e2e8f0" radius={[4, 4, 0, 0]} />
                       <Bar dataKey={idx === 0 ? "TD" : "RTD"} name="Top-Down" fill="#94a3b8" radius={[4, 4, 0, 0]} />
                       <Bar dataKey={idx === 0 ? "BU" : "RBU"} name="Comercial" fill="#818cf8" radius={[4, 4, 0, 0]} />
                       <Bar dataKey={idx === 0 ? "SP" : "RSP"} name="Supply" fill="#f59e0b" radius={[4, 4, 0, 0]} />
@@ -395,23 +440,29 @@ export default function GlobalDashboard() {
                     </tr>
                     {chartExpanded === row.original.chave_matriz && (
                       <tr>
-                        <td colSpan={table.getAllColumns().length} className="bg-slate-900 p-8 border-b border-slate-800">
-                           <div className="bg-slate-950 rounded-[32px] p-8 shadow-inner border border-slate-800 animate-in fade-in duration-500 h-[350px]">
+                        <td colSpan={table.getAllColumns().length} className="bg-slate-50 p-6 border-b border-slate-200 shadow-inner">
+                           <div className="bg-white rounded-[24px] p-6 border border-slate-200 animate-in fade-in duration-500 h-[350px]">
                               <div className="flex justify-between items-center mb-6">
-                                <h3 className="text-sm font-black text-white uppercase tracking-widest flex items-center gap-2"><Activity className="w-4 h-4 text-emerald-400" /> Curva S&OE: {row.original.nome}</h3>
-                                <button onClick={() => setChartExpanded(null)} className="text-slate-500 hover:text-white"><X className="w-5 h-5"/></button>
+                                <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest flex items-center gap-2"><Activity className="w-4 h-4 text-indigo-500" /> Curva S&OE: {row.original.nome}</h3>
+                                <button onClick={() => setChartExpanded(null)} className="text-slate-400 hover:text-slate-700">
+                                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                                </button>
                               </div>
                               <div className="w-full h-[250px]">
                                  {loadingGrafico === row.original.chave_matriz ? <div className="h-full flex items-center justify-center text-slate-600"><Loader2 className="animate-spin" /></div> : (
                                    <ResponsiveContainer width="100%" height="100%">
-                                      <BarChart data={dadosGraficoCache[row.original.chave_matriz] || []}>
-                                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
-                                         <XAxis dataKey="name" tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} />
-                                         <YAxis tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} />
-                                         <Tooltip contentStyle={{backgroundColor: '#0f172a', border: 'none', borderRadius: '12px'}} />
-                                         <Bar dataKey="Realizado" name="Faturamento Real" fill="#f8fafc" radius={[4,4,0,0]} />
-                                         <Bar dataKey="Consenso" name="Plano S&OP" fill="#10b981" radius={[4,4,0,0]} />
-                                      </BarChart>
+                                      <LineChart data={dadosGraficoCache[row.original.chave_matriz] || []}>
+                                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                                         <XAxis dataKey="name" tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} tickLine={false} />
+                                         <YAxis tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
+                                         <Tooltip contentStyle={{backgroundColor: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '12px', fontWeight: 900}} formatter={(val: any) => formatVolume(val)} />
+                                         <Legend iconType="circle" wrapperStyle={{paddingTop: '10px', fontSize: '11px', fontWeight: 900}} />
+                                         <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#94a3b8" strokeWidth={3} dot={{r: 4}} />
+                                         <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#cbd5e1" strokeWidth={3} strokeDasharray="5 5" dot={false} />
+                                         <Line type="monotone" dataKey="Comercial" name="Proposta Comercial" stroke="#818cf8" strokeWidth={3} dot={{r: 4}} />
+                                         <Line type="monotone" dataKey="Supply" name="Restrição Supply" stroke="#f59e0b" strokeWidth={3} dot={{r: 4}} />
+                                         <Line type="monotone" dataKey="Final" name="Global S&OP" stroke="#10b981" strokeWidth={4} dot={{r: 5}} />
+                                      </LineChart>
                                    </ResponsiveContainer>
                                  )}
                               </div>
