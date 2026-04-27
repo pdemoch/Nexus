@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect, useCallback, Fragment } from 'reac
 import { useReactTable, getCoreRowModel, flexRender, getExpandedRowModel, getSortedRowModel, SortingState } from '@tanstack/react-table';
 import { 
   Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
-  Layers, Lock, Download, AlertTriangle, ShieldCheck, Check, Globe, Package, Users, Search, Filter, BarChart3, TrendingUp, TrendingDown, Activity, Hash
+  Layers, Lock, Download, AlertTriangle, ShieldCheck, Check, Globe, Package, Users, Search, Filter, BarChart3, TrendingUp, TrendingDown, Activity, Hash, Target
 } from 'lucide-react';
 import axios from 'axios';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
@@ -22,7 +22,6 @@ const VarBadge = ({ atual = 0, anterior = 0 }: { atual?: number, anterior?: numb
   );
 };
 
-// Ordenadores Fixos para as Tooltips do Recharts
 const tooltipSorterGlobal = (item: any) => {
   const order: Record<string, number> = { 'Sinal IA': 1, 'Top-Down': 2, 'Comercial': 3, 'Supply': 4, 'Final S&OP': 5 };
   return order[item.name] || 99;
@@ -49,6 +48,8 @@ export default function GlobalDashboard() {
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
 
+  const [mesPareto, setMesPareto] = useState<string>('');
+
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
@@ -63,6 +64,17 @@ export default function GlobalDashboard() {
   }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  const mesesDisponiveis = useMemo(() => {
+    const meses = new Set(dadosBrutos.map(d => d.mes_projetado));
+    return Array.from(meses).sort() as string[];
+  }, [dadosBrutos]);
+
+  useEffect(() => {
+    if (mesesDisponiveis.length > 0 && !mesPareto) {
+      setMesPareto(mesesDisponiveis[0]);
+    }
+  }, [mesesDisponiveis, mesPareto]);
 
   const handleExportExcel = async () => {
     try {
@@ -157,29 +169,10 @@ export default function GlobalDashboard() {
       if (!porMes[r.mes_projetado]) porMes[r.mes_projetado] = { vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, rec_ia:0, rec_td:0, rec_bu:0, rec_sp:0, rec_final:0 };
       const m = porMes[r.mes_projetado];
       
-      m.vol_ia += (r.vol_ia || 0); 
-      m.vol_td += (r.vol_topdown || 0); 
-      m.vol_bu += (r.vol_bottomup || 0); 
-      m.vol_sp += (r.vol_supply || 0); 
-      m.vol_final += (r.vol_final || 0);
-      
-      m.rec_ia += (r.rec_ia || 0); 
-      m.rec_td += (r.rec_td || 0); 
-      m.rec_bu += (r.rec_bu || 0); 
-      m.rec_sp += (r.rec_supply || 0); 
-      m.rec_final += (r.rec_final || 0);
-      
-      t_ia += (r.vol_ia || 0); 
-      t_td += (r.vol_topdown || 0); 
-      t_bu += (r.vol_bottomup || 0); 
-      t_sp += (r.vol_supply || 0); 
-      t_final += (r.vol_final || 0);
-      
-      r_ia += (r.rec_ia || 0); 
-      r_td += (r.rec_td || 0); 
-      r_bu += (r.rec_bu || 0); 
-      r_sp += (r.rec_supply || 0); 
-      r_final += (r.rec_final || 0);
+      m.vol_ia += (r.vol_ia || 0); m.vol_td += (r.vol_topdown || 0); m.vol_bu += (r.vol_bottomup || 0); m.vol_sp += (r.vol_supply || 0); m.vol_final += (r.vol_final || 0);
+      m.rec_ia += (r.rec_ia || 0); m.rec_td += (r.rec_td || 0); m.rec_bu += (r.rec_bu || 0); m.rec_sp += (r.rec_supply || 0); m.rec_final += (r.rec_final || 0);
+      t_ia += (r.vol_ia || 0); t_td += (r.vol_topdown || 0); t_bu += (r.vol_bottomup || 0); t_sp += (r.vol_supply || 0); t_final += (r.vol_final || 0);
+      r_ia += (r.rec_ia || 0); r_td += (r.rec_td || 0); r_bu += (r.rec_bu || 0); r_sp += (r.rec_supply || 0); r_final += (r.rec_final || 0);
     });
 
     const chartData = Object.keys(porMes).sort().map(mes => ({
@@ -191,6 +184,45 @@ export default function GlobalDashboard() {
     return { porMes, chartData, cards: { vol: { ia: t_ia, td: t_td, bu: t_bu, sp: t_sp, final: t_final }, rec: { ia: r_ia, td: r_td, bu: r_bu, sp: r_sp, final: r_final } } };
   }, [dadosBrutos]);
 
+  const paretoData = useMemo(() => {
+    if (!mesPareto || dadosBrutos.length === 0) return [];
+    
+    const dadosMes = dadosBrutos.filter(d => d.mes_projetado === mesPareto);
+    const agrupado = new Map();
+    let totalFaturamentoMes = 0;
+
+    dadosMes.forEach(d => {
+      const cliente = d.razaosocial || 'CLIENTE NÃO IDENTIFICADO';
+      if (!agrupado.has(cliente)) {
+        agrupado.set(cliente, { razaosocial: cliente, receita: 0, volume: 0 });
+      }
+      const r = agrupado.get(cliente);
+      const rec = d.rec_final || 0;
+      const vol = d.vol_final || 0;
+      r.receita += rec;
+      r.volume += vol;
+      totalFaturamentoMes += rec;
+    });
+
+    const sorted = Array.from(agrupado.values()).sort((a, b) => b.receita - a.receita);
+    const limit80 = totalFaturamentoMes * 0.8;
+    let acumulado = 0;
+    const result: any[] = [];
+
+    for (const c of sorted) {
+      if (acumulado >= limit80 && result.length > 0) break; 
+      result.push({
+        name: c.razaosocial.length > 25 ? c.razaosocial.substring(0, 25) + '...' : c.razaosocial,
+        razaosocial_full: c.razaosocial,
+        Receita: c.receita,
+        Volume: c.volume
+      });
+      acumulado += c.receita;
+    }
+
+    return result;
+  }, [dadosBrutos, mesPareto]);
+
   const toggleChart = async (row: any) => {
     const chave = row.original.chave_matriz;
     if (chartExpanded === chave) { setChartExpanded(null); return; }
@@ -199,7 +231,6 @@ export default function GlobalDashboard() {
     if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
-        // Usa a nova rota inteligente exclusiva do Dashboard
         const res = await axios.get('/api/v1/dashboard/grafico', { params: { chave_matriz: chave, nivel_hierarquia: row.original.tipo } });
         const historico = res.data.dados || [];
 
@@ -212,7 +243,6 @@ export default function GlobalDashboard() {
         const merged: any[] = [];
         historico.forEach((h: any) => {
            const isProjection = projectionData.find((p: any) => p.data_iso === h.data_iso);
-           // Preserva M0, M1 e todo o Histórico que não está nas colunas editáveis
            if (!isProjection) {
                merged.push({ ...h });
            }
@@ -221,7 +251,6 @@ export default function GlobalDashboard() {
         const finalTimeline = [...merged, ...projectionData].sort((a: any, b: any) => a.data_iso.localeCompare(b.data_iso));
         setDadosGraficoCache((p: any) => ({ ...p, [chave]: finalTimeline }));
       } catch (e) {
-        console.error(e);
         const fallbackData = row.original.meses.map((m: any) => ({
             name: m.mes_banco.split('-').reverse().slice(1).join('/'),
             data_iso: m.mes_banco,
@@ -373,7 +402,7 @@ export default function GlobalDashboard() {
         )}
 
         {!isLoading && dadosAgrupados.length > 0 && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
             {['Volume Projetado (CX)', 'Receita Projetada (R$)'].map((title, idx) => (
               <div key={idx} className="bg-white rounded-[32px] p-6 shadow-sm border border-slate-100 flex flex-col min-h-[380px]">
                 <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-6 flex items-center gap-2"><BarChart3 className="w-4 h-4 text-indigo-500" /> {title}</h3>
@@ -399,6 +428,50 @@ export default function GlobalDashboard() {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+
+        {!isLoading && paretoData.length > 0 && (
+          <div className="bg-white rounded-[32px] p-6 shadow-sm border border-slate-100 flex flex-col mb-8 relative">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest flex items-center gap-2">
+                <Target className="w-4 h-4 text-emerald-500" /> Pareto S&OP (Top 80% Receita)
+              </h3>
+              <select 
+                value={mesPareto} 
+                onChange={e => setMesPareto(e.target.value)} 
+                className="bg-slate-50 border border-slate-200 text-xs font-black p-2 rounded-xl outline-none text-slate-700 cursor-pointer uppercase tracking-widest"
+              >
+                {mesesDisponiveis.map(m => (
+                  <option key={m} value={m}>{m.split('-').reverse().slice(1).join('/')}</option>
+                ))}
+              </select>
+            </div>
+            
+            <div className="w-full" style={{ height: Math.max(350, paretoData.length * 60) }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart layout="vertical" data={paretoData} margin={{ top: 30, right: 30, left: 140, bottom: 20 }}>
+                  <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} stroke="#f1f5f9" />
+                  
+                  {/* Eixo de Faturamento em cima */}
+                  <XAxis type="number" xAxisId="top" orientation="top" tickFormatter={(v) => `R$${(v/1000000).toFixed(1)}M`} tick={{fontSize: 10, fontWeight: 900, fill: '#10b981'}} axisLine={false} tickLine={false} />
+                  
+                  {/* Eixo de Volume embaixo */}
+                  <XAxis type="number" xAxisId="bottom" orientation="bottom" tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} tick={{fontSize: 10, fontWeight: 900, fill: '#6366f1'}} axisLine={false} tickLine={false} />
+                  
+                  <YAxis type="category" dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#64748b'}} width={130} axisLine={false} tickLine={false} />
+                  
+                  <Tooltip 
+                    contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)', fontWeight: 900}} 
+                    formatter={(val: any, name: any) => name === 'Receita (R$)' ? formatMoeda(val) : formatVolume(val)}
+                  />
+                  <Legend iconType="circle" wrapperStyle={{paddingBottom: '-10px', fontSize: '11px', fontWeight: 900}} />
+                  
+                  <Bar dataKey="Receita" name="Receita (R$)" xAxisId="top" fill="#10b981" radius={[0, 4, 4, 0]} barSize={12} />
+                  <Bar dataKey="Volume" name="Volume (CX)" xAxisId="bottom" fill="#6366f1" radius={[0, 4, 4, 0]} barSize={12} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
           </div>
         )}
 
@@ -469,6 +542,35 @@ export default function GlobalDashboard() {
                   </Fragment>
                 ))}
               </tbody>
+              
+              <tfoot className="bg-slate-900 text-white">
+                <tr>
+                  {table.getHeaderGroups()[0].headers.map(header => {
+                    if (header.id === 'nome') return (
+                      <td key={header.id} className="px-8 py-5 text-right rounded-bl-[40px]">
+                        <div className="flex flex-col">
+                          <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Fechamento do Mês</span>
+                          <span className="font-bold text-sm text-white">TOTAL S&OP</span>
+                        </div>
+                      </td>
+                    );
+                    if (header.id.startsWith('mes_')) {
+                      const mesBanco = header.id.replace('mes_', '');
+                      const volM = stats.porMes[mesBanco]?.vol_final || 0;
+                      const recM = stats.porMes[mesBanco]?.rec_final || 0;
+                      return (
+                        <td key={header.id} className="px-8 py-5">
+                          <div className="flex flex-col items-center justify-center min-w-[100px]">
+                            <span className="font-black text-white">{formatVolume(volM)} <span className="text-[9px] text-slate-400">CX</span></span>
+                            <span className="font-black text-emerald-400 text-[13px] tracking-tight mt-0.5">{formatMoeda(recM)}</span>
+                          </div>
+                        </td>
+                      );
+                    }
+                    return <td key={header.id} className="px-8 py-5"></td>;
+                  })}
+                </tr>
+              </tfoot>
             </table>
           </div>
           )}
