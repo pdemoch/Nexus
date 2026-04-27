@@ -66,7 +66,6 @@ async def listar_supply(db: Session = Depends(get_db), usuario: dict = Depends(r
         m2, m4 = get_projection_window()
         ciclo = get_current_cycle()
         
-        # OPÇÃO 1: Deteta se é a primeira vez que o Supply abre a tela
         reg_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
         is_supply_fechado = reg_sp.status == 'Fechado' if reg_sp else False
 
@@ -97,7 +96,6 @@ async def listar_supply(db: Session = Depends(get_db), usuario: dict = Depends(r
             v_bu = int(r.v_bu or 0)
             v_sp_banco = int(r.v_sp or 0)
             
-            # A MÁGICA DA OPÇÃO 1: Mostra o Comercial se o Supply ainda não salvou
             v_exibido = v_sp_banco if is_supply_fechado else v_bu
             
             rec_sp_banco = float(r.rec_sp or 0)
@@ -141,20 +139,17 @@ async def congelar_supply(payload: PayloadCongelarSupply, db: Session = Depends(
         if pendentes:
             raise HTTPException(status_code=403, detail=f"A Fase Comercial ainda não foi concluída. Faltam {len(pendentes)} equipes trancarem as carteiras.")
 
-        # ===============================================================================
-        # A MÁGICA DA OPÇÃO 2: HERANÇA FORÇADA
-        # ===============================================================================
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
         
         if not registro: 
-            # É a primeira vez! O backend copia tudo do Comercial para o Supply e para o Final ANTES de fazer os cortes.
+            # A CASCATA INICIAL DO PULO DO GATO ATUALIZADA
             db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo).update({
                 FatoIbpGranular.vol_supply: FatoIbpGranular.vol_bottomup,
-                FatoIbpGranular.vol_final: FatoIbpGranular.vol_bottomup
+                FatoIbpGranular.vol_final: FatoIbpGranular.vol_bottomup,
+                FatoIbpGranular.vol_meta: FatoIbpGranular.vol_bottomup
             }, synchronize_session=False)
             db.commit()
 
-        # RATEIO DOS CORTES DA TELA
         for ajuste in payload.ajustes:
             data_alvo = parse_date_safe(ajuste.mes_projetado)
             linhas = get_truth_query(db, ciclo, data_alvo, data_alvo).filter(FatoIbpGranular.sku == str(ajuste.produto)).all()
@@ -180,8 +175,9 @@ async def congelar_supply(payload: PayloadCongelarSupply, db: Session = Depends(
                 l.vol_supply = rateado
                 l.justificativa_supply = ajuste.justificativa
                 
-                # CASCATA OBRIGATÓRIA: O Final recebe a decisão da Fábrica!
+                # A CASCATA DE HERANÇA CORRIGIDA:
                 l.vol_final = rateado 
+                l.vol_meta = rateado
 
         if not registro: 
             db.add(ControleCiclo(ciclo_sop=ciclo, origem='Supply Review', status='Fechado'))

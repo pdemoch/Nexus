@@ -197,9 +197,6 @@ async def congelar_macro(payload: PayloadCongelar, db: Session = Depends(get_db)
 
             if not linhas: continue
 
-            # =========================================================================
-            # CORREÇÃO: OTIMIZAÇÃO EXTREMA DO RATEIO (Evitando Timeout/CORS)
-            # =========================================================================
             # Faz 1 única query global agrupada pelo CGC em vez de 1 query por cliente
             historico_agrupado = db.query(
                 FatoVendas.cgc, 
@@ -227,9 +224,12 @@ async def congelar_macro(payload: PayloadCongelar, db: Session = Depends(get_db)
                     rateado = int(round(volume_total * peso))
                     soma_dist += rateado
                     
+                # A CASCATA DE HERANÇA CORRIGIDA:
                 l.vol_topdown = rateado
                 l.vol_bottomup = rateado
+                l.vol_supply = rateado
                 l.vol_final = rateado
+                l.vol_meta = rateado
 
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
         if not registro: 

@@ -101,7 +101,6 @@ async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = Non
 
         status_dict = {c.origem.strip().upper(): c.status for c in db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo).all() if c.origem}
         
-        # AQUI FOI A CORREÇÃO PRINCIPAL: Estrutura alinhada com o Bottom-Up (sem vol_td)
         arvore = defaultdict(lambda: {
             "id": "", "nome": "", "tipo": "vendedor", "status": "Aberto", 
             "meses": defaultdict(lambda: {"vol_ia":0, "vol_ajustado":0, "receita":0}), 
@@ -169,7 +168,6 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
         mes_atual_inicio = hoje.replace(day=1)
         ciclo_ant, ciclo_atual = get_previous_cycle(), get_current_cycle()
 
-        # 1. Base Queries
         q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol'))\
                    .join(DimCliente, FatoVendas.cgc == DimCliente.cgc)\
                    .filter(FatoVendas.data_pedido >= hoje - relativedelta(years=2))
@@ -182,7 +180,6 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
                    .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
                    .filter(FatoIbpGranular.ciclo_sop == ciclo_atual)
 
-        # 2. Aplica Filtros Hierárquicos (EXPLICITAMENTE)
         if usuario['funcao'] == 'Gerente':
             g_nome = usuario['gerente_nome'].strip().upper()
             q_hist = q_hist.filter(func.upper(func.trim(DimCliente.gerente_nome)) == g_nome)
@@ -203,18 +200,15 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
             
         if sku_alvo: 
             s_nome = sku_alvo.strip()
-            # Histórico usa SKU da FatoVendas, Projeção usa SKU da FatoIbp
             q_hist = q_hist.filter(FatoVendas.sku == s_nome)
             q_ant = q_ant.filter(FatoIbpGranular.sku == s_nome)
             q_proj = q_proj.filter(FatoIbpGranular.sku == s_nome)
 
-        # 3. Executa e Mapeia
         hist_dict = {h.mes_ano: int(h.vol or 0) for h in q_hist.group_by('mes_ano').all()}
         ant_dict = {str(a.mes_projetado): int(a.vol or 0) for a in q_ant.group_by(FatoIbpGranular.mes_projetado).all()}
         proj_res = q_proj.group_by(FatoIbpGranular.mes_projetado).all()
 
         timeline = []
-        # Passado (24 meses)
         for i in range(24, 0, -1):
             dt = mes_atual_inicio - relativedelta(months=i)
             timeline.append({
@@ -222,7 +216,6 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
                 "Realizado": hist_dict.get(dt.strftime('%Y-%m'), 0), "IA": None, "Consenso": None, "CicloAnterior": None
             })
         
-        # Mês Corrente (S&OE)
         curr_iso = mes_atual_inicio.strftime('%Y-%m-%d')
         p_atual = next((p for p in proj_res if str(p.mes_projetado) == curr_iso), None)
         timeline.append({
@@ -231,7 +224,6 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
             "IA": int(p_atual.ia) if p_atual else None, "Consenso": None, "CicloAnterior": ant_dict.get(curr_iso)
         })
 
-        # Futuro
         for p in sorted(proj_res, key=lambda x: str(x.mes_projetado)):
             p_date = p.mes_projetado if isinstance(p.mes_projetado, datetime.date) else parse_date_safe(p.mes_projetado)
             if p_date <= mes_atual_inicio: continue
@@ -253,9 +245,6 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
         ciclo = get_current_cycle()
         check_global_lock(db, ciclo)
 
-        # =================================================================
-        # CORREÇÃO FASE 2: Exige que a Fase 1 (Top-Down) esteja fechada
-        # =================================================================
         reg_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
         if not reg_td or reg_td.status != 'Fechado':
              raise HTTPException(status_code=403, detail="A estratégia macro ainda não foi liberada pela Diretoria (Fase 1). Aguarde.")
@@ -289,8 +278,14 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
                 else:
                     rateado = int(round(int(ajuste.novo_volume) * (l.vol_bottomup / total_base if total_base > 0 else 1.0 / len(linhas))))
                     soma_dist += rateado
+                
+                # =================================================================
+                # A CASCATA DE HERANÇA CORRIGIDA:
+                # =================================================================
                 l.vol_bottomup = rateado
+                l.vol_supply = rateado
                 l.vol_final = rateado
+                l.vol_meta = rateado
 
         db.commit()
         return {"status": "success"}
@@ -324,9 +319,6 @@ async def lock_all(payload: PayloadLockAll, db: Session = Depends(get_db), usuar
         ciclo = get_current_cycle()
         check_global_lock(db, ciclo)
 
-        # =================================================================
-        # CORREÇÃO FASE 2: Exige que a Fase 1 (Top-Down) esteja fechada
-        # =================================================================
         reg_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
         if not reg_td or reg_td.status != 'Fechado':
              raise HTTPException(status_code=403, detail="A estratégia macro ainda não foi liberada pela Diretoria (Fase 1). Aguarde.")

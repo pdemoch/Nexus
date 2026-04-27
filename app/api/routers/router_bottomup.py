@@ -60,7 +60,6 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
         if filtro_reg: query_base = query_base.filter(func.upper(func.trim(DimCliente.regional)) == filtro_reg.strip().upper())
         if usuario['funcao'] == 'Gerente': query_base = query_base.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
 
-        # CORREÇÃO: Removido o nível do vendedor. A árvore volta a ser apenas Cliente -> Produto.
         resultados = query_base.with_entities(
             DimCliente.razaosocial, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado, 
             func.sum(FatoIbpGranular.vol_ia).label('v_ia'), 
@@ -193,8 +192,11 @@ async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: 
                     rateado = int(round(volume_total * peso))
                     soma_dist += rateado
                 
+                # A CASCATA DE HERANÇA CORRIGIDA:
                 l.vol_bottomup = rateado
+                l.vol_supply = rateado
                 l.vol_final = rateado
+                l.vol_meta = rateado
 
         origem_trava = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else nome_responsavel
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == origem_trava).first()

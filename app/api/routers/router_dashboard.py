@@ -33,166 +33,147 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
         
     try:
         ciclo = get_current_cycle()
-        m_plus_2, m_plus_4 = get_projection_window()
+        m2, m4 = get_projection_window()
 
-        status_global = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
-        is_global_fechado = status_global.status == 'Fechado' if status_global else False
+        query = get_truth_query(db, ciclo, m2, m4).with_entities(
+            DimProduto.categoria, FatoIbpGranular.sku, DimProduto.descricao, DimCliente.razaosocial, 
+            FatoIbpGranular.mes_projetado, FatoIbpGranular.vol_ia, FatoIbpGranular.vol_topdown, 
+            FatoIbpGranular.vol_bottomup, FatoIbpGranular.vol_supply, FatoIbpGranular.vol_final, 
+            FatoIbpGranular.vol_meta, FatoIbpGranular.pmv_aplicado,
+            (FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('rec_ia'),
+            (FatoIbpGranular.vol_topdown * FatoIbpGranular.pmv_aplicado).label('rec_td'),
+            (FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('rec_bu'),
+            (FatoIbpGranular.vol_supply * FatoIbpGranular.pmv_aplicado).label('rec_supply'),
+            (FatoIbpGranular.vol_final * FatoIbpGranular.pmv_aplicado).label('rec_final')
+        )
+
+        resultados = query.all()
         
-        status_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
-        is_td_fechado = status_td.status == 'Fechado' if status_td else False
-
-        # FASE 3: Verifica se o Supply Chain fechou o rateio
-        status_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
-        is_sp_fechado = status_sp.status == 'Fechado' if status_sp else False
-
-        query_base = get_truth_query(db, ciclo, m_plus_2, m_plus_4)
-
-        vendedores_ativos = query_base.with_entities(FatoIbpGranular.vendedor_nome).filter(FatoIbpGranular.vendedor_nome.isnot(None)).distinct().all()
-        v_ativos = [v[0].strip() for v in vendedores_ativos if v[0] and v[0].strip()]
+        # Verifica Status Global
+        reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
+        is_locked = reg.status == 'Fechado' if reg else False
         
-        vendedores_fechados = db.query(ControleCiclo.origem).filter(
-            ControleCiclo.ciclo_sop == ciclo, ControleCiclo.status == 'Fechado', ControleCiclo.origem.notin_(['Top-Down', 'Supply Review', 'S&OP-Final'])
-        ).all()
-        v_fechados = [v[0].strip() for v in vendedores_fechados if v[0]]
+        # Verifica se as fases anteriores terminaram
+        reg_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
+        if not is_locked and (not reg_sp or reg_sp.status != 'Fechado'):
+            return {
+                "status": "success", "is_locked": True, 
+                "lock_message": "Aguardando encerramento do Supply Review (Fase 3)", "dados": resultados
+            }
 
-        pendentes = [v for v in v_ativos if v not in v_fechados]
-
-        # AVALIAÇÃO EM CASCATA DA MENSAGEM DE TRAVA
-        if is_global_fechado: 
-            is_locked, lock_message = True, "Demanda Irrestrita Publicada"
-        elif not is_td_fechado: 
-            is_locked, lock_message = True, "Aguardando Diretoria (Top-Down)"
-        elif pendentes: 
-            is_locked, lock_message = True, f"Aguardando {len(pendentes)} Equipe(s) Comercial(is)"
-        elif not is_sp_fechado: 
-            is_locked, lock_message = True, "Aguardando Supply Chain (Fase 3)"
-        else: 
-            is_locked, lock_message = False, "Publicar Demanda Irrestrita"
-            
-        resultados = query_base.with_entities(
-            FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado,
-            func.sum(FatoIbpGranular.vol_ia).label('vol_ia'),
-            func.sum(FatoIbpGranular.vol_topdown).label('vol_td'),
-            func.sum(FatoIbpGranular.vol_supply).label('vol_supply'), 
-            func.sum(FatoIbpGranular.vol_bottomup).label('vol_bu'),
-            func.sum(FatoIbpGranular.vol_final).label('vol_final'),
-            func.sum(FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('rec_ia'),
-            func.sum(FatoIbpGranular.vol_topdown * FatoIbpGranular.pmv_aplicado).label('rec_td'),
-            func.sum(FatoIbpGranular.vol_supply * FatoIbpGranular.pmv_aplicado).label('rec_supply'), 
-            func.sum(FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('rec_bu'),
-            func.sum(FatoIbpGranular.vol_final * FatoIbpGranular.pmv_aplicado).label('rec_final'),
-            DimProduto.descricao, DimProduto.categoria
-        ).group_by(
-            FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado, DimProduto.descricao, DimProduto.categoria
-        ).all()
-
-        dados_formatados = []
-        for r in resultados:
-            dados_formatados.append({
-                "chave_matriz": f"{r.sku}_{r.razaosocial}", "categoria": r.categoria, "produto": r.sku,
-                "descricao": r.descricao, "cliente_razaosocial": r.razaosocial, 
-                "mes_projetado": r.mes_projetado.strftime("%Y-%m-%d") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado),
-                "vol_ia": int(r.vol_ia or 0), "vol_td": int(r.vol_td or 0), "vol_supply": int(r.vol_supply or 0), "vol_bu": int(r.vol_bu or 0), "vol_irrestrito": int(r.vol_final or 0), 
-                "rec_ia": float(r.rec_ia or 0), "rec_td": float(r.rec_td or 0), "rec_supply": float(r.rec_supply or 0), "rec_bu": float(r.rec_bu or 0), "rec_final": float(r.rec_final or 0)
-            })
-
-        return {"status": "success", "is_locked": is_locked, "lock_message": lock_message, "dados": dados_formatados}
+        return {
+            "status": "success", "is_locked": is_locked, 
+            "lock_message": "Demanda Irrestrita Publicada" if is_locked else "Plano Aberto para Aprovação Final", 
+            "dados": resultados
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(500, repr(e))
 
 @router.post("/aprovar")
-async def aprovar_dashboard_global(payload: PayloadAprovarGlobal, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
-        raise HTTPException(status_code=403, detail="Apenas a Gerência pode publicar o plano final.")
+async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+    if usuario['funcao'] not in ['Administrador', 'Gerente']:
+        raise HTTPException(status_code=403, detail="Apenas a Diretoria pode publicar o Plano Final.")
+
     try:
         ciclo = get_current_cycle()
-        registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
-        if registro and registro.status == 'Fechado': raise HTTPException(status_code=403, detail="O Ciclo já está fechado.")
-
-        # BLINDAGEM EXTRA: Exige que a Fase 3 (Supply Review) esteja fechada antes de permitir guardar
-        status_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
-        if not status_sp or status_sp.status != 'Fechado':
-             raise HTTPException(status_code=403, detail="O Supply Chain (Fase 3) ainda não finalizou o rateio restrito.")
-
+        
+        # 1. PROCESSAR AJUSTES FINAIS DA DIRETORIA
         for ajuste in payload.ajustes:
             data_alvo = parse_date_safe(ajuste.mes_projetado)
-            query = get_truth_query(db, ciclo, str(data_alvo), str(data_alvo))
+            partes = ajuste.chave.split('|')
+            
+            query = get_truth_query(db, ciclo, data_alvo, data_alvo)
 
+            # Lógica de filtro baseada na árvore Categoria|SKU|Cliente
             if ajuste.nivel == 'cliente':
-                partes = ajuste.chave.split('_', 1)
-                sku, razaosocial = partes[0], partes[1] if len(partes) > 1 else ""
-                linhas = query.filter(FatoIbpGranular.sku == sku, func.trim(DimCliente.razaosocial) == razaosocial.strip()).all()
-            elif ajuste.nivel == 'produto':
-                linhas = query.filter(FatoIbpGranular.sku == ajuste.chave).all()
-            else: continue
+                # Chave completa: Categoria|SKU|RazaoSocial
+                query = query.filter(FatoIbpGranular.sku == partes[1], DimCliente.razaosocial == partes[2])
+            else:
+                # Chave: Categoria|SKU
+                query = query.filter(FatoIbpGranular.sku == partes[1])
 
+            linhas = query.all()
             if not linhas: continue
-            total_base = sum([l.vol_final for l in linhas])
-            soma_dist = 0
-            for i, l in enumerate(linhas):
-                if i == len(linhas) - 1: l.vol_final = ajuste.novo_volume - soma_dist
-                else:
-                    peso = l.vol_final / total_base if total_base > 0 else 1.0 / len(linhas)
-                    rateado = int(round(ajuste.novo_volume * peso))
-                    l.vol_final = rateado
-                    soma_dist += rateado
 
-        if not registro: db.add(ControleCiclo(ciclo_sop=ciclo, origem='S&OP-Final', status='Fechado'))
-        else: registro.status = 'Fechado'
-        
-        # Copia o 'vol_final' para o 'vol_meta' criando a fotografia de execução
-        db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo).update(
-            {"vol_meta": FatoIbpGranular.vol_final}, synchronize_session=False
-        )
+            total_base = sum([float(l.vol_final or 0) for l in linhas])
+            soma_dist = 0
+            volume_alvo = int(ajuste.novo_volume)
+            
+            for i, l in enumerate(linhas):
+                if i == len(linhas) - 1:
+                    rateado = volume_alvo - soma_dist
+                else:
+                    peso = float(l.vol_final or 0) / total_base if total_base > 0 else 1.0 / len(linhas)
+                    rateado = int(round(volume_alvo * peso))
+                    soma_dist += rateado
+                
+                # REGRA 5: Ajuste final dita o vol_final e já prepara a vol_meta
+                l.vol_final = rateado
+                l.vol_meta = rateado
+
+        # 2. MARCAR CICLO COMO ENCERRADO
+        registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
+        if not registro:
+            db.add(ControleCiclo(ciclo_sop=ciclo, origem='S&OP-Final', status='Fechado'))
+        else:
+            registro.status = 'Fechado'
+
+        # 3. CONGELAMENTO TOTAL: A Demanda Irrestrita oficial torna-se a Meta Executiva (Cascata Meta)
+        db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo).update({
+            FatoIbpGranular.vol_meta: FatoIbpGranular.vol_final
+        }, synchronize_session=False)
 
         db.commit()
         return {"status": "success"}
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(500, repr(e))
 
 @router.get("/export")
-async def exportar_excel_global(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] not in ['Administrador', 'Gerente', 'Supply Chain']: 
-        raise HTTPException(status_code=403, detail="Acesso restrito.")
+async def exportar_oficial(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
         ciclo = get_current_cycle()
-        m_plus_2, m_plus_4 = get_projection_window()
+        m2, m4 = get_projection_window()
         
-        resultados = get_truth_query(db, ciclo, m_plus_2, m_plus_4).with_entities(
-            FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado,
-            func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), 
-            func.sum(FatoIbpGranular.vol_topdown).label('vol_td'),
-            func.sum(FatoIbpGranular.vol_supply).label('vol_supply'), 
-            func.sum(FatoIbpGranular.vol_bottomup).label('vol_bu'), 
-            func.sum(FatoIbpGranular.vol_final).label('vol_final'),
-            func.sum(FatoIbpGranular.vol_meta).label('vol_meta'),
-            func.sum(FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('rec_ia'), 
-            func.sum(FatoIbpGranular.vol_topdown * FatoIbpGranular.pmv_aplicado).label('rec_td'),
-            func.sum(FatoIbpGranular.vol_supply * FatoIbpGranular.pmv_aplicado).label('rec_supply'), 
-            func.sum(FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('rec_bu'), 
-            func.sum(FatoIbpGranular.vol_final * FatoIbpGranular.pmv_aplicado).label('rec_final'),
-            DimProduto.descricao, DimProduto.categoria
-        ).group_by(FatoIbpGranular.sku, DimCliente.razaosocial, FatoIbpGranular.mes_projetado, DimProduto.descricao, DimProduto.categoria).all()
+        resultados = get_truth_query(db, ciclo, m2, m4).with_entities(
+            DimProduto.categoria, FatoIbpGranular.sku, DimProduto.descricao, DimCliente.razaosocial, 
+            FatoIbpGranular.mes_projetado, FatoIbpGranular.vol_ia, FatoIbpGranular.vol_topdown, 
+            FatoIbpGranular.vol_bottomup, FatoIbpGranular.vol_supply, FatoIbpGranular.vol_final, 
+            FatoIbpGranular.vol_meta, FatoIbpGranular.pmv_aplicado,
+            (FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('rec_ia'),
+            (FatoIbpGranular.vol_topdown * FatoIbpGranular.pmv_aplicado).label('rec_td'),
+            (FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('rec_bu'),
+            (FatoIbpGranular.vol_supply * FatoIbpGranular.pmv_aplicado).label('rec_supply'),
+            (FatoIbpGranular.vol_final * FatoIbpGranular.pmv_aplicado).label('rec_final')
+        ).all()
 
-        if not resultados: raise HTTPException(status_code=404, detail="Sem dados para exportar.")
+        if not resultados:
+            raise HTTPException(404, detail="Sem dados para exportar.")
 
         dados = []
         for r in resultados:
             dados.append({
                 "Categoria": r.categoria, "SKU": r.sku, "Produto": r.descricao, "Cliente": r.razaosocial,
-                "Mês Projetado": r.mes_projetado.strftime("%m/%Y") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado), 
-                "Sinal IA (Base)": int(r.vol_ia or 0), "Receita IA (R$)": float(r.rec_ia or 0),
-                "Meta Gerencial": int(r.vol_td or 0), "Receita Gerencial (R$)": float(r.rec_td or 0),
-                "Meta Restrita (Supply)": int(r.vol_supply or 0), "Receita Supply (R$)": float(r.rec_supply or 0), 
-                "Proposta Comercial": int(r.vol_bu or 0), "Receita Comercial (R$)": float(r.rec_bu or 0),
-                "Demanda Irrestrita": int(r.vol_final or 0), "Faturamento Irrestrito (R$)": float(r.rec_final or 0),
-                "Meta Oficial de Execução": int(r.vol_meta or 0)
+                "Mês": r.mes_projetado.strftime("%m/%Y") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado), 
+                "Sinal IA": int(r.vol_ia or 0),
+                "Meta Gerencial": int(r.vol_td or 0),
+                "Proposta Comercial": int(r.vol_bu or 0),
+                "Capacidade Fábrica": int(r.vol_supply or 0),
+                "Demanda Irrestrita": int(r.vol_final or 0),
+                "Meta Oficial": int(r.vol_meta or 0),
+                "Receita Prevista (R$)": float(r.rec_final or 0)
             })
 
         df = pd.DataFrame(dados)
         buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df.to_excel(writer, index=False, sheet_name='Demanda_Irrestrita')
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='SOP_Nexus_Oficial')
+        
         buffer.seek(0)
-        return StreamingResponse(buffer, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=Demanda_Irrestrita_Oficial.xlsx"})
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+        return StreamingResponse(
+            buffer, 
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename=Nexus_Plano_Oficial_{ciclo.replace('/','_')}.xlsx"}
+        )
+    except Exception as e:
+        raise HTTPException(500, repr(e))
