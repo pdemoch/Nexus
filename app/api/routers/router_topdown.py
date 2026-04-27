@@ -55,8 +55,9 @@ class PayloadCongelar(BaseModel):
 @router.get("") 
 async def listar_macro(db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
-        m2, m4 = get_projection_window()
-        ciclo = get_current_cycle()
+        # ATUALIZAÇÃO: Passando 'db' para as funções de tempo
+        m2, m4 = get_projection_window(db)
+        ciclo = get_current_cycle(db)
 
         query_base = get_truth_query(db, ciclo, m2, m4)
         
@@ -105,9 +106,11 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
         # 1. Configuração de Janelas
         hoje = datetime.date.today()
         mes_atual_inicio = hoje.replace(day=1)
-        ciclo_atual = get_current_cycle()
-        ciclo_anterior = get_previous_cycle()
-        m2, m4 = get_projection_window() 
+        
+        # ATUALIZAÇÃO: Passando 'db' para as funções de tempo
+        ciclo_atual = get_current_cycle(db)
+        ciclo_anterior = get_previous_cycle(db)
+        m2, m4 = get_projection_window(db) 
         
         # 2. Queries de Dados
         q_hist = db.query(
@@ -185,7 +188,8 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
 @router.post("/congelar")
 async def congelar_macro(payload: PayloadCongelar, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
-        ciclo = get_current_cycle()
+        # ATUALIZAÇÃO: Passando 'db' para as funções de tempo
+        ciclo = get_current_cycle(db)
         check_global_lock(db, ciclo)
         data_limite_str = (datetime.date.today() - relativedelta(months=12)).strftime('%Y-%m-%d')
 
@@ -246,5 +250,6 @@ async def congelar_macro(payload: PayloadCongelar, db: Session = Depends(get_db)
 
 @router.get("/status")
 async def checar_status_macro(db: Session = Depends(get_db)):
-    reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == get_current_cycle(), ControleCiclo.origem == 'Top-Down').first()
+    # ATUALIZAÇÃO: Passando 'db' para a função get_current_cycle
+    reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == get_current_cycle(db), ControleCiclo.origem == 'Top-Down').first()
     return {"is_topdown_fechado": reg.status == 'Fechado' if reg else False}

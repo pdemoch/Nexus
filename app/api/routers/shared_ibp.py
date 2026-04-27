@@ -1,22 +1,33 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, text
 import datetime
 from dateutil.relativedelta import relativedelta
 from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, ControleCiclo
 from fastapi import HTTPException
 
 # =====================================================================
-# MOTOR DE DATAS E CICLOS
+# MÁQUINA DO TEMPO (MOTOR DE DATAS E CICLOS)
 # =====================================================================
-def get_current_cycle() -> str:
-    return datetime.date.today().strftime("%m/%Y")
+def _get_active_date(db: Session) -> datetime.date:
+    """Lê o relógio global do sistema a partir da base de dados"""
+    try:
+        resultado = db.execute(text("SELECT ciclo_ativo_global FROM configuracao_sistema ORDER BY id DESC LIMIT 1")).fetchone()
+        ciclo_str = resultado[0] if resultado else datetime.date.today().strftime("%m/%Y")
+        mes, ano = map(int, ciclo_str.split('/'))
+        return datetime.date(ano, mes, 1)
+    except Exception:
+        # Fallback de segurança caso a tabela não exista ou haja erro
+        return datetime.date.today().replace(day=1)
 
-def get_previous_cycle() -> str:
-    return (datetime.date.today().replace(day=1) - relativedelta(months=1)).strftime("%m/%Y")
+def get_current_cycle(db: Session) -> str:
+    return _get_active_date(db).strftime("%m/%Y")
 
-def get_projection_window() -> tuple[datetime.date, datetime.date]:
-    hoje = datetime.date.today().replace(day=1)
-    return (hoje + relativedelta(months=2), hoje + relativedelta(months=4))
+def get_previous_cycle(db: Session) -> str:
+    return (_get_active_date(db) - relativedelta(months=1)).strftime("%m/%Y")
+
+def get_projection_window(db: Session) -> tuple[datetime.date, datetime.date]:
+    hoje_ficticio = _get_active_date(db)
+    return (hoje_ficticio + relativedelta(months=2), hoje_ficticio + relativedelta(months=4))
 
 def parse_date_safe(date_input) -> datetime.date:
     if isinstance(date_input, datetime.date): return date_input

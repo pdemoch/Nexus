@@ -48,8 +48,9 @@ async def obter_filtros_busca(gerente_nome: str = None, db: Session = Depends(ge
 @router.get("") 
 async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
-        m2, m4 = get_projection_window()
-        ciclo = get_current_cycle()
+        # ATUALIZAÇÃO: Passando 'db' para as funções de tempo
+        m2, m4 = get_projection_window(db)
+        ciclo = get_current_cycle(db)
         
         filtro_vend = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else (nome_responsavel if nivel_hierarquia == 'vendedor' else None)
         filtro_reg = nome_responsavel if nivel_hierarquia != 'vendedor' and usuario['funcao'] != 'Executivo' else None
@@ -116,7 +117,8 @@ async def listar_micro(nivel_hierarquia: str, nome_responsavel: str, db: Session
 @router.get("/status")
 async def verificar_status_micro(nivel_hierarquia: str = 'vendedor', nome_responsavel: str = '', db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
-        ciclo = get_current_cycle()
+        # ATUALIZAÇÃO: Passando 'db'
+        ciclo = get_current_cycle(db)
         origem_trava = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else nome_responsavel
         
         if not origem_trava:
@@ -134,7 +136,8 @@ async def verificar_status_micro(nivel_hierarquia: str = 'vendedor', nome_respon
 @router.post("/congelar")
 async def congelar_micro(nivel_hierarquia: str, nome_responsavel: str, payload: PayloadCongelarBU, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
-        ciclo = get_current_cycle()
+        # ATUALIZAÇÃO: Passando 'db'
+        ciclo = get_current_cycle(db)
         check_global_lock(db, ciclo)
 
         reg_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
@@ -219,12 +222,14 @@ async def grafico_micro(chave_matriz: str, nivel_hierarquia: str = 'vendedor', n
         p = chave_matriz.split('|')
         razao, sku = p[0], p[1] if len(p) > 1 else None
         
-        m2_str, m4_str = get_projection_window()
+        # ATUALIZAÇÃO: Passando 'db'
+        m2_str, m4_str = get_projection_window(db)
         m2_date = parse_date_safe(m2_str) if isinstance(m2_str, str) else m2_str
         
         hoje = datetime.date.today()
         mes_atual_inicio = hoje.replace(day=1)
-        ciclo_anterior, ciclo_atual = get_previous_cycle(), get_current_cycle()
+        ciclo_anterior = get_previous_cycle(db)
+        ciclo_atual = get_current_cycle(db)
         
         filtro_vend = usuario['nome_vendedor'] if usuario['funcao'] == 'Executivo' else (nome_responsavel if nivel_hierarquia == 'vendedor' else None)
         filtro_reg = nome_responsavel if nivel_hierarquia != 'vendedor' and usuario['funcao'] != 'Executivo' else None

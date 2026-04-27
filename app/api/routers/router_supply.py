@@ -33,8 +33,9 @@ class PayloadCongelarSupply(BaseModel):
 
 @router.get("/status")
 async def checar_status_supply(db: Session = Depends(get_db)):
-    ciclo = get_current_cycle()
-    m2, m4 = get_projection_window()
+    # ATUALIZAÇÃO: Passando 'db'
+    ciclo = get_current_cycle(db)
+    m2, m4 = get_projection_window(db)
     
     reg_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
     is_td_fechado = reg_td.status == 'Fechado' if reg_td else False
@@ -63,8 +64,9 @@ async def checar_status_supply(db: Session = Depends(get_db)):
 @router.get("") 
 async def listar_supply(db: Session = Depends(get_db), usuario: dict = Depends(require_supply_or_admin)):
     try:
-        m2, m4 = get_projection_window()
-        ciclo = get_current_cycle()
+        # ATUALIZAÇÃO: Passando 'db'
+        m2, m4 = get_projection_window(db)
+        ciclo = get_current_cycle(db)
         
         reg_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
         is_supply_fechado = reg_sp.status == 'Fechado' if reg_sp else False
@@ -121,10 +123,11 @@ async def listar_supply(db: Session = Depends(get_db), usuario: dict = Depends(r
 @router.post("/congelar")
 async def congelar_supply(payload: PayloadCongelarSupply, db: Session = Depends(get_db), usuario: dict = Depends(require_supply_or_admin)):
     try:
-        ciclo = get_current_cycle()
+        # ATUALIZAÇÃO: Passando 'db'
+        ciclo = get_current_cycle(db)
         check_global_lock(db, ciclo)
         
-        m2, m4 = get_projection_window()
+        m2, m4 = get_projection_window(db)
         v_ativos_tuples = get_truth_query(db, ciclo, m2, m4).with_entities(FatoIbpGranular.vendedor_nome).filter(FatoIbpGranular.vendedor_nome.isnot(None)).distinct().all()
         v_ativos = [v[0].strip() for v in v_ativos_tuples if v[0]]
         

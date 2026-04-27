@@ -76,15 +76,14 @@ async def obter_filtros_gerencia(db: Session = Depends(get_db), usuario: dict = 
 @router.get("/vendedores")
 async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = None, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
-        m2, m4 = get_projection_window()
-        ciclo = get_current_cycle()
+        # ATUALIZAÇÃO: Passando 'db' para as funções de tempo
+        m2, m4 = get_projection_window(db)
+        ciclo = get_current_cycle(db)
         query_base = get_truth_query(db, ciclo, m2, m4)
         
-        # Filtro de Hierarquia do Gerente Logado
         if usuario['funcao'] == 'Gerente':
             query_base = query_base.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
             
-        # Filtros Adicionais da UI
         if nivel_filtro == 'vendedor' and valor_filtro:
             query_base = query_base.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == valor_filtro.strip().upper())
         elif nivel_filtro == 'regional' and valor_filtro:
@@ -162,11 +161,12 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
         cliente_alvo = p[1] if len(p) > 1 else None
         sku_alvo = p[2] if len(p) > 2 else None
         
-        m2_str, _ = get_projection_window()
+        # ATUALIZAÇÃO: Passando 'db'
+        m2_str, _ = get_projection_window(db)
         m2_date = parse_date_safe(m2_str)
         hoje = datetime.date.today()
         mes_atual_inicio = hoje.replace(day=1)
-        ciclo_ant, ciclo_atual = get_previous_cycle(), get_current_cycle()
+        ciclo_ant, ciclo_atual = get_previous_cycle(db), get_current_cycle(db)
 
         q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol'))\
                    .join(DimCliente, FatoVendas.cgc == DimCliente.cgc)\
@@ -242,7 +242,8 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
 @router.post("/aprovar")
 async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
-        ciclo = get_current_cycle()
+        # ATUALIZAÇÃO: Passando 'db'
+        ciclo = get_current_cycle(db)
         check_global_lock(db, ciclo)
 
         reg_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
@@ -279,9 +280,6 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
                     rateado = int(round(int(ajuste.novo_volume) * (l.vol_bottomup / total_base if total_base > 0 else 1.0 / len(linhas))))
                     soma_dist += rateado
                 
-                # =================================================================
-                # A CASCATA DE HERANÇA CORRIGIDA:
-                # =================================================================
                 l.vol_bottomup = rateado
                 l.vol_supply = rateado
                 l.vol_final = rateado
@@ -297,7 +295,8 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
 @router.post("/toggle-lock")
 async def toggle_lock_gerenciamento(payload: PayloadToggleLock, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
-        ciclo = get_current_cycle()
+        # ATUALIZAÇÃO: Passando 'db'
+        ciclo = get_current_cycle(db)
         check_global_lock(db, ciclo)
         verificar_vendedor_online(db, payload.origem)
         
@@ -316,14 +315,15 @@ async def toggle_lock_gerenciamento(payload: PayloadToggleLock, db: Session = De
 @router.post("/lock-all")
 async def lock_all(payload: PayloadLockAll, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
-        ciclo = get_current_cycle()
+        # ATUALIZAÇÃO: Passando 'db'
+        ciclo = get_current_cycle(db)
         check_global_lock(db, ciclo)
 
         reg_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
         if not reg_td or reg_td.status != 'Fechado':
              raise HTTPException(status_code=403, detail="A estratégia macro ainda não foi liberada pela Diretoria (Fase 1). Aguarde.")
         
-        m2, m4 = get_projection_window()
+        m2, m4 = get_projection_window(db)
         
         q = get_truth_query(db, ciclo, m2, m4).with_entities(FatoIbpGranular.vendedor_nome).filter(FatoIbpGranular.vendedor_nome.isnot(None))
         filtro = usuario.get('gerente_nome') if usuario['funcao'] == 'Gerente' else payload.gerente_nome

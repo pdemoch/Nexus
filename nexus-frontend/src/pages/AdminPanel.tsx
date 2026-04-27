@@ -101,7 +101,7 @@ export default function AdminPanel() {
   const handleExportarBase = async () => {
     setIsExporting(true);
     try {
-      const response = await axios.get('/api/v1/consensus/export/bottom-up', {
+      const response = await axios.get('/api/v1/admin/exportar-base', {
         responseType: 'blob', // Importante para o download de ficheiros
       });
       

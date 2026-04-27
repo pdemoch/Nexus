@@ -32,8 +32,9 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
         raise HTTPException(status_code=403, detail="Acesso restrito à Diretoria, Gerência ou Supply Chain.")
         
     try:
-        ciclo = get_current_cycle()
-        m2, m4 = get_projection_window()
+        # ATUALIZAÇÃO: Passando 'db'
+        ciclo = get_current_cycle(db)
+        m2, m4 = get_projection_window(db)
 
         query = get_truth_query(db, ciclo, m2, m4).with_entities(
             DimProduto.categoria, FatoIbpGranular.sku, DimProduto.descricao, DimCliente.razaosocial, 
@@ -97,11 +98,12 @@ async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria',
         sku = partes[1] if len(partes) > 1 else None
         cliente = partes[2] if len(partes) > 2 else None
 
-        m2_str, _ = get_projection_window()
+        # ATUALIZAÇÃO: Passando 'db'
+        m2_str, _ = get_projection_window(db)
         m2_date = parse_date_safe(m2_str)
         hoje = datetime.date.today()
         mes_atual_inicio = hoje.replace(day=1)
-        ciclo_ant, ciclo_atual = get_previous_cycle(), get_current_cycle()
+        ciclo_ant, ciclo_atual = get_previous_cycle(db), get_current_cycle(db)
 
         q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol'))\
                    .join(DimProduto, FatoVendas.sku == DimProduto.sku)\
@@ -187,7 +189,8 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
         raise HTTPException(status_code=403, detail="Apenas a Diretoria pode publicar o Plano Final.")
 
     try:
-        ciclo = get_current_cycle()
+        # ATUALIZAÇÃO: Passando 'db'
+        ciclo = get_current_cycle(db)
         
         for ajuste in payload.ajustes:
             data_alvo = parse_date_safe(ajuste.mes_projetado)
@@ -237,8 +240,9 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
 @router.get("/export")
 async def exportar_oficial(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
-        ciclo = get_current_cycle()
-        m2, m4 = get_projection_window()
+        # ATUALIZAÇÃO: Passando 'db'
+        ciclo = get_current_cycle(db)
+        m2, m4 = get_projection_window(db)
         
         resultados = get_truth_query(db, ciclo, m2, m4).with_entities(
             DimProduto.categoria, FatoIbpGranular.sku, DimProduto.descricao, DimCliente.razaosocial, 
