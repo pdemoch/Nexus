@@ -22,6 +22,17 @@ const VarBadge = ({ atual = 0, anterior = 0 }: { atual?: number, anterior?: numb
   );
 };
 
+// Ordenadores Fixos para as Tooltips do Recharts
+const tooltipSorterGlobal = (item: any) => {
+  const order: Record<string, number> = { 'Sinal IA': 1, 'Top-Down': 2, 'Comercial': 3, 'Supply': 4, 'Final S&OP': 5 };
+  return order[item.name] || 99;
+};
+
+const tooltipSorterRow = (item: any) => {
+  const order: Record<string, number> = { 'Histórico Real': 1, 'Sinal IA': 2, 'Proposta Comercial': 3, 'Restrição Supply': 4, 'Global S&OP': 5 };
+  return order[item.name] || 99;
+};
+
 export default function GlobalDashboard() {
   const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -188,29 +199,22 @@ export default function GlobalDashboard() {
     if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
-        let historico = [];
-        if (row.original.tipo !== 'categoria') {
-          const partes = chave.split('|');
-          const queryChave = partes.length === 3 ? `${partes[2]}|${partes[1]}` : (partes.length === 2 ? `|${partes[1]}` : partes[0]);
-          const res = await axios.get('/api/v1/consensus/micro/grafico', { params: { chave_matriz: queryChave } });
-          historico = res.data.dados || [];
-        }
+        // Usa a nova rota inteligente exclusiva do Dashboard
+        const res = await axios.get('/api/v1/dashboard/grafico', { params: { chave_matriz: chave, nivel_hierarquia: row.original.tipo } });
+        const historico = res.data.dados || [];
 
         const projectionData = row.original.meses.map((m: any) => ({
           name: m.mes_banco.split('-').reverse().slice(1).join('/'),
           data_iso: m.mes_banco,
-          IA: m.vol_ia,
-          Comercial: m.vol_bu,
-          Supply: m.vol_sp,
-          Final: m.vol_final,
-          Realizado: null
+          IA: m.vol_ia, Comercial: m.vol_bu, Supply: m.vol_sp, Final: m.vol_final, Realizado: null
         }));
 
         const merged: any[] = [];
         historico.forEach((h: any) => {
            const isProjection = projectionData.find((p: any) => p.data_iso === h.data_iso);
-           if (!isProjection && h.Realizado !== null) {
-               merged.push({ name: h.name, data_iso: h.data_iso, Realizado: h.Realizado, IA: null, Comercial: null, Supply: null, Final: null });
+           // Preserva M0, M1 e todo o Histórico que não está nas colunas editáveis
+           if (!isProjection) {
+               merged.push({ ...h });
            }
         });
 
@@ -283,7 +287,7 @@ export default function GlobalDashboard() {
 
           if (row.tipo === 'categoria' || row.tipo === 'produto') {
             return (
-              <div className="flex flex-col items-center justify-center">
+              <div className="flex flex-col items-center justify-center min-w-[100px]">
                 <div className="font-black text-slate-900 text-sm">{formatVolume(valorInteiro)}</div>
                 <div className="text-[10px] font-bold text-emerald-600 mt-0.5">{formatMoeda(receitaExibida)}</div>
               </div>
@@ -293,8 +297,8 @@ export default function GlobalDashboard() {
           return (
             <div className="flex flex-col w-32 gap-1 relative">
               <div className="flex justify-between items-center px-1">
-                 <span className="text-[8px] text-indigo-500 font-black" title="Proposta Comercial">BU: {formatVolume(dadosMes?.vol_bu)}</span>
-                 <span className="text-[8px] text-amber-500 font-black" title="Capacidade Supply">SP: {formatVolume(dadosMes?.vol_sp)}</span>
+                 <span className="text-[8px] text-indigo-500 font-black">BU: {formatVolume(dadosMes?.vol_bu)}</span>
+                 <span className="text-[8px] text-amber-500 font-black">SP: {formatVolume(dadosMes?.vol_sp)}</span>
               </div>
               <input
                 type="text" value={valorInteiro === 0 ? '' : valorInteiro.toLocaleString('pt-BR')} disabled={meta.isLocked}
@@ -303,9 +307,7 @@ export default function GlobalDashboard() {
                   ${meta.lockMessage.includes('Publicada') ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : meta.isLocked ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed' : 'bg-slate-50 border-transparent focus:bg-white text-slate-800 focus:border-indigo-500'} 
                   ${edicao !== undefined && !meta.isLocked ? 'bg-indigo-600 border-indigo-700 text-white' : ''}`}
               />
-              <div className="text-center mt-0.5">
-                <span className="text-[10px] font-bold text-emerald-600">{formatMoeda(receitaExibida)}</span>
-              </div>
+              <div className="text-center mt-0.5"><span className="text-[10px] font-bold text-emerald-600">{formatMoeda(receitaExibida)}</span></div>
             </div>
           );
         }
@@ -331,7 +333,6 @@ export default function GlobalDashboard() {
   return (
     <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
       <div className="max-w-[1600px] mx-auto p-6 lg:p-10 relative">
-        
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-6 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 relative overflow-hidden">
           {isLocked && !isLoading && (
               <div className={`absolute top-0 left-0 w-full text-white text-[10px] font-black py-1.5 flex justify-center items-center gap-2 tracking-widest uppercase shadow-sm z-10 ${lockMessage.includes('Publicada') ? "bg-emerald-500" : "bg-amber-500"}`}>
@@ -339,9 +340,7 @@ export default function GlobalDashboard() {
               </div>
           )}
           <div className={isLocked && !isLoading ? "pt-4" : ""}>
-            <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
-              <Globe className="w-8 h-8 text-indigo-600" /> Dashboard Global S&OP
-            </h1>
+            <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter"><Globe className="w-8 h-8 text-indigo-600" /> Dashboard Global S&OP</h1>
             <p className="text-sm font-bold text-slate-400 mt-1 uppercase tracking-widest pl-11">Consolidação e Aprovação de Metas</p>
           </div>
           <div className={`flex items-center gap-4 ${isLocked && !isLoading ? "pt-4" : ""}`}>
@@ -365,14 +364,8 @@ export default function GlobalDashboard() {
               <div key={i} className={`p-5 rounded-[24px] shadow-sm border border-slate-100 flex flex-col justify-between ${i === 4 ? 'bg-indigo-600 text-white' : 'bg-white'}`}>
                  <span className={`text-[10px] font-black uppercase tracking-widest mb-3 ${i === 4 ? 'text-indigo-200' : 'text-slate-400'}`}>{card.label}</span>
                  <div className="space-y-4">
-                    <div>
-                      <p className="text-2xl font-black leading-none">{formatVolume(card.v)} <span className="text-[10px] opacity-60">CX</span></p>
-                      {i > 0 && <VarBadge atual={card.v} anterior={card.bV} />}
-                    </div>
-                    <div className={`pt-2 border-t ${i === 4 ? 'border-white/10' : 'border-slate-100'}`}>
-                      <p className="text-[13px] font-black">{formatMoeda(card.r)}</p>
-                      {i > 0 && <VarBadge atual={card.r} anterior={card.bR} />}
-                    </div>
+                    <div><p className="text-2xl font-black leading-none">{formatVolume(card.v)} <span className="text-[10px] opacity-60">CX</span></p>{i > 0 && <VarBadge atual={card.v} anterior={card.bV} />}</div>
+                    <div className={`pt-2 border-t ${i === 4 ? 'border-white/10' : 'border-slate-100'}`}><p className="text-[13px] font-black">{formatMoeda(card.r)}</p>{i > 0 && <VarBadge atual={card.r} anterior={card.bR} />}</div>
                  </div>
               </div>
             ))}
@@ -383,9 +376,7 @@ export default function GlobalDashboard() {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
             {['Volume Projetado (CX)', 'Receita Projetada (R$)'].map((title, idx) => (
               <div key={idx} className="bg-white rounded-[32px] p-6 shadow-sm border border-slate-100 flex flex-col min-h-[380px]">
-                <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-6 flex items-center gap-2">
-                  <BarChart3 className="w-4 h-4 text-indigo-500" /> {title}
-                </h3>
+                <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-6 flex items-center gap-2"><BarChart3 className="w-4 h-4 text-indigo-500" /> {title}</h3>
                 <div className="flex-1 w-full">
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={stats.chartData} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
@@ -395,6 +386,7 @@ export default function GlobalDashboard() {
                       <Tooltip 
                         contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)', fontWeight: 900}} 
                         formatter={(val: any) => idx === 0 ? formatVolume(val) : formatMoeda(val)}
+                        itemSorter={tooltipSorterGlobal}
                       />
                       <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: 900}} />
                       <Bar dataKey={idx === 0 ? "IA" : "RIA"} name="Sinal IA" fill="#e2e8f0" radius={[4, 4, 0, 0]} />
@@ -441,27 +433,31 @@ export default function GlobalDashboard() {
                     {chartExpanded === row.original.chave_matriz && (
                       <tr>
                         <td colSpan={table.getAllColumns().length} className="bg-slate-50 p-6 border-b border-slate-200 shadow-inner">
-                           <div className="bg-white rounded-[24px] p-6 border border-slate-200 animate-in fade-in duration-500 h-[350px]">
+                           <div className="bg-white rounded-[24px] p-6 border border-slate-200 animate-in fade-in duration-500 h-[380px]">
                               <div className="flex justify-between items-center mb-6">
                                 <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest flex items-center gap-2"><Activity className="w-4 h-4 text-indigo-500" /> Curva S&OE: {row.original.nome}</h3>
                                 <button onClick={() => setChartExpanded(null)} className="text-slate-400 hover:text-slate-700">
                                   <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
                                 </button>
                               </div>
-                              <div className="w-full h-[250px]">
+                              <div className="w-full h-[280px]">
                                  {loadingGrafico === row.original.chave_matriz ? <div className="h-full flex items-center justify-center text-slate-600"><Loader2 className="animate-spin" /></div> : (
                                    <ResponsiveContainer width="100%" height="100%">
                                       <LineChart data={dadosGraficoCache[row.original.chave_matriz] || []}>
                                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                                          <XAxis dataKey="name" tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} tickLine={false} />
                                          <YAxis tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
-                                         <Tooltip contentStyle={{backgroundColor: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '12px', fontWeight: 900}} formatter={(val: any) => formatVolume(val)} />
+                                         <Tooltip 
+                                            contentStyle={{backgroundColor: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '12px', fontWeight: 900}} 
+                                            formatter={(val: any) => formatVolume(val)} 
+                                            itemSorter={tooltipSorterRow}
+                                         />
                                          <Legend iconType="circle" wrapperStyle={{paddingTop: '10px', fontSize: '11px', fontWeight: 900}} />
-                                         <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#94a3b8" strokeWidth={3} dot={{r: 4}} />
-                                         <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#cbd5e1" strokeWidth={3} strokeDasharray="5 5" dot={false} />
-                                         <Line type="monotone" dataKey="Comercial" name="Proposta Comercial" stroke="#818cf8" strokeWidth={3} dot={{r: 4}} />
-                                         <Line type="monotone" dataKey="Supply" name="Restrição Supply" stroke="#f59e0b" strokeWidth={3} dot={{r: 4}} />
-                                         <Line type="monotone" dataKey="Final" name="Global S&OP" stroke="#10b981" strokeWidth={4} dot={{r: 5}} />
+                                         <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#94a3b8" strokeWidth={3} dot={{r: 4}} connectNulls />
+                                         <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#cbd5e1" strokeWidth={3} strokeDasharray="5 5" dot={false} connectNulls />
+                                         <Line type="monotone" dataKey="Comercial" name="Proposta Comercial" stroke="#818cf8" strokeWidth={3} dot={{r: 4}} connectNulls />
+                                         <Line type="monotone" dataKey="Supply" name="Restrição Supply" stroke="#f59e0b" strokeWidth={3} dot={{r: 4}} connectNulls />
+                                         <Line type="monotone" dataKey="Final" name="Global S&OP" stroke="#10b981" strokeWidth={4} dot={{r: 5}} connectNulls />
                                       </LineChart>
                                    </ResponsiveContainer>
                                  )}

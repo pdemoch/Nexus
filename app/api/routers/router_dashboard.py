@@ -4,16 +4,16 @@ from typing import List
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 import datetime
+from dateutil.relativedelta import relativedelta
 import io
 import pandas as pd
 from fastapi.responses import StreamingResponse
 
 from app.core.database import get_db
-from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, ControleCiclo
+from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, ControleCiclo, FatoVendas
 from app.api.routers.router_auth import get_current_user
 
-# Importamos o nosso Cérebro de Dados
-from app.api.routers.shared_ibp import get_current_cycle, get_projection_window, get_truth_query, parse_date_safe
+from app.api.routers.shared_ibp import get_current_cycle, get_previous_cycle, get_projection_window, get_truth_query, parse_date_safe
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["S&OP Global Dashboard"])
 
@@ -49,7 +49,6 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
 
         resultados = query.all()
         
-        # CORREÇÃO CRUCIAL: Transformar explicitamente cada linha em um dicionário (Objeto JSON)
         dados_formatados = []
         for r in resultados:
             dados_formatados.append({
@@ -72,11 +71,9 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
                 "rec_final": float(r.rec_final or 0)
             })
         
-        # Verifica Status Global
         reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
         is_locked = reg.status == 'Fechado' if reg else False
         
-        # Verifica se as fases anteriores terminaram
         reg_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
         if not is_locked and (not reg_sp or reg_sp.status != 'Fechado'):
             return {
@@ -92,6 +89,98 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
     except Exception as e:
         raise HTTPException(500, repr(e))
 
+@router.get("/grafico")
+async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria', db: Session = Depends(get_db)):
+    try:
+        partes = chave_matriz.split('|')
+        categoria = partes[0] if len(partes) > 0 else None
+        sku = partes[1] if len(partes) > 1 else None
+        cliente = partes[2] if len(partes) > 2 else None
+
+        m2_str, _ = get_projection_window()
+        m2_date = parse_date_safe(m2_str)
+        hoje = datetime.date.today()
+        mes_atual_inicio = hoje.replace(day=1)
+        ciclo_ant, ciclo_atual = get_previous_cycle(), get_current_cycle()
+
+        q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol'))\
+                   .join(DimProduto, FatoVendas.sku == DimProduto.sku)\
+                   .join(DimCliente, FatoVendas.cgc == DimCliente.cgc)\
+                   .filter(FatoVendas.data_pedido >= hoje - relativedelta(years=2))
+
+        q_ant = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_final).label('vol'))\
+                  .join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)\
+                  .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
+                  .filter(FatoIbpGranular.ciclo_sop == ciclo_ant)
+
+        q_proj = db.query(
+                    FatoIbpGranular.mes_projetado, 
+                    func.sum(FatoIbpGranular.vol_ia).label('ia'), 
+                    func.sum(FatoIbpGranular.vol_bottomup).label('bu'),
+                    func.sum(FatoIbpGranular.vol_supply).label('sp'),
+                    func.sum(FatoIbpGranular.vol_final).label('final')
+                   )\
+                   .join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)\
+                   .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
+                   .filter(FatoIbpGranular.ciclo_sop == ciclo_atual)
+
+        if categoria:
+            q_hist = q_hist.filter(DimProduto.categoria == categoria.strip())
+            q_ant = q_ant.filter(DimProduto.categoria == categoria.strip())
+            q_proj = q_proj.filter(DimProduto.categoria == categoria.strip())
+        
+        if sku:
+            q_hist = q_hist.filter(FatoVendas.sku == sku.strip())
+            q_ant = q_ant.filter(FatoIbpGranular.sku == sku.strip())
+            q_proj = q_proj.filter(FatoIbpGranular.sku == sku.strip())
+
+        if cliente:
+            q_hist = q_hist.filter(func.upper(func.trim(DimCliente.razaosocial)) == cliente.strip().upper())
+            q_ant = q_ant.filter(func.upper(func.trim(DimCliente.razaosocial)) == cliente.strip().upper())
+            q_proj = q_proj.filter(func.upper(func.trim(DimCliente.razaosocial)) == cliente.strip().upper())
+
+        hist_dict = {h.mes_ano: int(h.vol or 0) for h in q_hist.group_by('mes_ano').all()}
+        ant_dict = {str(a.mes_projetado): int(a.vol or 0) for a in q_ant.group_by(FatoIbpGranular.mes_projetado).all()}
+        proj_res = q_proj.group_by(FatoIbpGranular.mes_projetado).all()
+
+        timeline = []
+        for i in range(24, 0, -1):
+            dt = mes_atual_inicio - relativedelta(months=i)
+            timeline.append({
+                "name": dt.strftime("%b/%y").capitalize(), "data_iso": dt.strftime("%Y-%m-%d"),
+                "Realizado": hist_dict.get(dt.strftime('%Y-%m'), 0), 
+                "IA": None, "Comercial": None, "Supply": None, "Final": None, "CicloAnterior": None
+            })
+
+        curr_iso = mes_atual_inicio.strftime('%Y-%m-%d')
+        p_atual = next((p for p in proj_res if str(p.mes_projetado) == curr_iso), None)
+        timeline.append({
+            "name": hoje.strftime("%b/%y").capitalize() + " (S&OE)", "data_iso": curr_iso,
+            "Realizado": hist_dict.get(hoje.strftime('%Y-%m'), 0), 
+            "IA": int(p_atual.ia) if p_atual else None, 
+            "Comercial": None, "Supply": None, "Final": None,
+            "CicloAnterior": ant_dict.get(curr_iso)
+        })
+
+        for p in sorted(proj_res, key=lambda x: str(x.mes_projetado)):
+            p_date = p.mes_projetado if isinstance(p.mes_projetado, datetime.date) else parse_date_safe(p.mes_projetado)
+            if p_date <= mes_atual_inicio: continue
+            p_iso = str(p_date)
+            
+            timeline.append({
+                "name": p_date.strftime("%b/%y").capitalize(), "data_iso": p_iso,
+                "Realizado": None, 
+                "IA": int(p.ia or 0), 
+                "Comercial": int(p.bu or 0) if p_date >= m2_date else None, 
+                "Supply": int(p.sp or 0) if p_date >= m2_date else None, 
+                "Final": int(p.final or 0) if p_date >= m2_date else None, 
+                "CicloAnterior": ant_dict.get(p_iso)
+            })
+
+        return {"status": "success", "dados": timeline}
+    except Exception as e:
+        raise HTTPException(500, repr(e))
+
 @router.post("/aprovar")
 async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     if usuario['funcao'] not in ['Administrador', 'Gerente']:
@@ -100,7 +189,6 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
     try:
         ciclo = get_current_cycle()
         
-        # 1. PROCESSAR AJUSTES FINAIS DA DIRETORIA
         for ajuste in payload.ajustes:
             data_alvo = parse_date_safe(ajuste.mes_projetado)
             partes = ajuste.chave.split('|')
@@ -130,14 +218,12 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
                 l.vol_final = rateado
                 l.vol_meta = rateado
 
-        # 2. MARCAR CICLO COMO ENCERRADO
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
         if not registro:
             db.add(ControleCiclo(ciclo_sop=ciclo, origem='S&OP-Final', status='Fechado'))
         else:
             registro.status = 'Fechado'
 
-        # 3. CONGELAMENTO TOTAL
         db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo).update({
             FatoIbpGranular.vol_meta: FatoIbpGranular.vol_final
         }, synchronize_session=False)
