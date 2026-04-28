@@ -77,10 +77,18 @@ export default function AdminPanel() {
   }, [fetchData, isPipelineRunning]);
 
   const handleRunPipeline = async () => {
-    if (!window.confirm(`⚠️ ATENÇÃO: O pipeline rodará para o mês focado atualmente (${cicloAtivo}). Iniciar a Engenharia de Dados irá bloquear todo o sistema. Deseja continuar?`)) return;
+    // CORREÇÃO: O alerta e o funcionamento do pipeline focam no mundo real, protegendo o banco.
+    const msgConfirmacao = `⚠️ EXECUÇÃO DO MOTOR DE DADOS:
+    
+1. O pipeline atualizará as Vendas Reais do ERP no histórico.
+2. Se o calendário real já tiver mudado de mês, um NOVO Ciclo S&OP será gerado automaticamente.
+
+O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a integridade do banco de dados. Deseja prosseguir?`;
+
+    if (!window.confirm(msgConfirmacao)) return;
     
     setIsPipelineRunning(true);
-    setLogs(["[SISTEMA] Iniciando requisição para o núcleo de IA..."]);
+    setLogs(["[SISTEMA] Conectando ao núcleo de IA e sincronizando ERP..."]);
     
     try {
       await axios.post('/api/v1/admin/pipeline/start');
@@ -335,7 +343,7 @@ export default function AdminPanel() {
                     Motor de Engenharia S&OP
                   </h2>
                   <p className="text-xs font-medium text-slate-400 mt-1">
-                    Aciona a pipeline de Machine Learning e recria a matriz no ciclo: <strong className="text-emerald-400">{cicloAtivo}</strong>
+                    Carga de Vendas Delta e Processamento de Redes Neurais S&OP.
                   </p>
                </div>
                <button 
