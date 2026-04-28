@@ -90,7 +90,7 @@ async def carregar_radar_soe(db: Session = Depends(get_db)):
     # 1. Metas do Mês Atual
     forecast = db.query(
         FatoIbpGranular.sku,
-        func.sum(FatoIbpGranular.vol_sop).label('vol_sop'),
+        func.sum(FatoIbpGranular.vol_final).label('vol_sop'), # <- CORRIGIDO PARA vol_final
         func.sum(FatoIbpGranular.vol_meta).label('vol_meta'),
         func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
     ).filter(
