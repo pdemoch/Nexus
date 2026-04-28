@@ -153,8 +153,8 @@ export default function SoeDashboard() {
 
   const table = useReactTable({
     data: dados, columns: columnsSku, state: { sorting, columnFilters, expanded },
-    onExpandedChange: setExpanded, getExpandedRowModel: getExpandedRowModel(),
-    onSortingChange: setSorting, onColumnFiltersChange: setColumnFilters,
+    onExpandedChange: setExpanded, getSubRows: (row) => row.subRows, getRowCanExpand: () => true, 
+    getExpandedRowModel: getExpandedRowModel(), onSortingChange: setSorting, onColumnFiltersChange: setColumnFilters,
     getCoreRowModel: getCoreRowModel(), getSortedRowModel: getSortedRowModel(), getFilteredRowModel: getFilteredRowModel(),
   });
 
