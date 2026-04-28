@@ -140,7 +140,8 @@ async def deletar_inbound(id: int, db: Session = Depends(get_db)):
 async def carregar_radar_soe(db: Session = Depends(get_db)):
     """Calcula o Pacing, Backlog, Gap e Risco de Ruptura em tempo real."""
     hoje = datetime.date.today()
-    ciclo_atual = get_current_cycle()
+    # CORREÇÃO: Passando o 'db' para a função get_current_cycle()
+    ciclo_atual = get_current_cycle(db)
     primeiro_dia_mes = hoje.replace(day=1)
     
     # 1. BUSCAR FORECAST S&OP (VOL_FINAL)

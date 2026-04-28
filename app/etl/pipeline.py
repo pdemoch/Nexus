@@ -24,13 +24,15 @@ async def executar_pipeline_nexus():
     tempo_inicio_total = time.time()
     try:
         os.makedirs("data", exist_ok=True)
+        
+        # 1. MUDANÇA: O teto agora é HOJE (captura vendas em tempo real do dia atual)
         hoje = date.today()
-        data_fim = hoje - relativedelta(days=1)
+        data_fim = hoje 
         
         log("🚀 [SYSTEM] Iniciando Nexus Engine 4.0 (Arquitetura Delta/Upsert)...")
 
         # =================================================================
-        # FASE 1: O CÉREBRO DA CARGA INCREMENTAL (DELTA LOAD)
+        # FASE 1: O CÉREBRO DA CARGA INCREMENTAL (DELTA LOAD MÊS DESLIZANTE)
         # =================================================================
         db = SessionLocal()
         ultima_data_banco = db.query(func.max(FatoVendas.data_pedido)).scalar()
@@ -41,11 +43,18 @@ async def executar_pipeline_nexus():
         db.close()
 
         if ultima_data_banco:
-            data_inicio = ultima_data_banco - relativedelta(days=5)
-            log(f"⚡ [DELTA LOAD] Banco detectado. Baixando notas emitidas desde {data_inicio.strftime('%d/%m/%Y')}...")
+            # 2. MUDANÇA: Lógica do Mês Deslizante (Rolling Month)
+            # Se estamos nos primeiros 5 dias do mês (ex: 3 de Maio), volta para 1º do mês anterior (1º de Abril)
+            # para capturar notas atrasadas do fechamento. Senão, volta para 1º do mês atual (1º de Maio).
+            if hoje.day <= 5:
+                data_inicio = (hoje.replace(day=1) - relativedelta(months=1))
+            else:
+                data_inicio = hoje.replace(day=1)
+                
+            log(f"⚡ [DELTA LOAD] Atualizando mês vigente e atrasos. Baixando notas desde {data_inicio.strftime('%d/%m/%Y')} até {data_fim.strftime('%d/%m/%Y')}...")
         else:
             data_inicio = date(2022, 1, 1)                  
-            log(f"⚠️ [FULL LOAD] Banco vazio. Iniciando carga histórica profunda desde {data_inicio.strftime('%d/%m/%Y')}...")
+            log(f"⚠️ [FULL LOAD] Banco vazio. Iniciando carga histórica profunda desde {data_inicio.strftime('%d/%m/%Y')} até {data_fim.strftime('%d/%m/%Y')}...")
         
         extractor = GobiExtractor()
         transformer = NexusTransformer()
