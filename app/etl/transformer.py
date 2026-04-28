@@ -77,19 +77,34 @@ class NexusTransformer:
 
         lf_silver = lf_silver.with_columns(pl.col("cliente").alias("cod_cliente"))
         
-        # ATUALIZAÇÃO S&OE: Adicionadas as colunas 'qtfatura' e 'qtcorte' para garantir
-        # que o saldo ativo do pedido possa ser calculado!
-        colunas_finais = [
-            "dtapedido", "pedido", "cod_cliente", "loja", "cgc", "cliente_razaosocial", 
-            "regional", "produto", "descricao", "qtpedido", "vlpedido", "qtfatura", "qtcorte",
-            "vendedor_nome", "gerente_nome", "supervisor_nome", "bu", "categoria", "segmento",
-            "bloqueado"
-        ]
+        lf_final = lf_silver.with_columns(pl.col("2026").alias("curva_2026"))
         
-        lf_final = lf_silver.select(colunas_finais + [pl.col("2026").alias("curva_2026")])
-        
-        # BLINDAGEM FINAL PARA O UPSERT: Garante que não há linhas duplicadas no mesmo lote delta
-        # para a mesma chave (pedido + produto + cgc), evitando erros no PostgreSQL.
-        lf_final = lf_final.unique(subset=["pedido", "produto", "cgc"], keep="last")
+        # ---------------------------------------------------------------------
+        # CORREÇÃO DA MATEMÁTICA DO ERP (FUSÃO DE LINHAS QUEBRADAS)
+        # Substituímos o '.unique()' por um agrupamento e soma das métricas.
+        # ---------------------------------------------------------------------
+        lf_final = lf_final.group_by(["pedido", "produto", "cgc"]).agg([
+            # Métricas Quantitativas (SOMADAS)
+            pl.col("qtpedido").sum().alias("qtpedido"),
+            pl.col("vlpedido").sum().alias("vlpedido"),
+            pl.col("qtfatura").sum().alias("qtfatura"),
+            pl.col("qtcorte").sum().alias("qtcorte"),
+            
+            # Dados Qualitativos (Mantemos o primeiro registro do agrupamento)
+            pl.col("dtapedido").first().alias("dtapedido"),
+            pl.col("cod_cliente").first().alias("cod_cliente"),
+            pl.col("loja").first().alias("loja"),
+            pl.col("cliente_razaosocial").first().alias("cliente_razaosocial"),
+            pl.col("regional").first().alias("regional"),
+            pl.col("descricao").first().alias("descricao"),
+            pl.col("vendedor_nome").first().alias("vendedor_nome"),
+            pl.col("gerente_nome").first().alias("gerente_nome"),
+            pl.col("supervisor_nome").first().alias("supervisor_nome"),
+            pl.col("bu").first().alias("bu"),
+            pl.col("categoria").first().alias("categoria"),
+            pl.col("segmento").first().alias("segmento"),
+            pl.col("bloqueado").first().alias("bloqueado"),
+            pl.col("curva_2026").first().alias("curva_2026")
+        ])
         
         return lf_final
