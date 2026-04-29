@@ -37,7 +37,14 @@ class ProphetModel:
             import logging
             logging.getLogger('prophet').setLevel(logging.ERROR)
             
-            m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
+            # TUNING: Mais agressividade nas mudanças de tendência para pegar os Vales e Picos
+            m = Prophet(
+                yearly_seasonality=True, 
+                weekly_seasonality=False, 
+                daily_seasonality=False,
+                changepoint_prior_scale=0.1,  # Mais sensível a quebras de padrão
+                seasonality_prior_scale=10.0  # Sazonalidade mais forte
+            )
             m.fit(df_p)
             future = m.make_future_dataframe(periods=steps_ahead, freq='MS')
             forecast = m.predict(future)
@@ -119,7 +126,11 @@ class MovingAverageModel:
         return np.array(preds)
 
 class LocalMLAutoregressive:
-    """Modelo de Machine Learning Local: Treina apenas com os dados do SKU e prevê o futuro passo a passo (Retroalimentação)."""
+    """
+    NOVO MOTOR DIRECT MULTI-STEP:
+    Abandona a recursividade. Treina um modelo independente para cada horizonte de tempo (h).
+    Injeta o conhecimento de Picos e Vales via Z-Score.
+    """
     def __init__(self, model_type='xgb'):
         self.model_type = model_type
 
@@ -127,53 +138,62 @@ class LocalMLAutoregressive:
         if len(train_series) < 15: 
             return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
 
-        # Constrói Features Locais
+        # 1. Feature Engineering com Memória de Picos
         df = pd.DataFrame({'y': train_series.values})
         for lag in [1, 2, 3, 6, 12]:
             df[f'lag_{lag}'] = df['y'].shift(lag)
+            
         df['media_movel_3'] = df['y'].shift(1).rolling(3).mean()
-        df['diff_1'] = df['lag_1'] - df['lag_2']
+        df['media_movel_6'] = df['y'].shift(1).rolling(6).mean()
+        df['max_6m'] = df['y'].shift(1).rolling(6).max()
+        
+        # Detector de Ressaca / Trade Loading (Z-Score)
+        std_6m = df['y'].shift(1).rolling(6).std().replace(0, 1)
+        df['z_score'] = (df['y'].shift(1) - df['media_movel_6']) / std_6m
+        df['is_pico'] = (df['z_score'] > 1.5).astype(int)
+        df['picos_ultimos_3m'] = df['is_pico'].rolling(3).sum().fillna(0) # Flag de ressaca
 
-        df_train = df.dropna()
-        if len(df_train) < 5: return np.full(steps_ahead, train_series.mean())
-
-        X = df_train.drop(columns=['y'])
-        y = df_train['y']
-
-        if self.model_type == 'xgb':
-            model = xgboost.XGBRegressor(n_estimators=100, learning_rate=0.05, random_state=42)
-        elif self.model_type == 'lgb':
-            model = lightgbm.LGBMRegressor(n_estimators=100, learning_rate=0.05, random_state=42, verbose=-1)
-        else:
-            model = RandomForestRegressor(n_estimators=100, random_state=42)
-
-        model.fit(X, y)
-
-        # PREVISÃO RECURSIVA: O Segredo para não gerar linhas retas!
         preds = []
-        current_history = list(train_series.values)
+        
+        # O "Hoje": As features exatas no momento da previsão
+        X_current = df.iloc[[-1]].drop(columns=['y', 'target'], errors='ignore')
 
-        for _ in range(steps_ahead):
-            feat = {
-                'lag_1': current_history[-1],
-                'lag_2': current_history[-2],
-                'lag_3': current_history[-3],
-                'lag_6': current_history[-6],
-                'lag_12': current_history[-12],
-                'media_movel_3': np.mean(current_history[-3:]),
-            }
-            feat['diff_1'] = feat['lag_1'] - feat['lag_2']
+        # 2. Estratégia DIRECT: Um modelo para cada horizonte
+        for h in range(1, steps_ahead + 1):
+            df_h = df.copy()
+            # O alvo é a venda real que ocorreu 'h' meses depois dessa linha
+            df_h['target'] = df_h['y'].shift(-h)
+            
+            df_train = df_h.dropna()
+            
+            # Se faltar dados pro horizonte longo, faz fallback inteligente
+            if len(df_train) < 5:
+                pred_fallback = np.mean(train_series.values[-3:])
+                preds.append(pred_fallback)
+                continue
 
-            X_pred = pd.DataFrame([feat])
-            pred = max(0, model.predict(X_pred)[0])
-            preds.append(pred)
-            current_history.append(pred) # Injeta o futuro simulado no passado!
+            X_train = df_train.drop(columns=['y', 'target'])
+            y_train = df_train['target']
+
+            # Instancia o especialista daquele horizonte
+            if self.model_type == 'xgb':
+                model = xgboost.XGBRegressor(n_estimators=50, max_depth=3, learning_rate=0.05, random_state=42)
+            elif self.model_type == 'lgb':
+                model = lightgbm.LGBMRegressor(n_estimators=50, max_depth=3, learning_rate=0.05, random_state=42, verbose=-1)
+            else:
+                model = RandomForestRegressor(n_estimators=50, max_depth=5, random_state=42)
+
+            model.fit(X_train, y_train)
+            
+            # Prevemos usando apenas as features conhecidas de HOJE
+            pred_h = max(0, model.predict(X_current)[0])
+            preds.append(pred_h)
 
         return np.array(preds)
 
 
 class GlobalMLTrainer:
-    """Construtor de Features para os Modelos Globais."""
+    """Construtor Avançado de Features Globais (Anti-Ressaca)"""
     @staticmethod
     def gerar_features_globais(df_historico_completo: pd.DataFrame, lags=[1, 2, 3, 6, 12]):
         dfs_processados = []
@@ -184,8 +204,17 @@ class GlobalMLTrainer:
             g['mes_cos'] = np.cos(2 * np.pi * g['mes'] / 12)
             
             for lag in lags: g[f'lag_{lag}'] = g['total_qtpedido'].shift(lag)
+            
             g['media_movel_3'] = g['total_qtpedido'].shift(1).rolling(window=3).mean()
+            g['media_movel_6'] = g['total_qtpedido'].shift(1).rolling(window=6).mean()
             g['volatilidade_3m'] = g['total_qtpedido'].shift(1).rolling(window=3).std().fillna(0)
+            
+            # Cálculo Global de Z-Score e Picos
+            std_6 = g['total_qtpedido'].shift(1).rolling(window=6).std().replace(0, 1)
+            g['z_score'] = (g['total_qtpedido'].shift(1) - g['media_movel_6']) / std_6
+            g['is_pico'] = (g['z_score'] > 1.5).astype(int)
+            g['picos_ultimos_3m'] = g['is_pico'].rolling(window=3).sum().fillna(0)
+            
             g['diff_1'] = g['lag_1'] - g['lag_2']
             g['diff_2'] = g['lag_2'] - g['lag_3']
             dfs_processados.append(g)
