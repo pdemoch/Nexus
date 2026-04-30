@@ -4,7 +4,7 @@ from sqlalchemy import func, cast, Date, and_, desc
 
 # Adapte as importações de acordo com a estrutura exata do Nexus
 from app.core.database import get_db
-from app.models.models import FatoIbpGranular, FatoVendas
+from app.models.domain_models import FatoIbpGranular, FatoVendas
 # from app.core.auth import get_current_user_admin # Seu middleware de segurança
 
 router = APIRouter(prefix="/api/v1/kpis", tags=["Auditoria S&OP"])
