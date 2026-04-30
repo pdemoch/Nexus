@@ -7,7 +7,6 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.forecasting.theta import ThetaModel
 import warnings
 
-# --- NOVAS IMPORTAÇÕES ---
 try:
     from prophet import Prophet
 except ImportError:

@@ -8,7 +8,7 @@ import lightgbm as lgb
 from app.core.database import engine  # NOVO: Conexão direta com a AWS
 from app.ml.models_library import (
     HoltModel, HoltWintersModel, ThetaModelWrapper, CrostonModel, MovingAverageModel, 
-    ProphetModel, AutoArimaModel, GlobalMLTrainer, calcular_acuracia, LocalMLAutoregressive
+    ProphetModel, AutoArimaModel, GlobalMLTrainer, calcular_acuracia, LocalMLAutoregressive, DeepLearningForecaster
 )
 
 class NexusForecaster:
@@ -21,10 +21,10 @@ class NexusForecaster:
             'AutoARIMA_Sazonal': AutoArimaModel(),
             'XGBoost_Local': LocalMLAutoregressive('xgb'),
             'LightGBM_Local': LocalMLAutoregressive('lgb'),
-            # --- INJEÇÃO 1: O NOVO GLADIADOR DE MACHINE LEARNING ---
             'CatBoost_Local': LocalMLAutoregressive('cat'),
-            # -------------------------------------------------------
             'RandomForest_Local': LocalMLAutoregressive('rf'),
+            'TiDE_DeepLearning': DeepLearningForecaster('tide'),
+            'TFT_DeepLearning': DeepLearningForecaster('tft'),   
             'HoltWinters_Sazonal': HoltWintersModel(),
             'Holt_Trend': HoltModel(),
             'Theta': ThetaModelWrapper(),
