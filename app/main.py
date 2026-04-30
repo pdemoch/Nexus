@@ -11,7 +11,8 @@ from app.api.routers import (
     router_bottomup, 
     router_gerenciamento,
     router_soe,
-    router_supply
+    router_supply,
+    router_kpis
 )
 from app.core.config import settings
 from app.models.domain_models import Base
@@ -61,6 +62,7 @@ app.include_router(router_bottomup.router)
 app.include_router(router_gerenciamento.router)
 app.include_router(router_supply.router)
 app.include_router(router_soe.router)
+app.include_router(router_kpis.router)
 
 @app.get("/", tags=["Health Check"])
 async def root():

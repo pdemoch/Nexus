@@ -6,7 +6,7 @@ import Sidebar from './pages/Sidebar';
 import AdminPanel from './pages/AdminPanel';
 import LoginArena from './pages/LoginArena'; 
 import TopDownArena from './pages/TopDownArena';
-import SupplyReviewArena from './pages/SupplyReviewArena'; // <-- MANTIDO INTACTO
+import SupplyReviewArena from './pages/SupplyReviewArena'; 
 import ConsensoArena from './pages/ConsensoArena';
 import GlobalDashboard from './pages/GlobalDashboard';
 import NPDArena from './pages/NPDArena';
@@ -15,6 +15,9 @@ import GerenciamentoArena from './pages/GerenciamentoArena';
 // IMPORTS DO NOVO MÓDULO S&OE
 import SoeDashboard from './pages/SoeDashboard';
 import InboundArena from './pages/InboundArena';
+
+// IMPORT DO NOSSO NOVO MÓDULO DE AUDITORIA
+import AuditoriaArena from './pages/AuditoriaArena';
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
@@ -57,17 +60,17 @@ export default function App() {
       // REGRAS DE ROTA INICIAL POR CARGO
       if (parsedUser.funcao === 'Executivo') setCurrentRoute('consenso');
       else if (parsedUser.funcao === 'Gerente') setCurrentRoute('gerenciamento');
-      else if (parsedUser.funcao === 'Supply Chain') setCurrentRoute('supply'); // Mantido
+      else if (parsedUser.funcao === 'Supply Chain') setCurrentRoute('supply');
       else setCurrentRoute('admin');
     }
   }, []);
 
   const handleLoginSuccess = (userData: any) => {
     setUser(userData);
-    localStorage.setItem('nexus_user', JSON.stringify(userData)); // Adicionado para persistir o usuario no refresh
+    localStorage.setItem('nexus_user', JSON.stringify(userData)); 
     if (userData.funcao === 'Executivo') setCurrentRoute('consenso');
     else if (userData.funcao === 'Gerente') setCurrentRoute('gerenciamento');
-    else if (userData.funcao === 'Supply Chain') setCurrentRoute('supply'); // Mantido
+    else if (userData.funcao === 'Supply Chain') setCurrentRoute('supply');
     else setCurrentRoute('admin');
   };
 
@@ -83,7 +86,7 @@ export default function App() {
     switch (currentRoute) {
       case 'dashboard': return <GlobalDashboard />;
       case 'topdown': return <TopDownArena />;
-      case 'supply': return <SupplyReviewArena />; // Mantido
+      case 'supply': return <SupplyReviewArena />; 
       case 'npd': return <NPDArena />;
       case 'consenso': return <ConsensoArena usuarioSessao={user} />;
       case 'gerenciamento': return <GerenciamentoArena usuarioSessao={user} />;
@@ -92,6 +95,9 @@ export default function App() {
       // ROTAS DO NOVO MÓDULO S&OE
       case 'soe-radar': return <SoeDashboard />;
       case 'inbound': return <InboundArena />;
+
+      // ROTA DO NOSSO NOVO MÓDULO DE AUDITORIA DE IA
+      case 'auditoria': return <AuditoriaArena />;
 
       default: return <AdminPanel />;
     }

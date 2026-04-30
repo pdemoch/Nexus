@@ -1,19 +1,21 @@
-import { BarChart3, Users, LayoutDashboard, Settings, Rocket, LogOut, UserCircle, ShieldAlert, Factory, Activity } from 'lucide-react';
+import { BarChart3, Users, LayoutDashboard, Settings, Rocket, LogOut, UserCircle, ShieldAlert, Factory, Activity, Crosshair } from 'lucide-react';
 
 export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout }: any) {
   
   // Definição das permissões de cada ecrã (Ordem Lógica do S&OP)
   const allNavItems = [
-    // ATUALIZADO: Supply Chain adicionado ao Dashboard Global
     { id: 'dashboard', label: 'S&OP Global', icon: LayoutDashboard, roles: ['Administrador', 'Gerente', 'Supply Chain'] },
     
-    // NOVAS ROTAS DO MÓDULO S&OE
+    // ROTAS DO MÓDULO S&OE
     { id: 'soe-radar', label: 'Radar S&OE', icon: Activity, roles: ['Administrador', 'Gerente', 'Supply Chain', 'Executivo'] },
     { id: 'inbound', label: 'Inbound Arena', icon: Factory, roles: ['Administrador', 'Supply Chain'] },
 
+    // NOVO: MÓDULO DE AUDITORIA DE IA & FVA
+    { id: 'auditoria', label: 'Auditoria de IA', icon: Crosshair, roles: ['Administrador', 'Gerente', 'Executivo'] },
+
     { id: 'topdown', label: 'Top-Down (Diretoria)', icon: BarChart3, roles: ['Administrador', 'Gerente'] },
     { id: 'npd', label: 'Inovações (MKT)', icon: Rocket, roles: ['Administrador', 'Gerente'] },
-    { id: 'supply', label: 'Supply Review', icon: Factory, roles: ['Administrador', 'Supply Chain'] }, // Mantido
+    { id: 'supply', label: 'Supply Review', icon: Factory, roles: ['Administrador', 'Supply Chain'] },
     { id: 'consenso', label: 'Bottom-Up (Comercial)', icon: Users, roles: ['Administrador', 'Gerente', 'Executivo'] },
     { id: 'gerenciamento', label: 'Gerenciamento', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },
     { id: 'admin', label: 'Control Tower', icon: Settings, roles: ['Administrador'] },
