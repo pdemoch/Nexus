@@ -21,6 +21,9 @@ class NexusForecaster:
             'AutoARIMA_Sazonal': AutoArimaModel(),
             'XGBoost_Local': LocalMLAutoregressive('xgb'),
             'LightGBM_Local': LocalMLAutoregressive('lgb'),
+            # --- INJEÇÃO 1: O NOVO GLADIADOR DE MACHINE LEARNING ---
+            'CatBoost_Local': LocalMLAutoregressive('cat'),
+            # -------------------------------------------------------
             'RandomForest_Local': LocalMLAutoregressive('rf'),
             'HoltWinters_Sazonal': HoltWintersModel(),
             'Holt_Trend': HoltModel(),
@@ -29,7 +32,6 @@ class NexusForecaster:
             'MediaMovel_3M': MovingAverageModel(window=3)
         }
 
-    # ATENÇÃO: Removemos o df_ia_polars. A IA agora puxa os dados do próprio banco!
     def executar_arena(self, log_callback=print) -> pl.DataFrame:
         hoje = date.today()
         ciclo_atual = hoje.strftime("%m/%Y")
@@ -37,7 +39,6 @@ class NexusForecaster:
         
         log_callback("📥 [ENGINE] Extraindo matriz histórica consolidada do PostgreSQL...")
         
-        # A MÁGICA ESTÁ AQUI: A IA faz o select agrupado de todo o passado, ignorando o limite do Delta
         query = text("""
             SELECT 
                 TO_CHAR(v.data_pedido, 'YYYY-MM') AS mes_ano,
@@ -158,6 +159,18 @@ class NexusForecaster:
             treino_local = serie.iloc[:-self.holdout_months]
             holdout_real = serie.iloc[-self.holdout_months:]
             
+            # =========================================================================
+            # --- INJEÇÃO 2: DETETOR DE RESSACA (LÊ AS FEATURES DAQUELE SKU) ---
+            # =========================================================================
+            df_feat_sku_completo = df_feat[df_feat['produto'] == sku]
+            historico_recente_saturado = False
+            if not df_feat_sku_completo.empty:
+                # Olha para os últimos 6 meses da série inteira para ver se apita picos
+                picos_recentes = df_feat_sku_completo['picos_ultimos_3m'].iloc[-6:].max()
+                if pd.notna(picos_recentes) and picos_recentes > 0:
+                    historico_recente_saturado = True
+            # =========================================================================
+            
             avaliacoes_sku = {}
             
             df_holdout_sku = df_feat[(df_feat['produto'] == sku) & (df_feat['mes_ano_dt'] >= data_corte_holdout)]
@@ -169,6 +182,13 @@ class NexusForecaster:
 
             if len(treino_local) >= 12:
                 for nome, modelo in self.especialistas.items():
+                    # =========================================================================
+                    # --- INJEÇÃO 3: CLÁUSULA DE TRADE LOADING (BYPASS ESTATÍSTICO) ---
+                    # =========================================================================
+                    modelos_estatisticos = ['AutoARIMA_Sazonal', 'HoltWinters_Sazonal', 'Holt_Trend', 'Prophet_Agressivo', 'Theta', 'MediaMovel_3M']
+                    if historico_recente_saturado and nome in modelos_estatisticos:
+                        continue # Pula imediatamente este modelo, forçando a escolha do XGBoost/LightGBM/CatBoost
+                    # =========================================================================
                     try:
                         preds = modelo.fit_predict(treino_local, self.holdout_months)
                         acc = calcular_acuracia(holdout_real.values, preds)

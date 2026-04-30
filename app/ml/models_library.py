@@ -7,6 +7,7 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.forecasting.theta import ThetaModel
 import warnings
 
+# --- NOVAS IMPORTAÇÕES ---
 try:
     from prophet import Prophet
 except ImportError:
@@ -14,6 +15,17 @@ except ImportError:
 
 try:
     import pmdarima as pm
+except ImportError:
+    pass
+
+try:
+    from catboost import CatBoostRegressor
+except ImportError:
+    pass
+
+try:
+    from neuralforecast import NeuralForecast
+    from neuralforecast.models import TiDE, TFT
 except ImportError:
     pass
 
@@ -37,13 +49,12 @@ class ProphetModel:
             import logging
             logging.getLogger('prophet').setLevel(logging.ERROR)
             
-            # TUNING: Mais agressividade nas mudanças de tendência para pegar os Vales e Picos
             m = Prophet(
                 yearly_seasonality=True, 
                 weekly_seasonality=False, 
                 daily_seasonality=False,
-                changepoint_prior_scale=0.1,  # Mais sensível a quebras de padrão
-                seasonality_prior_scale=10.0  # Sazonalidade mais forte
+                changepoint_prior_scale=0.1,  
+                seasonality_prior_scale=10.0  
             )
             m.fit(df_p)
             future = m.make_future_dataframe(periods=steps_ahead, freq='MS')
@@ -127,7 +138,7 @@ class MovingAverageModel:
 
 class LocalMLAutoregressive:
     """
-    NOVO MOTOR DIRECT MULTI-STEP:
+    MOTOR DIRECT MULTI-STEP APRIMORADO
     Abandona a recursividade. Treina um modelo independente para cada horizonte de tempo (h).
     Injeta o conhecimento de Picos e Vales via Z-Score.
     """
@@ -145,28 +156,22 @@ class LocalMLAutoregressive:
             
         df['media_movel_3'] = df['y'].shift(1).rolling(3).mean()
         df['media_movel_6'] = df['y'].shift(1).rolling(6).mean()
-        df['max_6m'] = df['y'].shift(1).rolling(6).max()
         
         # Detector de Ressaca / Trade Loading (Z-Score)
         std_6m = df['y'].shift(1).rolling(6).std().replace(0, 1)
         df['z_score'] = (df['y'].shift(1) - df['media_movel_6']) / std_6m
         df['is_pico'] = (df['z_score'] > 1.5).astype(int)
-        df['picos_ultimos_3m'] = df['is_pico'].rolling(3).sum().fillna(0) # Flag de ressaca
+        df['picos_ultimos_3m'] = df['is_pico'].rolling(3).sum().fillna(0)
 
         preds = []
-        
-        # O "Hoje": As features exatas no momento da previsão
         X_current = df.iloc[[-1]].drop(columns=['y', 'target'], errors='ignore')
 
         # 2. Estratégia DIRECT: Um modelo para cada horizonte
         for h in range(1, steps_ahead + 1):
             df_h = df.copy()
-            # O alvo é a venda real que ocorreu 'h' meses depois dessa linha
             df_h['target'] = df_h['y'].shift(-h)
-            
             df_train = df_h.dropna()
             
-            # Se faltar dados pro horizonte longo, faz fallback inteligente
             if len(df_train) < 5:
                 pred_fallback = np.mean(train_series.values[-3:])
                 preds.append(pred_fallback)
@@ -180,16 +185,55 @@ class LocalMLAutoregressive:
                 model = xgboost.XGBRegressor(n_estimators=50, max_depth=3, learning_rate=0.05, random_state=42)
             elif self.model_type == 'lgb':
                 model = lightgbm.LGBMRegressor(n_estimators=50, max_depth=3, learning_rate=0.05, random_state=42, verbose=-1)
+            elif self.model_type == 'cat':
+                model = CatBoostRegressor(iterations=50, depth=4, learning_rate=0.05, random_seed=42, verbose=0)
             else:
                 model = RandomForestRegressor(n_estimators=50, max_depth=5, random_state=42)
 
             model.fit(X_train, y_train)
-            
-            # Prevemos usando apenas as features conhecidas de HOJE
             pred_h = max(0, model.predict(X_current)[0])
             preds.append(pred_h)
 
         return np.array(preds)
+
+class DeepLearningForecaster:
+    """
+    MOTOR DE REDES NEURAIS (ZERO-SHOT & DEEP LEARNING)
+    Implementação nativa para TiDE (Time-series Dense Encoder) e TFT (Temporal Fusion Transformer).
+    Requer: pip install neuralforecast
+    """
+    def __init__(self, model_type='tide'):
+        self.model_type = model_type
+
+    def fit_predict(self, train_series: pd.Series, steps_ahead: int):
+        try:
+            if len(train_series) < 24:
+                return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
+
+            df_dl = pd.DataFrame({
+                'unique_id': 'sku_arena',
+                'ds': train_series.index,
+                'y': train_series.values
+            })
+
+            if self.model_type == 'tide':
+                model = TiDE(h=steps_ahead, input_size=12, max_steps=100, scaler_type='standard')
+            elif self.model_type == 'tft':
+                model = TFT(h=steps_ahead, input_size=12, max_steps=100, scaler_type='standard')
+            else:
+                return np.zeros(steps_ahead)
+
+            nf = NeuralForecast(models=[model], freq='MS')
+            nf.fit(df=df_dl)
+            forecast = nf.predict()
+            
+            preds = forecast[self.model_type.upper()].values
+            return np.maximum(0, preds)
+
+        except NameError:
+            return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
+        except Exception as e:
+            return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
 
 
 class GlobalMLTrainer:
