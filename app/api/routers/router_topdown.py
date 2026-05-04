@@ -178,25 +178,25 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
             "name": hoje.strftime("%b/%y").capitalize() + " (S&OE)",
             "data_iso": mes_atual_iso,
             "Realizado": hist_dict.get(hoje.strftime('%Y-%m'), 0), 
-            "IA": dados_atual_m0.get('ia', None),   
-            "Consenso": None, # M0 ainda está em edição na tela, então deixamos o React cuidar disso
+            "IA": dados_atual_m0.get('ia', 0), # Mudamos None para 0
+            "Consenso": None, 
             "CicloAnterior": ibp_map.get(mes_atual_iso, {}).get(ciclo_anterior, {}).get('consenso', None)
         })
 
-        # Identificamos os meses do futuro que a IA projetou no ciclo atual
-        futuros = [d for d in ibp_map.keys() if ciclo_atual in ibp_map[d] and parse_date_safe(d) > mes_atual_inicio]
-        futuros.sort()
-        
-        for p_iso in futuros:
-            p_date = parse_date_safe(p_iso)
+        # --- A MÁGICA: Régua Fixa de M1 a M4 ---
+        # Garante que o eixo X nunca quebre, mesmo se a IA previu 0 e o DB não salvou.
+        for i in range(1, 5):
+            p_date = mes_atual_inicio + relativedelta(months=i)
+            p_iso = p_date.strftime('%Y-%m-%d')
+            
             dados_futuro = ibp_map.get(p_iso, {}).get(ciclo_atual, {})
             
             timeline.append({
                 "name": p_date.strftime("%b/%y").capitalize(),
                 "data_iso": p_iso,
                 "Realizado": None,
-                "IA": dados_futuro.get('ia', None),
-                "Consenso": dados_futuro.get('consenso', None) if p_date >= m2 else None,
+                "IA": dados_futuro.get('ia', 0), # Força 0 para desenhar a linha caindo
+                "Consenso": dados_futuro.get('consenso', 0) if p_date >= m2 else None,
                 "CicloAnterior": ibp_map.get(p_iso, {}).get(ciclo_anterior, {}).get('consenso', None)
             })
             
