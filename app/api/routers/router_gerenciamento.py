@@ -166,73 +166,103 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
         m2_date = parse_date_safe(m2_str)
         hoje = datetime.date.today()
         mes_atual_inicio = hoje.replace(day=1)
-        ciclo_ant, ciclo_atual = get_previous_cycle(db), get_current_cycle(db)
+        ciclo_ant = get_previous_cycle(db)
+        ciclo_atual = get_current_cycle(db)
 
+        # 1. Histórico Real de Vendas
         q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol'))\
                    .join(DimCliente, FatoVendas.cgc == DimCliente.cgc)\
                    .filter(FatoVendas.data_pedido >= hoje - relativedelta(years=2))
         
-        q_ant = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_bottomup).label('vol'))\
-                  .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
-                  .filter(FatoIbpGranular.ciclo_sop == ciclo_ant)
-        
-        q_proj = db.query(FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_ia).label('ia'), func.sum(FatoIbpGranular.vol_bottomup).label('bu'))\
-                   .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
-                   .filter(FatoIbpGranular.ciclo_sop == ciclo_atual)
+        # 2. Histórico Mestre IBP (Super Query do Gerenciamento)
+        q_all_ibp = db.query(
+            FatoIbpGranular.ciclo_sop,
+            FatoIbpGranular.mes_projetado,
+            func.sum(FatoIbpGranular.vol_ia).label('ia'),
+            func.sum(FatoIbpGranular.vol_bottomup).label('bu')
+        ).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)
 
+        # ---------------------------------------------------------
+        # MANTIDO: Aplicação dinâmica dos Filtros nas duas Queries
+        # ---------------------------------------------------------
         if usuario['funcao'] == 'Gerente':
             g_nome = usuario['gerente_nome'].strip().upper()
             q_hist = q_hist.filter(func.upper(func.trim(DimCliente.gerente_nome)) == g_nome)
-            q_ant = q_ant.filter(func.upper(func.trim(DimCliente.gerente_nome)) == g_nome)
-            q_proj = q_proj.filter(func.upper(func.trim(DimCliente.gerente_nome)) == g_nome)
+            q_all_ibp = q_all_ibp.filter(func.upper(func.trim(DimCliente.gerente_nome)) == g_nome)
 
         if vendedor_alvo: 
             v_nome = vendedor_alvo.strip().upper()
             q_hist = q_hist.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == v_nome)
-            q_ant = q_ant.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == v_nome)
-            q_proj = q_proj.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == v_nome)
+            q_all_ibp = q_all_ibp.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == v_nome)
             
         if cliente_alvo: 
             c_nome = cliente_alvo.strip().upper()
             q_hist = q_hist.filter(func.upper(func.trim(DimCliente.razaosocial)) == c_nome)
-            q_ant = q_ant.filter(func.upper(func.trim(DimCliente.razaosocial)) == c_nome)
-            q_proj = q_proj.filter(func.upper(func.trim(DimCliente.razaosocial)) == c_nome)
+            q_all_ibp = q_all_ibp.filter(func.upper(func.trim(DimCliente.razaosocial)) == c_nome)
             
         if sku_alvo: 
             s_nome = sku_alvo.strip()
             q_hist = q_hist.filter(FatoVendas.sku == s_nome)
-            q_ant = q_ant.filter(FatoIbpGranular.sku == s_nome)
-            q_proj = q_proj.filter(FatoIbpGranular.sku == s_nome)
+            q_all_ibp = q_all_ibp.filter(FatoIbpGranular.sku == s_nome)
 
+        # Execução e Mapeamento 3D
         hist_dict = {h.mes_ano: int(h.vol or 0) for h in q_hist.group_by('mes_ano').all()}
-        ant_dict = {str(a.mes_projetado): int(a.vol or 0) for a in q_ant.group_by(FatoIbpGranular.mes_projetado).all()}
-        proj_res = q_proj.group_by(FatoIbpGranular.mes_projetado).all()
+        all_ibp_res = q_all_ibp.group_by(FatoIbpGranular.ciclo_sop, FatoIbpGranular.mes_projetado).all()
+
+        ibp_map = {}
+        for r in all_ibp_res:
+            d_iso = str(r.mes_projetado)
+            if d_iso not in ibp_map: ibp_map[d_iso] = {}
+            ibp_map[d_iso][r.ciclo_sop] = {'ia': int(r.ia or 0), 'bu': int(r.bu or 0)}
 
         timeline = []
+
+        # 3. CONSTRUÇÃO DA TIMELINE S&OE (O PASSADO)
         for i in range(24, 0, -1):
             dt = mes_atual_inicio - relativedelta(months=i)
+            mes_str = dt.strftime('%Y-%m')
+            dt_iso = dt.strftime('%Y-%m-%d')
+            
+            # Qual era o ciclo ativo naquele exato mês no passado?
+            ciclo_do_mes = dt.strftime('%m/%Y')
+            ciclo_mes_passado = (dt - relativedelta(months=1)).strftime('%m/%Y')
+            
+            dados_mes = ibp_map.get(dt_iso, {}).get(ciclo_do_mes, {})
+            dados_lag1 = ibp_map.get(dt_iso, {}).get(ciclo_mes_passado, {})
+
             timeline.append({
-                "name": dt.strftime("%b/%y").capitalize(), "data_iso": dt.strftime("%Y-%m-%d"),
-                "Realizado": hist_dict.get(dt.strftime('%Y-%m'), 0), "IA": None, "Consenso": None, "CicloAnterior": None
+                "name": dt.strftime("%b/%y").capitalize(), 
+                "data_iso": dt_iso,
+                "Realizado": hist_dict.get(mes_str, 0), 
+                "IA": dados_mes.get('ia', None), # IA pura!
+                "Consenso": None,                # Sem linha gerencial no passado!
+                "CicloAnterior": dados_lag1.get('bu', None)
             })
         
+        # 4. O PRESENTE M0 E O FUTURO
         curr_iso = mes_atual_inicio.strftime('%Y-%m-%d')
-        p_atual = next((p for p in proj_res if str(p.mes_projetado) == curr_iso), None)
+        dados_atual_m0 = ibp_map.get(curr_iso, {}).get(ciclo_atual, {})
         timeline.append({
             "name": hoje.strftime("%b/%y").capitalize() + " (S&OE)", "data_iso": curr_iso,
             "Realizado": hist_dict.get(hoje.strftime('%Y-%m'), 0), 
-            "IA": int(p_atual.ia) if p_atual else None, "Consenso": None, "CicloAnterior": ant_dict.get(curr_iso)
+            "IA": dados_atual_m0.get('ia', None), 
+            "Consenso": None,
+            "CicloAnterior": ibp_map.get(curr_iso, {}).get(ciclo_ant, {}).get('bu', None)
         })
 
-        for p in sorted(proj_res, key=lambda x: str(x.mes_projetado)):
-            p_date = p.mes_projetado if isinstance(p.mes_projetado, datetime.date) else parse_date_safe(p.mes_projetado)
-            if p_date <= mes_atual_inicio: continue
-            p_iso = str(p_date)
+        futuros = [d for d in ibp_map.keys() if ciclo_atual in ibp_map[d] and parse_date_safe(d) > mes_atual_inicio]
+        futuros.sort()
+
+        for p_iso in futuros:
+            p_date = parse_date_safe(p_iso)
+            dados_futuro = ibp_map.get(p_iso, {}).get(ciclo_atual, {})
+            
             timeline.append({
                 "name": p_date.strftime("%b/%y").capitalize(), "data_iso": p_iso,
-                "Realizado": None, "IA": int(p.ia or 0), 
-                "Consenso": int(p.bu or 0) if p_date >= m2_date else None, 
-                "CicloAnterior": ant_dict.get(p_iso)
+                "Realizado": None, 
+                "IA": dados_futuro.get('ia', None), 
+                "Consenso": dados_futuro.get('bu', None) if p_date >= m2_date else None, 
+                "CicloAnterior": ibp_map.get(p_iso, {}).get(ciclo_ant, {}).get('bu', None)
             })
 
         return {"status": "success", "dados": timeline}

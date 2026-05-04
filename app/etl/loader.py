@@ -169,9 +169,17 @@ class NexusLoader:
             processados = 0
             for row in df_final.to_dicts():
                 ibp_dicts.append({
-                    'ciclo_sop': ciclo_atual, 'mes_projetado': row['mes_projetado'], 'sku': row['produto'],
-                    'cgc': row['cgc'], 'vendedor_nome': row['vendedor_nome'], 'vol_ia': row['vol_ia_atomico'],
-                    'vol_topdown': row['vol_ia_atomico'], 'vol_bottomup': row['vol_ia_atomico'], 'vol_final': row['vol_ia_atomico'],      
+                    'ciclo_sop': ciclo_atual, 
+                    'mes_projetado': row['mes_projetado'], 
+                    'sku': row['produto'],
+                    'cgc': row['cgc'], 
+                    'vendedor_nome': row['vendedor_nome'], 
+                    'vol_ia': row['vol_ia_atomico'],
+                    'vol_topdown': row['vol_ia_atomico'], 
+                    'vol_bottomup': row['vol_ia_atomico'],
+                    'vol_supply': row['vol_ia_atomico'],
+                    'vol_meta': row['vol_ia_atomico'],                    
+                    'vol_final': row['vol_ia_atomico'],      
                     'pmv_aplicado': row['pmv_ref']
                 })
                 processados += 1
