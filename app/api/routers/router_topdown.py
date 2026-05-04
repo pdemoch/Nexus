@@ -113,6 +113,7 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
         m2, m4 = get_projection_window(db) 
         
         # 2. Queries de Dados
+        # Busca o Histórico Real (Vendas)
         q_hist = db.query(
             func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), 
             func.sum(FatoVendas.qt_pedido).label('vol_real')
@@ -121,63 +122,82 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
             FatoVendas.sku == produto
         ).group_by('mes_ano').all()
 
-        q_ant = db.query(
-            FatoIbpGranular.mes_projetado, 
-            func.sum(FatoIbpGranular.vol_topdown).label('vol_ant')
-        ).filter(
-            FatoIbpGranular.ciclo_sop == ciclo_anterior, 
-            FatoIbpGranular.sku == produto
-        ).group_by(FatoIbpGranular.mes_projetado).all()
-            
-        q_proj = db.query(
-            FatoIbpGranular.mes_projetado, 
-            func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), 
+        # NOVO: Super Query! Busca TODO o histórico de projeções S&OP deste SKU
+        q_all_ibp = db.query(
+            FatoIbpGranular.ciclo_sop,
+            FatoIbpGranular.mes_projetado,
+            func.sum(FatoIbpGranular.vol_ia).label('vol_ia'),
             func.sum(FatoIbpGranular.vol_topdown).label('vol_consenso')
         ).filter(
-            FatoIbpGranular.ciclo_sop == ciclo_atual, 
             FatoIbpGranular.sku == produto
-        ).group_by(FatoIbpGranular.mes_projetado).order_by(FatoIbpGranular.mes_projetado).all()
+        ).group_by(FatoIbpGranular.ciclo_sop, FatoIbpGranular.mes_projetado).all()
 
         hist_dict = {h.mes_ano: int(h.vol_real or 0) for h in q_hist}
-        ant_dict = {str(a.mes_projetado): int(a.vol_ant or 0) for a in q_ant}
+
+        # Mapeamento 3D de alta performance: ibp_map[data_iso][ciclo] = volumes
+        ibp_map = {}
+        for r in q_all_ibp:
+            d_iso = str(r.mes_projetado)
+            if d_iso not in ibp_map: ibp_map[d_iso] = {}
+            ibp_map[d_iso][r.ciclo_sop] = {
+                'ia': int(r.vol_ia or 0),
+                'consenso': int(r.vol_consenso or 0)
+            }
 
         timeline = []
 
-        # 3. CONSTRUÇÃO DA TIMELINE S&OE
+        # 3. CONSTRUÇÃO DA TIMELINE S&OE (O PASSADO)
         for i in range(24, 0, -1):
             dt = mes_atual_inicio - relativedelta(months=i)
             mes_str = dt.strftime('%Y-%m')
+            dt_iso = dt.strftime('%Y-%m-%d')
+            
+            # Qual era o ciclo ativo naquele exato mês no passado?
+            ciclo_do_mes = dt.strftime('%m/%Y')
+            # E qual era o ciclo do mês anterior a ele (Para a Proposta Antiga)?
+            ciclo_mes_passado = (dt - relativedelta(months=1)).strftime('%m/%Y')
+            
+            # Buscamos as "fotos congeladas" do passado
+            dados_mes = ibp_map.get(dt_iso, {}).get(ciclo_do_mes, {})
+            dados_lag1 = ibp_map.get(dt_iso, {}).get(ciclo_mes_passado, {})
+            
             timeline.append({
                 "name": dt.strftime("%b/%y").capitalize(),
-                "data_iso": dt.strftime("%Y-%m-%d"),
+                "data_iso": dt_iso,
                 "Realizado": hist_dict.get(mes_str, 0),
-                "IA": None, "Consenso": None, "CicloAnterior": None
+                "IA": dados_mes.get('ia', None), # O que a IA cravou neste mês no passado
+                "Consenso": dados_mes.get('consenso', None), # A Meta aprovada neste mês no passado
+                "CicloAnterior": dados_lag1.get('consenso', None) # O que queriam fazer com esse mês, visto de 1 mês antes
             })
 
+        # 4. CONSTRUÇÃO DA TIMELINE S&OE (O PRESENTE M0 E O FUTURO)
         mes_atual_iso = mes_atual_inicio.strftime('%Y-%m-%d')
-        proj_atual = next((p for p in q_proj if str(p.mes_projetado) == mes_atual_iso), None)
+        dados_atual_m0 = ibp_map.get(mes_atual_iso, {}).get(ciclo_atual, {})
         
         timeline.append({
             "name": hoje.strftime("%b/%y").capitalize() + " (S&OE)",
             "data_iso": mes_atual_iso,
             "Realizado": hist_dict.get(hoje.strftime('%Y-%m'), 0), 
-            "IA": int(proj_atual.vol_ia) if proj_atual else None,   
-            "Consenso": None,
-            "CicloAnterior": ant_dict.get(mes_atual_iso, None)
+            "IA": dados_atual_m0.get('ia', None),   
+            "Consenso": None, # M0 ainda está em edição na tela, então deixamos o React cuidar disso
+            "CicloAnterior": ibp_map.get(mes_atual_iso, {}).get(ciclo_anterior, {}).get('consenso', None)
         })
 
-        for p in q_proj:
-            p_date = parse_date_safe(p.mes_projetado)
-            if p_date <= mes_atual_inicio: continue 
+        # Identificamos os meses do futuro que a IA projetou no ciclo atual
+        futuros = [d for d in ibp_map.keys() if ciclo_atual in ibp_map[d] and parse_date_safe(d) > mes_atual_inicio]
+        futuros.sort()
+        
+        for p_iso in futuros:
+            p_date = parse_date_safe(p_iso)
+            dados_futuro = ibp_map.get(p_iso, {}).get(ciclo_atual, {})
             
-            p_iso = str(p_date)
             timeline.append({
                 "name": p_date.strftime("%b/%y").capitalize(),
                 "data_iso": p_iso,
                 "Realizado": None,
-                "IA": int(p.vol_ia or 0),
-                "Consenso": int(p.vol_consenso or 0) if p_date >= m2 else None,
-                "CicloAnterior": ant_dict.get(p_iso, None)
+                "IA": dados_futuro.get('ia', None),
+                "Consenso": dados_futuro.get('consenso', None) if p_date >= m2 else None,
+                "CicloAnterior": ibp_map.get(p_iso, {}).get(ciclo_anterior, {}).get('consenso', None)
             })
             
         return {"status": "success", "dados": timeline}
