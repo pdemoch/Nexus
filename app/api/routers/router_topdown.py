@@ -165,9 +165,9 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
                 "name": dt.strftime("%b/%y").capitalize(),
                 "data_iso": dt_iso,
                 "Realizado": hist_dict.get(mes_str, 0),
-                "IA": dados_mes.get('ia', None), # O que a IA cravou neste mês no passado
-                "Consenso": dados_mes.get('consenso', None), # A Meta aprovada neste mês no passado
-                "CicloAnterior": dados_lag1.get('consenso', None) # O que queriam fazer com esse mês, visto de 1 mês antes
+                "IA": dados_mes.get('ia', None),
+                "Consenso": None, # <-- ALTERAÇÃO AQUI: Forçamos None para ocultar a Meta Gerencial no passado
+                "CicloAnterior": dados_lag1.get('consenso', None) 
             })
 
         # 4. CONSTRUÇÃO DA TIMELINE S&OE (O PRESENTE M0 E O FUTURO)
