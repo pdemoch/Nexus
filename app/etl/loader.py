@@ -111,11 +111,14 @@ class NexusLoader:
             log_callback("❌ [LOAD] O DataFrame do Forecast está vazio.")
             return
 
-        ciclo_atual = get_current_cycle()
-        log_callback(f"   -> [LOAD] Iniciando construção da matriz FatoIBP para o ciclo {ciclo_atual}...")
-
-        db = SessionLocal()
+        # 1. ABRE A SESSÃO DO BANCO PRIMEIRO
+        db = SessionLocal() 
+        
         try:
+            # 2. AGORA SIM, PASSA O 'db' PARA A FUNÇÃO
+            ciclo_atual = get_current_cycle(db) 
+            log_callback(f"   -> [LOAD] Iniciando construção da matriz FatoIBP para o ciclo {ciclo_atual}...")
+
             from sqlalchemy import text
             query_share = text("""
                 WITH cte_base AS (
