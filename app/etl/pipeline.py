@@ -97,7 +97,8 @@ async def executar_pipeline_nexus():
 
             t0 = time.time()
             log("⏳ [LOAD] Rateando e injetando as metas S&OP no Banco...")
-            loader.executar_carga_forecast(df_forecast, log_callback=log)
+            # Passando o ciclo_atual que foi definido no topo do arquivo
+            loader.executar_carga_forecast(df_forecast, ciclo_atual, log_callback=log) 
             log(f"✅ [LOAD] Metas atomizadas com sucesso em {time.time() - t0:.2f}s.")
 
         tempo_total = time.time() - tempo_inicio_total

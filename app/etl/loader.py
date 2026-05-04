@@ -101,22 +101,19 @@ class NexusLoader:
             log_callback(f"❌ [SILVER] Erro no Upsert: {str(e)}")
             raise e
 
-    def executar_carga_forecast(self, df_forecast: pl.DataFrame, log_callback=print):
+    def executar_carga_forecast(self, df_forecast: pl.DataFrame, ciclo_alvo: str, log_callback=print):
         from app.core.database import SessionLocal
         from app.models.domain_models import FatoIbpGranular
-        from app.api.routers.shared_ibp import get_current_cycle
         import numpy as np
 
         if df_forecast.is_empty():
             log_callback("❌ [LOAD] O DataFrame do Forecast está vazio.")
             return
 
-        # 1. ABRE A SESSÃO DO BANCO PRIMEIRO
         db = SessionLocal() 
-        
         try:
-            # 2. AGORA SIM, PASSA O 'db' PARA A FUNÇÃO
-            ciclo_atual = get_current_cycle(db) 
+            # Substituímos o get_current_cycle(db) pelo ciclo_alvo que veio do pipeline
+            ciclo_atual = ciclo_alvo 
             log_callback(f"   -> [LOAD] Iniciando construção da matriz FatoIBP para o ciclo {ciclo_atual}...")
 
             from sqlalchemy import text
