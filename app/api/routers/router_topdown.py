@@ -27,7 +27,7 @@ router = APIRouter(prefix="/api/v1/consensus/macro", tags=["Consenso Top-Down"])
 # PERMISSÕES
 # =====================================================================
 def require_manager_or_admin(usuario: dict = Depends(get_current_user)):
-    if usuario['funcao'] not in ['Administrador', 'Gerente']:
+    if usuario['funcao'] not in ['Administrador', 'Gerente', 'Marketing']:
         raise HTTPException(status_code=403, detail="Acesso Restrito à Diretoria/Gerência.")
     return usuario
 

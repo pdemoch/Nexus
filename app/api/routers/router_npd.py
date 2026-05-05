@@ -29,7 +29,7 @@ class PayloadNPD(BaseModel):
 
 @router.get("/espelhos")
 async def obter_listas_npd(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
+    if usuario_logado['funcao'] not in ['Administrador', 'Marketing']:
         raise HTTPException(status_code=403, detail="Acesso restrito à Diretoria/Gerência.")
         
     produtos = db.query(DimProduto.sku, DimProduto.descricao).filter(DimProduto.descricao.isnot(None)).distinct().all()
@@ -45,7 +45,7 @@ async def obter_listas_npd(db: Session = Depends(get_db), usuario_logado: dict =
 
 @router.post("/injetar")
 async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] not in ['Administrador', 'Gerente']:
+    if usuario_logado['funcao'] not in ['Administrador', 'Marketing']:
         raise HTTPException(status_code=403, detail="Acesso restrito.")
         
     try:

@@ -19,7 +19,7 @@ router = APIRouter(prefix="/api/v1/soe", tags=["S&OE - Execução Tática"])
 @router.post("/sync-stock")
 async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     """Puxa a API 90 com paginação e mapeia 'arm' para 'qtd_dispo'."""
-    if usuario['funcao'] not in ['Administrador', 'Planejador S&OP', 'Lideranca']:
+    if usuario['funcao'] not in ['Administrador', 'Supply Chain', 'Gerente', 'C-Level']:
         raise HTTPException(status_code=403, detail="Sem permissão.")
 
     headers = {"Authorization": f"Bearer {settings.GOBI_TOKEN}"}

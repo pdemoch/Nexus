@@ -28,7 +28,7 @@ class PayloadAprovarGlobal(BaseModel):
 
 @router.get("/global")
 async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] not in ['Administrador', 'Gerente', 'Supply Chain']:
+    if usuario_logado['funcao'] not in ['Administrador', 'Gerente', 'Supply Chain', 'Marketing', 'C-Level']:
         raise HTTPException(status_code=403, detail="Acesso restrito à Diretoria, Gerência ou Supply Chain.")
         
     try:
@@ -204,8 +204,8 @@ async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria',
 
 @router.post("/aprovar")
 async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
-    if usuario['funcao'] not in ['Administrador', 'Gerente']:
-        raise HTTPException(status_code=403, detail="Apenas a Diretoria pode publicar o Plano Final.")
+    if usuario['funcao'] not in ['Administrador']:
+        raise HTTPException(status_code=403, detail="Apenas a Administrador pode publicar o Plano Final.")
 
     try:
         # ATUALIZAÇÃO: Passando 'db'
