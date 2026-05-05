@@ -4,16 +4,16 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
   
   // Definição das permissões de cada ecrã (Ordem Lógica do S&OP)
   const allNavItems = [
-    { id: 'dashboard', label: 'S&OP Global', icon: LayoutDashboard, roles: ['Administrador', 'Gerente', 'Supply Chain', 'Marketing', 'C-Level'] },
-    { id: 'soe-radar', label: 'Radar S&OE', icon: Activity, roles: ['Administrador'] },
-    { id: 'inbound', label: 'Inbound Arena', icon: Factory, roles: ['Administrador'] },
-    { id: 'auditoria', label: 'Auditoria de IA', icon: Crosshair, roles: ['Administrador'] },
-    { id: 'topdown', label: 'Top-Down (Diretoria)', icon: BarChart3, roles: ['Administrador', 'Gerente', 'Marketing'] },
-    { id: 'npd', label: 'Inovações (MKT)', icon: Rocket, roles: ['Administrador', 'Gerente', 'Marketing'] },
+    { id: 'dashboard', label: 'Plano de Demanda', icon: LayoutDashboard, roles: ['Administrador', 'Gerente', 'Supply Chain', 'Marketing', 'C-Level'] },
+    { id: 'soe-radar', label: 'S&OE', icon: Activity, roles: ['Administrador'] },
+    { id: 'inbound', label: 'Mapa Produtivo', icon: Factory, roles: ['Administrador'] },
+    { id: 'auditoria', label: 'KPIs', icon: Crosshair, roles: ['Administrador'] },
+    { id: 'topdown', label: 'Plano Irrestrito', icon: BarChart3, roles: ['Administrador', 'Gerente', 'Marketing'] },
+    { id: 'npd', label: 'Inovações', icon: Rocket, roles: ['Administrador', 'Marketing'] },
     { id: 'supply', label: 'Supply Review', icon: Factory, roles: ['Administrador', 'Supply Chain'] },
-    { id: 'consenso', label: 'Bottom-Up (Comercial)', icon: Users, roles: ['Administrador', 'Gerente', 'Executivo'] },
-    { id: 'gerenciamento', label: 'Gerenciamento', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },
-    { id: 'admin', label: 'Control Tower', icon: Settings, roles: ['Administrador'] },
+    { id: 'consenso', label: 'Executivos', icon: Users, roles: ['Administrador', 'Gerente', 'Executivo'] },
+    { id: 'gerenciamento', label: 'Metas Executivo', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },
+    { id: 'admin', label: 'Painel de Controle', icon: Settings, roles: ['Administrador'] },
   ];
 
   const allowedNavItems = allNavItems.filter(item => item.roles.includes(user?.funcao));
