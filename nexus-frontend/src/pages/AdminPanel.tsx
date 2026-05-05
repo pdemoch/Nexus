@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { Settings, RefreshCw, Terminal, Play, ShieldAlert, Loader2, Download, UserPlus, Check, X, Unlock, Calendar } from 'lucide-react';
+import { Settings, RefreshCw, Terminal, Play, ShieldAlert, Loader2, Download, UserPlus, Check, X, Unlock, Calendar, Users, KeyRound } from 'lucide-react';
 
 export default function AdminPanel() {
   const [logs, setLogs] = useState<string[]>([]);
@@ -9,13 +9,14 @@ export default function AdminPanel() {
   const [isExporting, setIsExporting] = useState(false);
   
   const [usuariosPendentes, setUsuariosPendentes] = useState<any[]>([]);
+  const [usuariosAtivos, setUsuariosAtivos] = useState<any[]>([]);
   const [vendedores, setVendedores] = useState<string[]>([]);
   
   // ESTADOS DO DESCONGELAMENTO
   const [origemDesbloqueio, setOrigemDesbloqueio] = useState('');
   const [isUnlocking, setIsUnlocking] = useState(false);
 
-  // ESTADOS DA MÁQUINA DO TEMPO (NOVO)
+  // ESTADOS DA MÁQUINA DO TEMPO
   const [cicloAtivo, setCicloAtivo] = useState('');
   const [novoCicloInput, setNovoCicloInput] = useState('');
   const [isChangingCiclo, setIsChangingCiclo] = useState(false);
@@ -38,11 +39,14 @@ export default function AdminPanel() {
         setIsPipelineRunning(statusRes.data.is_running);
       } catch(e) { console.error("Erro ao buscar status do pipeline"); }
 
-      // 2. Busca utilizadores pendentes de aprovação
+      // 2. Busca utilizadores pendentes e ativos
       try {
         const pendentesRes = await axios.get('/api/v1/auth/pendentes');
         setUsuariosPendentes(pendentesRes.data.dados || []);
-      } catch(e) { console.error("Erro ao buscar pendentes"); }
+        
+        const ativosRes = await axios.get('/api/v1/auth/ativos');
+        setUsuariosAtivos(ativosRes.data.dados || []);
+      } catch(e) { console.error("Erro ao buscar utilizadores"); }
 
       // 3. Busca a lista de vendedores para a caixa de seleção de destrancamento
       try {
@@ -50,7 +54,7 @@ export default function AdminPanel() {
         setVendedores(filtrosRes.data.vendedores || []);
       } catch(e) { console.error("Erro ao buscar vendedores"); }
 
-      // 4. Busca o Ciclo Ativo da Máquina do Tempo (NOVO)
+      // 4. Busca o Ciclo Ativo da Máquina do Tempo
       try {
         const cicloRes = await axios.get('/api/v1/admin/ciclo-ativo');
         setCicloAtivo(cicloRes.data.ciclo_ativo);
@@ -77,7 +81,6 @@ export default function AdminPanel() {
   }, [fetchData, isPipelineRunning]);
 
   const handleRunPipeline = async () => {
-    // CORREÇÃO: O alerta e o funcionamento do pipeline focam no mundo real, protegendo o banco.
     const msgConfirmacao = `⚠️ EXECUÇÃO DO MOTOR DE DADOS:
     
 1. O pipeline atualizará as Vendas Reais do ERP no histórico.
@@ -118,11 +121,22 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
     }
   };
 
+  const handleResetSenha = async (id: number, nome: string) => {
+    if (!window.confirm(`⚠️ ATENÇÃO: Tem a certeza que deseja resetar a senha de ${nome}? \n\nA senha voltará para o padrão "Linea@123" e o utilizador será obrigado a trocá-la no próximo acesso.`)) return;
+    
+    try {
+      await axios.post(`/api/v1/auth/reset-password/${id}`);
+      alert(`✅ Senha de ${nome} resetada para "Linea@123" com sucesso!`);
+    } catch (e: any) {
+      alert(e.response?.data?.detail || "Erro ao resetar a senha.");
+    }
+  };
+
   const handleExportarBase = async () => {
     setIsExporting(true);
     try {
       const response = await axios.get('/api/v1/admin/exportar-base', {
-        responseType: 'blob', // Importante para o download de ficheiros
+        responseType: 'blob', 
       });
       
       const url = window.URL.createObjectURL(new Blob([response.data]));
@@ -157,7 +171,6 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
     }
   };
 
-  // MUDAR O RELÓGIO GLOBAL (NOVO)
   const handleChangeCiclo = async () => {
     if (!novoCicloInput) return;
     if (!window.confirm(`MÁQUINA DO TEMPO: Deseja alterar o relógio global do sistema para o ciclo ${novoCicloInput}? \n\nIsto irá mudar a visão de todos os utilizadores na plataforma imediatamente.`)) return;
@@ -166,7 +179,7 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
     try {
       await axios.post('/api/v1/admin/ciclo-ativo', { novo_ciclo: novoCicloInput });
       alert(`✅ Relógio do sistema alterado para ${novoCicloInput} com sucesso! A página será recarregada.`);
-      window.location.reload(); // Força o refresh para limpar toda a cache do navegador
+      window.location.reload(); 
     } catch (e: any) {
       alert(e.response?.data?.detail || "Erro ao alterar o ciclo.");
       setIsChangingCiclo(false);
@@ -213,7 +226,7 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
           {/* COLUNA ESQUERDA: GESTÃO DE UTILIZADORES E TRAVAS */}
           <div className="w-full lg:w-1/3 flex flex-col gap-6">
              
-             {/* NOVO CARD: MÁQUINA DO TEMPO */}
+             {/* CARD: MÁQUINA DO TEMPO */}
              <div className="bg-white rounded-[32px] p-6 lg:p-8 shadow-sm border border-slate-100 flex flex-col relative overflow-hidden">
                <div className="absolute top-0 left-0 w-full h-1.5 bg-indigo-500"></div>
                <div className="flex items-center gap-3 mb-4 pb-4 border-b border-slate-100 flex-shrink-0">
@@ -279,6 +292,46 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
                                 <Check className="w-3 h-3" /> Aprovar
                               </button>
                            </div>
+                        </div>
+                      ))
+                    )}
+                 </div>
+             </div>
+
+             {/* CARD 1.5: UTILIZADORES ATIVOS E RESET DE SENHA */}
+             <div className="bg-white rounded-[32px] p-6 lg:p-8 shadow-sm border border-slate-100 flex flex-col h-[400px]">
+                 <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slate-100 flex-shrink-0">
+                   <Users className="w-5 h-5 text-indigo-500" />
+                   <h2 className="text-sm font-black text-slate-700 uppercase tracking-widest">Utilizadores Ativos</h2>
+                   <div className="ml-auto bg-indigo-100 text-indigo-700 font-black text-xs px-2 py-1 rounded-lg">{usuariosAtivos.length}</div>
+                 </div>
+
+                 <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-4">
+                    {usuariosAtivos.length === 0 ? (
+                      <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-3 opacity-60">
+                         <ShieldAlert className="w-10 h-10" />
+                         <span className="text-xs font-black uppercase tracking-widest text-center">Nenhum utilizador<br/>ativo no sistema</span>
+                      </div>
+                    ) : (
+                      usuariosAtivos.map((user) => (
+                        <div key={user.id} className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col gap-3">
+                           <div>
+                             <h3 className="font-black text-sm text-slate-800">{user.nome}</h3>
+                             <p className="text-xs font-bold text-slate-500">{user.email}</p>
+                           </div>
+                           
+                           <div className="bg-white p-2 rounded-xl border border-slate-100 flex flex-col gap-1">
+                              <span className="text-[10px] font-black text-indigo-500 uppercase tracking-widest">Perfil: {user.funcao}</span>
+                              {user.nome_vendedor && <span className="text-[10px] font-bold text-slate-600 truncate">Vendedor: {user.nome_vendedor}</span>}
+                              {user.gerente_nome && <span className="text-[10px] font-bold text-slate-600 truncate">Gerente: {user.gerente_nome}</span>}
+                           </div>
+
+                           <button 
+                             onClick={() => handleResetSenha(user.id, user.nome)} 
+                             className="mt-1 w-full flex items-center justify-center gap-2 bg-white border border-slate-200 hover:border-amber-300 hover:bg-amber-50 text-slate-600 hover:text-amber-700 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all"
+                           >
+                             <KeyRound className="w-3.5 h-3.5" /> Resetar Senha
+                           </button>
                         </div>
                       ))
                     )}

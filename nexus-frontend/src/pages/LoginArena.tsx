@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Lock, Mail, User, ShieldCheck, ChevronRight, Loader2, KeyRound, Briefcase, Factory } from 'lucide-react';
+import { Lock, Mail, User, ShieldCheck, ChevronRight, Loader2, KeyRound, Briefcase, Factory, Megaphone, Building } from 'lucide-react';
 import axios from 'axios';
 
 export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userData: any) => void }) {
@@ -188,34 +188,48 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3 mt-2">
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mt-2">
                   <div 
                     onClick={() => setFuncao('Administrador')}
                     className={`cursor-pointer border-2 p-3 rounded-xl flex flex-col items-center justify-center gap-1 transition-all ${funcao === 'Administrador' ? 'border-indigo-600 bg-indigo-50' : 'border-slate-200 hover:border-indigo-300'}`}
                   >
                     <ShieldCheck className={`w-5 h-5 ${funcao === 'Administrador' ? 'text-indigo-600' : 'text-slate-400'}`} />
-                    <span className={`text-[10px] font-black uppercase tracking-wider ${funcao === 'Administrador' ? 'text-indigo-900' : 'text-slate-500'}`}>Admin</span>
+                    <span className={`text-[10px] font-black uppercase tracking-wider text-center ${funcao === 'Administrador' ? 'text-indigo-900' : 'text-slate-500'}`}>Admin</span>
                   </div>
                   <div 
                     onClick={() => setFuncao('Gerente')}
                     className={`cursor-pointer border-2 p-3 rounded-xl flex flex-col items-center justify-center gap-1 transition-all ${funcao === 'Gerente' ? 'border-emerald-600 bg-emerald-50' : 'border-slate-200 hover:border-emerald-300'}`}
                   >
                     <Briefcase className={`w-5 h-5 ${funcao === 'Gerente' ? 'text-emerald-600' : 'text-slate-400'}`} />
-                    <span className={`text-[10px] font-black uppercase tracking-wider ${funcao === 'Gerente' ? 'text-emerald-900' : 'text-slate-500'}`}>Gerente</span>
+                    <span className={`text-[10px] font-black uppercase tracking-wider text-center ${funcao === 'Gerente' ? 'text-emerald-900' : 'text-slate-500'}`}>Gerente</span>
                   </div>
                   <div 
                     onClick={() => setFuncao('Supply Chain')}
                     className={`cursor-pointer border-2 p-3 rounded-xl flex flex-col items-center justify-center gap-1 transition-all ${funcao === 'Supply Chain' ? 'border-amber-600 bg-amber-50' : 'border-slate-200 hover:border-amber-300'}`}
                   >
                     <Factory className={`w-5 h-5 ${funcao === 'Supply Chain' ? 'text-amber-600' : 'text-slate-400'}`} />
-                    <span className={`text-[10px] font-black uppercase tracking-wider ${funcao === 'Supply Chain' ? 'text-amber-900' : 'text-slate-500'}`}>Supply Chain</span>
+                    <span className={`text-[10px] font-black uppercase tracking-wider text-center ${funcao === 'Supply Chain' ? 'text-amber-900' : 'text-slate-500'}`}>Supply</span>
                   </div>
                   <div 
                     onClick={() => setFuncao('Executivo')}
                     className={`cursor-pointer border-2 p-3 rounded-xl flex flex-col items-center justify-center gap-1 transition-all ${funcao === 'Executivo' ? 'border-blue-600 bg-blue-50' : 'border-slate-200 hover:border-blue-300'}`}
                   >
                     <User className={`w-5 h-5 ${funcao === 'Executivo' ? 'text-blue-600' : 'text-slate-400'}`} />
-                    <span className={`text-[10px] font-black uppercase tracking-wider ${funcao === 'Executivo' ? 'text-blue-900' : 'text-slate-500'}`}>Executivo (Vendas)</span>
+                    <span className={`text-[10px] font-black uppercase tracking-wider text-center ${funcao === 'Executivo' ? 'text-blue-900' : 'text-slate-500'}`}>Executivo</span>
+                  </div>
+                  <div 
+                    onClick={() => setFuncao('Marketing')}
+                    className={`cursor-pointer border-2 p-3 rounded-xl flex flex-col items-center justify-center gap-1 transition-all ${funcao === 'Marketing' ? 'border-pink-600 bg-pink-50' : 'border-slate-200 hover:border-pink-300'}`}
+                  >
+                    <Megaphone className={`w-5 h-5 ${funcao === 'Marketing' ? 'text-pink-600' : 'text-slate-400'}`} />
+                    <span className={`text-[10px] font-black uppercase tracking-wider text-center ${funcao === 'Marketing' ? 'text-pink-900' : 'text-slate-500'}`}>Marketing</span>
+                  </div>
+                  <div 
+                    onClick={() => setFuncao('C-Level')}
+                    className={`cursor-pointer border-2 p-3 rounded-xl flex flex-col items-center justify-center gap-1 transition-all ${funcao === 'C-Level' ? 'border-purple-600 bg-purple-50' : 'border-slate-200 hover:border-purple-300'}`}
+                  >
+                    <Building className={`w-5 h-5 ${funcao === 'C-Level' ? 'text-purple-600' : 'text-slate-400'}`} />
+                    <span className={`text-[10px] font-black uppercase tracking-wider text-center ${funcao === 'C-Level' ? 'text-purple-900' : 'text-slate-500'}`}>C-Level</span>
                   </div>
                 </div>
 

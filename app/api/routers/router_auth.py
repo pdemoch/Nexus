@@ -281,3 +281,32 @@ async def rejeitar_usuario(user_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail="Erro ao rejeitar usuário.")
+    
+@router.get("/ativos")
+async def listar_ativos(db: Session = Depends(get_db)):
+    try:
+        ativos = db.query(Usuario).filter(Usuario.aprovado == True).all()
+        dados = [{
+            "id": p.id, 
+            "nome": p.nome, 
+            "email": p.email, 
+            "funcao": p.funcao, 
+            "nome_vendedor": p.nome_vendedor, 
+            "gerente_nome": getattr(p, 'gerente_nome', None)
+        } for p in ativos]
+        return {"status": "success", "dados": dados}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Erro ao buscar usuários ativos.")
+
+@router.post("/reset-password/{user_id}")
+async def resetar_senha(user_id: int, db: Session = Depends(get_db)):
+    try:
+        usuario = db.query(Usuario).filter(Usuario.id == user_id).first()
+        if usuario:
+            usuario.senha_hash = gerar_hash("Linea@123")
+            usuario.primeiro_acesso = True # Força o usuário a trocar a senha no próximo login
+            db.commit()
+        return {"status": "success", "message": "Senha resetada para Linea@123 com sucesso!"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Erro ao resetar senha do usuário.")

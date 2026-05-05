@@ -4,12 +4,12 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
   
   // Definição das permissões de cada ecrã (Ordem Lógica do S&OP)
   const allNavItems = [
-    { id: 'dashboard', label: 'S&OP Global', icon: LayoutDashboard, roles: ['Administrador', 'Gerente', 'Supply Chain'] },
+    { id: 'dashboard', label: 'S&OP Global', icon: LayoutDashboard, roles: ['Administrador', 'Gerente', 'Supply Chain', 'Marketing', 'C-Level'] },
     { id: 'soe-radar', label: 'Radar S&OE', icon: Activity, roles: ['Administrador'] },
     { id: 'inbound', label: 'Inbound Arena', icon: Factory, roles: ['Administrador'] },
     { id: 'auditoria', label: 'Auditoria de IA', icon: Crosshair, roles: ['Administrador'] },
-    { id: 'topdown', label: 'Top-Down (Diretoria)', icon: BarChart3, roles: ['Administrador', 'Gerente'] },
-    { id: 'npd', label: 'Inovações (MKT)', icon: Rocket, roles: ['Administrador', 'Gerente'] },
+    { id: 'topdown', label: 'Top-Down (Diretoria)', icon: BarChart3, roles: ['Administrador', 'Gerente', 'Marketing'] },
+    { id: 'npd', label: 'Inovações (MKT)', icon: Rocket, roles: ['Administrador', 'Gerente', 'Marketing'] },
     { id: 'supply', label: 'Supply Review', icon: Factory, roles: ['Administrador', 'Supply Chain'] },
     { id: 'consenso', label: 'Bottom-Up (Comercial)', icon: Users, roles: ['Administrador', 'Gerente', 'Executivo'] },
     { id: 'gerenciamento', label: 'Gerenciamento', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },

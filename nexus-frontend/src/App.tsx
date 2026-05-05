@@ -11,12 +11,8 @@ import ConsensoArena from './pages/ConsensoArena';
 import GlobalDashboard from './pages/GlobalDashboard';
 import NPDArena from './pages/NPDArena';
 import GerenciamentoArena from './pages/GerenciamentoArena';
-
-// IMPORTS DO NOVO MÓDULO S&OE
 import SoeDashboard from './pages/SoeDashboard';
 import InboundArena from './pages/InboundArena';
-
-// IMPORT DO NOSSO NOVO MÓDULO DE AUDITORIA
 import AuditoriaArena from './pages/AuditoriaArena';
 
 export default function App() {
@@ -59,9 +55,7 @@ export default function App() {
       setUser(parsedUser);
       // REGRAS DE ROTA INICIAL POR CARGO
       if (parsedUser.funcao === 'Executivo') setCurrentRoute('consenso');
-      else if (parsedUser.funcao === 'Gerente') setCurrentRoute('gerenciamento');
-      else if (parsedUser.funcao === 'Supply Chain') setCurrentRoute('supply');
-      else setCurrentRoute('admin');
+      else setCurrentRoute('dashboard'); // Administrador, Gerente, Supply, Marketing e C-Level caem aqui!
     }
   }, []);
 
@@ -69,9 +63,7 @@ export default function App() {
     setUser(userData);
     localStorage.setItem('nexus_user', JSON.stringify(userData)); 
     if (userData.funcao === 'Executivo') setCurrentRoute('consenso');
-    else if (userData.funcao === 'Gerente') setCurrentRoute('gerenciamento');
-    else if (userData.funcao === 'Supply Chain') setCurrentRoute('supply');
-    else setCurrentRoute('admin');
+    else setCurrentRoute('dashboard'); // Todos os outros caem no dashboard
   };
 
   const handleLogout = () => {
