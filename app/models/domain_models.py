@@ -47,6 +47,7 @@ class DimCliente(Base):
     bloqueado = Column(String)
     vendedor_nome = Column(String(100), index=True) 
     gerente_nome = Column(String(100), index=True)
+    supervisor_nome = Column(String(100), index=True)
 
     vendas = relationship("FatoVendas", back_populates="cliente_rel")
     forecasts = relationship("FatoIbpGranular", back_populates="cliente_rel")
@@ -64,10 +65,9 @@ class FatoVendas(Base):
     
     qt_pedido = Column(Float, default=0.0)
     vl_pedido = Column(Float, default=0.0)
-    
-    # NOVAS COLUNAS PARA S&OE (BACKLOG REAL)
-    qtfatura = Column(Float, default=0.0) # O que já saiu do ERP
-    qtcorte = Column(Float, default=0.0)  # O que foi cancelado/perdido
+
+    qtfatura = Column(Float, default=0.0) 
+    qtcorte = Column(Float, default=0.0)  
 
     __table_args__ = (
         UniqueConstraint('pedido', 'sku', 'cgc', name='uix_vendas_pedido'),
@@ -75,10 +75,6 @@ class FatoVendas(Base):
 
     produto_rel = relationship("DimProduto", back_populates="vendas")
     cliente_rel = relationship("DimCliente", back_populates="vendas")
-
-# =========================================================================
-# NOVAS TABELAS NATIVAS DO MÓDULO S&OE
-# =========================================================================
 
 class FatoEstoqueD0(Base):
     """Guarda a posição consolidada do armazém 05 (API 90)"""
@@ -180,3 +176,4 @@ class FatoAcuracia(Base):
     
     acuracia_ia = Column(Float, default=0.0)
     acuracia_consenso = Column(Float, default=0.0)
+

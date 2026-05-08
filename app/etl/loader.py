@@ -21,14 +21,17 @@ class NexusLoader:
             log_callback("      • Sincronizando Cadastro de Clientes e Hierarquias...")
             df_clientes = df_silver.select([
                 "cgc", "cod_cliente", "loja", "cliente_razaosocial", 
-                "regional", "bloqueado", "vendedor_nome", "gerente_nome"
+                "regional", "bloqueado", "vendedor_nome", "gerente_nome", 
+                "supervisor_nome" 
             ]).unique(subset=["cgc"])
 
             for row in df_clientes.to_dicts():
                 stmt = pg_insert(DimCliente).values(
                     cgc=row['cgc'], cod_cliente=row['cod_cliente'], loja=row['loja'],
                     razaosocial=row['cliente_razaosocial'], regional=row['regional'],
-                    bloqueado=row['bloqueado'], vendedor_nome=row['vendedor_nome'], gerente_nome=row['gerente_nome']
+                    bloqueado=row['bloqueado'], vendedor_nome=row['vendedor_nome'], 
+                    gerente_nome=row['gerente_nome'],
+                    supervisor_nome=row['supervisor_nome'] 
                 )
                 stmt = stmt.on_conflict_do_update(
                     index_elements=['cgc'],
@@ -36,7 +39,8 @@ class NexusLoader:
                         'cod_cliente': stmt.excluded.cod_cliente, 'loja': stmt.excluded.loja,
                         'razaosocial': stmt.excluded.razaosocial, 'regional': stmt.excluded.regional,
                         'bloqueado': stmt.excluded.bloqueado, 'vendedor_nome': stmt.excluded.vendedor_nome, 
-                        'gerente_nome': stmt.excluded.gerente_nome
+                        'gerente_nome': stmt.excluded.gerente_nome,
+                        'supervisor_nome': stmt.excluded.supervisor_nome # <- ADICIONADO AQUI
                     }
                 )
                 db.execute(stmt)
