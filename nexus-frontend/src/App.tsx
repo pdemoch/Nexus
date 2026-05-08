@@ -53,8 +53,8 @@ export default function App() {
     if (token && savedUser) {
       const parsedUser = JSON.parse(savedUser);
       setUser(parsedUser);
-      // REGRAS DE ROTA INICIAL POR CARGO
-      if (parsedUser.funcao === 'Executivo') setCurrentRoute('consenso');
+      // REGRAS DE ROTA INICIAL POR CARGO (ATUALIZADO PARA COORDENADOR)
+      if (parsedUser.funcao === 'Coordenador') setCurrentRoute('consenso');
       else setCurrentRoute('dashboard'); // Administrador, Gerente, Supply, Marketing e C-Level caem aqui!
     }
   }, []);
@@ -62,7 +62,8 @@ export default function App() {
   const handleLoginSuccess = (userData: any) => {
     setUser(userData);
     localStorage.setItem('nexus_user', JSON.stringify(userData)); 
-    if (userData.funcao === 'Executivo') setCurrentRoute('consenso');
+    // REGRAS DE ROTA INICIAL POR CARGO (ATUALIZADO PARA COORDENADOR)
+    if (userData.funcao === 'Coordenador') setCurrentRoute('consenso');
     else setCurrentRoute('dashboard'); // Todos os outros caem no dashboard
   };
 

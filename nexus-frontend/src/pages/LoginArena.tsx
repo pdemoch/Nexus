@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Lock, Mail, User, ShieldCheck, ChevronRight, Loader2, KeyRound, Briefcase, Factory, Megaphone, Building } from 'lucide-react';
+import { Lock, Mail, User, ShieldCheck, ChevronRight, Loader2, KeyRound, Briefcase, Factory, Megaphone, Building, Users } from 'lucide-react';
 import axios from 'axios';
 
 export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userData: any) => void }) {
@@ -11,19 +11,19 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
   const [senha, setSenha] = useState('');
   const [nome, setNome] = useState('');
   const [funcao, setFuncao] = useState('Gerente'); 
-  const [nomeVendedor, setNomeVendedor] = useState('');
   const [nomeGerente, setNomeGerente] = useState(''); 
+  const [nomeSupervisor, setNomeSupervisor] = useState(''); // NOVO: Para Coordenadores
   const [novaSenha, setNovaSenha] = useState('');
   
-  const [listaVendedores, setListaVendedores] = useState<string[]>([]);
+  const [listaCoordenadores, setListaCoordenadores] = useState<string[]>([]); // NOVO
   const [listaGerentes, setListaGerentes] = useState<string[]>([]);
 
-  // Busca lista de vendedores e gerentes se for para o modo cadastro
+  // Busca lista de supervisores e gerentes se for para o modo cadastro
   useEffect(() => {
     if (modo === 'cadastro') {
-      axios.get('/api/v1/auth/lista-vendedores')
-        .then(res => setListaVendedores(res.data.dados))
-        .catch(e => console.log(e));
+      axios.get('/api/v1/auth/lista-coordenadores')
+        .then(res => setListaCoordenadores(res.data.dados))
+        .catch(e => console.log("Erro ao buscar coordenadores:", e));
         
       axios.get('/api/v1/auth/lista-gerentes')
         .then(res => setListaGerentes(res.data.dados))
@@ -55,7 +55,7 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
 
   const handleCadastro = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (funcao === 'Executivo' && !nomeVendedor) return alert("Selecione o Vendedor para amarrar à conta do Executivo.");
+    if (funcao === 'Coordenador' && !nomeSupervisor) return alert("Selecione a Equipe/Supervisão para amarrar à conta do Coordenador.");
     if (funcao === 'Gerente' && !nomeGerente) return alert("Selecione o nome do Gerente para amarrar à conta.");
     
     setIsLoading(true);
@@ -65,7 +65,7 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
         email, 
         senha_inicial: senha, 
         funcao, 
-        nome_vendedor: funcao === 'Executivo' ? nomeVendedor : null,
+        supervisor_nome: funcao === 'Coordenador' ? nomeSupervisor : null, // Modificado
         gerente_nome: funcao === 'Gerente' ? nomeGerente : null
       });
       alert("✅ Usuário cadastrado com sucesso! A senha digitada é a senha inicial.");
@@ -81,7 +81,8 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
     e.preventDefault();
     setIsLoading(true);
     try {
-      await axios.post('/api/v1/auth/alterar-senha', { email, nova_senha: novaSenha });
+      // Usando a rota correta do nosso novo backend
+      await axios.post('/api/v1/auth/reset-password', { email, nova_senha: novaSenha });
       alert("🔒 Senha atualizada! Faça o login novamente com a sua nova senha.");
       setSenha(''); setNovaSenha('');
       setModo('login');
@@ -95,7 +96,7 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
   return (
     <div className="min-h-screen w-full bg-slate-50 flex font-sans">
       
-      {/* Lado Esquerdo - Decorativo */}
+      {/* Lado Esquerdo - Decorativo (Seu layout mantido!) */}
       <div className="hidden lg:flex w-1/2 bg-slate-900 relative overflow-hidden flex-col justify-between p-12">
         <div className="absolute inset-0 bg-gradient-to-br from-indigo-900/50 to-slate-900 z-0"></div>
         <div className="absolute -top-40 -right-40 w-96 h-96 bg-indigo-500 rounded-full blur-[120px] opacity-20"></div>
@@ -203,19 +204,20 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
                     <Briefcase className={`w-5 h-5 ${funcao === 'Gerente' ? 'text-emerald-600' : 'text-slate-400'}`} />
                     <span className={`text-[10px] font-black uppercase tracking-wider text-center ${funcao === 'Gerente' ? 'text-emerald-900' : 'text-slate-500'}`}>Gerente</span>
                   </div>
+                  {/* SUBSTITUÍDO: Executivo por Coordenador */}
+                  <div 
+                    onClick={() => setFuncao('Coordenador')}
+                    className={`cursor-pointer border-2 p-3 rounded-xl flex flex-col items-center justify-center gap-1 transition-all ${funcao === 'Coordenador' ? 'border-blue-600 bg-blue-50' : 'border-slate-200 hover:border-blue-300'}`}
+                  >
+                    <Users className={`w-5 h-5 ${funcao === 'Coordenador' ? 'text-blue-600' : 'text-slate-400'}`} />
+                    <span className={`text-[10px] font-black uppercase tracking-wider text-center ${funcao === 'Coordenador' ? 'text-blue-900' : 'text-slate-500'}`}>Coordenador</span>
+                  </div>
                   <div 
                     onClick={() => setFuncao('Supply Chain')}
                     className={`cursor-pointer border-2 p-3 rounded-xl flex flex-col items-center justify-center gap-1 transition-all ${funcao === 'Supply Chain' ? 'border-amber-600 bg-amber-50' : 'border-slate-200 hover:border-amber-300'}`}
                   >
                     <Factory className={`w-5 h-5 ${funcao === 'Supply Chain' ? 'text-amber-600' : 'text-slate-400'}`} />
                     <span className={`text-[10px] font-black uppercase tracking-wider text-center ${funcao === 'Supply Chain' ? 'text-amber-900' : 'text-slate-500'}`}>Supply</span>
-                  </div>
-                  <div 
-                    onClick={() => setFuncao('Executivo')}
-                    className={`cursor-pointer border-2 p-3 rounded-xl flex flex-col items-center justify-center gap-1 transition-all ${funcao === 'Executivo' ? 'border-blue-600 bg-blue-50' : 'border-slate-200 hover:border-blue-300'}`}
-                  >
-                    <User className={`w-5 h-5 ${funcao === 'Executivo' ? 'text-blue-600' : 'text-slate-400'}`} />
-                    <span className={`text-[10px] font-black uppercase tracking-wider text-center ${funcao === 'Executivo' ? 'text-blue-900' : 'text-slate-500'}`}>Executivo</span>
                   </div>
                   <div 
                     onClick={() => setFuncao('Marketing')}
@@ -244,13 +246,13 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
                   </div>
                 )}
 
-                {/* CAMPO CONDICIONAL PARA EXECUTIVO */}
-                {funcao === 'Executivo' && (
+                {/* CAMPO CONDICIONAL PARA COORDENADOR */}
+                {funcao === 'Coordenador' && (
                   <div className="mt-2 animate-in fade-in slide-in-from-top-2">
-                    <label className="text-[10px] font-black text-blue-600 uppercase tracking-widest ml-1 block mb-1">Amarração de Vendedor (Obrigatório)</label>
-                    <select required value={nomeVendedor} onChange={e => setNomeVendedor(e.target.value)} className="w-full bg-blue-50/50 border border-blue-200 py-3 px-4 rounded-xl text-sm font-bold text-slate-800 outline-none focus:border-blue-500 cursor-pointer">
-                      <option value="">-- SELECIONE O VENDEDOR NO ERP --</option>
-                      {listaVendedores.map(v => <option key={v} value={v}>{v}</option>)}
+                    <label className="text-[10px] font-black text-blue-600 uppercase tracking-widest ml-1 block mb-1">Amarração de Coordenação (Obrigatório)</label>
+                    <select required value={nomeSupervisor} onChange={e => setNomeSupervisor(e.target.value)} className="w-full bg-blue-50/50 border border-blue-200 py-3 px-4 rounded-xl text-sm font-bold text-slate-800 outline-none focus:border-blue-500 cursor-pointer">
+                      <option value="">-- SELECIONE A SUPERVISÃO NO ERP --</option>
+                      {listaCoordenadores.map(s => <option key={s} value={s}>{s}</option>)}
                     </select>
                   </div>
                 )}

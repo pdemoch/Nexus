@@ -6,6 +6,7 @@ from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from app.core.database import get_db
 from app.models.domain_models import Usuario, DimCliente
 
@@ -54,15 +55,15 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         "email": usuario.email,
         "funcao": usuario.funcao,
         "nome_vendedor": usuario.nome_vendedor,
-        "gerente_nome": getattr(usuario, 'gerente_nome', None)
+        "gerente_nome": getattr(usuario, 'gerente_nome', None),
+        "supervisor_nome": getattr(usuario, 'supervisor_nome', None) # <-- ADICIONADO À SESSÃO
     }
 
 # ==========================================
-# MOTOR DE HEARTBEAT (CONTROLE DE CONCORRÊNCIA)
+# MOTOR DE HEARTBEAT
 # ==========================================
 @router.post("/heartbeat")
 async def heartbeat(usuario_logado: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Rota chamada pelo React para avisar que o utilizador está com a aba aberta."""
     try:
         usuario = db.query(Usuario).filter(Usuario.id == usuario_logado['id']).first()
         if usuario:
@@ -92,6 +93,7 @@ class CadastroPayload(BaseModel):
     funcao: str
     nome_vendedor: Optional[str] = None
     gerente_nome: Optional[str] = None 
+    supervisor_nome: Optional[str] = None # <-- NOVO CAMPO
 
 class NovaSenhaPayload(BaseModel):
     email: str
@@ -116,7 +118,7 @@ async def login(payload: LoginPayload, db: Session = Depends(get_db)):
         if not usuario.aprovado:
             raise HTTPException(status_code=403, detail="⏳ Cadastro em análise. Aguarde a aprovação de um Administrador.")
             
-        # GERAÇÃO DO TOKEN JWT
+        # GERAÇÃO DO TOKEN JWT (Adicionamos a função no token)
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
             data={"sub": usuario.email, "funcao": usuario.funcao},
@@ -134,10 +136,10 @@ async def login(payload: LoginPayload, db: Session = Depends(get_db)):
                 "funcao": usuario.funcao,
                 "nome_vendedor": usuario.nome_vendedor,
                 "gerente_nome": getattr(usuario, 'gerente_nome', None),
+                "supervisor_nome": getattr(usuario, 'supervisor_nome', None), # <-- ADICIONADO
                 "primeiro_acesso": usuario.primeiro_acesso
             }
         }
-        
     except Exception as e:
         if isinstance(e, HTTPException): raise e
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
@@ -151,17 +153,18 @@ async def cadastrar_usuario(payload: CadastroPayload, db: Session = Depends(get_
         if check_email:
             raise HTTPException(status_code=400, detail="Este email já está cadastrado.")
             
-        if payload.funcao == 'Executivo' and payload.nome_vendedor:
-            check_vendedor = db.query(Usuario).filter(Usuario.nome_vendedor == payload.nome_vendedor).first()
-            if check_vendedor:
-                raise HTTPException(status_code=400, detail=f"O vendedor {payload.nome_vendedor} já está vinculado a outro usuário.")
+        # AMARRAÇÃO DE COORDENADOR (SUPERVISOR)
+        if payload.funcao == 'Coordenador' and payload.supervisor_nome:
+            check_coord = db.query(Usuario).filter(Usuario.supervisor_nome == payload.supervisor_nome).first()
+            if check_coord:
+                raise HTTPException(status_code=400, detail=f"A coordenação {payload.supervisor_nome} já está vinculada a outro usuário.")
         
+        # AMARRAÇÃO DE GERENTE
         if payload.funcao == 'Gerente' and payload.gerente_nome:
-            check_gerente = db.query(Usuario).filter(getattr(Usuario, 'gerente_nome', None) == payload.gerente_nome).first()
+            check_gerente = db.query(Usuario).filter(Usuario.gerente_nome == payload.gerente_nome).first()
             if check_gerente:
                 raise HTTPException(status_code=400, detail=f"A gerência {payload.gerente_nome} já está vinculada a outro usuário.")
             
-        # VERIFICAÇÃO SE É O PRIMEIRO USUÁRIO (BOOTSTRAP)
         total_usuarios = db.query(Usuario).count()
         eh_primeiro_usuario = (total_usuarios == 0)
             
@@ -170,75 +173,49 @@ async def cadastrar_usuario(payload: CadastroPayload, db: Session = Depends(get_
             email=email_limpo,
             senha_hash=gerar_hash(payload.senha_inicial),
             funcao=payload.funcao,
-            nome_vendedor=payload.nome_vendedor if payload.funcao == 'Executivo' else None,
+            nome_vendedor=None, # Não amarramos mais a um vendedor único
             gerente_nome=payload.gerente_nome if payload.funcao == 'Gerente' else None, 
+            supervisor_nome=payload.supervisor_nome if payload.funcao == 'Coordenador' else None, # <-- NOVO
             primeiro_acesso=True,
-            aprovado=eh_primeiro_usuario, # Auto-aprova se for o primeiro
+            aprovado=eh_primeiro_usuario,
             ultima_atividade=datetime.utcnow()
         )
         
         db.add(novo_usuario)
         db.commit()
         return {"status": "success", "message": "Usuário criado com sucesso!"}
-        
     except Exception as e:
         db.rollback()
         if isinstance(e, HTTPException): raise e
         raise HTTPException(status_code=500, detail=str(e))
-    
-@router.post("/alterar-senha")
-async def alterar_senha(payload: NovaSenhaPayload, db: Session = Depends(get_db)):
-    email_limpo = payload.email.lower().strip()
+
+@router.get("/lista-coordenadores")
+async def obter_coordenadores(db: Session = Depends(get_db)):
+    """Busca a lista de supervisores disponíveis no ERP (que não estão em uso)"""
     try:
-        usuario = db.query(Usuario).filter(Usuario.email == email_limpo).first()
-        if not usuario:
-            raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+        erp_sup = db.query(DimCliente.supervisor_nome).filter(DimCliente.supervisor_nome.isnot(None)).distinct().all()
+        todos_sup = set(r[0].strip() for r in erp_sup if r[0] and r[0].strip())
 
-        usuario.senha_hash = gerar_hash(payload.nova_senha)
-        usuario.primeiro_acesso = False
-        db.commit()
-        
-        return {"status": "success", "message": "Senha alterada com sucesso!"}
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        usuarios_sup = db.query(Usuario.supervisor_nome).filter(Usuario.supervisor_nome.isnot(None)).distinct().all()
+        sup_em_uso = set(u[0].strip() for u in usuarios_sup if u[0] and u[0].strip())
 
-@router.get("/lista-vendedores")
-async def obter_vendedores(db: Session = Depends(get_db)):
-    try:
-        erp_vendedores = db.query(DimCliente.vendedor_nome).filter(DimCliente.vendedor_nome.isnot(None)).distinct().all()
-        todos_vendedores = set(r[0].strip() for r in erp_vendedores if r[0].strip())
-
-        usuarios_vendedores = db.query(Usuario.nome_vendedor).filter(Usuario.nome_vendedor.isnot(None)).distinct().all()
-        vendedores_em_uso = set(u[0].strip() for u in usuarios_vendedores if u[0].strip())
-
-        vendedores_livres = sorted(list(todos_vendedores - vendedores_em_uso))
-        return {"status": "success", "dados": vendedores_livres}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Erro ao carregar lista de vendedores.")
+        sup_livres = sorted(list(todos_sup - sup_em_uso))
+        return {"status": "success", "dados": sup_livres}
+    except Exception:
+        raise HTTPException(status_code=500, detail="Erro ao carregar supervisores.")
 
 @router.get("/lista-gerentes")
 async def obter_gerentes(db: Session = Depends(get_db)):
     try:
-        col_gerente_erp = getattr(DimCliente, 'gerente_nome', None)
-        col_gerente_user = getattr(Usuario, 'gerente_nome', None)
-
-        if col_gerente_erp is None:
-            return {"status": "success", "dados": []}
-
-        erp_gerentes = db.query(col_gerente_erp).filter(col_gerente_erp.isnot(None)).distinct().all()
+        erp_gerentes = db.query(DimCliente.gerente_nome).filter(DimCliente.gerente_nome.isnot(None)).distinct().all()
         todos_gerentes = set(r[0].strip() for r in erp_gerentes if r[0] and str(r[0]).strip())
 
-        if col_gerente_user is None:
-            gerentes_em_uso = set()
-        else:
-            usuarios_gerentes = db.query(col_gerente_user).filter(col_gerente_user.isnot(None)).distinct().all()
-            gerentes_em_uso = set(u[0].strip() for u in usuarios_gerentes if u[0] and str(u[0]).strip())
+        usuarios_gerentes = db.query(Usuario.gerente_nome).filter(Usuario.gerente_nome.isnot(None)).distinct().all()
+        gerentes_em_uso = set(u[0].strip() for u in usuarios_gerentes if u[0] and str(u[0]).strip())
 
         gerentes_livres = sorted(list(todos_gerentes - gerentes_em_uso))
         return {"status": "success", "dados": gerentes_livres}
-        
-    except Exception as e:
+    except Exception:
         return {"status": "success", "dados": []}
 
 @router.get("/pendentes")
@@ -246,16 +223,13 @@ async def listar_pendentes(db: Session = Depends(get_db)):
     try:
         pendentes = db.query(Usuario).filter(Usuario.aprovado == False).all()
         dados = [{
-            "id": p.id, 
-            "nome": p.nome, 
-            "email": p.email, 
-            "funcao": p.funcao, 
-            "nome_vendedor": p.nome_vendedor, 
-            "gerente_nome": getattr(p, 'gerente_nome', None),
+            "id": p.id, "nome": p.nome, "email": p.email, "funcao": p.funcao, 
+            "gerente_nome": p.gerente_nome, 
+            "supervisor_nome": p.supervisor_nome, # <-- INCLUÍDO
             "criado_em": p.criado_em
         } for p in pendentes]
         return {"status": "success", "dados": dados}
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=500, detail="Erro ao buscar pendentes.")
 
 @router.post("/aprovar/{user_id}")
@@ -266,7 +240,7 @@ async def aprovar_usuario(user_id: int, db: Session = Depends(get_db)):
             usuario.aprovado = True
             db.commit()
         return {"status": "success", "message": "Usuário aprovado!"}
-    except Exception as e:
+    except Exception:
         db.rollback()
         raise HTTPException(status_code=500, detail="Erro ao aprovar usuário.")
 
@@ -278,7 +252,7 @@ async def rejeitar_usuario(user_id: int, db: Session = Depends(get_db)):
             db.delete(usuario)
             db.commit()
         return {"status": "success", "message": "Usuário rejeitado e deletado."}
-    except Exception as e:
+    except Exception:
         db.rollback()
         raise HTTPException(status_code=500, detail="Erro ao rejeitar usuário.")
     
@@ -287,15 +261,12 @@ async def listar_ativos(db: Session = Depends(get_db)):
     try:
         ativos = db.query(Usuario).filter(Usuario.aprovado == True).all()
         dados = [{
-            "id": p.id, 
-            "nome": p.nome, 
-            "email": p.email, 
-            "funcao": p.funcao, 
-            "nome_vendedor": p.nome_vendedor, 
-            "gerente_nome": getattr(p, 'gerente_nome', None)
+            "id": p.id, "nome": p.nome, "email": p.email, "funcao": p.funcao, 
+            "gerente_nome": p.gerente_nome,
+            "supervisor_nome": p.supervisor_nome # <-- INCLUÍDO
         } for p in ativos]
         return {"status": "success", "dados": dados}
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=500, detail="Erro ao buscar usuários ativos.")
 
 @router.post("/reset-password/{user_id}")
@@ -304,9 +275,9 @@ async def resetar_senha(user_id: int, db: Session = Depends(get_db)):
         usuario = db.query(Usuario).filter(Usuario.id == user_id).first()
         if usuario:
             usuario.senha_hash = gerar_hash("Linea@123")
-            usuario.primeiro_acesso = True # Força o usuário a trocar a senha no próximo login
+            usuario.primeiro_acesso = True 
             db.commit()
-        return {"status": "success", "message": "Senha resetada para Linea@123 com sucesso!"}
-    except Exception as e:
+        return {"status": "success", "message": "Senha resetada!"}
+    except Exception:
         db.rollback()
-        raise HTTPException(status_code=500, detail="Erro ao resetar senha do usuário.")
+        raise HTTPException(status_code=500, detail="Erro ao resetar senha.")

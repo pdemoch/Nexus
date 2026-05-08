@@ -12,8 +12,11 @@ class Usuario(Base):
     email = Column(String(100), unique=True, index=True, nullable=False)
     senha_hash = Column(String(255), nullable=False)
     funcao = Column(String(50), nullable=False) 
+    
     nome_vendedor = Column(String(100), nullable=True) 
     gerente_nome = Column(String, nullable=True)
+    supervisor_nome = Column(String(100), nullable=True)
+
     aprovado = Column(Boolean, default=False)
     primeiro_acesso = Column(Boolean, default=True)
     criado_em = Column(DateTime, default=datetime.utcnow)
@@ -96,14 +99,10 @@ class FatoInboundProducao(Base):
     data_entrada = Column(Date, nullable=False, index=True)
     vol_caixas = Column(Integer, nullable=False)
     justificativa = Column(String, nullable=True)
-    usuario_nome = Column(String, nullable=True) # Nome de quem inseriu a programação
+    usuario_nome = Column(String, nullable=True) 
     criado_em = Column(DateTime, default=datetime.utcnow)
 
     produto_rel = relationship("DimProduto", back_populates="inbound")
-
-# =========================================================================
-# MODELOS ORIGINAIS DO S&OP (MANTIDOS E ATUALIZADOS)
-# =========================================================================
 
 class FatoIbpGranular(Base):
     __tablename__ = "fato_ibp_granular"
@@ -122,7 +121,7 @@ class FatoIbpGranular(Base):
     justificativa_supply = Column(String, nullable=True) 
     vol_bottomup = Column(Integer, default=0)
     vol_final = Column(Integer, default=0) 
-    vol_meta = Column(Integer, default=0) # NOVA COLUNA: Meta congelada após aprovação global
+    vol_meta = Column(Integer, default=0) 
     
     pmv_aplicado = Column(Float, default=0.0)
     
@@ -176,4 +175,3 @@ class FatoAcuracia(Base):
     
     acuracia_ia = Column(Float, default=0.0)
     acuracia_consenso = Column(Float, default=0.0)
-
