@@ -30,6 +30,8 @@ class NexusTransformer:
             pl.col("loja").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars(),
             pl.col("cgc").cast(pl.Utf8).str.strip_chars(),
             pl.col("cliente_razaosocial").cast(pl.Utf8).str.strip_chars(),
+            # PADRONIZAÇÃO DO STATUS: Maiúsculas e sem espaços perdidos
+            pl.col("bloqueado").cast(pl.Utf8).str.to_uppercase().str.strip_chars(), 
             pl.col("gerente_nome").cast(pl.Utf8).fill_null("SEM GERENTE").str.to_uppercase().str.strip_chars()
         ]).with_columns([
             pl.concat_str([pl.col("cod"), pl.lit("_"), pl.col("loja")]).alias("cod_loja")
@@ -40,10 +42,12 @@ class NexusTransformer:
             lf_clientes, left_on="cliente_loja", right_on="cod_loja", how="left"
         )
 
+        # A REGRA DE OURO DA HERANÇA DO SUPERVISOR
         lf_vendas = lf_vendas.with_columns([
             pl.when(pl.col("supervisor_nome").is_null() | (pl.col("supervisor_nome").str.strip_chars() == ""))
             .then(pl.col("gerente_nome"))
             .otherwise(pl.col("supervisor_nome")).alias("supervisor_nome"),
+            
             pl.col("cgc").fill_null("SEM_CGC"),
             pl.col("cliente_razaosocial").fill_null("SEM_NOME"),
             pl.col("bloqueado").fill_null("ATIVO"),
@@ -76,7 +80,6 @@ class NexusTransformer:
             return pl.LazyFrame()
 
         lf_silver = lf_silver.with_columns(pl.col("cliente").alias("cod_cliente"))
-        
         lf_final = lf_silver.with_columns(pl.col("2026").alias("curva_2026"))
         
         # ---------------------------------------------------------------------

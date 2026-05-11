@@ -43,7 +43,9 @@ def get_truth_query(db: Session, ciclo: str, data_ini: datetime.date, data_fim: 
             FatoIbpGranular.mes_projetado >= data_ini,
             FatoIbpGranular.mes_projetado <= data_fim,
             FatoIbpGranular.ciclo_sop == ciclo,
-            func.upper(func.coalesce(DimCliente.bloqueado, 'ATIVO')) != 'INATIVO'
+            # BLINDAGEM MÁXIMA CONTRA INATIVOS (Com Trim e Upper forçados)
+            # Garante que os rateios gerenciais não enviem caixas para o buraco negro
+            func.upper(func.trim(func.coalesce(DimCliente.bloqueado, 'ATIVO'))) != 'INATIVO'
         )
 
 # =====================================================================

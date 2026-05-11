@@ -40,7 +40,7 @@ class NexusLoader:
                         'razaosocial': stmt.excluded.razaosocial, 'regional': stmt.excluded.regional,
                         'bloqueado': stmt.excluded.bloqueado, 'vendedor_nome': stmt.excluded.vendedor_nome, 
                         'gerente_nome': stmt.excluded.gerente_nome,
-                        'supervisor_nome': stmt.excluded.supervisor_nome # <- ADICIONADO AQUI
+                        'supervisor_nome': stmt.excluded.supervisor_nome
                     }
                 )
                 db.execute(stmt)
@@ -67,14 +67,12 @@ class NexusLoader:
 
             log_callback("      • Realizando Upsert Atômico na Fato_Vendas (S&OE Ready)...")
             
-            # ATENÇÃO: Adicionado qtfatura e qtcorte na seleção
             vendas_dicts = df_silver.select([
                 "pedido", "dtapedido", "produto", "cgc", "vendedor_nome", 
                 "qtpedido", "vlpedido", "qtfatura", "qtcorte" 
             ]).to_dicts()
 
             for row in vendas_dicts:
-                # Segurança caso o campo venha nulo nalguma anomalia do ERP
                 qt_fatura_val = row.get('qtfatura') or 0.0
                 qt_corte_val = row.get('qtcorte') or 0.0
 
@@ -82,18 +80,17 @@ class NexusLoader:
                     pedido=row['pedido'], data_pedido=row['dtapedido'],
                     sku=row['produto'], cgc=row['cgc'], vendedor_nome=row['vendedor_nome'],
                     qt_pedido=row['qtpedido'], vl_pedido=row['vlpedido'],
-                    qtfatura=qt_fatura_val, qtcorte=qt_corte_val # Injeção S&OE
+                    qtfatura=qt_fatura_val, qtcorte=qt_corte_val 
                 )
                 
-                # Regra de atualização em caso de conflito (O mesmo pedido atualizado no ERP)
                 stmt_vendas = stmt_vendas.on_conflict_do_update(
                     constraint='uix_vendas_pedido',
                     set_={
                         'qt_pedido': stmt_vendas.excluded.qt_pedido,
                         'vl_pedido': stmt_vendas.excluded.vl_pedido,
                         'vendedor_nome': stmt_vendas.excluded.vendedor_nome,
-                        'qtfatura': stmt_vendas.excluded.qtfatura, # O Faturamento vai subindo
-                        'qtcorte': stmt_vendas.excluded.qtcorte    # Se cortar hoje, reflete aqui
+                        'qtfatura': stmt_vendas.excluded.qtfatura, 
+                        'qtcorte': stmt_vendas.excluded.qtcorte    
                     }
                 )
                 db.execute(stmt_vendas)
@@ -116,18 +113,19 @@ class NexusLoader:
 
         db = SessionLocal() 
         try:
-            # Substituímos o get_current_cycle(db) pelo ciclo_alvo que veio do pipeline
             ciclo_atual = ciclo_alvo 
             log_callback(f"   -> [LOAD] Iniciando construção da matriz FatoIBP para o ciclo {ciclo_atual}...")
 
             from sqlalchemy import text
+            
+            # BLINDAGEM DO RATEIO: Exclui INATIVOS usando o mesmo padrão do shared_ibp
             query_share = text("""
                 WITH cte_base AS (
                     SELECT v.sku, v.cgc, c.vendedor_nome, SUM(v.qt_pedido) as total_cliente
                     FROM fato_vendas v
                     JOIN dim_clientes c ON v.cgc = c.cgc
                     WHERE v.data_pedido >= CURRENT_DATE - INTERVAL '6 months'
-                      AND UPPER(COALESCE(c.bloqueado, 'ATIVO')) != 'INATIVO'
+                      AND UPPER(TRIM(COALESCE(c.bloqueado, 'ATIVO'))) != 'INATIVO'
                     GROUP BY v.sku, v.cgc, c.vendedor_nome
                 ), cte_total AS (
                     SELECT sku, SUM(total_cliente) as total_sku
