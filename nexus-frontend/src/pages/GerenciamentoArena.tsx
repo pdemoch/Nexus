@@ -3,8 +3,8 @@ import {
   useReactTable, getCoreRowModel, flexRender, getExpandedRowModel, getSortedRowModel, SortingState
 } from '@tanstack/react-table';
 import { 
-  Check, TrendingUp, Filter, Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
-  Lock, Unlock, Search, X, Store, Package, Users, Download, BarChart2, Activity, ShieldAlert, AlertTriangle
+  Check, Filter, Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
+  Lock, Unlock, Search, X, Store, Package, Users, Download, BarChart2, Activity, Shield
 } from 'lucide-react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
@@ -32,7 +32,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
 
   const [busca, setBusca] = useState('');
-  const [opcoesBusca, setOpcoesBusca] = useState<{vendedores: string[], regionais: string[]}>({vendedores: [], regionais: []});
+  const [opcoesBusca, setOpcoesBusca] = useState<{coordenadores: string[], vendedores: string[], regionais: string[]}>({coordenadores: [], vendedores: [], regionais: []});
 
   useEffect(() => {
     // Busca os filtros da gerência
@@ -74,7 +74,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
        await axios.post('/api/v1/consensus/gerenciamento/toggle-lock', { origem });
        fetchData();
     } catch (e: any) {
-       alert(e.response?.data?.detail || "Erro ao trancar/destrancar vendedor.");
+       alert(e.response?.data?.detail || "Erro ao trancar/destrancar alvo.");
     }
   };
 
@@ -92,29 +92,36 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     if (dadosBrutos.length === 0) return alert("Não há dados na tela para exportar.");
     const dadosExcel: any[] = [];
     
-    dadosBrutos.forEach(vendedor => {
-      vendedor.subRows.forEach((cliente: any) => {
-        cliente.subRows.forEach((prod: any) => {
-          const linha: any = {
-            "VENDEDOR": vendedor.nome, "STATUS CARTEIRA": vendedor.status,
-            "RAZÃO SOCIAL": cliente.nome, "CÓDIGO SKU": prod.produto, "DESCRIÇÃO": prod.nome, 
-            "PMV PONDERADO (R$)": prod.meses[0]?.pmv || 0
-          };
-          prod.meses.forEach((m: any) => {
-            const edicao = celulasEditadas[prod.chave_matriz]?.[m.mes_banco];
-            const volFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : m.vol_ajustado));
-            linha[`${m.mes_str} (Base IA)`] = Math.round(Number(m.vol_ia));
-            linha[`${m.mes_str} (Gerencial)`] = volFinal;
+    // Iteração profunda para a árvore de 4 níveis (Coordenador > Vendedor > Cliente > Prod)
+    dadosBrutos.forEach(coord => {
+      coord.subRows.forEach((vendedor: any) => {
+        vendedor.subRows.forEach((cliente: any) => {
+          cliente.subRows.forEach((prod: any) => {
+            const linha: any = {
+              "COORDENADOR": coord.nome,
+              "VENDEDOR": vendedor.nome, 
+              "STATUS CARTEIRA": vendedor.status,
+              "RAZÃO SOCIAL": cliente.nome, 
+              "CÓDIGO SKU": prod.produto, 
+              "DESCRIÇÃO": prod.nome, 
+              "PMV PONDERADO (R$)": prod.meses[0]?.pmv || 0
+            };
+            prod.meses.forEach((m: any) => {
+              const edicao = celulasEditadas[prod.chave_matriz]?.[m.mes_banco];
+              const volFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : m.vol_ajustado));
+              linha[`${m.mes_str} (Base IA)`] = Math.round(Number(m.vol_ia));
+              linha[`${m.mes_str} (Gerencial)`] = volFinal;
+            });
+            dadosExcel.push(linha);
           });
-          dadosExcel.push(linha);
         });
       });
     });
 
     const worksheet = XLSX.utils.json_to_sheet(dadosExcel);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Gerenciamento_Macro");
-    worksheet['!cols'] = [{ wch: 25 }, { wch: 15 }, { wch: 30 }, { wch: 15 }, { wch: 40 }, { wch: 18 }];
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Gerenciamento_SOP");
+    worksheet['!cols'] = [{ wch: 20 }, { wch: 25 }, { wch: 15 }, { wch: 30 }, { wch: 15 }, { wch: 40 }, { wch: 18 }];
     XLSX.writeFile(workbook, `SOP_Nexus_Gerenciamento_${new Date().toISOString().split('T')[0]}.xlsx`);
   };
 
@@ -124,7 +131,8 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     Object.entries(celulasEditadas).forEach(([chave, meses]: any) => {
       Object.entries(meses).forEach(([mes, val]: any) => {
         const partes = chave.split('|');
-        const nivel = partes.length === 3 ? 'produto' : partes.length === 2 ? 'cliente' : 'vendedor';
+        // Definição do nível baseada na profundidade da chave (4 níveis agora)
+        const nivel = partes.length === 4 ? 'produto' : partes.length === 3 ? 'cliente' : partes.length === 2 ? 'vendedor' : 'coordenador';
         
         ajustes.push({ 
           nivel: nivel, 
@@ -137,7 +145,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
 
     try {
       await axios.post(`/api/v1/consensus/gerenciamento/aprovar`, { ajustes });
-      alert("✅ Volume gerencial salvo com sucesso e rateado para os níveis inferiores!");
+      alert("✅ Volume gerencial salvo com sucesso e rateado para as estruturas inferiores!");
       fetchData(); 
     } catch (e: any) {
       alert(e.response?.data?.detail || "Erro ao guardar as alterações.");
@@ -150,42 +158,53 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     if (!busca) return dadosBrutos;
     const term = busca.toLowerCase();
     
-    return dadosBrutos.map(vendedor => {
-      if (vendedor.nome.toLowerCase().includes(term)) return vendedor;
+    // Filtragem em cascata pelos 4 níveis
+    return dadosBrutos.map(coord => {
+      if (coord.nome.toLowerCase().includes(term)) return coord;
       
-      const clientesFiltrados = vendedor.subRows.map((cliente: any) => {
-        if (cliente.nome.toLowerCase().includes(term)) return cliente;
+      const vendsFiltrados = coord.subRows.map((vendedor: any) => {
+        if (vendedor.nome.toLowerCase().includes(term)) return vendedor;
         
-        const prodsFiltrados = cliente.subRows.filter((p: any) => 
-          (p.nome.toLowerCase().includes(term) || (p.produto && p.produto.toLowerCase().includes(term)))
-        );
-        
-        if (prodsFiltrados.length > 0) return { ...cliente, subRows: prodsFiltrados };
+        const clientesFiltrados = vendedor.subRows.map((cliente: any) => {
+          if (cliente.nome.toLowerCase().includes(term)) return cliente;
+          
+          const prodsFiltrados = cliente.subRows.filter((p: any) => 
+            (p.nome.toLowerCase().includes(term) || (p.produto && p.produto.toLowerCase().includes(term)))
+          );
+          
+          if (prodsFiltrados.length > 0) return { ...cliente, subRows: prodsFiltrados };
+          return null;
+        }).filter(Boolean);
+
+        if (clientesFiltrados.length > 0) return { ...vendedor, subRows: clientesFiltrados };
         return null;
       }).filter(Boolean);
 
-      if (clientesFiltrados.length > 0) return { ...vendedor, subRows: clientesFiltrados };
+      if (vendsFiltrados.length > 0) return { ...coord, subRows: vendsFiltrados };
       return null;
     }).filter(Boolean);
   }, [dadosBrutos, busca]);
 
   const totaisGerais = useMemo(() => {
     const totais: Record<string, {vol: number, fat: number}> = {};
-    dadosFiltrados.forEach(vendedor => {
-      vendedor.meses.forEach((m: any) => totais[m.mes_banco] = {vol: 0, fat: 0});
+    dadosFiltrados.forEach(coord => {
+      coord.meses.forEach((m: any) => totais[m.mes_banco] = {vol: 0, fat: 0});
     });
     
-    dadosFiltrados.forEach(vendedor => {
-      vendedor.subRows.forEach((cliente: any) => {
-        cliente.subRows.forEach((prod: any) => {
-          const pmvBase = prod.meses[0]?.pmv || 0;
-          prod.meses.forEach((mes: any) => {
-            const edicaoProd = celulasEditadas[prod.chave_matriz]?.[mes.mes_banco];
-            const isPendente = edicaoProd !== undefined;
-            const volumeFinal = Math.round(Number(isPendente ? edicaoProd.novo_volume : mes.vol_ajustado));
-            
-            totais[mes.mes_banco].vol += volumeFinal;
-            totais[mes.mes_banco].fat += isPendente ? (volumeFinal * pmvBase) : (mes.receita || 0);
+    // Somatório profundo (Coordenador -> Vendedor -> Cliente -> Prod)
+    dadosFiltrados.forEach(coord => {
+      coord.subRows.forEach((vendedor: any) => {
+        vendedor.subRows.forEach((cliente: any) => {
+          cliente.subRows.forEach((prod: any) => {
+            const pmvBase = prod.meses[0]?.pmv || 0;
+            prod.meses.forEach((mes: any) => {
+              const edicaoProd = celulasEditadas[prod.chave_matriz]?.[mes.mes_banco];
+              const isPendente = edicaoProd !== undefined;
+              const volumeFinal = Math.round(Number(isPendente ? edicaoProd.novo_volume : mes.vol_ajustado));
+              
+              totais[mes.mes_banco].vol += volumeFinal;
+              totais[mes.mes_banco].fat += isPendente ? (volumeFinal * pmvBase) : (mes.receita || 0);
+            });
           });
         });
       });
@@ -220,16 +239,17 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     
     const baseCols: any[] = [
       {
-        id: 'nome', header: 'Vendedor / Cliente / Produto',
+        id: 'nome', header: 'Hierarquia S&OP',
         accessorFn: (row: any) => row.nome,
         cell: (info: any) => {
           const row = info.row;
+          const isCoordenador = row.original.tipo === 'coordenador';
           const isVendedor = row.original.tipo === 'vendedor';
           const isCliente = row.original.tipo === 'cliente';
           const isProduto = row.original.tipo === 'produto';
 
           return (
-            <div style={{ paddingLeft: `${row.depth * 2}rem` }} className="flex items-center gap-3 py-2 min-w-[320px]">
+            <div style={{ paddingLeft: `${row.depth * 2}rem` }} className="flex items-center gap-3 py-2 min-w-[350px]">
               {!isProduto ? (
                 <button onClick={row.getToggleExpandedHandler()} className="p-1.5 hover:bg-slate-200 text-slate-500 rounded-lg transition-colors">
                   {row.getIsExpanded() ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
@@ -242,8 +262,8 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                 <BarChart2 className="w-4 h-4" />
               </button>
 
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center border flex-shrink-0 ${isVendedor ? 'bg-blue-100 border-blue-200 text-blue-600' : isCliente ? 'bg-indigo-50 border-indigo-100 text-indigo-600' : 'bg-slate-50 border-slate-200 text-slate-400'}`}>
-                {isVendedor ? <Users className="w-4 h-4" /> : isCliente ? <Store className="w-4 h-4" /> : <Package className="w-4 h-4" />}
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center border flex-shrink-0 ${isCoordenador ? 'bg-indigo-900 border-indigo-950 text-white' : isVendedor ? 'bg-blue-100 border-blue-200 text-blue-600' : isCliente ? 'bg-indigo-50 border-indigo-100 text-indigo-600' : 'bg-slate-50 border-slate-200 text-slate-400'}`}>
+                {isCoordenador ? <Shield className="w-4 h-4" /> : isVendedor ? <Users className="w-4 h-4" /> : isCliente ? <Store className="w-4 h-4" /> : <Package className="w-4 h-4" />}
               </div>
               
               <div className="flex flex-col">
@@ -257,8 +277,8 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                  )}
               </div>
 
-              {isVendedor && (
-                <button onClick={() => handleToggleLock(row.original.nome)} title={row.original.status === 'Fechado' ? 'Destrancar Carteira' : 'Trancar Carteira'} className={`ml-auto px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest flex items-center gap-1.5 shadow-sm transition-all hover:scale-105 ${row.original.status === 'Fechado' ? 'bg-rose-500 text-white border border-rose-600' : 'bg-emerald-500 text-white border border-emerald-600'}`}>
+              {(isCoordenador || isVendedor) && (
+                <button onClick={() => handleToggleLock(row.original.nome)} title={row.original.status === 'Fechado' ? 'Destrancar' : 'Trancar'} className={`ml-auto px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest flex items-center gap-1.5 shadow-sm transition-all hover:scale-105 ${row.original.status === 'Fechado' ? 'bg-rose-500 text-white border border-rose-600' : 'bg-emerald-500 text-white border border-emerald-600'}`}>
                    {row.original.status === 'Fechado' ? <><Lock className="w-3 h-3"/> Trancado</> : <><Unlock className="w-3 h-3"/> Aberto</>}
                 </button>
               )}
@@ -269,7 +289,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     ];
 
     const mesesMap = new Map();
-    dadosFiltrados.forEach(v => v.meses.forEach((m: any) => mesesMap.set(m.mes_banco, m)));
+    dadosFiltrados.forEach(c => c.meses.forEach((m: any) => mesesMap.set(m.mes_banco, m)));
     
     Array.from(mesesMap.values()).sort((a: any, b: any) => a.mes_banco.localeCompare(b.mes_banco)).forEach((m: any) => {
       baseCols.push({
@@ -277,6 +297,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
         accessorFn: (row: any) => row.meses.find((rm: any) => rm.mes_banco === m.mes_banco)?.vol_ajustado || 0,
         cell: (info: any) => {
           const row = info.row.original;
+          const isCoordenador = row.tipo === 'coordenador';
           const isVendedor = row.tipo === 'vendedor';
           const isCliente = row.tipo === 'cliente';
           
@@ -291,12 +312,18 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           const isChanged = valorInteiro !== baseIA;
           const faturamentoPrevisto = isPendente ? (valorInteiro * (dadosMes?.pmv || 0)) : (dadosMes?.receita || 0);
           
-          // Verifica se o vendedor pai está trancado
-          const parentVendedor = row.chave_matriz.split('|')[0];
-          const vNode = dadosFiltrados.find(v => v.nome === parentVendedor);
-          const bloqueado = vNode?.status === 'Fechado' || !isTopDownFechado;
+          // Lógica de Trava em Cascata (Coordenador tranca Vendedor que tranca filhos)
+          const partes = row.chave_matriz.split('|');
+          const coordenadorNome = partes[0];
+          const vendedorNome = partes[1]; // Pode ser undefined na linha do próprio coordenador
 
-          if (isVendedor) {
+          const nodeCoordenador = dadosFiltrados.find(c => c.nome === coordenadorNome);
+          const nodeVendedor = nodeCoordenador?.subRows.find((v: any) => v.nome === vendedorNome);
+          
+          const bloqueado = !isTopDownFechado || nodeCoordenador?.status === 'Fechado' || nodeVendedor?.status === 'Fechado';
+
+          // A linha do Coordenador é de visualização (soma da equipa), não tem input
+          if (isCoordenador) {
             return (
               <div className="flex flex-col items-center justify-center py-2 w-28">
                  <span className="text-sm font-black text-slate-800">{formatVolume(valorInteiro)}</span>
@@ -316,11 +343,11 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                 onChange={(e) => meta.updateCell(row.chave_matriz, m.mes_banco, e.target.value)}
                 className={`text-sm text-center font-black p-2.5 rounded-xl outline-none border-2 transition-all w-full
                   ${bloqueado ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed opacity-80' : 
-                    isCliente ? 'border-dashed border-indigo-200 focus:border-indigo-500 focus:bg-indigo-50 text-indigo-900 bg-white' : 'border-solid'} 
-                  ${isChanged && !isCliente && !bloqueado ? 'bg-indigo-600 border-indigo-700 text-white shadow-md' : !isCliente && !bloqueado ? 'bg-slate-50 border-transparent text-slate-800 focus:bg-white focus:border-slate-300' : ''}`}
-                title={bloqueado ? "Carteira Trancada" : isCliente ? "Editar Matriz (Rateia para os SKUs do cliente)" : "Editar SKU"}
+                    isCliente || isVendedor ? 'border-dashed border-indigo-200 focus:border-indigo-500 focus:bg-indigo-50 text-indigo-900 bg-white' : 'border-solid'} 
+                  ${isChanged && !isCliente && !isVendedor && !bloqueado ? 'bg-indigo-600 border-indigo-700 text-white shadow-md' : !isCliente && !isVendedor && !bloqueado ? 'bg-slate-50 border-transparent text-slate-800 focus:bg-white focus:border-slate-300' : ''}`}
+                title={bloqueado ? "Carteira Trancada" : isVendedor ? "Editar Equipa Comercial (Rateia para todos abaixo)" : isCliente ? "Editar Matriz (Rateia para os SKUs do cliente)" : "Editar SKU"}
               />
-              <span className={`text-[10px] font-black text-center tracking-tight ${bloqueado ? 'text-slate-400' : isCliente ? 'text-indigo-500' : 'text-emerald-600'}`}>
+              <span className={`text-[10px] font-black text-center tracking-tight ${bloqueado ? 'text-slate-400' : isCliente || isVendedor ? 'text-indigo-500' : 'text-emerald-600'}`}>
                 {formatMoeda(faturamentoPrevisto)}
               </span>
             </div>
@@ -417,6 +444,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                 className="bg-slate-50 border border-slate-200 text-sm font-bold p-2.5 rounded-xl outline-none text-slate-700 cursor-pointer"
             >
                 <option value="regional">Por Regional</option>
+                <option value="coordenador">Por Coordenador</option>
                 <option value="vendedor">Por Vendedor</option>
             </select>
             
@@ -425,8 +453,8 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                 onChange={e => setNomeResponsavel(e.target.value)} 
                 className="flex-1 bg-slate-50 border border-slate-200 p-2.5 rounded-xl text-sm font-bold text-slate-700 outline-none cursor-pointer"
             >
-                <option value="">{nivelHierarquia === 'vendedor' ? '-- Selecione um Vendedor (Opcional) --' : '-- Selecione uma Regional (Opcional) --'}</option>
-                {(nivelHierarquia === 'vendedor' ? opcoesBusca.vendedores : opcoesBusca.regionais).map(opt => (
+                <option value="">{nivelHierarquia === 'coordenador' ? '-- Selecione o Coordenador --' : nivelHierarquia === 'vendedor' ? '-- Selecione o Vendedor --' : '-- Selecione a Regional --'}</option>
+                {(nivelHierarquia === 'coordenador' ? opcoesBusca.coordenadores : nivelHierarquia === 'vendedor' ? opcoesBusca.vendedores : opcoesBusca.regionais).map(opt => (
                     <option key={opt} value={opt}>{opt}</option>
                 ))}
             </select>
@@ -493,7 +521,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
               <tbody>
                 {table.getRowModel().rows.map(row => (
                   <Fragment key={row.id}>
-                    <tr className={`border-b border-slate-50 transition-colors ${row.getIsExpanded() ? 'bg-blue-50/20' : row.original.tipo === 'vendedor' ? 'bg-slate-50/80 hover:bg-slate-100' : row.original.tipo === 'cliente' ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/30 hover:bg-slate-50'}`}>
+                    <tr className={`border-b border-slate-50 transition-colors ${row.getIsExpanded() ? 'bg-blue-50/20' : row.original.tipo === 'coordenador' ? 'bg-indigo-50/40 hover:bg-indigo-50' : row.original.tipo === 'vendedor' ? 'bg-slate-50/80 hover:bg-slate-100' : row.original.tipo === 'cliente' ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/30 hover:bg-slate-50'}`}>
                       {row.getVisibleCells().map(cell => (
                         <td key={cell.id} className="px-8 py-2">
                           {flexRender(cell.column.columnDef.cell, cell.getContext())}
@@ -508,7 +536,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                             <div className="flex justify-between items-start mb-6 px-2">
                                <div className="flex flex-col gap-1">
                                  <h3 className="text-lg font-black text-white uppercase tracking-tighter flex items-center gap-2">
-                                   <Activity className="w-5 h-5 text-blue-400" /> Curva S&OE ({row.original.tipo === 'vendedor' ? 'Visão Carteira Completa' : row.original.tipo === 'cliente' ? 'Visão Conta Global' : 'Visão Produto'})
+                                   <Activity className="w-5 h-5 text-blue-400" /> Curva S&OE ({row.original.tipo === 'coordenador' ? 'Visão Supervisão' : row.original.tipo === 'vendedor' ? 'Visão Carteira de Vendas' : row.original.tipo === 'cliente' ? 'Visão Conta Global' : 'Visão Produto'})
                                  </h3>
                                  <p className="text-xs font-bold text-slate-400 tracking-widest uppercase">
                                    {row.original.nome}
