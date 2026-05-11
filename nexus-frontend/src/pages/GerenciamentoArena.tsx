@@ -35,11 +35,9 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   const [opcoesBusca, setOpcoesBusca] = useState<{coordenadores: string[], vendedores: string[], regionais: string[]}>({coordenadores: [], vendedores: [], regionais: []});
 
   useEffect(() => {
-    // Busca os filtros da gerência
     axios.get('/api/v1/consensus/gerenciamento/filtros')
          .then(res => setOpcoesBusca(res.data)).catch(console.error);
 
-    // Consulta a rota macro (Top-Down) para saber se a tela está liberada
     axios.get('/api/v1/consensus/macro/status')
          .then(res => setIsTopDownFechado(res.data.is_topdown_fechado))
          .catch(() => setIsTopDownFechado(false));
@@ -64,7 +62,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   }, [nivelHierarquia, nomeResponsavel]);
 
   useEffect(() => { 
-    // Carrega dados automaticamente se o Top-Down estiver fechado
     if (isTopDownFechado) fetchData(); 
   }, [fetchData, isTopDownFechado]);
 
@@ -92,7 +89,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     if (dadosBrutos.length === 0) return alert("Não há dados na tela para exportar.");
     const dadosExcel: any[] = [];
     
-    // Iteração profunda para a árvore de 4 níveis (Coordenador > Vendedor > Cliente > Prod)
     dadosBrutos.forEach(coord => {
       coord.subRows.forEach((vendedor: any) => {
         vendedor.subRows.forEach((cliente: any) => {
@@ -101,6 +97,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
               "COORDENADOR": coord.nome,
               "VENDEDOR": vendedor.nome, 
               "STATUS CARTEIRA": vendedor.status,
+              "CNPJ": cliente.cnpj,
               "RAZÃO SOCIAL": cliente.nome, 
               "CÓDIGO SKU": prod.produto, 
               "DESCRIÇÃO": prod.nome, 
@@ -121,7 +118,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     const worksheet = XLSX.utils.json_to_sheet(dadosExcel);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Gerenciamento_SOP");
-    worksheet['!cols'] = [{ wch: 20 }, { wch: 25 }, { wch: 15 }, { wch: 30 }, { wch: 15 }, { wch: 40 }, { wch: 18 }];
+    worksheet['!cols'] = [{ wch: 20 }, { wch: 25 }, { wch: 15 }, { wch: 18 }, { wch: 30 }, { wch: 15 }, { wch: 40 }, { wch: 18 }];
     XLSX.writeFile(workbook, `SOP_Nexus_Gerenciamento_${new Date().toISOString().split('T')[0]}.xlsx`);
   };
 
@@ -131,7 +128,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     Object.entries(celulasEditadas).forEach(([chave, meses]: any) => {
       Object.entries(meses).forEach(([mes, val]: any) => {
         const partes = chave.split('|');
-        // Definição do nível baseada na profundidade da chave (4 níveis agora)
         const nivel = partes.length === 4 ? 'produto' : partes.length === 3 ? 'cliente' : partes.length === 2 ? 'vendedor' : 'coordenador';
         
         ajustes.push({ 
@@ -158,7 +154,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     if (!busca) return dadosBrutos;
     const term = busca.toLowerCase();
     
-    // Filtragem em cascata pelos 4 níveis
     return dadosBrutos.map(coord => {
       if (coord.nome.toLowerCase().includes(term)) return coord;
       
@@ -166,7 +161,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
         if (vendedor.nome.toLowerCase().includes(term)) return vendedor;
         
         const clientesFiltrados = vendedor.subRows.map((cliente: any) => {
-          if (cliente.nome.toLowerCase().includes(term)) return cliente;
+          if (cliente.nome.toLowerCase().includes(term) || (cliente.cnpj && cliente.cnpj.includes(term))) return cliente;
           
           const prodsFiltrados = cliente.subRows.filter((p: any) => 
             (p.nome.toLowerCase().includes(term) || (p.produto && p.produto.toLowerCase().includes(term)))
@@ -191,7 +186,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
       coord.meses.forEach((m: any) => totais[m.mes_banco] = {vol: 0, fat: 0});
     });
     
-    // Somatório profundo (Coordenador -> Vendedor -> Cliente -> Prod)
     dadosFiltrados.forEach(coord => {
       coord.subRows.forEach((vendedor: any) => {
         vendedor.subRows.forEach((cliente: any) => {
@@ -270,6 +264,12 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                  <span className={`text-sm ${!isProduto ? 'font-black text-slate-800 uppercase tracking-tighter' : 'font-bold text-slate-600 truncate max-w-[250px]'}`}>
                    {info.getValue()}
                  </span>
+                 {/* MOSTRA O CNPJ AQUI EMBAIXO DO NOME DO CLIENTE */}
+                 {isCliente && row.original.cnpj && (
+                   <div className="flex items-center gap-2 mt-0.5">
+                     <span className="text-[10px] text-slate-400 font-bold tracking-widest uppercase">CNPJ: {row.original.cnpj}</span>
+                   </div>
+                 )}
                  {isProduto && (
                    <div className="flex items-center gap-2 mt-1">
                      <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">{row.original.produto}</span>
@@ -312,17 +312,15 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           const isChanged = valorInteiro !== baseIA;
           const faturamentoPrevisto = isPendente ? (valorInteiro * (dadosMes?.pmv || 0)) : (dadosMes?.receita || 0);
           
-          // Lógica de Trava em Cascata (Coordenador tranca Vendedor que tranca filhos)
           const partes = row.chave_matriz.split('|');
           const coordenadorNome = partes[0];
-          const vendedorNome = partes[1]; // Pode ser undefined na linha do próprio coordenador
+          const vendedorNome = partes[1]; 
 
           const nodeCoordenador = dadosFiltrados.find(c => c.nome === coordenadorNome);
           const nodeVendedor = nodeCoordenador?.subRows.find((v: any) => v.nome === vendedorNome);
           
           const bloqueado = !isTopDownFechado || nodeCoordenador?.status === 'Fechado' || nodeVendedor?.status === 'Fechado';
 
-          // A linha do Coordenador é de visualização (soma da equipa), não tem input
           if (isCoordenador) {
             return (
               <div className="flex flex-col items-center justify-center py-2 w-28">
@@ -374,7 +372,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     }
   });
 
-  // TELA DE BLOQUEIO DE FASE
   if (isTopDownFechado === null) {
     return (
       <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
@@ -404,9 +401,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
       <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative">
         
-        {/* CABEÇALHO */}
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 relative overflow-hidden">
-          
           <div>
             <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
               <Users className="w-8 h-8 text-blue-600" /> Metas por Cliente (Gerenciamento)
@@ -418,13 +413,10 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           
           <div className="flex items-center gap-4">
               <div className="flex items-center gap-3 h-full">
-                
-                {/* BOTÕES DE TRANCAMENTO EM MASSA */}
                 <div className="flex bg-slate-100 p-1 rounded-2xl mr-4 border border-slate-200">
                    <button onClick={() => handleLockAll('Trancar')} className="px-4 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest text-slate-600 hover:bg-white hover:shadow-sm hover:text-slate-900 transition-all flex items-center gap-1.5"><Lock className="w-3.5 h-3.5"/> Trancar Todos</button>
                    <button onClick={() => handleLockAll('Destrancar')} className="px-4 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest text-slate-600 hover:bg-white hover:shadow-sm hover:text-slate-900 transition-all flex items-center gap-1.5"><Unlock className="w-3.5 h-3.5"/> Reabrir Todos</button>
                 </div>
-
                 {qtdEdicoes > 0 && (<button onClick={() => setCelulasEditadas({})} className="flex items-center gap-1 text-xs font-black text-rose-500 hover:text-rose-700 transition tracking-widest uppercase px-4 py-3 rounded-2xl hover:bg-rose-50"><X className="w-4 h-4" /> Descartar</button>)}
                 <button onClick={handleSalvar} disabled={isProcessing || qtdEdicoes === 0} className={`flex items-center gap-2 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase transition-all shadow-lg ${qtdEdicoes === 0 ? 'bg-slate-300 cursor-not-allowed shadow-none' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-600/30'}`}>
                     {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : <Check className="w-5 h-5" />}
@@ -434,38 +426,21 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           </div>
         </div>
 
-        {/* CONTROLES E BUSCA */}
         <div className="flex items-center gap-4 mb-6 bg-white p-4 rounded-2xl shadow-sm border border-slate-100">
             <span className="text-xs font-black text-slate-500 uppercase tracking-widest">Filtrar Visão:</span>
-            
-            <select 
-                value={nivelHierarquia} 
-                onChange={e => {setNivelHierarquia(e.target.value); setNomeResponsavel('');}} 
-                className="bg-slate-50 border border-slate-200 text-sm font-bold p-2.5 rounded-xl outline-none text-slate-700 cursor-pointer"
-            >
+            <select value={nivelHierarquia} onChange={e => {setNivelHierarquia(e.target.value); setNomeResponsavel('');}} className="bg-slate-50 border border-slate-200 text-sm font-bold p-2.5 rounded-xl outline-none text-slate-700 cursor-pointer">
                 <option value="regional">Por Regional</option>
                 <option value="coordenador">Por Coordenador</option>
                 <option value="vendedor">Por Vendedor</option>
             </select>
-            
-            <select 
-                value={nomeResponsavel} 
-                onChange={e => setNomeResponsavel(e.target.value)} 
-                className="flex-1 bg-slate-50 border border-slate-200 p-2.5 rounded-xl text-sm font-bold text-slate-700 outline-none cursor-pointer"
-            >
+            <select value={nomeResponsavel} onChange={e => setNomeResponsavel(e.target.value)} className="flex-1 bg-slate-50 border border-slate-200 p-2.5 rounded-xl text-sm font-bold text-slate-700 outline-none cursor-pointer">
                 <option value="">{nivelHierarquia === 'coordenador' ? '-- Selecione o Coordenador --' : nivelHierarquia === 'vendedor' ? '-- Selecione o Vendedor --' : '-- Selecione a Regional --'}</option>
                 {(nivelHierarquia === 'coordenador' ? opcoesBusca.coordenadores : nivelHierarquia === 'vendedor' ? opcoesBusca.vendedores : opcoesBusca.regionais).map(opt => (
                     <option key={opt} value={opt}>{opt}</option>
                 ))}
             </select>
-
-            <button 
-            onClick={fetchData} 
-            disabled={isLoading} 
-            className="bg-blue-50 text-blue-600 px-6 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-blue-100 transition disabled:opacity-50 flex items-center gap-2"
-            >
-                {isLoading ? <Loader2 className="w-4 h-4 animate-spin"/> : <Search className="w-4 h-4"/>} 
-                Aplicar Filtro
+            <button onClick={fetchData} disabled={isLoading} className="bg-blue-50 text-blue-600 px-6 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-blue-100 transition disabled:opacity-50 flex items-center gap-2">
+                {isLoading ? <Loader2 className="w-4 h-4 animate-spin"/> : <Search className="w-4 h-4"/>} Aplicar Filtro
             </button>
         </div>
 
@@ -473,10 +448,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
            <div className="flex-1 bg-white p-3 rounded-[24px] shadow-sm border border-slate-100 flex flex-col md:flex-row items-center gap-3">
              <div className="flex-1 flex items-center gap-3 px-4 bg-slate-50 rounded-xl border border-slate-100 w-full">
                <Search className="w-5 h-5 text-slate-400" />
-               <input 
-                 type="text" placeholder="Pesquisar livremente na árvore..." value={busca} onChange={e => setBusca(e.target.value)}
-                 className="w-full bg-transparent py-3 text-sm font-bold text-slate-800 outline-none placeholder:text-slate-400"
-               />
+               <input type="text" placeholder="Pesquisar livremente na árvore..." value={busca} onChange={e => setBusca(e.target.value)} className="w-full bg-transparent py-3 text-sm font-bold text-slate-800 outline-none placeholder:text-slate-400" />
              </div>
              <button onClick={handleExportExcel} className="flex items-center gap-2 bg-slate-100 hover:bg-blue-50 text-slate-700 px-6 py-3 rounded-xl text-xs font-black tracking-widest uppercase transition-all border border-slate-200 ml-auto whitespace-nowrap">
                 <Download className="w-4 h-4" /> Exportar Matriz
@@ -484,7 +456,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
            </div>
         </div>
 
-        {/* TABELA DE DADOS */}
         <div className="bg-white rounded-[40px] shadow-2xl border border-slate-100 overflow-hidden relative min-h-[400px]">
           {isLoading ? (
              <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 backdrop-blur-sm z-10">
@@ -538,12 +509,9 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                                  <h3 className="text-lg font-black text-white uppercase tracking-tighter flex items-center gap-2">
                                    <Activity className="w-5 h-5 text-blue-400" /> Curva S&OE ({row.original.tipo === 'coordenador' ? 'Visão Supervisão' : row.original.tipo === 'vendedor' ? 'Visão Carteira de Vendas' : row.original.tipo === 'cliente' ? 'Visão Conta Global' : 'Visão Produto'})
                                  </h3>
-                                 <p className="text-xs font-bold text-slate-400 tracking-widest uppercase">
-                                   {row.original.nome}
-                                 </p>
+                                 <p className="text-xs font-bold text-slate-400 tracking-widest uppercase">{row.original.nome}</p>
                                </div>
                             </div>
-
                             <div className="h-[250px] w-full">
                               {loadingGrafico === row.original.chave_matriz ? (
                                 <div className="h-full flex items-center justify-center text-slate-600"><Loader2 className="animate-spin w-8 h-8" /></div>
@@ -565,9 +533,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                                     <YAxis tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} tickLine={false} />
                                     <Tooltip contentStyle={{borderRadius: '20px', backgroundColor: '#0f172a', border: '1px solid #1e293b', color: '#fff', boxShadow: '0 10px 30px rgba(0,0,0,0.5)'}} />
                                     <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900', color: '#cbd5e1'}} />
-                                    
                                     <Line type="monotone" dataKey="CicloAnterior" name="Mês Passado" stroke="#f59e0b" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
-
                                     <Line type="monotone" dataKey="Realizado" name="Venda Real" stroke="#f8fafc" strokeWidth={4} dot={{r: 3, fill: '#f8fafc'}} connectNulls={false} />
                                     <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#475569" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
                                     <Line type="monotone" dataKey="Consenso" name="Proposta Atual" stroke="#3b82f6" strokeWidth={5} dot={{r: 6, fill: '#3b82f6', strokeWidth: 2, stroke: '#0f172a'}} connectNulls={false} />
@@ -582,7 +548,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                   </Fragment>
                 ))}
               </tbody>
-              
               <tfoot className="bg-slate-900 text-white">
                 <tr>
                   {table.getHeaderGroups()[0].headers.map(header => {
