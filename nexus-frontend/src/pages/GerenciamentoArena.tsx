@@ -14,8 +14,6 @@ const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: '
 const formatVolume = (val: number) => Math.round(val).toLocaleString('pt-BR');
 
 export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: any }) {
-  const isExecutivo = usuarioSessao?.funcao === 'Executivo';
-
   const [nivelHierarquia, setNivelHierarquia] = useState('regional');
   const [nomeResponsavel, setNomeResponsavel] = useState('');
 
@@ -66,8 +64,9 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   }, [nivelHierarquia, nomeResponsavel]);
 
   useEffect(() => { 
-    if (!isExecutivo && isTopDownFechado) fetchData(); 
-  }, [fetchData, isExecutivo, isTopDownFechado]);
+    // Carrega dados automaticamente se o Top-Down estiver fechado
+    if (isTopDownFechado) fetchData(); 
+  }, [fetchData, isTopDownFechado]);
 
   const handleToggleLock = async (origem: string) => {
     if (!isTopDownFechado) return;

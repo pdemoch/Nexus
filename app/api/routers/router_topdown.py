@@ -11,14 +11,15 @@ from app.core.database import get_db
 from app.models.domain_models import DimProduto, FatoIbpGranular, ControleCiclo, FatoVendas
 from app.api.routers.router_auth import get_current_user
 
-# Importação do Cérebro compartilhado
+# Importação do Cérebro compartilhado (AGORA COM AUDITORIA)
 from app.api.routers.shared_ibp import (
     get_current_cycle,
     get_previous_cycle,
     get_projection_window,
     get_truth_query,
     check_global_lock,
-    parse_date_safe
+    parse_date_safe,
+    registrar_log_auditoria
 )
 
 router = APIRouter(prefix="/api/v1/consensus/macro", tags=["Consenso Top-Down"])
@@ -55,7 +56,6 @@ class PayloadCongelar(BaseModel):
 @router.get("") 
 async def listar_macro(db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
-        # ATUALIZAÇÃO: Passando 'db' para as funções de tempo
         m2, m4 = get_projection_window(db)
         ciclo = get_current_cycle(db)
 
@@ -107,13 +107,11 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
         hoje = datetime.date.today()
         mes_atual_inicio = hoje.replace(day=1)
         
-        # ATUALIZAÇÃO: Passando 'db' para as funções de tempo
         ciclo_atual = get_current_cycle(db)
         ciclo_anterior = get_previous_cycle(db)
         m2, m4 = get_projection_window(db) 
         
         # 2. Queries de Dados
-        # Busca o Histórico Real (Vendas)
         q_hist = db.query(
             func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), 
             func.sum(FatoVendas.qt_pedido).label('vol_real')
@@ -122,7 +120,6 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
             FatoVendas.sku == produto
         ).group_by('mes_ano').all()
 
-        # NOVO: Super Query! Busca TODO o histórico de projeções S&OP deste SKU
         q_all_ibp = db.query(
             FatoIbpGranular.ciclo_sop,
             FatoIbpGranular.mes_projetado,
@@ -134,7 +131,6 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
 
         hist_dict = {h.mes_ano: int(h.vol_real or 0) for h in q_hist}
 
-        # Mapeamento 3D de alta performance: ibp_map[data_iso][ciclo] = volumes
         ibp_map = {}
         for r in q_all_ibp:
             d_iso = str(r.mes_projetado)
@@ -152,12 +148,9 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
             mes_str = dt.strftime('%Y-%m')
             dt_iso = dt.strftime('%Y-%m-%d')
             
-            # Qual era o ciclo ativo naquele exato mês no passado?
             ciclo_do_mes = dt.strftime('%m/%Y')
-            # E qual era o ciclo do mês anterior a ele (Para a Proposta Antiga)?
             ciclo_mes_passado = (dt - relativedelta(months=1)).strftime('%m/%Y')
             
-            # Buscamos as "fotos congeladas" do passado
             dados_mes = ibp_map.get(dt_iso, {}).get(ciclo_do_mes, {})
             dados_lag1 = ibp_map.get(dt_iso, {}).get(ciclo_mes_passado, {})
             
@@ -166,7 +159,7 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
                 "data_iso": dt_iso,
                 "Realizado": hist_dict.get(mes_str, 0),
                 "IA": dados_mes.get('ia', None),
-                "Consenso": None, # <-- ALTERAÇÃO AQUI: Forçamos None para ocultar a Meta Gerencial no passado
+                "Consenso": None, 
                 "CicloAnterior": dados_lag1.get('consenso', None) 
             })
 
@@ -178,13 +171,11 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
             "name": hoje.strftime("%b/%y").capitalize() + " (S&OE)",
             "data_iso": mes_atual_iso,
             "Realizado": hist_dict.get(hoje.strftime('%Y-%m'), 0), 
-            "IA": dados_atual_m0.get('ia', 0), # Mudamos None para 0
+            "IA": dados_atual_m0.get('ia', 0), 
             "Consenso": None, 
             "CicloAnterior": ibp_map.get(mes_atual_iso, {}).get(ciclo_anterior, {}).get('consenso', None)
         })
 
-        # --- A MÁGICA: Régua Fixa de M1 a M4 ---
-        # Garante que o eixo X nunca quebre, mesmo se a IA previu 0 e o DB não salvou.
         for i in range(1, 5):
             p_date = mes_atual_inicio + relativedelta(months=i)
             p_iso = p_date.strftime('%Y-%m-%d')
@@ -195,7 +186,7 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
                 "name": p_date.strftime("%b/%y").capitalize(),
                 "data_iso": p_iso,
                 "Realizado": None,
-                "IA": dados_futuro.get('ia', 0), # Força 0 para desenhar a linha caindo
+                "IA": dados_futuro.get('ia', 0), 
                 "Consenso": dados_futuro.get('consenso', 0) if p_date >= m2 else None,
                 "CicloAnterior": ibp_map.get(p_iso, {}).get(ciclo_anterior, {}).get('consenso', None)
             })
@@ -208,7 +199,6 @@ async def grafico_macro(produto: str, db: Session = Depends(get_db)):
 @router.post("/congelar")
 async def congelar_macro(payload: PayloadCongelar, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
-        # ATUALIZAÇÃO: Passando 'db' para as funções de tempo
         ciclo = get_current_cycle(db)
         check_global_lock(db, ciclo)
         data_limite_str = (datetime.date.today() - relativedelta(months=12)).strftime('%Y-%m-%d')
@@ -221,7 +211,9 @@ async def congelar_macro(payload: PayloadCongelar, db: Session = Depends(get_db)
 
             if not linhas: continue
 
-            # Faz 1 única query global agrupada pelo CGC em vez de 1 query por cliente
+            # AUDITORIA: Salvar o estado antigo antes de ratear
+            total_base_antigo = sum([int(l.vol_topdown or 0) for l in linhas])
+
             historico_agrupado = db.query(
                 FatoVendas.cgc, 
                 func.sum(FatoVendas.qt_pedido).label('vol_cli')
@@ -230,7 +222,6 @@ async def congelar_macro(payload: PayloadCongelar, db: Session = Depends(get_db)
                 FatoVendas.data_pedido >= data_limite_str
             ).group_by(FatoVendas.cgc).all()
 
-            # Transforma em dicionário na RAM para busca instantânea O(1)
             mapa_hist = {h.cgc: float(h.vol_cli or 0) for h in historico_agrupado}
             soma_hist = sum(mapa_hist.values())
             
@@ -241,19 +232,24 @@ async def congelar_macro(payload: PayloadCongelar, db: Session = Depends(get_db)
                 if i == len(linhas) - 1:
                     rateado = volume_total - soma_dist 
                 else:
-                    # Busca o histórico do cliente diretamente no dicionário na memória
                     vol_cli = mapa_hist.get(l.cgc, 0.0)
-                    
                     peso = vol_cli / soma_hist if soma_hist > 0 else 1.0 / len(linhas)
                     rateado = int(round(volume_total * peso))
                     soma_dist += rateado
                     
-                # A CASCATA DE HERANÇA CORRIGIDA:
                 l.vol_topdown = rateado
                 l.vol_bottomup = rateado
                 l.vol_supply = rateado
                 l.vol_final = rateado
                 l.vol_meta = rateado
+
+            # GRAVAR LOG DE AUDITORIA
+            nome_user = usuario.get('nome', usuario.get('email', 'Desconhecido'))
+            registrar_log_auditoria(
+                db=db, ciclo=ciclo, origem="Visão Gerencial (Top-Down)",
+                usuario=nome_user, sku=ajuste.produto, cliente="TODOS_OS_CLIENTES",
+                mes=data_alvo, v_antigo=total_base_antigo, v_novo=ajuste.novo_volume
+            )
 
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
         if not registro: 
@@ -270,6 +266,5 @@ async def congelar_macro(payload: PayloadCongelar, db: Session = Depends(get_db)
 
 @router.get("/status")
 async def checar_status_macro(db: Session = Depends(get_db)):
-    # ATUALIZAÇÃO: Passando 'db' para a função get_current_cycle
     reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == get_current_cycle(db), ControleCiclo.origem == 'Top-Down').first()
     return {"is_topdown_fechado": reg.status == 'Fechado' if reg else False}

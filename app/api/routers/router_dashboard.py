@@ -13,7 +13,15 @@ from app.core.database import get_db
 from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, ControleCiclo, FatoVendas
 from app.api.routers.router_auth import get_current_user
 
-from app.api.routers.shared_ibp import get_current_cycle, get_previous_cycle, get_projection_window, get_truth_query, parse_date_safe
+# Importação do Cérebro compartilhado (COM AUDITORIA)
+from app.api.routers.shared_ibp import (
+    get_current_cycle, 
+    get_previous_cycle, 
+    get_projection_window, 
+    get_truth_query, 
+    parse_date_safe,
+    registrar_log_auditoria
+)
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["S&OP Global Dashboard"])
 
@@ -32,7 +40,6 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
         raise HTTPException(status_code=403, detail="Acesso restrito à Diretoria, Gerência ou Supply Chain.")
         
     try:
-        # ATUALIZAÇÃO: Passando 'db'
         ciclo = get_current_cycle(db)
         m2, m4 = get_projection_window(db)
 
@@ -98,7 +105,6 @@ async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria',
         sku = partes[1] if len(partes) > 1 else None
         cliente = partes[2] if len(partes) > 2 else None
 
-        # ATUALIZAÇÃO: Passando 'db'
         m2_str, _ = get_projection_window(db)
         m2_date = parse_date_safe(m2_str)
         hoje = datetime.date.today()
@@ -163,7 +169,7 @@ async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria',
                 "name": dt.strftime("%b/%y").capitalize(), 
                 "data_iso": dt_iso,
                 "Realizado": hist_dict.get(mes_str, 0), 
-                "IA": dados_mes.get('ia', None), # IA Pura sem mascaramento
+                "IA": dados_mes.get('ia', None),
                 "Comercial": None, 
                 "Supply": None, 
                 "Final": None, 
@@ -208,7 +214,6 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
         raise HTTPException(status_code=403, detail="Apenas a Administrador pode publicar o Plano Final.")
 
     try:
-        # ATUALIZAÇÃO: Passando 'db'
         ciclo = get_current_cycle(db)
         
         for ajuste in payload.ajustes:
@@ -225,6 +230,9 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
             linhas = query.all()
             if not linhas: continue
 
+            # AUDITORIA: Salvar o estado antigo
+            total_base_antigo = sum([float(l.vol_final or 0) for l in linhas])
+
             total_base = sum([float(l.vol_final or 0) for l in linhas])
             soma_dist = 0
             volume_alvo = int(ajuste.novo_volume)
@@ -239,6 +247,16 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
                 
                 l.vol_final = rateado
                 l.vol_meta = rateado
+
+            nome_user = usuario.get('nome', usuario.get('email', 'Desconhecido'))
+            sku_log = partes[1] if len(partes) > 1 else "MULTIPLOS_SKUS"
+            cliente_log = partes[2] if len(partes) > 2 else "TODOS_OS_CLIENTES"
+
+            registrar_log_auditoria(
+                db=db, ciclo=ciclo, origem="S&OP Global (Dashboard Final)",
+                usuario=nome_user, sku=sku_log, cliente=cliente_log,
+                mes=data_alvo, v_antigo=int(total_base_antigo), v_novo=ajuste.novo_volume
+            )
 
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
         if not registro:
@@ -259,7 +277,6 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
 @router.get("/export")
 async def exportar_oficial(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
-        # ATUALIZAÇÃO: Passando 'db'
         ciclo = get_current_cycle(db)
         m2, m4 = get_projection_window(db)
         

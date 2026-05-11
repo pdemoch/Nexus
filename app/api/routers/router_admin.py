@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 
 from app.core.database import get_db
 from app.core.state import AppState
-from app.models.domain_models import ControleCiclo, DimProduto, DimCliente, FatoIbpGranular
+from app.models.domain_models import ControleCiclo, DimProduto, DimCliente, FatoIbpGranular, AuditoriaAjuste
 from app.etl.pipeline import executar_pipeline_nexus
 from app.api.routers.router_auth import get_current_user
 from app.api.routers.shared_ibp import get_current_cycle, get_truth_query, get_projection_window
@@ -151,3 +151,29 @@ async def exportar_base_granular(db: Session = Depends(get_db), usuario_logado: 
         )
     except Exception as e:
         raise HTTPException(500, repr(e))
+
+@router.get("/auditoria/logs")
+async def listar_logs_auditoria(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
+    if usuario_logado['funcao'] != 'Administrador':
+        raise HTTPException(status_code=403, detail="Acesso negado.")
+        
+    try:
+        # Busca os últimos 500 registos de alteração
+        logs = db.query(AuditoriaAjuste).order_by(AuditoriaAjuste.data_ajuste.desc()).limit(500).all()
+        
+        dados = []
+        for l in logs:
+            dados.append({
+                "id": l.id,
+                "data": l.data_ajuste.strftime("%d/%m/%Y %H:%M"),
+                "usuario": l.usuario_nome or "Sistema",
+                "origem": l.origem_ajuste,
+                "cliente": l.razaosocial_afetada,
+                "sku": l.sku,
+                "mes_ref": l.mes_projetado.strftime("%m/%Y"),
+                "de": int(l.valor_antigo or 0),
+                "para": int(l.vol_novo)
+            })
+        return {"status": "success", "dados": dados}
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao carregar auditoria: {str(e)}")

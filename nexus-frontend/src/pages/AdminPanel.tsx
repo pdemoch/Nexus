@@ -1,29 +1,38 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import axios from 'axios';
-import { Settings, RefreshCw, Terminal, Play, ShieldAlert, Loader2, Download, UserPlus, Check, X, Unlock, Calendar, Users, KeyRound } from 'lucide-react';
+import { 
+  Settings, RefreshCw, Terminal, Play, ShieldAlert, Loader2, Download, 
+  UserPlus, Check, X, Unlock, Calendar, Users, KeyRound, Database, Shield, History, Search, ArrowRight, TrendingUp, TrendingDown 
+} from 'lucide-react';
 
 export default function AdminPanel() {
-  const [logs, setLogs] = useState<string[]>([]);
-  const [isPipelineRunning, setIsPipelineRunning] = useState(false);
+  // ESTADOS GERAIS
+  const [activeTab, setActiveTab] = useState<'motor' | 'acessos' | 'auditoria'>('motor');
   const [isLoading, setIsLoading] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
   
+  // ESTADOS DO MOTOR E PIPELINE
+  const [logs, setLogs] = useState<string[]>([]);
+  const [isPipelineRunning, setIsPipelineRunning] = useState(false);
+  const terminalScrollRef = useRef<HTMLDivElement>(null);
+
+  // ESTADOS DE ACESSOS E USUÁRIOS
   const [usuariosPendentes, setUsuariosPendentes] = useState<any[]>([]);
   const [usuariosAtivos, setUsuariosAtivos] = useState<any[]>([]);
-  const [vendedores, setVendedores] = useState<string[]>([]);
   
-  // ESTADOS DO DESCONGELAMENTO
+  // ESTADOS DO DESCONGELAMENTO E MÁQUINA DO TEMPO
+  const [vendedores, setVendedores] = useState<string[]>([]);
   const [origemDesbloqueio, setOrigemDesbloqueio] = useState('');
   const [isUnlocking, setIsUnlocking] = useState(false);
-
-  // ESTADOS DA MÁQUINA DO TEMPO
   const [cicloAtivo, setCicloAtivo] = useState('');
   const [novoCicloInput, setNovoCicloInput] = useState('');
   const [isChangingCiclo, setIsChangingCiclo] = useState(false);
 
-  const terminalScrollRef = useRef<HTMLDivElement>(null);
+  // ESTADOS DE AUDITORIA
+  const [logsAuditoria, setLogsAuditoria] = useState<any[]>([]);
+  const [buscaAuditoria, setBuscaAuditoria] = useState('');
 
-  // EFEITO: Rola a barra do terminal automaticamente se o pipeline estiver a rodar
+  // Auto-scroll do terminal
   useEffect(() => {
     if (isPipelineRunning && terminalScrollRef.current) {
       terminalScrollRef.current.scrollTop = terminalScrollRef.current.scrollHeight;
@@ -32,43 +41,50 @@ export default function AdminPanel() {
 
   const fetchData = useCallback(async () => {
     try {
-      // 1. Busca o status do Pipeline ML
+      // 1. Pipeline Status
       try {
         const statusRes = await axios.get('/api/v1/admin/pipeline/status');
         setLogs(statusRes.data.logs || []);
         setIsPipelineRunning(statusRes.data.is_running);
-      } catch(e) { console.error("Erro ao buscar status do pipeline"); }
+      } catch(e) {}
 
-      // 2. Busca utilizadores pendentes e ativos
+      // 2. Usuários
       try {
-        const pendentesRes = await axios.get('/api/v1/auth/pendentes');
+        const [pendentesRes, ativosRes] = await Promise.all([
+          axios.get('/api/v1/auth/pendentes'),
+          axios.get('/api/v1/auth/ativos')
+        ]);
         setUsuariosPendentes(pendentesRes.data.dados || []);
-        
-        const ativosRes = await axios.get('/api/v1/auth/ativos');
         setUsuariosAtivos(ativosRes.data.dados || []);
-      } catch(e) { console.error("Erro ao buscar utilizadores"); }
+      } catch(e) {}
 
-      // 3. Busca a lista de vendedores para a caixa de seleção de destrancamento
+      // 3. Vendedores para Desbloqueio
       try {
         const filtrosRes = await axios.get('/api/v1/consensus/gerenciamento/filtros');
         setVendedores(filtrosRes.data.vendedores || []);
-      } catch(e) { console.error("Erro ao buscar vendedores"); }
+      } catch(e) {}
 
-      // 4. Busca o Ciclo Ativo da Máquina do Tempo
+      // 4. Ciclo Ativo
       try {
         const cicloRes = await axios.get('/api/v1/admin/ciclo-ativo');
         setCicloAtivo(cicloRes.data.ciclo_ativo);
         setNovoCicloInput(cicloRes.data.ciclo_ativo);
-      } catch(e) { console.error("Erro ao buscar ciclo ativo"); }
+      } catch(e) {}
+
+      // 5. Logs de Auditoria
+      try {
+        const auditRes = await axios.get('/api/v1/admin/auditoria/logs');
+        setLogsAuditoria(auditRes.data.dados || []);
+      } catch (e) {}
 
     } catch (e) {
-      console.error(e);
+      console.error("Erro no carregamento do Admin Panel:", e);
     } finally {
       setIsLoading(false);
     }
   }, []);
 
-  // Faz polling do status a cada 3 segundos APENAS se o pipeline estiver a rodar
+  // Polling para o Pipeline
   useEffect(() => {
     fetchData();
     let interval: ReturnType<typeof setInterval>;
@@ -106,9 +122,7 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
     try {
       await axios.post(`/api/v1/auth/aprovar/${id}`);
       fetchData();
-    } catch (e: any) {
-      alert(e.response?.data?.detail || "Erro ao aprovar utilizador.");
-    }
+    } catch (e: any) { alert(e.response?.data?.detail || "Erro ao aprovar utilizador."); }
   };
 
   const handleRejeitarUsuario = async (id: number) => {
@@ -116,29 +130,21 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
     try {
       await axios.delete(`/api/v1/auth/rejeitar/${id}`);
       fetchData();
-    } catch (e: any) {
-      alert(e.response?.data?.detail || "Erro ao rejeitar utilizador.");
-    }
+    } catch (e: any) { alert(e.response?.data?.detail || "Erro ao rejeitar utilizador."); }
   };
 
   const handleResetSenha = async (id: number, nome: string) => {
     if (!window.confirm(`⚠️ ATENÇÃO: Tem a certeza que deseja resetar a senha de ${nome}? \n\nA senha voltará para o padrão "Linea@123" e o utilizador será obrigado a trocá-la no próximo acesso.`)) return;
-    
     try {
       await axios.post(`/api/v1/auth/reset-password/${id}`);
       alert(`✅ Senha de ${nome} resetada para "Linea@123" com sucesso!`);
-    } catch (e: any) {
-      alert(e.response?.data?.detail || "Erro ao resetar a senha.");
-    }
+    } catch (e: any) { alert(e.response?.data?.detail || "Erro ao resetar a senha."); }
   };
 
   const handleExportarBase = async () => {
     setIsExporting(true);
     try {
-      const response = await axios.get('/api/v1/admin/exportar-base', {
-        responseType: 'blob', 
-      });
-      
+      const response = await axios.get('/api/v1/admin/exportar-base', { responseType: 'blob' });
       const url = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = url;
@@ -147,10 +153,8 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
       link.click();
       link.remove();
     } catch (e: any) {
-      alert(e.response?.data?.detail || "Erro ao exportar a base de dados. Verifique se existem dados no ciclo atual.");
-    } finally {
-      setIsExporting(false);
-    }
+      alert("Erro ao exportar a base de dados. Verifique se existem dados no ciclo atual.");
+    } finally { setIsExporting(false); }
   };
 
   const handleDescongelar = async () => {
@@ -159,16 +163,12 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
 
     setIsUnlocking(true);
     try {
-      await axios.post('/api/v1/admin/reabrir-ciclo', null, { 
-        params: { origem: origemDesbloqueio } 
-      });
+      await axios.post('/api/v1/admin/reabrir-ciclo', null, { params: { origem: origemDesbloqueio } });
       alert(`✅ Tela destrancada com sucesso para: ${origemDesbloqueio}`);
       setOrigemDesbloqueio('');
     } catch (e: any) {
       alert(e.response?.data?.detail || "Erro ao destrancar a tela.");
-    } finally {
-      setIsUnlocking(false);
-    }
+    } finally { setIsUnlocking(false); }
   };
 
   const handleChangeCiclo = async () => {
@@ -188,6 +188,17 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
 
   const isGlobalSelected = ['Top-Down', 'Supply Review', 'S&OP-Final'].includes(origemDesbloqueio);
   const isVendedorSelected = !isGlobalSelected && origemDesbloqueio !== '';
+
+  const auditoriaFiltrada = useMemo(() => {
+    if (!buscaAuditoria) return logsAuditoria;
+    const t = buscaAuditoria.toLowerCase();
+    return logsAuditoria.filter(log => 
+      log.usuario.toLowerCase().includes(t) ||
+      log.origem.toLowerCase().includes(t) ||
+      log.cliente.toLowerCase().includes(t) ||
+      log.sku.toLowerCase().includes(t)
+    );
+  }, [logsAuditoria, buscaAuditoria]);
 
   if (isLoading) {
     return (
@@ -221,218 +232,280 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
           </button>
         </div>
 
-        <div className="flex flex-col lg:flex-row gap-6 items-stretch">
-          
-          {/* COLUNA ESQUERDA: GESTÃO DE UTILIZADORES E TRAVAS */}
-          <div className="w-full lg:w-1/3 flex flex-col gap-6">
-             
-             {/* CARD: MÁQUINA DO TEMPO */}
-             <div className="bg-white rounded-[32px] p-6 lg:p-8 shadow-sm border border-slate-100 flex flex-col relative overflow-hidden">
-               <div className="absolute top-0 left-0 w-full h-1.5 bg-indigo-500"></div>
-               <div className="flex items-center gap-3 mb-4 pb-4 border-b border-slate-100 flex-shrink-0">
-                 <Calendar className="w-5 h-5 text-indigo-500" />
-                 <h2 className="text-sm font-black text-slate-700 uppercase tracking-widest">Controlo de Ciclo (Tempo)</h2>
-               </div>
-               <div className="flex flex-col gap-4">
-                 <p className="text-xs font-medium text-slate-500 leading-relaxed">
-                   O sistema inteiro (IA, Relatórios e Travas) está focado no ciclo abaixo. Altere o valor para viajar para um mês passado.
-                 </p>
-                 <div className="flex items-center gap-3 mt-2">
-                   <input 
-                     type="text" 
-                     placeholder="MM/YYYY" 
-                     value={novoCicloInput}
-                     onChange={e => setNovoCicloInput(e.target.value)}
-                     className="flex-1 bg-slate-50 border-2 border-slate-200 text-slate-800 text-lg text-center rounded-xl p-3 font-black outline-none focus:border-indigo-500 transition-all"
-                   />
-                   <button 
-                     onClick={handleChangeCiclo}
-                     disabled={isChangingCiclo || novoCicloInput === cicloAtivo}
-                     className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-md shadow-indigo-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
-                   >
-                     {isChangingCiclo ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Ativar'}
-                   </button>
-                 </div>
-               </div>
-             </div>
-
-             {/* CARD 1: APROVAÇÕES PENDENTES */}
-             <div className="bg-white rounded-[32px] p-6 lg:p-8 shadow-sm border border-slate-100 flex flex-col h-[400px]">
-                 <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slate-100 flex-shrink-0">
-                   <UserPlus className="w-5 h-5 text-blue-500" />
-                   <h2 className="text-sm font-black text-slate-700 uppercase tracking-widest">Aprovações Pendentes</h2>
-                   <div className="ml-auto bg-blue-100 text-blue-700 font-black text-xs px-2 py-1 rounded-lg">{usuariosPendentes.length}</div>
-                 </div>
-
-                 <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-4">
-                    {usuariosPendentes.length === 0 ? (
-                      <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-3 opacity-60">
-                         <ShieldAlert className="w-10 h-10" />
-                         <span className="text-xs font-black uppercase tracking-widest text-center">Nenhum acesso<br/>pendente</span>
-                      </div>
-                    ) : (
-                      usuariosPendentes.map((user) => (
-                        <div key={user.id} className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col gap-3">
-                           <div>
-                             <h3 className="font-black text-sm text-slate-800">{user.nome}</h3>
-                             <p className="text-xs font-bold text-slate-500">{user.email}</p>
-                           </div>
-                           
-                           <div className="bg-white p-2 rounded-xl border border-slate-100 flex flex-col gap-1">
-                              <span className="text-[10px] font-black text-indigo-500 uppercase tracking-widest">Perfil: {user.funcao}</span>
-                              {user.nome_vendedor && <span className="text-[10px] font-bold text-slate-600 truncate">Vendedor: {user.nome_vendedor}</span>}
-                              {user.gerente_nome && <span className="text-[10px] font-bold text-slate-600 truncate">Gerente: {user.gerente_nome}</span>}
-                           </div>
-
-                           <div className="flex items-center gap-2 mt-1">
-                              <button onClick={() => handleRejeitarUsuario(user.id)} className="flex-1 flex items-center justify-center gap-1 bg-white border border-rose-200 text-rose-600 hover:bg-rose-50 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors">
-                                <X className="w-3 h-3" /> Rejeitar
-                              </button>
-                              <button onClick={() => handleAprovarUsuario(user.id)} className="flex-1 flex items-center justify-center gap-1 bg-emerald-500 hover:bg-emerald-600 text-white py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors shadow-md shadow-emerald-500/20">
-                                <Check className="w-3 h-3" /> Aprovar
-                              </button>
-                           </div>
-                        </div>
-                      ))
-                    )}
-                 </div>
-             </div>
-
-             {/* CARD 1.5: UTILIZADORES ATIVOS E RESET DE SENHA */}
-             <div className="bg-white rounded-[32px] p-6 lg:p-8 shadow-sm border border-slate-100 flex flex-col h-[400px]">
-                 <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slate-100 flex-shrink-0">
-                   <Users className="w-5 h-5 text-indigo-500" />
-                   <h2 className="text-sm font-black text-slate-700 uppercase tracking-widest">Utilizadores Ativos</h2>
-                   <div className="ml-auto bg-indigo-100 text-indigo-700 font-black text-xs px-2 py-1 rounded-lg">{usuariosAtivos.length}</div>
-                 </div>
-
-                 <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-4">
-                    {usuariosAtivos.length === 0 ? (
-                      <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-3 opacity-60">
-                         <ShieldAlert className="w-10 h-10" />
-                         <span className="text-xs font-black uppercase tracking-widest text-center">Nenhum utilizador<br/>ativo no sistema</span>
-                      </div>
-                    ) : (
-                      usuariosAtivos.map((user) => (
-                        <div key={user.id} className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col gap-3">
-                           <div>
-                             <h3 className="font-black text-sm text-slate-800">{user.nome}</h3>
-                             <p className="text-xs font-bold text-slate-500">{user.email}</p>
-                           </div>
-                           
-                           <div className="bg-white p-2 rounded-xl border border-slate-100 flex flex-col gap-1">
-                              <span className="text-[10px] font-black text-indigo-500 uppercase tracking-widest">Perfil: {user.funcao}</span>
-                              {user.nome_vendedor && <span className="text-[10px] font-bold text-slate-600 truncate">Vendedor: {user.nome_vendedor}</span>}
-                              {user.gerente_nome && <span className="text-[10px] font-bold text-slate-600 truncate">Gerente: {user.gerente_nome}</span>}
-                           </div>
-
-                           <button 
-                             onClick={() => handleResetSenha(user.id, user.nome)} 
-                             className="mt-1 w-full flex items-center justify-center gap-2 bg-white border border-slate-200 hover:border-amber-300 hover:bg-amber-50 text-slate-600 hover:text-amber-700 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all"
-                           >
-                             <KeyRound className="w-3.5 h-3.5" /> Resetar Senha
-                           </button>
-                        </div>
-                      ))
-                    )}
-                 </div>
-             </div>
-
-             {/* CARD 2: DESCONGELAMENTO DE TELAS */}
-             <div className="bg-white rounded-[32px] p-6 lg:p-8 shadow-sm border border-slate-100 flex flex-col">
-               <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slate-100 flex-shrink-0">
-                 <Unlock className="w-5 h-5 text-amber-500" />
-                 <h2 className="text-sm font-black text-slate-700 uppercase tracking-widest">Descongelar Telas</h2>
-               </div>
-
-               <div className="flex flex-col gap-4">
-                 <p className="text-xs font-medium text-slate-500 leading-relaxed">
-                   Force a reabertura de uma etapa do S&OP que já foi assinada e congelada <strong className="text-slate-800">no ciclo ativo ({cicloAtivo})</strong>.
-                 </p>
-
-                 <select
-                   value={isGlobalSelected ? origemDesbloqueio : ''}
-                   onChange={(e) => setOrigemDesbloqueio(e.target.value)}
-                   className="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-xl focus:ring-amber-500 focus:border-amber-500 block w-full p-3 font-bold outline-none cursor-pointer"
-                 >
-                   <option value="">Selecione um nível global...</option>
-                   <option value="Top-Down">Visão Gerencial (Top-Down)</option>
-                   <option value="Supply Review">Fábrica (Supply Review)</option>
-                   <option value="S&OP-Final">S&OP Global (Dashboard Final)</option>
-                 </select>
-
-                 <select
-                   value={isVendedorSelected ? origemDesbloqueio : ''}
-                   onChange={(e) => setOrigemDesbloqueio(e.target.value)}
-                   className="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-xl focus:ring-amber-500 focus:border-amber-500 block w-full p-3 font-bold outline-none cursor-pointer"
-                 >
-                   <option value="">Ou selecione a carteira de um Vendedor...</option>
-                   {vendedores.map(v => (
-                     <option key={v} value={v}>{v}</option>
-                   ))}
-                 </select>
-
-                 <button
-                   onClick={handleDescongelar}
-                   disabled={isUnlocking || !origemDesbloqueio}
-                   className="mt-2 w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 text-white py-3.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-md shadow-amber-500/20 disabled:opacity-50"
-                 >
-                   {isUnlocking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Unlock className="w-4 h-4" />}
-                   Forçar Reabertura
-                 </button>
-               </div>
-             </div>
-
-          </div>
-
-          {/* COLUNA DIREITA: MOTOR DE IA & TERMINAL */}
-          <div className="w-full lg:w-2/3 bg-slate-950 rounded-[32px] p-2 shadow-2xl border border-slate-800 flex flex-col relative min-h-[500px]">
-            
-            {/* PAINEL DE CONTROLE DO MOTOR */}
-            <div className="bg-slate-900 rounded-[24px] p-6 border border-slate-800 m-2 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 flex-shrink-0">
-               <div>
-                  <h2 className="text-sm font-black text-white uppercase tracking-widest flex items-center gap-2">
-                    <RefreshCw className={`w-4 h-4 text-emerald-400 ${isPipelineRunning ? 'animate-spin' : ''}`} />
-                    Motor de Engenharia S&OP
-                  </h2>
-                  <p className="text-xs font-medium text-slate-400 mt-1">
-                    Carga de Vendas Delta e Processamento de Redes Neurais S&OP.
-                  </p>
-               </div>
-               <button 
-                 onClick={handleRunPipeline}
-                 disabled={isPipelineRunning}
-                 className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-white px-6 py-3 rounded-xl text-xs font-black tracking-widest uppercase transition-all shadow-[0_0_20px_rgba(16,185,129,0.3)] disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
-               >
-                 {isPipelineRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                 {isPipelineRunning ? 'Processando...' : 'Run Pipeline'}
-               </button>
-            </div>
-
-            {/* TERMINAL DE LOGS */}
-            <div className="flex-1 bg-slate-950 p-6 flex flex-col overflow-hidden relative">
-              <div className="flex items-center gap-2 mb-4 pb-4 border-b border-slate-800 flex-shrink-0">
-                 <Terminal className="w-5 h-5 text-slate-500" />
-                 <span className="text-xs font-black text-slate-500 uppercase tracking-widest">NEXUS SERVER // CONSOLE OUTPUT</span>
-                 {isPipelineRunning && <span className="ml-auto flex items-center gap-2 text-[10px] font-black text-emerald-400 uppercase tracking-widest animate-pulse"><div className="w-2 h-2 bg-emerald-400 rounded-full"></div> RUNNING</span>}
-              </div>
-
-              <div ref={terminalScrollRef} className="flex-1 overflow-y-auto font-mono text-xs md:text-sm text-emerald-400/90 pr-2 space-y-1 custom-scrollbar">
-                {logs.length === 0 ? (
-                   <div className="h-full flex items-center justify-center text-slate-800 font-bold uppercase tracking-widest">Aguardando Execução...</div>
-                ) : (
-                  logs.map((log, i) => (
-                    <div key={i} className={`${log.includes('ERRO') || log.includes('❌') ? 'text-rose-400' : log.includes('✅') ? 'text-cyan-400' : 'text-emerald-400/80'} py-0.5 border-l-2 border-slate-800 pl-3 break-words`}>
-                      {log}
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-          </div>
-
+        {/* NAVEGAÇÃO DE ABAS */}
+        <div className="flex gap-2 mb-6 bg-slate-200/50 p-1.5 rounded-[20px] w-fit">
+           <button 
+             onClick={() => setActiveTab('motor')} 
+             className={`flex items-center gap-2 px-6 py-3 rounded-2xl text-sm font-black uppercase tracking-widest transition-all ${activeTab === 'motor' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'}`}
+           >
+             <Database className="w-4 h-4" /> Motor S&OP
+           </button>
+           <button 
+             onClick={() => setActiveTab('acessos')} 
+             className={`flex items-center gap-2 px-6 py-3 rounded-2xl text-sm font-black uppercase tracking-widest transition-all ${activeTab === 'acessos' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'}`}
+           >
+             <Shield className="w-4 h-4" /> Gestão de Acessos
+           </button>
+           <button 
+             onClick={() => setActiveTab('auditoria')} 
+             className={`flex items-center gap-2 px-6 py-3 rounded-2xl text-sm font-black uppercase tracking-widest transition-all ${activeTab === 'auditoria' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'}`}
+           >
+             <History className="w-4 h-4" /> Trilha de Auditoria
+           </button>
         </div>
+
+        {/* CONTEÚDO DA ABA: MOTOR S&OP */}
+        {activeTab === 'motor' && (
+            <div className="flex flex-col lg:flex-row gap-6 items-stretch animate-in fade-in duration-300">
+                {/* COLUNA ESQUERDA: MÁQUINA DO TEMPO E CADEADOS */}
+                <div className="w-full lg:w-1/3 flex flex-col gap-6">
+                    <div className="bg-white rounded-[32px] p-6 lg:p-8 shadow-sm border border-slate-100 flex flex-col relative overflow-hidden">
+                        <div className="absolute top-0 left-0 w-full h-1.5 bg-indigo-500"></div>
+                        <div className="flex items-center gap-3 mb-4 pb-4 border-b border-slate-100 flex-shrink-0">
+                            <Calendar className="w-5 h-5 text-indigo-500" />
+                            <h2 className="text-sm font-black text-slate-700 uppercase tracking-widest">Controlo de Ciclo (Tempo)</h2>
+                        </div>
+                        <div className="flex flex-col gap-4">
+                            <p className="text-xs font-medium text-slate-500 leading-relaxed">
+                            O sistema inteiro (IA, Relatórios e Travas) está focado no ciclo abaixo. Altere o valor para viajar para um mês passado.
+                            </p>
+                            <div className="flex items-center gap-3 mt-2">
+                            <input 
+                                type="text" placeholder="MM/YYYY" value={novoCicloInput} onChange={e => setNovoCicloInput(e.target.value)}
+                                className="flex-1 bg-slate-50 border-2 border-slate-200 text-slate-800 text-lg text-center rounded-xl p-3 font-black outline-none focus:border-indigo-500 transition-all"
+                            />
+                            <button 
+                                onClick={handleChangeCiclo} disabled={isChangingCiclo || novoCicloInput === cicloAtivo}
+                                className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-md shadow-indigo-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                {isChangingCiclo ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Ativar'}
+                            </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="bg-white rounded-[32px] p-6 lg:p-8 shadow-sm border border-slate-100 flex flex-col">
+                        <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slate-100 flex-shrink-0">
+                            <Unlock className="w-5 h-5 text-amber-500" />
+                            <h2 className="text-sm font-black text-slate-700 uppercase tracking-widest">Descongelar Telas</h2>
+                        </div>
+                        <div className="flex flex-col gap-4">
+                            <p className="text-xs font-medium text-slate-500 leading-relaxed">
+                            Force a reabertura de uma etapa do S&OP que já foi assinada e congelada <strong className="text-slate-800">no ciclo ativo ({cicloAtivo})</strong>.
+                            </p>
+                            <select value={isGlobalSelected ? origemDesbloqueio : ''} onChange={(e) => setOrigemDesbloqueio(e.target.value)} className="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-xl focus:ring-amber-500 focus:border-amber-500 block w-full p-3 font-bold outline-none cursor-pointer">
+                                <option value="">Selecione um nível global...</option>
+                                <option value="Top-Down">Visão Gerencial (Top-Down)</option>
+                                <option value="Supply Review">Fábrica (Supply Review)</option>
+                                <option value="S&OP-Final">S&OP Global (Dashboard Final)</option>
+                            </select>
+                            <select value={isVendedorSelected ? origemDesbloqueio : ''} onChange={(e) => setOrigemDesbloqueio(e.target.value)} className="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-xl focus:ring-amber-500 focus:border-amber-500 block w-full p-3 font-bold outline-none cursor-pointer">
+                                <option value="">Ou selecione a carteira de um Vendedor...</option>
+                                {vendedores.map(v => <option key={v} value={v}>{v}</option>)}
+                            </select>
+                            <button onClick={handleDescongelar} disabled={isUnlocking || !origemDesbloqueio} className="mt-2 w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 text-white py-3.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-md shadow-amber-500/20 disabled:opacity-50">
+                                {isUnlocking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Unlock className="w-4 h-4" />} Forçar Reabertura
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                {/* COLUNA DIREITA: TERMINAL */}
+                <div className="w-full lg:w-2/3 bg-slate-950 rounded-[32px] p-2 shadow-2xl border border-slate-800 flex flex-col relative min-h-[500px]">
+                    <div className="bg-slate-900 rounded-[24px] p-6 border border-slate-800 m-2 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 flex-shrink-0">
+                        <div>
+                            <h2 className="text-sm font-black text-white uppercase tracking-widest flex items-center gap-2">
+                                <RefreshCw className={`w-4 h-4 text-emerald-400 ${isPipelineRunning ? 'animate-spin' : ''}`} /> Motor de Engenharia S&OP
+                            </h2>
+                            <p className="text-xs font-medium text-slate-400 mt-1">Carga de Vendas Delta e Processamento de Redes Neurais S&OP.</p>
+                        </div>
+                        <button onClick={handleRunPipeline} disabled={isPipelineRunning} className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-white px-6 py-3 rounded-xl text-xs font-black tracking-widest uppercase transition-all shadow-[0_0_20px_rgba(16,185,129,0.3)] disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap">
+                            {isPipelineRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                            {isPipelineRunning ? 'Processando...' : 'Run Pipeline'}
+                        </button>
+                    </div>
+
+                    <div className="flex-1 bg-slate-950 p-6 flex flex-col overflow-hidden relative">
+                        <div className="flex items-center gap-2 mb-4 pb-4 border-b border-slate-800 flex-shrink-0">
+                            <Terminal className="w-5 h-5 text-slate-500" />
+                            <span className="text-xs font-black text-slate-500 uppercase tracking-widest">NEXUS SERVER // CONSOLE OUTPUT</span>
+                            {isPipelineRunning && <span className="ml-auto flex items-center gap-2 text-[10px] font-black text-emerald-400 uppercase tracking-widest animate-pulse"><div className="w-2 h-2 bg-emerald-400 rounded-full"></div> RUNNING</span>}
+                        </div>
+                        <div ref={terminalScrollRef} className="flex-1 overflow-y-auto font-mono text-xs md:text-sm text-emerald-400/90 pr-2 space-y-1 custom-scrollbar">
+                            {logs.length === 0 ? (
+                                <div className="h-full flex items-center justify-center text-slate-800 font-bold uppercase tracking-widest">Aguardando Execução...</div>
+                            ) : (
+                                logs.map((log, i) => (
+                                    <div key={i} className={`${log.includes('ERRO') || log.includes('❌') ? 'text-rose-400' : log.includes('✅') ? 'text-cyan-400' : 'text-emerald-400/80'} py-0.5 border-l-2 border-slate-800 pl-3 break-words`}>
+                                    {log}
+                                    </div>
+                                ))
+                            )}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {/* CONTEÚDO DA ABA: GESTÃO DE ACESSOS */}
+        {activeTab === 'acessos' && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-in fade-in duration-300">
+                <div className="bg-white rounded-[32px] p-6 lg:p-8 shadow-sm border border-slate-100 flex flex-col min-h-[500px]">
+                    <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slate-100 flex-shrink-0">
+                        <UserPlus className="w-5 h-5 text-blue-500" />
+                        <h2 className="text-sm font-black text-slate-700 uppercase tracking-widest">Aprovações Pendentes</h2>
+                        <div className="ml-auto bg-blue-100 text-blue-700 font-black text-xs px-2 py-1 rounded-lg">{usuariosPendentes.length}</div>
+                    </div>
+                    <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-4">
+                        {usuariosPendentes.length === 0 ? (
+                            <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-3 opacity-60">
+                                <ShieldAlert className="w-10 h-10" />
+                                <span className="text-xs font-black uppercase tracking-widest text-center">Nenhum acesso<br/>pendente</span>
+                            </div>
+                        ) : (
+                            usuariosPendentes.map((user) => (
+                                <div key={user.id} className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col gap-3">
+                                    <div>
+                                        <h3 className="font-black text-sm text-slate-800">{user.nome}</h3>
+                                        <p className="text-xs font-bold text-slate-500">{user.email}</p>
+                                    </div>
+                                    <div className="bg-white p-2 rounded-xl border border-slate-100 flex flex-col gap-1">
+                                        <span className="text-[10px] font-black text-indigo-500 uppercase tracking-widest">Perfil: {user.funcao}</span>
+                                        {user.supervisor_nome && <span className="text-[10px] font-bold text-slate-600 truncate">Equipa: {user.supervisor_nome}</span>}
+                                        {user.gerente_nome && <span className="text-[10px] font-bold text-slate-600 truncate">Gerente: {user.gerente_nome}</span>}
+                                    </div>
+                                    <div className="flex items-center gap-2 mt-1">
+                                        <button onClick={() => handleRejeitarUsuario(user.id)} className="flex-1 flex items-center justify-center gap-1 bg-white border border-rose-200 text-rose-600 hover:bg-rose-50 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors"><X className="w-3 h-3" /> Rejeitar</button>
+                                        <button onClick={() => handleAprovarUsuario(user.id)} className="flex-1 flex items-center justify-center gap-1 bg-emerald-500 hover:bg-emerald-600 text-white py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors shadow-md shadow-emerald-500/20"><Check className="w-3 h-3" /> Aprovar</button>
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </div>
+
+                <div className="bg-white rounded-[32px] p-6 lg:p-8 shadow-sm border border-slate-100 flex flex-col min-h-[500px]">
+                    <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slate-100 flex-shrink-0">
+                        <Users className="w-5 h-5 text-indigo-500" />
+                        <h2 className="text-sm font-black text-slate-700 uppercase tracking-widest">Utilizadores Ativos</h2>
+                        <div className="ml-auto bg-indigo-100 text-indigo-700 font-black text-xs px-2 py-1 rounded-lg">{usuariosAtivos.length}</div>
+                    </div>
+                    <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-4">
+                        {usuariosAtivos.length === 0 ? (
+                            <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-3 opacity-60">
+                                <ShieldAlert className="w-10 h-10" />
+                                <span className="text-xs font-black uppercase tracking-widest text-center">Nenhum utilizador<br/>ativo no sistema</span>
+                            </div>
+                        ) : (
+                            usuariosAtivos.map((user) => (
+                                <div key={user.id} className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col gap-3">
+                                    <div>
+                                        <h3 className="font-black text-sm text-slate-800">{user.nome}</h3>
+                                        <p className="text-xs font-bold text-slate-500">{user.email}</p>
+                                    </div>
+                                    <div className="bg-white p-2 rounded-xl border border-slate-100 flex flex-col gap-1">
+                                        <span className="text-[10px] font-black text-indigo-500 uppercase tracking-widest">Perfil: {user.funcao}</span>
+                                        {user.supervisor_nome && <span className="text-[10px] font-bold text-slate-600 truncate">Equipa: {user.supervisor_nome}</span>}
+                                        {user.gerente_nome && <span className="text-[10px] font-bold text-slate-600 truncate">Gerente: {user.gerente_nome}</span>}
+                                    </div>
+                                    <button onClick={() => handleResetSenha(user.id, user.nome)} className="mt-1 w-full flex items-center justify-center gap-2 bg-white border border-slate-200 hover:border-amber-300 hover:bg-amber-50 text-slate-600 hover:text-amber-700 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all">
+                                        <KeyRound className="w-3.5 h-3.5" /> Resetar Senha
+                                    </button>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {/* CONTEÚDO DA ABA: TRILHA DE AUDITORIA */}
+        {activeTab === 'auditoria' && (
+            <div className="bg-white rounded-[32px] shadow-sm border border-slate-100 flex flex-col animate-in fade-in duration-300 overflow-hidden min-h-[500px]">
+                
+                <div className="p-6 border-b border-slate-100 flex flex-col md:flex-row gap-4 items-center justify-between">
+                    <div>
+                        <h2 className="text-lg font-black text-slate-900 tracking-tighter flex items-center gap-2">
+                            <History className="w-5 h-5 text-indigo-600" /> Extrato de Operações S&OP
+                        </h2>
+                        <p className="text-xs font-bold text-slate-400 mt-1 uppercase tracking-widest">Últimas 500 alterações gravadas no banco de dados.</p>
+                    </div>
+                    <div className="flex items-center gap-3 px-4 bg-slate-50 rounded-xl border border-slate-200 w-full md:w-96">
+                        <Search className="w-5 h-5 text-slate-400" />
+                        <input 
+                            type="text" placeholder="Filtrar por Usuário, Tela, Cliente ou Produto..." 
+                            value={buscaAuditoria} onChange={e => setBuscaAuditoria(e.target.value)}
+                            className="w-full bg-transparent py-3 text-sm font-bold text-slate-800 outline-none placeholder:text-slate-400"
+                        />
+                    </div>
+                </div>
+
+                <div className="flex-1 overflow-x-auto">
+                    <table className="w-full text-left">
+                        <thead className="bg-slate-50 border-b-2 border-slate-100">
+                            <tr>
+                                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Data / Hora</th>
+                                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Usuário & Origem</th>
+                                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Cliente</th>
+                                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Produto / SKU</th>
+                                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Mês Ref.</th>
+                                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Alteração (CX)</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-50">
+                            {auditoriaFiltrada.length === 0 ? (
+                                <tr><td colSpan={6} className="px-6 py-12 text-center text-sm font-bold text-slate-400">Nenhum registro de auditoria encontrado.</td></tr>
+                            ) : (
+                                auditoriaFiltrada.map((log) => {
+                                    const aumentou = log.para > log.de;
+                                    const diminuiu = log.para < log.de;
+
+                                    return (
+                                        <tr key={log.id} className="hover:bg-slate-50/50 transition-colors">
+                                            <td className="px-6 py-4">
+                                                <span className="text-xs font-black text-slate-600">{log.data}</span>
+                                            </td>
+                                            <td className="px-6 py-4">
+                                                <div className="flex flex-col">
+                                                    <span className="text-sm font-black text-slate-900">{log.usuario}</span>
+                                                    <span className="text-[10px] font-bold uppercase tracking-widest text-indigo-500">{log.origem}</span>
+                                                </div>
+                                            </td>
+                                            <td className="px-6 py-4">
+                                                <span className="text-xs font-bold text-slate-600 max-w-[200px] truncate block" title={log.cliente}>
+                                                    {log.cliente}
+                                                </span>
+                                            </td>
+                                            <td className="px-6 py-4">
+                                                <span className="text-xs font-bold text-slate-600 max-w-[200px] truncate block" title={log.sku}>
+                                                    {log.sku}
+                                                </span>
+                                            </td>
+                                            <td className="px-6 py-4">
+                                                <span className="text-xs font-black bg-slate-100 px-2 py-1 rounded text-slate-600">{log.mes_ref}</span>
+                                            </td>
+                                            <td className="px-6 py-4">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-sm font-bold text-slate-400">{log.de.toLocaleString('pt-BR')}</span>
+                                                    <ArrowRight className="w-4 h-4 text-slate-300" />
+                                                    <span className={`text-sm font-black flex items-center gap-1 ${aumentou ? 'text-emerald-600' : diminuiu ? 'text-rose-600' : 'text-slate-600'}`}>
+                                                        {log.para.toLocaleString('pt-BR')}
+                                                        {aumentou && <TrendingUp className="w-4 h-4" />}
+                                                        {diminuiu && <TrendingDown className="w-4 h-4" />}
+                                                    </span>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    );
+                                })
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+
+            </div>
+        )}
+
       </div>
     </div>
   );

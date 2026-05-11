@@ -2,7 +2,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, text
 import datetime
 from dateutil.relativedelta import relativedelta
-from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, ControleCiclo
+from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, ControleCiclo, AuditoriaAjuste
 from fastapi import HTTPException
 
 # =====================================================================
@@ -16,7 +16,6 @@ def _get_active_date(db: Session) -> datetime.date:
         mes, ano = map(int, ciclo_str.split('/'))
         return datetime.date(ano, mes, 1)
     except Exception:
-        # Fallback de segurança caso a tabela não exista ou haja erro
         return datetime.date.today().replace(day=1)
 
 def get_current_cycle(db: Session) -> str:
@@ -37,12 +36,6 @@ def parse_date_safe(date_input) -> datetime.date:
 # A FONTE DA VERDADE ÚNICA (SINGLE SOURCE OF TRUTH)
 # =====================================================================
 def get_truth_query(db: Session, ciclo: str, data_ini: datetime.date, data_fim: datetime.date):
-    """
-    CORREÇÃO DO BUG (AttributeError): 
-    Agora o db.query pede APENAS a tabela FatoIbpGranular. 
-    Isso garante que as rotas de POST/Salvar recebam o objeto direto, e não uma Tupla.
-    Os joins continuam aqui para permitir filtros avançados.
-    """
     return db.query(FatoIbpGranular)\
         .outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
         .outerjoin(DimProduto, FatoIbpGranular.sku == DimProduto.sku)\
@@ -54,7 +47,7 @@ def get_truth_query(db: Session, ciclo: str, data_ini: datetime.date, data_fim: 
         )
 
 # =====================================================================
-# VALIDADOR DE TRAVAS (LOCKS)
+# VALIDADOR DE TRAVAS E GERADOR DE AUDITORIA
 # =====================================================================
 def check_global_lock(db: Session, ciclo: str):
     registro = db.query(ControleCiclo).filter(
@@ -67,11 +60,7 @@ def check_global_lock(db: Session, ciclo: str):
         raise HTTPException(status_code=403, detail="Acesso Negado: S&OP Global já está publicado.")
 
 def check_origin_lock(db: Session, ciclo: str, origem: str):
-    """
-    Verifica se a gerência trancou a carteira deste vendedor/regional específico.
-    """
     if not origem: return
-    
     registro = db.query(ControleCiclo).filter(
         ControleCiclo.ciclo_sop == ciclo, 
         func.upper(func.trim(ControleCiclo.origem)) == origem.strip().upper(),
@@ -79,4 +68,21 @@ def check_origin_lock(db: Session, ciclo: str, origem: str):
     ).first()
     
     if registro:
-        raise HTTPException(status_code=403, detail=f"Acesso Negado: A carteira de '{origem}' foi trancada pela Gerência e não pode receber alterações.")
+        raise HTTPException(status_code=403, detail=f"Acesso Negado: A carteira de '{origem}' foi trancada e não pode receber alterações.")
+
+def registrar_log_auditoria(db: Session, ciclo: str, origem: str, usuario: str, sku: str, cliente: str, mes: datetime.date, v_antigo: int, v_novo: int):
+    """Grava uma linha na trilha de auditoria se houver mudança de valor"""
+    if int(v_antigo) == int(v_novo):
+        return
+        
+    novo_log = AuditoriaAjuste(
+        ciclo_sop=ciclo,
+        origem_ajuste=origem,
+        usuario_nome=usuario,
+        sku=sku,
+        razaosocial_afetada=cliente,
+        mes_projetado=mes,
+        valor_antigo=v_antigo,
+        vol_novo=v_novo
+    )
+    db.add(novo_log)

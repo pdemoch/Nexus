@@ -151,13 +151,15 @@ class AuditoriaAjuste(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     ciclo_sop = Column(String(10), nullable=False, index=True)
     data_ajuste = Column(DateTime, default=datetime.utcnow)
-    origem_ajuste = Column(String(100), nullable=False) 
+    origem_ajuste = Column(String(100), nullable=False) # Ex: 'Top-Down', 'Comercial'
+    usuario_nome = Column(String(100), nullable=True)   # <-- NOVO: Quem fez a alteração
     
     sku = Column(String(50), nullable=False)
     razaosocial_afetada = Column(String(255), nullable=False)
     mes_projetado = Column(Date, nullable=False)
     
-    vol_novo = Column(Integer, nullable=False)
+    valor_antigo = Column(Integer, default=0) # <-- NOVO: Valor antes do ajuste
+    vol_novo = Column(Integer, nullable=False) # Novo valor gravado
 
 class FatoAcuracia(Base):
     __tablename__ = "fato_acuracia"
