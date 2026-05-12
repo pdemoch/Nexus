@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback, Fragment } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, Fragment, useRef } from 'react';
 import { 
   useReactTable, getCoreRowModel, flexRender, getExpandedRowModel, 
   getSortedRowModel, SortingState, ColumnDef 
@@ -7,7 +7,7 @@ import {
   Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
   Layers, Lock, Download, AlertTriangle, ShieldCheck, Check, Globe, Package, 
   Users, Search, Filter, BarChart3, TrendingUp, TrendingDown, Activity, Hash, Target,
-  ArrowRightLeft, AlertCircle, Info
+  ArrowRightLeft, AlertCircle, Info, Bot, Send, X, Sparkles
 } from 'lucide-react';
 import axios from 'axios';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
@@ -26,12 +26,6 @@ const VarBadge = ({ atual = 0, anterior = 0 }: { atual?: number, anterior?: numb
       {isPos ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />} {Math.abs(v).toFixed(1)}%
     </span>
   );
-};
-
-// --- ORDENADORES DE TOOLTIP ---
-const tooltipSorterGlobal = (item: any) => {
-  const order: Record<string, number> = { 'Sinal IA': 1, 'Top-Down': 2, 'Comercial': 3, 'Supply': 4, 'Final S&OP': 5 };
-  return order[item.name] || 99;
 };
 
 const tooltipSorterRow = (item: any) => {
@@ -57,6 +51,15 @@ export default function GlobalDashboard() {
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
   const [mesPareto, setMesPareto] = useState<string>('');
 
+  // --- ESTADOS DA INTELIGÊNCIA ARTIFICIAL ---
+  const [isAiOpen, setIsAiOpen] = useState(false);
+  const [aiInput, setAiInput] = useState('');
+  const [isAiTyping, setIsAiTyping] = useState(false);
+  const [aiMessages, setAiMessages] = useState<{role: 'ai' | 'user', content: string}[]>([
+    { role: 'ai', content: 'Olá! Sou o **Nexus AI**. Consigo ler todos os dados desta tela, cruzar com o histórico e analisar as justificativas de Supply. O que o preocupa neste ciclo S&OP?' }
+  ]);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
   // --- CARGA DE DADOS ---
   const fetchData = useCallback(async () => {
     setIsLoading(true);
@@ -79,9 +82,7 @@ export default function GlobalDashboard() {
   }, [dadosBrutos]);
 
   useEffect(() => {
-    if (mesesDisponiveis.length > 0 && !mesPareto) {
-      setMesPareto(mesesDisponiveis[0]);
-    }
+    if (mesesDisponiveis.length > 0 && !mesPareto) setMesPareto(mesesDisponiveis[0]);
   }, [mesesDisponiveis, mesPareto]);
 
   const handleExportExcel = async () => {
@@ -101,9 +102,7 @@ export default function GlobalDashboard() {
     const ajustes = Object.entries(celulasEditadas).flatMap(([chave, meses]: any) => 
       Object.entries(meses).map(([mes, val]: any) => ({
         nivel: chave.split('|').length === 3 ? 'cliente' : 'produto',
-        chave: chave, 
-        mes_projetado: mes, 
-        novo_volume: val.novo_volume === '' ? 0 : Number(val.novo_volume || 0)
+        chave: chave, mes_projetado: mes, novo_volume: val.novo_volume === '' ? 0 : Number(val.novo_volume || 0)
       }))
     );
     try {
@@ -114,7 +113,7 @@ export default function GlobalDashboard() {
     finally { setIsProcessing(false); }
   };
 
-  // --- MOTOR DE AGRUPAMENTO (VIEW 1: CATEGORIAS) ---
+  // --- MOTOR DE AGRUPAMENTO (CATEGORIAS) ---
   const dadosAgrupadosCategorias = useMemo(() => {
     if (!dadosBrutos.length || viewMode !== 'categorias') return [];
     const term = busca.toLowerCase();
@@ -133,15 +132,12 @@ export default function GlobalDashboard() {
       const m = r.mes_projetado;
 
       [cat, skuNode].forEach(node => {
-        if (!node.meses.has(m)) node.meses.set(m, { mes_banco: m, vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, rec_ia:0, rec_td:0, rec_bu:0, rec_sp:0, rec_final:0, unmet_brl: 0, delta_ia_brl: 0, delta_ciclo: 0 });
+        if (!node.meses.has(m)) node.meses.set(m, { mes_banco: m, vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, rec_ia:0, rec_td:0, rec_bu:0, rec_sp:0, rec_final:0, unmet_brl: 0, delta_ia_brl: 0, delta_ciclo: 0, justificativas: new Set() });
         const target = node.meses.get(m);
-        target.vol_ia += (r.vol_ia || 0); target.vol_td += (r.vol_topdown || 0); target.vol_bu += (r.vol_bottomup || 0); 
-        target.vol_sp += (r.vol_supply || 0); target.vol_final += (r.vol_final || 0);
-        target.rec_ia += (r.rec_ia || 0); target.rec_td += (r.rec_td || 0); target.rec_bu += (r.rec_bu || 0); 
-        target.rec_sp += (r.rec_supply || 0); target.rec_final += (r.rec_final || 0);
-        target.unmet_brl += (r.unmet_demand_brl || 0);
-        target.delta_ia_brl += (r.impacto_financeiro_ia_brl || 0);
-        target.delta_ciclo += (r.delta_ciclo_vol || 0);
+        target.vol_ia += (r.vol_ia || 0); target.vol_td += (r.vol_topdown || 0); target.vol_bu += (r.vol_bottomup || 0); target.vol_sp += (r.vol_supply || 0); target.vol_final += (r.vol_final || 0);
+        target.rec_ia += (r.rec_ia || 0); target.rec_td += (r.rec_td || 0); target.rec_bu += (r.rec_bu || 0); target.rec_sp += (r.rec_supply || 0); target.rec_final += (r.rec_final || 0);
+        target.unmet_brl += (r.unmet_demand_brl || 0); target.delta_ia_brl += (r.impacto_financeiro_ia_brl || 0); target.delta_ciclo += (r.delta_ciclo_vol || 0);
+        if (r.justificativa_supply) target.justificativas.add(r.justificativa_supply);
       });
     });
 
@@ -153,11 +149,10 @@ export default function GlobalDashboard() {
     }));
   }, [dadosBrutos, busca, viewMode]);
 
-  // --- MOTOR DE AGRUPAMENTO (VIEW 2: TOP CLIENTES PARETO 80%) ---
+  // --- MOTOR DE AGRUPAMENTO (CLIENTES PARETO 80%) ---
   const dadosAgrupadosClientes = useMemo(() => {
     if (!dadosBrutos.length || viewMode !== 'clientes') return [];
     
-    // 1. Identificar Clientes Curva A (80% da Receita)
     const faturamentoPorCliente = new Map();
     let totalGlobal = 0;
     dadosBrutos.forEach(d => {
@@ -175,7 +170,6 @@ export default function GlobalDashboard() {
       if (totalGlobal > 0 && acumulado >= totalGlobal * 0.8) break;
     }
 
-    // 2. Construir Hierarquia Invertida (Cliente -> SKU)
     const tree = new Map();
     const term = busca.toLowerCase();
     
@@ -183,26 +177,19 @@ export default function GlobalDashboard() {
       .filter(d => topClientesSet.has(d.razaosocial))
       .filter(d => (d.sku + ' ' + d.descricao + ' ' + d.razaosocial).toLowerCase().includes(term))
       .forEach(r => {
-        if (!tree.has(r.razaosocial)) {
-          tree.set(r.razaosocial, { id: r.razaosocial, chave_matriz: r.razaosocial, nome: r.razaosocial, tipo: 'cliente_pai', meses: new Map(), skus: new Map() });
-        }
+        if (!tree.has(r.razaosocial)) tree.set(r.razaosocial, { id: r.razaosocial, chave_matriz: r.razaosocial, nome: r.razaosocial, tipo: 'cliente_pai', meses: new Map(), skus: new Map() });
         const cli = tree.get(r.razaosocial);
-        if (!cli.skus.has(r.sku)) {
-          cli.skus.set(r.sku, { id: `${r.razaosocial}|${r.sku}`, chave_matriz: `${r.razaosocial}|${r.sku}`, nome: r.descricao, produto: r.sku, tipo: 'produto', meses: new Map() });
-        }
+        if (!cli.skus.has(r.sku)) cli.skus.set(r.sku, { id: `${r.razaosocial}|${r.sku}`, chave_matriz: `${r.razaosocial}|${r.sku}`, nome: r.descricao, produto: r.sku, tipo: 'produto', meses: new Map() });
         const skuNode = cli.skus.get(r.sku);
         const m = r.mes_projetado;
 
         [cli, skuNode].forEach(node => {
-          if (!node.meses.has(m)) node.meses.set(m, { mes_banco: m, vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, rec_ia:0, rec_td:0, rec_bu:0, rec_sp:0, rec_final:0, unmet_brl: 0, delta_ia_brl: 0, delta_ciclo: 0 });
+          if (!node.meses.has(m)) node.meses.set(m, { mes_banco: m, vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, rec_ia:0, rec_td:0, rec_bu:0, rec_sp:0, rec_final:0, unmet_brl: 0, delta_ia_brl: 0, delta_ciclo: 0, justificativas: new Set() });
           const target = node.meses.get(m);
-          target.vol_ia += (r.vol_ia || 0); target.vol_td += (r.vol_topdown || 0); target.vol_bu += (r.vol_bottomup || 0); 
-          target.vol_sp += (r.vol_supply || 0); target.vol_final += (r.vol_final || 0);
-          target.rec_ia += (r.rec_ia || 0); target.rec_td += (r.rec_td || 0); target.rec_bu += (r.rec_bu || 0); 
-          target.rec_sp += (r.rec_supply || 0); target.rec_final += (r.rec_final || 0);
-          target.unmet_brl += (r.unmet_demand_brl || 0);
-          target.delta_ia_brl += (r.impacto_financeiro_ia_brl || 0);
-          target.delta_ciclo += (r.delta_ciclo_vol || 0);
+          target.vol_ia += (r.vol_ia || 0); target.vol_td += (r.vol_topdown || 0); target.vol_bu += (r.vol_bottomup || 0); target.vol_sp += (r.vol_supply || 0); target.vol_final += (r.vol_final || 0);
+          target.rec_ia += (r.rec_ia || 0); target.rec_td += (r.rec_td || 0); target.rec_bu += (r.rec_bu || 0); target.rec_sp += (r.rec_supply || 0); target.rec_final += (r.rec_final || 0);
+          target.unmet_brl += (r.unmet_demand_brl || 0); target.delta_ia_brl += (r.impacto_financeiro_ia_brl || 0); target.delta_ciclo += (r.delta_ciclo_vol || 0);
+          if (r.justificativa_supply) target.justificativas.add(r.justificativa_supply);
         });
       });
 
@@ -220,10 +207,11 @@ export default function GlobalDashboard() {
       }));
   }, [dadosBrutos, busca, viewMode]);
 
-  // --- STATS GERAIS E GRÁFICOS ---
+  // --- STATS GERAIS ---
   const stats = useMemo(() => {
     let t_ia = 0, t_td = 0, t_bu = 0, t_sp = 0, t_final = 0;
     let r_ia = 0, r_td = 0, r_bu = 0, r_sp = 0, r_final = 0;
+    let risco_total_brl = 0;
     const porMes: Record<string, any> = {};
 
     dadosBrutos.forEach(r => {
@@ -233,6 +221,7 @@ export default function GlobalDashboard() {
       m.rec_ia += (r.rec_ia || 0); m.rec_td += (r.rec_td || 0); m.rec_bu += (r.rec_bu || 0); m.rec_sp += (r.rec_supply || 0); r_final += (r.rec_final || 0);
       t_ia += (r.vol_ia || 0); t_td += (r.vol_topdown || 0); t_bu += (r.vol_bottomup || 0); t_sp += (r.vol_supply || 0); t_final += (r.vol_final || 0);
       r_ia += (r.rec_ia || 0); r_td += (r.rec_td || 0); r_bu += (r.rec_bu || 0); r_sp += (r.rec_supply || 0); r_final += (r.rec_final || 0);
+      risco_total_brl += (r.unmet_demand_brl || 0);
     });
 
     const chartData = Object.keys(porMes).sort().map(mes => ({
@@ -241,47 +230,64 @@ export default function GlobalDashboard() {
       RIA: porMes[mes].rec_ia, RTD: porMes[mes].rec_td, RBU: porMes[mes].rec_bu, RSP: porMes[mes].rec_sp, RFinal: porMes[mes].rec_final
     }));
 
-    return { porMes, chartData, cards: { vol: { ia: t_ia, td: t_td, bu: t_bu, sp: t_sp, final: t_final }, rec: { ia: r_ia, td: r_td, bu: r_bu, sp: r_sp, final: r_final } } };
+    return { porMes, chartData, risco_total_brl, cards: { vol: { ia: t_ia, td: t_td, bu: t_bu, sp: t_sp, final: t_final }, rec: { ia: r_ia, td: r_td, bu: r_bu, sp: r_sp, final: r_final } } };
   }, [dadosBrutos]);
 
-  const paretoData = useMemo(() => {
-    if (!mesPareto || dadosBrutos.length === 0) return [];
-    const dadosMes = dadosBrutos.filter(d => d.mes_projetado === mesPareto);
-    const agrupado = new Map();
-    let totalFaturamentoMes = 0;
-    dadosMes.forEach(d => {
-      const cliente = d.razaosocial || 'N/A';
-      if (!agrupado.has(cliente)) agrupado.set(cliente, { razaosocial: cliente, receita: 0, volume: 0 });
-      const r = agrupado.get(cliente);
-      r.receita += (d.rec_final || 0); r.volume += (d.vol_final || 0);
-      totalFaturamentoMes += (d.rec_final || 0);
-    });
-    const sorted = Array.from(agrupado.values()).sort((a, b) => b.receita - a.receita);
-    const limit80 = totalFaturamentoMes * 0.8;
-    let acumulado = 0;
-    const result: any[] = [];
-    for (const c of sorted) {
-      if (acumulado >= limit80 && result.length > 0) break; 
-      result.push({ name: c.razaosocial.length > 25 ? c.razaosocial.substring(0, 25) + '...' : c.razaosocial, Receita: c.receita, Volume: c.volume });
-      acumulado += c.receita;
+  // --- FUNÇÕES DA IA (CHAT) ---
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [aiMessages, isAiTyping]);
+
+  const handleSendAiMessage = async () => {
+    if (!aiInput.trim()) return;
+    const userText = aiInput;
+    setAiInput('');
+    setAiMessages(prev => [...prev, { role: 'user', content: userText }]);
+    setIsAiTyping(true);
+
+    try {
+      // O Segredo: Context Injection. Montamos um resumo leve do Dashboard atual.
+      const dadosAtivos = viewMode === 'categorias' ? dadosAgrupadosCategorias : dadosAgrupadosClientes;
+      const contextSummary = {
+        visao_ativa: viewMode,
+        risco_supply_total_brl: stats.risco_total_brl,
+        top_itens: dadosAtivos.slice(0, 5).map(item => ({
+            nome: item.nome, 
+            receita_total: Array.from(item.meses).reduce((acc:any, m:any) => acc + m.rec_final, 0),
+            risco_supply_brl: Array.from(item.meses).reduce((acc:any, m:any) => acc + m.unmet_brl, 0)
+        }))
+      };
+
+      const res = await axios.post('/api/v1/ai/analise-sop', {
+        pergunta: userText,
+        contexto_dashboard: contextSummary
+      });
+      
+      setAiMessages(prev => [...prev, { role: 'ai', content: res.data.resposta }]);
+    } catch (error) {
+      setAiMessages(prev => [...prev, { role: 'ai', content: '❌ *Erro de conexão com o motor Nexus AI.* Verifique se o serviço de IA está ativo.' }]);
+    } finally {
+      setIsAiTyping(false);
     }
-    return result;
-  }, [dadosBrutos, mesPareto]);
+  };
+
+  const sugestoesIA = viewMode === 'categorias' 
+    ? ["Qual categoria tem maior risco de Supply?", "Resuma a volatilidade do plano", "Onde a IA sugeriu acréscimos?"]
+    : ["Quais clientes do Pareto perderam faturamento?", "Explique as justificativas de Supply", "Qual cliente mais cresceu vs Histórico?"];
+
 
   // --- LOGICA DE GRÁFICO EXPANSÍVEL ---
   const toggleChart = async (row: any) => {
     const chave = row.original.chave_matriz;
     if (chartExpanded === chave) { setChartExpanded(null); return; }
     setChartExpanded(chave);
-    
     if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
         const res = await axios.get('/api/v1/dashboard/grafico', { params: { chave_matriz: chave } });
         const historico = res.data.dados || [];
         const projectionData = row.original.meses.map((m: any) => ({
-          name: m.mes_banco.split('-').reverse().slice(1).join('/'),
-          data_iso: m.mes_banco,
+          name: m.mes_banco.split('-').reverse().slice(1).join('/'), data_iso: m.mes_banco,
           IA: m.vol_ia, Comercial: m.vol_bu, Supply: m.vol_sp, Final: m.vol_final, CicloAnterior: m.vol_anterior || null, Realizado: null
         }));
         const merged: any[] = [];
@@ -315,7 +321,7 @@ export default function GlobalDashboard() {
                 {row.getIsExpanded() ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
               </button>
               
-              <button onClick={() => toggleChart(row)} className={`p-1.5 rounded-lg border transition-all ${chartExpanded === row.original.chave_matriz ? 'bg-indigo-600 border-indigo-600 text-white' : 'hover:bg-slate-100 border-transparent text-slate-400'}`}>
+              <button onClick={() => toggleChart(row)} className={`p-1.5 rounded-lg border transition-all ${chartExpanded === row.original.chave_matriz ? 'bg-indigo-600 border-indigo-600 text-white shadow-md' : 'hover:bg-slate-100 border-transparent text-slate-400'}`}>
                 <Activity className="w-3.5 h-3.5" />
               </button>
 
@@ -341,31 +347,32 @@ export default function GlobalDashboard() {
       const mesStr = mBanco.split('-').reverse().slice(1).join('/');
       baseCols.push({
         id: `mes_${mBanco}`, header: mesStr,
+        accessorFn: (row: any) => row.meses.find((rm: any) => rm.mes_banco === mBanco)?.vol_final || 0,
         cell: (info: any) => {
           const row = info.row.original;
           const dadosMes = row.meses.find((rm: any) => rm.mes_banco === mBanco);
           const valorInteiro = Math.round(Number(dadosMes?.vol_final || 0));
           const receitaExibida = dadosMes?.rec_final || 0;
 
-          // Indicadores de Gestão (Deltas)
+          // Indicadores Analíticos
           const corteSupply = (dadosMes?.vol_bu || 0) - (dadosMes?.vol_sp || 0);
           const acrescimoIA = (dadosMes?.vol_ia || 0) - (dadosMes?.vol_bu || 0);
+          const hasJustification = dadosMes?.justificativas?.size > 0;
 
           return (
             <div className="flex flex-col items-center justify-center min-w-[120px] group relative">
               <div className="flex items-center gap-2">
                  <div className="font-black text-slate-900 text-sm">{formatVolume(valorInteiro)}</div>
                  <div className="flex flex-col gap-0.5">
-                    {corteSupply > 10 && <div className="w-1.5 h-1.5 bg-rose-500 rounded-full animate-pulse" title={`Corte Crítico: -${formatVolume(corteSupply)} CX`} />}
-                    {acrescimoIA > 10 && <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full" title={`Oportunidade IA: +${formatVolume(acrescimoIA)} CX`} />}
+                    {corteSupply > 10 && <div className="w-1.5 h-1.5 bg-rose-500 rounded-full animate-pulse" title={`Corte: -${formatVolume(corteSupply)} CX\nRisco: ${formatMoeda(dadosMes.unmet_brl)}`} />}
+                    {acrescimoIA > 10 && <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full" title={`Inovação IA: +${formatVolume(acrescimoIA)} CX\nOportunidade: ${formatMoeda(dadosMes.delta_ia_brl)}`} />}
                  </div>
               </div>
               <div className="text-[10px] font-bold text-emerald-600 mt-0.5">{formatMoeda(receitaExibida)}</div>
               
-              {/* Tooltip de Justificativa se houver */}
-              {row.tipo === 'produto' && dadosMes?.justificativa_supply && (
-                <div className="absolute -top-2 -right-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <Info className="w-3 h-3 text-slate-400 cursor-help" />
+              {hasJustification && (
+                <div className="absolute -top-1 -right-4 cursor-help" title={Array.from(dadosMes.justificativas).join('\n')}>
+                  <Info className="w-3.5 h-3.5 text-rose-400 hover:text-rose-600 transition-colors" />
                 </div>
               )}
             </div>
@@ -394,8 +401,8 @@ export default function GlobalDashboard() {
   );
 
   return (
-    <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
-      <div className="max-w-[1600px] mx-auto p-6 lg:p-10 relative">
+    <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20 relative">
+      <div className="max-w-[1600px] mx-auto p-6 lg:p-10">
         
         {/* --- HEADER EXECUTIVO --- */}
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6 mb-8 bg-white p-8 rounded-[40px] shadow-sm border border-slate-100 relative overflow-hidden">
@@ -447,7 +454,7 @@ export default function GlobalDashboard() {
                 <button onClick={() => setViewMode('categorias')} className={`flex-1 flex items-center justify-center gap-3 py-4 rounded-[18px] text-[11px] font-black uppercase tracking-widest transition-all ${viewMode === 'categorias' ? 'bg-slate-900 text-white shadow-lg' : 'text-slate-400 hover:text-slate-600'}`}>
                     <Layers className="w-4 h-4" /> Portfólio de Categorias
                 </button>
-                <button onClick={() => setViewMode('clientes')} className={`flex-1 flex items-center justify-center gap-3 py-4 rounded-[18px] text-[11px] font-black uppercase tracking-widest transition-all ${viewMode === 'clientes' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-600'}`}>
+                <button onClick={() => setViewMode('clientes')} className={`flex-1 flex items-center justify-center gap-3 py-4 rounded-[18px] text-[11px] font-black uppercase tracking-widest transition-all ${viewMode === 'clientes' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-600'}`}>
                     <Users className="w-4 h-4" /> Clientes Curva A (80%)
                 </button>
             </div>
@@ -554,6 +561,88 @@ export default function GlobalDashboard() {
           </div>
         </div>
       </div>
+
+      {/* ========================================================= */}
+      {/* NEXUS AI COPILOT (FLOATING CHAT)                          */}
+      {/* ========================================================= */}
+      
+      {/* BOTÃO FLUTUANTE */}
+      <button 
+        onClick={() => setIsAiOpen(true)}
+        className={`fixed bottom-8 right-8 p-4 bg-slate-900 text-white rounded-full shadow-2xl hover:scale-110 hover:bg-black transition-all z-40 group ${isAiOpen ? 'hidden' : 'flex'}`}
+      >
+        <Sparkles className="w-6 h-6 text-indigo-400 group-hover:text-indigo-300" />
+      </button>
+
+      {/* DRAWER DO CHAT */}
+      {isAiOpen && (
+        <div className="fixed top-0 right-0 h-full w-[450px] bg-white shadow-2xl z-50 flex flex-col animate-in slide-in-from-right duration-300 border-l border-slate-200">
+          
+          {/* AI Header */}
+          <div className="p-6 bg-slate-900 text-white flex justify-between items-center">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-indigo-500/20 rounded-xl"><Bot className="w-6 h-6 text-indigo-400" /></div>
+              <div>
+                <h2 className="font-black text-lg tracking-tighter">Nexus AI</h2>
+                <p className="text-[10px] text-indigo-300 uppercase tracking-widest font-bold">Copiloto Executivo S&OP</p>
+              </div>
+            </div>
+            <button onClick={() => setIsAiOpen(false)} className="p-2 hover:bg-white/10 rounded-full transition-colors"><X className="w-5 h-5" /></button>
+          </div>
+
+          {/* AI Messages Area */}
+          <div className="flex-1 overflow-y-auto p-6 bg-slate-50 flex flex-col gap-4 custom-scrollbar">
+            {aiMessages.map((msg, idx) => (
+              <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[85%] p-4 rounded-2xl text-sm leading-relaxed ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-sm' : 'bg-white border border-slate-200 text-slate-700 shadow-sm rounded-tl-sm'}`}>
+                  {/* Renderização simples de Negrito do Markdown */}
+                  <span dangerouslySetInnerHTML={{ __html: msg.content.replace(/\*\*(.*?)\*\*/g, '<strong class="font-black text-slate-900">$1</strong>') }} />
+                </div>
+              </div>
+            ))}
+            {isAiTyping && (
+              <div className="flex justify-start">
+                <div className="bg-white border border-slate-200 p-4 rounded-2xl rounded-tl-sm shadow-sm flex items-center gap-2">
+                  <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                </div>
+              </div>
+            )}
+            <div ref={chatEndRef} />
+          </div>
+
+          {/* AI Input Area */}
+          <div className="p-6 bg-white border-t border-slate-100 flex flex-col gap-3">
+            <div className="flex gap-2 overflow-x-auto pb-2 custom-scrollbar">
+              {sugestoesIA.map(sugestao => (
+                <button 
+                  key={sugestao} onClick={() => setAiInput(sugestao)}
+                  className="whitespace-nowrap px-3 py-1.5 bg-slate-100 hover:bg-indigo-50 text-slate-600 hover:text-indigo-600 text-[10px] font-black uppercase tracking-widest rounded-full transition-colors border border-slate-200"
+                >
+                  {sugestao}
+                </button>
+              ))}
+            </div>
+            <div className="relative flex items-center">
+              <input 
+                type="text" value={aiInput} onChange={(e) => setAiInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSendAiMessage()}
+                placeholder="Pergunte sobre riscos, variações..."
+                className="w-full bg-slate-50 border border-slate-200 rounded-[20px] py-4 pl-4 pr-12 text-sm font-bold text-slate-800 outline-none focus:border-indigo-500 focus:bg-white transition-colors"
+              />
+              <button 
+                onClick={handleSendAiMessage} disabled={!aiInput.trim() || isAiTyping}
+                className="absolute right-2 p-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white rounded-xl transition-colors"
+              >
+                <Send className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+        </div>
+      )}
+
     </div>
   );
 }
