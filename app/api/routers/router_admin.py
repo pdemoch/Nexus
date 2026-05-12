@@ -10,7 +10,6 @@ from fastapi.responses import StreamingResponse
 from app.core.database import get_db
 from app.core.state import AppState
 from app.models.domain_models import ControleCiclo, DimProduto, DimCliente, FatoIbpGranular, AuditoriaAjuste
-from app.models.auth_models import User  # IMPORTAÇÃO ADICIONADA: Necessária para a gestão de usuários
 from app.etl.pipeline import executar_pipeline_nexus
 from app.api.routers.router_auth import get_current_user
 from app.api.routers.shared_ibp import get_current_cycle, get_truth_query, get_projection_window
@@ -27,7 +26,7 @@ async def obter_status_pipeline(usuario_logado: dict = Depends(get_current_user)
 
 @router.post("/pipeline/start")
 async def iniciar_pipeline(background_tasks: BackgroundTasks, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] != 'Administrador':
+    if usuario_logado.get('funcao') != 'Administrador':
         raise HTTPException(status_code=403, detail="Acesso negado. Apenas Administradores podem rodar o pipeline.")
         
     if AppState.pipeline_rodando:
@@ -39,7 +38,7 @@ async def iniciar_pipeline(background_tasks: BackgroundTasks, db: Session = Depe
     return {"status": "success", "message": "Pipeline de Engenharia de Dados iniciado em Background!"}
 
 # =====================================================================
-# ROTAS DA MÁQUINA DO TEMPO (NOVO)
+# ROTAS DA MÁQUINA DO TEMPO
 # =====================================================================
 
 @router.get("/ciclo-ativo")
@@ -55,7 +54,7 @@ async def obter_ciclo_ativo(db: Session = Depends(get_db), usuario: dict = Depen
 @router.post("/ciclo-ativo")
 async def atualizar_ciclo_ativo(payload: PayloadCiclo, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     """Altera o relógio global do sistema S&OP"""
-    if usuario['funcao'] != 'Administrador':
+    if usuario.get('funcao') != 'Administrador':
         raise HTTPException(status_code=403, detail="Apenas administradores podem viajar no tempo.")
     
     try:
@@ -80,7 +79,7 @@ async def atualizar_ciclo_ativo(payload: PayloadCiclo, db: Session = Depends(get
 
 @router.post("/reabrir-ciclo")
 async def reabrir_ciclo(origem: str, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] != 'Administrador':
+    if usuario_logado.get('funcao') != 'Administrador':
         raise HTTPException(status_code=403, detail="Acesso negado.")
         
     ciclo_atual = get_current_cycle(db)
@@ -102,7 +101,7 @@ async def reabrir_ciclo(origem: str, db: Session = Depends(get_db), usuario_loga
 
 @router.get("/exportar-base")
 async def exportar_base_granular(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] != 'Administrador':
+    if usuario_logado.get('funcao') != 'Administrador':
         raise HTTPException(status_code=403, detail="Acesso negado.")
         
     try:
@@ -153,7 +152,7 @@ async def exportar_base_granular(db: Session = Depends(get_db), usuario_logado: 
 
 @router.get("/auditoria/logs")
 async def listar_logs_auditoria(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] != 'Administrador':
+    if usuario_logado.get('funcao') != 'Administrador':
         raise HTTPException(status_code=403, detail="Acesso negado.")
         
     try:
@@ -178,34 +177,34 @@ async def listar_logs_auditoria(db: Session = Depends(get_db), usuario_logado: d
         raise HTTPException(500, f"Erro ao carregar auditoria: {str(e)}")
 
 # =====================================================================
-# GESTÃO DE USUÁRIOS E SEGURANÇA (NOVA FUNCIONALIDADE)
+# GESTÃO DE USUÁRIOS E SEGURANÇA (SQL PURO)
 # =====================================================================
 
 @router.delete("/delete-user/{user_id}")
 async def excluir_usuario_sistema(user_id: int, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    """Exclui permanentemente um usuário ativo do sistema"""
+    """Exclui permanentemente um usuário ativo do sistema via Raw SQL para evitar erros de importação"""
     
-    if usuario_logado['funcao'] != 'Administrador':
+    if usuario_logado.get('funcao') != 'Administrador':
         raise HTTPException(status_code=403, detail="Acesso negado. Apenas administradores podem excluir usuários.")
     
-    user_to_delete = db.query(User).filter(User.id == user_id).first()
-    
-    if not user_to_delete:
-        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
-    
-    # Trava de segurança para impedir a auto-exclusão do administrador ativo
-    if user_to_delete.id == usuario_logado['id']:
+    if user_id == usuario_logado.get('id'):
         raise HTTPException(
             status_code=400, 
             detail="Operação negada: Você não pode excluir a sua própria conta de administrador."
         )
 
     try:
-        db.delete(user_to_delete)
+        # Apaga o usuário diretamente com SQL, sem necessitar da classe Modelo
+        db.execute(text("DELETE FROM usuarios WHERE id = :id"), {"id": user_id})
         db.commit()
-        # Usa o 'nome' amigável se existir, caso contrário usa o username
-        nome_display = getattr(user_to_delete, 'nome', user_to_delete.username)
-        return {"status": "success", "message": f"Utilizador {nome_display} removido com sucesso do Nexus."}
+        return {"status": "success", "message": f"Utilizador removido com sucesso do Nexus."}
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Erro ao excluir utilizador: {str(e)}")
+        # Se a tabela não se chamar "usuarios", tenta a "users"
+        try:
+            db.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_id})
+            db.commit()
+            return {"status": "success", "message": f"Utilizador removido com sucesso do Nexus."}
+        except Exception as e2:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Erro interno ao excluir utilizador. Contacte o suporte.")

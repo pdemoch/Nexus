@@ -44,7 +44,7 @@ class PayloadAprovarGlobal(BaseModel):
 @router.get("/global")
 async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
     # Travas de segurança corrigidas (usando Supply ao invés de Planejamento)
-    perfis_permitidos = ['Administrador', 'Gerente', 'Supply Chain', 'Marketing', 'C-Level', 'Supply', 'Diretoria']
+    perfis_permitidos = ['Administrador', 'Gerente', 'Supply Chain', 'Marketing', 'C-Level', 'Diretoria']
     if usuario_logado.get('funcao') not in perfis_permitidos:
         raise HTTPException(status_code=403, detail="Acesso restrito à Diretoria, Gerência ou Supply Chain.")
         
