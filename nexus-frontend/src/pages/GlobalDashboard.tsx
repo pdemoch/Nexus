@@ -7,10 +7,10 @@ import {
   Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
   Layers, Lock, Download, AlertTriangle, ShieldCheck, Check, Globe, Package, 
   Users, Search, Filter, BarChart3, TrendingUp, TrendingDown, Activity, Hash, Target,
-  ArrowRightLeft, AlertCircle, Info, Bot, Send, X, Sparkles, Lightbulb
+  ArrowRightLeft, AlertCircle, Info, Bot, Send, X, Sparkles, Lightbulb, History, Zap
 } from 'lucide-react';
 import axios from 'axios';
-import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area } from 'recharts';
 
 // --- HELPERS DE FORMATAÇÃO ---
 const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor || 0));
@@ -31,6 +31,113 @@ const VarBadge = ({ atual = 0, anterior = 0 }: { atual?: number, anterior?: numb
 const tooltipSorterRow = (item: any) => {
   const order: Record<string, number> = { 'Histórico Real': 1, 'Proposta Mês Passado': 2, 'Sinal IA': 3, 'Proposta Comercial': 4, 'Restrição Supply': 5, 'Global S&OP': 6 };
   return order[item.name] || 99;
+};
+
+// =========================================================
+// COMPONENTE: DOSSIÊ DO SKU (SUB-ROW)
+// =========================================================
+const SKUPerformanceDossier = ({ rowData }: { rowData: any }) => {
+  const meses = rowData.meses || [];
+  
+  // Agregados do Dossiê
+  const totais = useMemo(() => {
+    return meses.reduce((acc: any, m: any) => ({
+      ia: acc.ia + (m.vol_ia || 0),
+      bu: acc.bu + (m.vol_bu || 0),
+      sp: acc.sp + (m.vol_sp || 0),
+      final: acc.final + (m.vol_final || 0),
+      rec: acc.rec + (m.rec_final || 0),
+      ant: acc.ant + (m.vol_anterior || 0),
+      hist: acc.hist + (m.vol_hist_media || 0)
+    }), { ia:0, bu:0, sp:0, final:0, rec:0, ant:0, hist:0 });
+  }, [meses]);
+
+  const justificativas = useMemo(() => {
+    const set = new Set<string>();
+    meses.forEach((m: any) => m.justificativas?.forEach((j: string) => set.add(j)));
+    return Array.from(set);
+  }, [meses]);
+
+  return (
+    <div className="p-8 bg-slate-50/80 border-y border-slate-200 animate-in fade-in slide-in-from-top-2 duration-300">
+      <div className="max-w-[1400px] mx-auto grid grid-cols-1 lg:grid-cols-4 gap-6">
+        
+        {/* COL 1: KPIs DE SAÚDE */}
+        <div className="bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 flex flex-col gap-4">
+          <div className="flex items-center gap-2 text-indigo-600 mb-2">
+             <Target className="w-5 h-5" />
+             <span className="text-[10px] font-black uppercase tracking-widest">Resumo do Ciclo</span>
+          </div>
+          <div>
+            <p className="text-[10px] font-bold text-slate-400 uppercase">Receita Total Projetada</p>
+            <p className="text-xl font-black text-slate-900">{formatMoeda(totais.rec)}</p>
+          </div>
+          <div className="grid grid-cols-2 gap-4 pt-4 border-t border-slate-50">
+             <div>
+                <p className="text-[9px] font-bold text-slate-400 uppercase">vs Ciclo Anterior</p>
+                <div className="flex items-center gap-2">
+                   <span className="text-sm font-black">{formatVolume(totais.final)}</span>
+                   <VarBadge atual={totais.final} anterior={totais.ant} />
+                </div>
+             </div>
+             <div>
+                <p className="text-[9px] font-bold text-slate-400 uppercase">vs Méd. Histórica</p>
+                <div className="flex items-center gap-2">
+                   <span className="text-sm font-black">{formatVolume(totais.final)}</span>
+                   <VarBadge atual={totais.final} anterior={totais.hist} />
+                </div>
+             </div>
+          </div>
+        </div>
+
+        {/* COL 2 & 3: CONSTRUÇÃO DO VOLUME (WATERFALL VISUAL) */}
+        <div className="lg:col-span-2 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100">
+           <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center gap-2 text-emerald-600">
+                <Zap className="w-5 h-5" />
+                <span className="text-[10px] font-black uppercase tracking-widest">Aderência e Construção do Plano</span>
+              </div>
+              <span className="text-[10px] font-bold text-slate-300">Volume Acumulado (M2-M4)</span>
+           </div>
+           
+           <div className="flex items-end justify-between h-[120px] px-4">
+              {[
+                { label: 'IA', val: totais.ia, color: 'bg-slate-200' },
+                { label: 'Comercial', val: totais.bu, color: 'bg-indigo-400' },
+                { label: 'Supply', val: totais.sp, color: 'bg-rose-400' },
+                { label: 'Final', val: totais.final, color: 'bg-slate-900' }
+              ].map((step, idx) => (
+                <div key={idx} className="flex flex-col items-center gap-2 flex-1">
+                   <div className="text-[10px] font-black text-slate-400">{formatVolume(step.val)}</div>
+                   <div className={`w-12 rounded-t-xl transition-all duration-700 ${step.color}`} style={{ height: `${(step.val / Math.max(totais.ia, totais.bu, totais.final, 1)) * 100}%`, minHeight: '4px' }} />
+                   <div className="text-[9px] font-bold text-slate-500 uppercase mt-1">{step.label}</div>
+                </div>
+              ))}
+           </div>
+        </div>
+
+        {/* COL 4: NOTAS E AÇÕES */}
+        <div className="bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 overflow-hidden">
+          <div className="flex items-center gap-2 text-rose-500 mb-4">
+             <AlertCircle className="w-5 h-5" />
+             <span className="text-[10px] font-black uppercase tracking-widest">Ações de Supply</span>
+          </div>
+          <div className="flex flex-col gap-3 h-[140px] overflow-y-auto custom-scrollbar pr-2">
+             {justificativas.length > 0 ? justificativas.map((j: string, i: number) => (
+               <div key={i} className="p-3 bg-rose-50 border-l-4 border-rose-400 rounded-r-xl">
+                  <p className="text-[11px] font-bold text-rose-800 leading-tight italic">"{j}"</p>
+               </div>
+             )) : (
+               <div className="h-full flex items-center justify-center border-2 border-dashed border-slate-100 rounded-2xl">
+                  <span className="text-[10px] font-bold text-slate-300 uppercase">Sem restrições registradas</span>
+               </div>
+             )}
+          </div>
+        </div>
+
+      </div>
+    </div>
+  );
 };
 
 export default function GlobalDashboard() {
@@ -57,6 +164,11 @@ export default function GlobalDashboard() {
     { role: 'ai', content: 'Olá! Sou o **Nexus AI Copilot**. Já processei a matemática de Supply, Volatilidade, PMV e Assertividade deste S&OP. Como posso apoiar a sua análise?' }
   ]);
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // --- SUGESTÕES DINÂMICAS IA ---
+  const sugestoesIA = viewMode === 'categorias' 
+    ? ["Qual categoria teve maior corte de Supply?", "A IA sugeriu inovação em qual linha?", "Houve queda no preço médio (PMV)?"]
+    : ["Quais clientes perderam faturamento?", "Explique as justificativas da fábrica", "Qual cliente mais cresceu vs Histórico?"];
 
   // --- CARGA DE DADOS ---
   const fetchData = useCallback(async () => {
@@ -119,11 +231,11 @@ export default function GlobalDashboard() {
       const m = r.mes_projetado;
 
       [cat, skuNode].forEach(node => {
-        if (!node.meses.has(m)) node.meses.set(m, { mes_banco: m, vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, rec_ia:0, rec_td:0, rec_bu:0, rec_sp:0, rec_final:0, unmet_brl: 0, delta_ia_brl: 0, delta_ciclo: 0, justificativas: new Set() });
+        if (!node.meses.has(m)) node.meses.set(m, { mes_banco: m, vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, rec_ia:0, rec_td:0, rec_bu:0, rec_sp:0, rec_final:0, unmet_brl: 0, delta_ia_brl: 0, vol_anterior:0, vol_hist_media:0, justificativas: new Set() });
         const target = node.meses.get(m);
-        target.vol_ia += (r.vol_ia || 0); target.vol_td += (r.vol_topdown || 0); target.vol_bu += (r.vol_bottomup || 0); target.vol_sp += (r.vol_supply || 0); target.vol_final += (r.vol_final || 0);
-        target.rec_ia += (r.rec_ia || 0); target.rec_td += (r.rec_td || 0); target.rec_bu += (r.rec_bu || 0); target.rec_sp += (r.rec_supply || 0); target.rec_final += (r.rec_final || 0);
-        target.unmet_brl += (r.unmet_demand_brl || 0); target.delta_ia_brl += (r.impacto_financeiro_ia_brl || 0); target.delta_ciclo += (r.delta_ciclo_vol || 0);
+        target.vol_ia += (r.vol_ia || 0); target.vol_bu += (r.vol_bottomup || 0); target.vol_sp += (r.vol_supply || 0); target.vol_final += (r.vol_final || 0);
+        target.rec_final += (r.rec_final || 0); target.unmet_brl += (r.unmet_demand_brl || 0); target.delta_ia_brl += (r.impacto_financeiro_ia_brl || 0);
+        target.vol_anterior += (r.vol_anterior || 0); target.vol_hist_media += (r.vol_hist_media || 0);
         if (r.justificativa_supply) target.justificativas.add(r.justificativa_supply);
       });
     });
@@ -171,11 +283,11 @@ export default function GlobalDashboard() {
         const m = r.mes_projetado;
 
         [cli, skuNode].forEach(node => {
-          if (!node.meses.has(m)) node.meses.set(m, { mes_banco: m, vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, rec_ia:0, rec_td:0, rec_bu:0, rec_sp:0, rec_final:0, unmet_brl: 0, delta_ia_brl: 0, delta_ciclo: 0, justificativas: new Set() });
+          if (!node.meses.has(m)) node.meses.set(m, { mes_banco: m, vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, rec_ia:0, rec_td:0, rec_bu:0, rec_sp:0, rec_final:0, unmet_brl: 0, delta_ia_brl: 0, vol_anterior:0, vol_hist_media:0, justificativas: new Set() });
           const target = node.meses.get(m);
-          target.vol_ia += (r.vol_ia || 0); target.vol_td += (r.vol_topdown || 0); target.vol_bu += (r.vol_bottomup || 0); target.vol_sp += (r.vol_supply || 0); target.vol_final += (r.vol_final || 0);
-          target.rec_ia += (r.rec_ia || 0); target.rec_td += (r.rec_td || 0); target.rec_bu += (r.rec_bu || 0); target.rec_sp += (r.rec_supply || 0); target.rec_final += (r.rec_final || 0);
-          target.unmet_brl += (r.unmet_demand_brl || 0); target.delta_ia_brl += (r.impacto_financeiro_ia_brl || 0); target.delta_ciclo += (r.delta_ciclo_vol || 0);
+          target.vol_ia += (r.vol_ia || 0); target.vol_bu += (r.vol_bottomup || 0); target.vol_sp += (r.vol_supply || 0); target.vol_final += (r.vol_final || 0);
+          target.rec_final += (r.rec_final || 0); target.unmet_brl += (r.unmet_demand_brl || 0); target.delta_ia_brl += (r.impacto_financeiro_ia_brl || 0);
+          target.vol_anterior += (r.vol_anterior || 0); target.vol_hist_media += (r.vol_hist_media || 0);
           if (r.justificativa_supply) target.justificativas.add(r.justificativa_supply);
         });
       });
@@ -194,29 +306,31 @@ export default function GlobalDashboard() {
       }));
   }, [dadosBrutos, busca, viewMode]);
 
-  // --- STATS GERAIS (CARDS DO TOPO) ---
+  // --- STATS GERAIS ---
   const stats = useMemo(() => {
     let t_ia = 0, t_td = 0, t_bu = 0, t_sp = 0, t_final = 0;
     let r_ia = 0, r_td = 0, r_bu = 0, r_sp = 0, r_final = 0;
     let risco_total_brl = 0, oportunidade_ia_total_brl = 0;
-    const porMes: Record<string, any> = {};
 
     dadosBrutos.forEach(r => {
-      if (!porMes[r.mes_projetado]) porMes[r.mes_projetado] = { vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, rec_ia:0, rec_td:0, rec_bu:0, rec_sp:0, rec_final:0 };
-      const m = porMes[r.mes_projetado];
-      m.vol_ia += (r.vol_ia || 0); m.vol_td += (r.vol_topdown || 0); m.vol_bu += (r.vol_bottomup || 0); m.vol_sp += (r.vol_supply || 0); m.vol_final += (r.vol_final || 0);
-      m.rec_ia += (r.rec_ia || 0); m.rec_td += (r.rec_td || 0); m.rec_bu += (r.rec_bu || 0); m.rec_sp += (r.rec_supply || 0); m.rec_final += (r.rec_final || 0);
-      
       t_ia += (r.vol_ia || 0); t_td += (r.vol_topdown || 0); t_bu += (r.vol_bottomup || 0); t_sp += (r.vol_supply || 0); t_final += (r.vol_final || 0);
-      r_ia += (r.rec_ia || 0); r_td += (r.rec_td || 0); r_bu += (r.rec_bu || 0); r_sp += (r.rec_supply || 0); r_final += (r.rec_final || 0);
+      r_ia += ((r.vol_ia || 0) * (r.pmv_aplicado || 0)); 
+      r_td += ((r.vol_topdown || 0) * (r.pmv_aplicado || 0)); 
+      r_bu += ((r.vol_bottomup || 0) * (r.pmv_aplicado || 0)); 
+      r_sp += ((r.vol_supply || 0) * (r.pmv_aplicado || 0)); 
+      r_final += (r.rec_final || 0);
       
       risco_total_brl += (r.unmet_demand_brl || 0);
       oportunidade_ia_total_brl += (r.impacto_financeiro_ia_brl || 0);
     });
 
     return { 
-      porMes, risco_total_brl, oportunidade_ia_total_brl, 
-      cards: { vol: { ia: t_ia, td: t_td, bu: t_bu, sp: t_sp, final: t_final }, rec: { ia: r_ia, td: r_td, bu: r_bu, sp: r_sp, final: r_final } } 
+      risco_total_brl, 
+      oportunidade_ia_total_brl, 
+      cards: { 
+        vol: { ia: t_ia, td: t_td, bu: t_bu, sp: t_sp, final: t_final }, 
+        rec: { ia: r_ia, td: r_td, bu: r_bu, sp: r_sp, final: r_final } 
+      } 
     };
   }, [dadosBrutos]);
 
@@ -267,7 +381,11 @@ export default function GlobalDashboard() {
         dados_resumidos: topResumidos
       };
 
-      const res = await axios.post('/api/v1/ai/analise-sop', { pergunta: userText, contexto_dashboard: contextSummary });
+      const res = await axios.post('/api/v1/ai/analise-sop', {
+        pergunta: userText,
+        contexto_dashboard: contextSummary
+      });
+      
       setAiMessages(prev => [...prev, { role: 'ai', content: res.data.resposta }]);
     } catch (error) {
       setAiMessages(prev => [...prev, { role: 'ai', content: '❌ *Erro de comunicação com o motor Nexus AI.* Verifique a conexão com o backend ou a chave de API.' }]);
@@ -276,16 +394,11 @@ export default function GlobalDashboard() {
     }
   };
 
-  const sugestoesIA = viewMode === 'categorias' 
-    ? ["Qual categoria teve maior corte de Supply?", "A IA sugeriu inovação em qual linha?", "Houve queda no preço médio (PMV)?"]
-    : ["Quais clientes perderam faturamento?", "Explique as justificativas da fábrica", "Qual cliente mais cresceu vs Histórico?"];
-
-  // --- LOGICA DE GRÁFICO EXPANSÍVEL ---
+  // --- LÓGICA DE GRÁFICO EXPANSÍVEL ---
   const toggleChart = async (row: any) => {
     const chave = row.original.chave_matriz;
     if (chartExpanded === chave) { setChartExpanded(null); return; }
     setChartExpanded(chave);
-    
     if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
@@ -298,30 +411,43 @@ export default function GlobalDashboard() {
     }
   };
 
-  // --- CONFIGURAÇÃO DAS COLUNAS ---
+  // --- CONFIGURAÇÃO DAS COLUNAS DA TABELA ---
   const columns = useMemo<ColumnDef<any>[]>(() => {
     const activeData = viewMode === 'categorias' ? dadosAgrupadosCategorias : dadosAgrupadosClientes;
     if (activeData.length === 0) return [];
 
     const baseCols: ColumnDef<any>[] = [
       {
-        id: 'nome', header: viewMode === 'categorias' ? 'Hierarquia de Portfólio' : 'Top Clientes (Curva A)',
+        id: 'nome', header: viewMode === 'categorias' ? 'Hierarquia / Portfólio' : 'Top Clientes (Pareto 80%)',
         accessorFn: (row: any) => row.nome,
         cell: (info: any) => {
           const row = info.row;
-          const { tipo, nome, produto } = row.original;
+          const { tipo, nome, produto, meses } = row.original;
+          
+          // Indicadores de Bolinha (Resumo na Seta do SKU)
+          const hasInnovation = meses.some((m:any) => (m.vol_ia - m.vol_bu) > 100);
+          const hasSupplyCut = meses.some((m:any) => (m.vol_bu - m.vol_sp) > 100);
+          const hasPriceErosion = meses.some((m:any) => m.rec_final < (m.vol_final * m.pmv_hist_media * 0.95));
+
           return (
             <div style={{ paddingLeft: `${row.depth * 2}rem` }} className="flex items-center gap-3 py-1.5 min-w-[380px]">
-              {/* SETA DE EXPANSÃO CORRIGIDA */}
-              <button 
-                onClick={(e) => {
-                  e.stopPropagation();
-                  row.toggleExpanded();
-                }} 
-                className="p-1 hover:bg-slate-100 rounded text-slate-500 transition-transform"
-              >
-                {row.getIsExpanded() ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-              </button>
+              
+              <div className="relative">
+                <button 
+                  onClick={(e) => { e.stopPropagation(); row.toggleExpanded(); }} 
+                  className={`p-1.5 rounded-lg border transition-all ${row.getIsExpanded() ? 'bg-slate-900 border-slate-900 text-white shadow-lg' : 'hover:bg-slate-100 border-transparent text-slate-500'}`}
+                >
+                  {row.getIsExpanded() ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                </button>
+                {/* Bolinhas de Alerta só aparecem nos produtos */}
+                {tipo === 'produto' && (
+                  <div className="absolute -top-1 -right-1 flex gap-0.5 pointer-events-none">
+                    {hasInnovation && <div className="w-2 h-2 bg-indigo-500 rounded-full border border-white shadow-sm" title="Inovação IA" />}
+                    {hasSupplyCut && <div className="w-2 h-2 bg-rose-500 rounded-full border border-white shadow-sm animate-pulse" title="Corte de Fábrica" />}
+                    {hasPriceErosion && <div className="w-2 h-2 bg-amber-400 rounded-full border border-white shadow-sm" title="Erosão de PMV" />}
+                  </div>
+                )}
+              </div>
               
               <button onClick={() => toggleChart(row)} className={`p-1.5 rounded-lg border transition-all ${chartExpanded === row.original.chave_matriz ? 'bg-indigo-600 border-indigo-600 text-white shadow-md' : 'hover:bg-slate-100 border-transparent text-slate-400'}`}>
                 <Activity className="w-3.5 h-3.5" />
@@ -330,14 +456,14 @@ export default function GlobalDashboard() {
               <div className={`w-7 h-7 rounded-full flex items-center justify-center border flex-shrink-0 
                 ${tipo === 'categoria' ? 'bg-slate-900 border-slate-700 text-white' : 
                   tipo === 'cliente_pai' ? 'bg-blue-600 border-blue-400 text-white' :
-                  tipo === 'produto' ? 'bg-indigo-50 border-indigo-100 text-indigo-600' : 'bg-slate-50 text-slate-400'}`}>
+                  'bg-indigo-50 border-indigo-100 text-indigo-600'}`}>
                 {tipo === 'categoria' ? <Layers className="w-3.5 h-3.5" /> : 
-                 tipo === 'cliente_pai' ? <Users className="w-3.5 h-3.5" /> : <Hash className="w-3.5 h-3.5" />}
+                 tipo === 'cliente_pai' ? <Users className="w-3.5 h-3.5" /> : <Package className="w-3.5 h-3.5" />}
               </div>
 
               <div className="flex flex-col overflow-hidden">
                 <span className={`text-[13px] truncate ${tipo !== 'produto' ? 'font-black uppercase tracking-tighter' : 'font-bold text-slate-600'}`} title={nome}>{nome}</span>
-                {tipo === 'produto' && <span className="text-[10px] text-slate-400 font-bold">{produto}</span>}
+                {tipo === 'produto' && <span className="text-[10px] text-slate-400 font-black tracking-widest">{produto}</span>}
               </div>
             </div>
           )
@@ -356,23 +482,21 @@ export default function GlobalDashboard() {
           const valorInteiro = Math.round(Number(dadosMes?.vol_final || 0));
           const receitaExibida = dadosMes?.rec_final || 0;
 
-          // Indicadores de Alerta IA & Supply
           const corteSupply = (dadosMes?.vol_bu || 0) - (dadosMes?.vol_sp || 0);
           const acrescimoIA = (dadosMes?.vol_ia || 0) - (dadosMes?.vol_bu || 0);
-          const hasJustification = dadosMes?.justificativas?.size > 0;
 
           return (
             <div className="flex flex-col items-center justify-center min-w-[120px] group relative">
               <div className="flex items-center gap-2">
                  <div className="font-black text-slate-900 text-sm">{formatVolume(valorInteiro)}</div>
                  <div className="flex flex-col gap-0.5">
-                    {corteSupply > 10 && <div className="w-1.5 h-1.5 bg-rose-500 rounded-full animate-pulse" title={`Corte Fábrica: -${formatVolume(corteSupply)} CX\nRisco: ${formatMoeda(dadosMes.unmet_brl)}`} />}
-                    {acrescimoIA > 10 && <div className="w-1.5 h-1.5 bg-amber-400 rounded-full" title={`Oportunidade IA: +${formatVolume(acrescimoIA)} CX\nInovação: ${formatMoeda(dadosMes.delta_ia_brl)}`} />}
+                    {corteSupply > 10 && <div className="w-1.5 h-1.5 bg-rose-500 rounded-full animate-pulse" title={`Corte: -${formatVolume(corteSupply)} CX\nRisco: ${formatMoeda(dadosMes?.unmet_brl)}`} />}
+                    {acrescimoIA > 10 && <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full" title={`Inovação IA: +${formatVolume(acrescimoIA)} CX\nOportunidade: ${formatMoeda(dadosMes?.delta_ia_brl)}`} />}
                  </div>
               </div>
               <div className="text-[10px] font-bold text-emerald-600 mt-0.5">{formatMoeda(receitaExibida)}</div>
               
-              {hasJustification && (
+              {row.tipo === 'produto' && dadosMes?.justificativas?.size > 0 && (
                 <div className="absolute -top-1 -right-4 cursor-help" title={Array.from(dadosMes.justificativas).join('\n')}>
                   <Info className="w-3.5 h-3.5 text-rose-400 hover:text-rose-600 transition-colors" />
                 </div>
@@ -392,9 +516,7 @@ export default function GlobalDashboard() {
     getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel(), getSortedRowModel: getSortedRowModel(),
   });
 
-  // --- CÁLCULO DINÂMICO DO RODAPÉ (TFOOT) ---
   const totaisMesTfoot = useMemo(() => {
-    // Soma apenas as linhas de Topo (depth 0) que passaram pelo filtro atual
     const rows = table.getFilteredRowModel().rows.filter(r => r.depth === 0);
     const totals: Record<string, {vol: number, rec: number}> = {};
     mesesDisponiveis.forEach(m => {
@@ -416,7 +538,7 @@ export default function GlobalDashboard() {
         <Loader2 className="w-12 h-12 animate-spin text-indigo-600" />
         <Globe className="w-6 h-6 text-indigo-300 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
       </div>
-      <span className="text-slate-400 font-black text-[10px] tracking-[0.2em] uppercase mt-6 animate-pulse">A Consolidar Informações S&OP...</span>
+      <span className="text-slate-400 font-black text-[10px] tracking-[0.2em] uppercase mt-6 animate-pulse">Cruzando Dados Estratégicos...</span>
     </div>
   );
 
@@ -505,15 +627,24 @@ export default function GlobalDashboard() {
               <tbody>
                 {table.getRowModel().rows.map(row => (
                   <Fragment key={row.id}>
-                    <tr className={`border-b border-slate-50 transition-all ${row.depth === 0 ? 'bg-white' : 'bg-slate-50/30 hover:bg-slate-100/50'}`}>
+                    <tr className={`border-b border-slate-50 transition-all ${row.depth === 0 ? 'bg-white font-bold' : 'bg-slate-50/30 hover:bg-slate-100/50'}`}>
                       {row.getVisibleCells().map(cell => (<td key={cell.id} className="px-10 py-5">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>))}
                     </tr>
                     
-                    {/* --- GRÁFICO S&OE EXPANSÍVEL --- */}
+                    {/* DOSSIÊ DO SKU EXPANDIDO */}
+                    {row.getIsExpanded() && row.original.tipo === 'produto' && (
+                      <tr>
+                        <td colSpan={table.getAllColumns().length} className="p-0">
+                          <SKUPerformanceDossier rowData={row.original} />
+                        </td>
+                      </tr>
+                    )}
+
+                    {/* GRÁFICO S&OE EXPANSÍVEL */}
                     {chartExpanded === row.original.chave_matriz && (
                       <tr>
                         <td colSpan={table.getAllColumns().length} className="bg-slate-100/30 p-8 border-b border-slate-200">
-                           <div className="bg-white rounded-[40px] p-10 border border-slate-200 shadow-2xl h-[450px] animate-in slide-in-from-top-4 duration-500 relative">
+                           <div className="bg-white rounded-[40px] p-10 border border-slate-200 shadow-2xl h-[450px] relative">
                               <div className="flex justify-between items-center mb-10">
                                 <div>
                                    <div className="flex items-center gap-3 mb-1">
@@ -525,16 +656,14 @@ export default function GlobalDashboard() {
                                 <button onClick={() => setChartExpanded(null)} className="p-3 bg-slate-50 hover:bg-rose-50 text-slate-400 hover:text-rose-500 rounded-full transition-all shadow-sm"><AlertCircle className="w-6 h-6" /></button>
                               </div>
                               <div className="w-full h-[280px]">
-                                 {loadingGrafico === row.original.chave_matriz ? <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-4"><Loader2 className="animate-spin w-8 h-8" /><span className="font-black text-[10px] uppercase tracking-widest">A carregar linha do tempo...</span></div> : (
+                                 {loadingGrafico === row.original.chave_matriz ? <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-4"><Loader2 className="animate-spin w-8 h-8" /><span className="font-black text-[10px] uppercase tracking-widest">Reconstruindo Horizonte...</span></div> : (
                                    <ResponsiveContainer width="100%" height="100%">
                                       <LineChart data={dadosGraficoCache[row.original.chave_matriz] || []} margin={{ top: 10, right: 30, left: 10, bottom: 0 }}>
                                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                                         {/* EIXO X PADRONIZADO (Jan/26) */}
                                          <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} dy={10} />
                                          <YAxis tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
                                          <Tooltip contentStyle={{backgroundColor: '#fff', border: 'none', borderRadius: '20px', boxShadow: '0 20px 40px rgba(0,0,0,0.1)', fontWeight: 900}} formatter={(val: any) => formatVolume(val)} itemSorter={tooltipSorterRow} />
                                          <Legend iconType="circle" wrapperStyle={{paddingTop: '30px', fontSize: '11px', fontWeight: 900}} />
-                                         
                                          <Line type="monotone" dataKey="CicloAnterior" name="Proposta Mês Passado" stroke="#a855f7" strokeWidth={2} strokeDasharray="6 4" dot={false} connectNulls />
                                          <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={4} dot={{r: 4, fill: '#0f172a'}} connectNulls />
                                          <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls />
@@ -553,8 +682,7 @@ export default function GlobalDashboard() {
                 ))}
               </tbody>
               
-              {/* TFOOT RECALCULADO COM BASE NO FILTRO DA TELA */}
-              <tfoot className="bg-slate-900 text-white sticky bottom-0 z-20">
+              <tfoot className="bg-slate-900 text-white sticky bottom-0 z-20 shadow-[0_-10px_30px_rgba(0,0,0,0.3)]">
                 <tr>
                   {table.getHeaderGroups()[0].headers.map(header => {
                     if (header.id === 'nome') return (
@@ -588,7 +716,7 @@ export default function GlobalDashboard() {
       </div>
 
       {/* ========================================================= */}
-      {/* NEXUS AI COPILOT (CHAT ESTRATÉGICO 360º)                  */}
+      {/* NEXUS AI COPILOT (FLOATING CHAT)                          */}
       {/* ========================================================= */}
       
       <button 
@@ -599,13 +727,14 @@ export default function GlobalDashboard() {
       </button>
 
       {isAiOpen && (
-        <div className="fixed top-0 right-0 h-full w-[480px] bg-white shadow-2xl z-50 flex flex-col animate-in slide-in-from-right duration-300 border-l border-slate-200">
+        <div className="fixed top-0 right-0 h-full w-[450px] bg-white shadow-2xl z-50 flex flex-col animate-in slide-in-from-right duration-300 border-l border-slate-200">
+          
           <div className="p-6 bg-slate-900 text-white flex justify-between items-center">
-            <div className="flex items-center gap-4">
-              <div className="p-2 bg-indigo-500/20 rounded-xl"><Bot className="w-7 h-7 text-indigo-400" /></div>
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-indigo-500/20 rounded-xl"><Bot className="w-6 h-6 text-indigo-400" /></div>
               <div>
-                <h2 className="font-black text-lg tracking-tighter flex items-center gap-2">Nexus AI <span className="text-[9px] bg-indigo-600 px-2 py-0.5 rounded-full">BETA</span></h2>
-                <p className="text-[10px] text-indigo-300 uppercase tracking-widest font-bold">Conselheiro Estratégico S&OP</p>
+                <h2 className="font-black text-lg tracking-tighter flex items-center gap-2">Nexus AI <span className="text-[9px] bg-indigo-600 px-2 py-0.5 rounded-full uppercase">Analyst</span></h2>
+                <p className="text-[10px] text-indigo-300 uppercase tracking-widest font-bold">Copiloto Executivo S&OP</p>
               </div>
             </div>
             <button onClick={() => setIsAiOpen(false)} className="p-2 hover:bg-white/10 rounded-full transition-colors"><X className="w-5 h-5" /></button>
@@ -646,7 +775,7 @@ export default function GlobalDashboard() {
               <input 
                 type="text" value={aiInput} onChange={(e) => setAiInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSendAiMessage()}
-                placeholder="Ex: Onde a IA inovou?"
+                placeholder="Ex: Analise o risco de ruptura..."
                 className="w-full bg-slate-50 border border-slate-200 rounded-[20px] py-4 pl-4 pr-12 text-sm font-bold text-slate-800 outline-none focus:border-indigo-500 focus:bg-white transition-colors"
               />
               <button 
@@ -657,8 +786,10 @@ export default function GlobalDashboard() {
               </button>
             </div>
           </div>
+
         </div>
       )}
+
     </div>
   );
 }
