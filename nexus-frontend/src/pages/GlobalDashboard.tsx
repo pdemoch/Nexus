@@ -39,7 +39,6 @@ const tooltipSorterRow = (item: any) => {
 const SKUPerformanceDossier = ({ rowData }: { rowData: any }) => {
   const meses = rowData.meses || [];
   
-  // Agregados do Dossiê
   const totais = useMemo(() => {
     return meses.reduce((acc: any, m: any) => ({
       ia: acc.ia + (m.vol_ia || 0),
@@ -62,7 +61,6 @@ const SKUPerformanceDossier = ({ rowData }: { rowData: any }) => {
     <div className="p-8 bg-slate-50/80 border-y border-slate-200 animate-in fade-in slide-in-from-top-2 duration-300">
       <div className="max-w-[1400px] mx-auto grid grid-cols-1 lg:grid-cols-4 gap-6">
         
-        {/* COL 1: KPIs DE SAÚDE */}
         <div className="bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 flex flex-col gap-4">
           <div className="flex items-center gap-2 text-indigo-600 mb-2">
              <Target className="w-5 h-5" />
@@ -90,7 +88,6 @@ const SKUPerformanceDossier = ({ rowData }: { rowData: any }) => {
           </div>
         </div>
 
-        {/* COL 2 & 3: CONSTRUÇÃO DO VOLUME (WATERFALL VISUAL) */}
         <div className="lg:col-span-2 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100">
            <div className="flex items-center justify-between mb-6">
               <div className="flex items-center gap-2 text-emerald-600">
@@ -116,7 +113,6 @@ const SKUPerformanceDossier = ({ rowData }: { rowData: any }) => {
            </div>
         </div>
 
-        {/* COL 4: NOTAS E AÇÕES */}
         <div className="bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 overflow-hidden">
           <div className="flex items-center gap-2 text-rose-500 mb-4">
              <AlertCircle className="w-5 h-5" />
@@ -156,19 +152,19 @@ export default function GlobalDashboard() {
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
 
-  // --- ESTADOS DA IA ---
+  // --- ESTADOS DA IA (AGENTE SQL) ---
   const [isAiOpen, setIsAiOpen] = useState(false);
   const [aiInput, setAiInput] = useState('');
   const [isAiTyping, setIsAiTyping] = useState(false);
   const [aiMessages, setAiMessages] = useState<{role: 'ai' | 'user', content: string}[]>([
-    { role: 'ai', content: 'Olá! Sou o **Nexus AI Copilot**. Já processei a matemática de Supply, Volatilidade, PMV e Assertividade deste S&OP. Como posso apoiar a sua análise?' }
+    { role: 'ai', content: 'Olá! Sou o **Nexus SQL Agent**. Estou conectado diretamente à base de dados relacional. Pode fazer perguntas de negócio e eu irei consultar as tabelas (como *fato_vendas* e *fato_ibp_granular*) para encontrar os seus dados reais.' }
   ]);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // --- SUGESTÕES DINÂMICAS IA ---
   const sugestoesIA = viewMode === 'categorias' 
-    ? ["Qual categoria teve maior corte de Supply?", "A IA sugeriu inovação em qual linha?", "Houve queda no preço médio (PMV)?"]
-    : ["Quais clientes perderam faturamento?", "Explique as justificativas da fábrica", "Qual cliente mais cresceu vs Histórico?"];
+    ? ["Qual o faturamento histórico de Chocolates?", "Quais as justificativas de Supply no último ciclo?", "Tivemos alguma queda brusca de rentabilidade?"]
+    : ["Mostre o histórico de vendas da SENDAS", "Quais clientes tiveram cortes de Supply?", "Liste o Top 3 clientes da base."];
 
   // --- CARGA DE DADOS ---
   const fetchData = useCallback(async () => {
@@ -334,12 +330,12 @@ export default function GlobalDashboard() {
     };
   }, [dadosBrutos]);
 
-  // --- FUNÇÕES DA IA (CHAT) ---
+  // --- FUNÇÕES DA IA (NOVO AGENTE SQL) ---
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [aiMessages, isAiTyping]);
 
-const handleSendAiMessage = async () => {
+  const handleSendAiMessage = async () => {
     if (!aiInput.trim()) return;
     const userText = aiInput;
     setAiInput('');
@@ -347,52 +343,14 @@ const handleSendAiMessage = async () => {
     setIsAiTyping(true);
 
     try {
-      const dadosAtivos = viewMode === 'categorias' ? dadosAgrupadosCategorias : dadosAgrupadosClientes;
-      const topResumidos = dadosAtivos.slice(0, 10).map(item => {
-          const recFinal = Array.from(item.meses).reduce((acc:any, m:any) => acc + (m.rec_final || 0), 0);
-          const risco = Array.from(item.meses).reduce((acc:any, m:any) => acc + (m.unmet_brl || 0), 0);
-          const inovacao = Array.from(item.meses).reduce((acc:any, m:any) => acc + (m.delta_ia_brl || 0), 0);
-          
-          let bestCresc = 0; let bestAcc = 0;
-          item.subRows?.forEach((sku:any) => {
-              sku.meses?.forEach((m:any) => {
-                  if (m.crescimento_hist_pct > bestCresc) bestCresc = m.crescimento_hist_pct;
-                  if (m.assertividade_ia > bestAcc) bestAcc = m.assertividade_ia;
-              });
-          });
-
-          const justificativas = new Set<string>();
-          Array.from(item.meses).forEach((m: any) => {
-              Array.from(m.justificativas || []).forEach(j => justificativas.add(j as string));
-          });
-
-          return {
-              nome: item.nome, 
-              delta_ia_bu: Array.from(item.meses).reduce((acc:any, m:any) => acc + (m.vol_ia - m.vol_bu || 0), 0),
-              impacto_ia_brl: inovacao,
-              crescimento_pico_vs_historico: bestCresc,
-              assertividade_ia_pico: bestAcc,
-              justificativas_supply: justificativas.size > 0 ? Array.from(justificativas).join('; ') : "Sem restrições",
-              rec_final: recFinal,
-              risco_ruptura_brl: risco
-          };
-      });
-
-      const contextSummary = {
-        visao_ativa: viewMode,
-        risco_supply_total_brl: stats.risco_total_brl,
-        oportunidade_ia_total_brl: stats.oportunidade_ia_total_brl,
-        dados_resumidos: topResumidos
-      };
-
-      const res = await axios.post('/api/v1/ai/analise-sop', {
-        pergunta: userText,
-        contexto_dashboard: contextSummary
+      // O LangChain no backend trata de analisar a base de dados
+      const res = await axios.post('/api/v1/ai-sql/perguntar', {
+        pergunta: userText
       });
       
       setAiMessages(prev => [...prev, { role: 'ai', content: res.data.resposta }]);
     } catch (error) {
-      setAiMessages(prev => [...prev, { role: 'ai', content: '❌ *Erro de comunicação com o motor Nexus AI.* Verifique a conexão com o backend ou a chave de API.' }]);
+      setAiMessages(prev => [...prev, { role: 'ai', content: '❌ *Erro de comunicação com o Agente SQL.* Verifique a conexão com o backend ou se a base de dados tem as tabelas esperadas.' }]);
     } finally {
       setIsAiTyping(false);
     }
@@ -428,7 +386,6 @@ const handleSendAiMessage = async () => {
           const row = info.row;
           const { tipo, nome, produto, meses } = row.original;
           
-          // Indicadores de Bolinha (Resumo na Seta do SKU)
           const hasInnovation = meses.some((m:any) => (m.vol_ia - m.vol_bu) > 100);
           const hasSupplyCut = meses.some((m:any) => (m.vol_bu - m.vol_sp) > 100);
           const hasPriceErosion = meses.some((m:any) => m.rec_final < (m.vol_final * m.pmv_hist_media * 0.95));
@@ -443,7 +400,6 @@ const handleSendAiMessage = async () => {
                 >
                   {row.getIsExpanded() ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                 </button>
-                {/* Bolinhas de Alerta só aparecem nos produtos */}
                 {tipo === 'produto' && (
                   <div className="absolute -top-1 -right-1 flex gap-0.5 pointer-events-none">
                     {hasInnovation && <div className="w-2 h-2 bg-indigo-500 rounded-full border border-white shadow-sm" title="Inovação IA" />}
@@ -737,8 +693,8 @@ const handleSendAiMessage = async () => {
             <div className="flex items-center gap-3">
               <div className="p-2 bg-indigo-500/20 rounded-xl"><Bot className="w-6 h-6 text-indigo-400" /></div>
               <div>
-                <h2 className="font-black text-lg tracking-tighter flex items-center gap-2">Nexus AI <span className="text-[9px] bg-indigo-600 px-2 py-0.5 rounded-full uppercase">Analyst</span></h2>
-                <p className="text-[10px] text-indigo-300 uppercase tracking-widest font-bold">Copiloto Executivo S&OP</p>
+                <h2 className="font-black text-lg tracking-tighter flex items-center gap-2">Nexus AI <span className="text-[9px] bg-indigo-600 px-2 py-0.5 rounded-full uppercase">SQL Agent</span></h2>
+                <p className="text-[10px] text-indigo-300 uppercase tracking-widest font-bold">Data Exploratório S&OP</p>
               </div>
             </div>
             <button onClick={() => setIsAiOpen(false)} className="p-2 hover:bg-white/10 rounded-full transition-colors"><X className="w-5 h-5" /></button>
@@ -779,7 +735,7 @@ const handleSendAiMessage = async () => {
               <input 
                 type="text" value={aiInput} onChange={(e) => setAiInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSendAiMessage()}
-                placeholder="Ex: Analise o risco de ruptura..."
+                placeholder="Pergunte ao banco de dados..."
                 className="w-full bg-slate-50 border border-slate-200 rounded-[20px] py-4 pl-4 pr-12 text-sm font-bold text-slate-800 outline-none focus:border-indigo-500 focus:bg-white transition-colors"
               />
               <button 
