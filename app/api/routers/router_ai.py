@@ -9,18 +9,17 @@ from app.api.routers.router_auth import get_current_user
 router = APIRouter(prefix="/api/v1/ai", tags=["Nexus AI Analyst"])
 
 # =====================================================================
-# SCHEMAS
+# SCHEMAS (ATUALIZADOS PARA O MODELO AGENTE)
 # =====================================================================
 class ItemResumido(BaseModel):
     nome: str
     delta_ia_bu: int
     impacto_ia_brl: float
-    var_pmv: float
-    crescimento: float
-    assertividade_ia: float
-    justificativa: str
+    crescimento_pico_vs_historico: float
+    assertividade_ia_pico: float
+    justificativas_supply: str
     rec_final: float
-    unmet_brl: float
+    risco_ruptura_brl: float
 
 class ContextoDashboard(BaseModel):
     visao_ativa: str
@@ -36,8 +35,6 @@ class PayloadAI(BaseModel):
 # CONFIGURAÇÃO GOOGLE GEMINI (VERSÃO 2.5 FLASH VALIDADA)
 # =====================================================================
 GEMINI_API_KEY = "AIzaSyAmNP1mhQAcN-afbSibO8m-0VibJ22nNSw"
-
-# URL atualizada com o modelo exato retornado pelo seu terminal
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
 
 @router.post("/analise-sop")
@@ -46,34 +43,22 @@ def analisar_dados_sop(payload: PayloadAI, usuario: dict = Depends(get_current_u
         ctx = payload.contexto_dashboard
         visao = "Categorias" if ctx.visao_ativa == "categorias" else "Clientes Curva A"
         
-        prompt_sistema = (
-            "Você é o Nexus AI, um Diretor de S&OP Estratégico. Analise os dados abaixo para uma reunião de diretoria.\n\n"
-            f"CONTEXTO DO PAINEL:\n"
-            f"- Visão Atual: {visao}\n"
-            f"- Risco Total de Receita (Cortes de Supply): R$ {ctx.risco_supply_total_brl:,.2f}\n"
-            f"- Oportunidade de Inovação (Sinal IA > Comercial): R$ {ctx.oportunidade_ia_total_brl:,.2f}\n\n"
-            "DADOS DETALHADOS DOS TOP ITENS:\n"
-        )
+        # O "JSON" bruto para a IA mastigar como se fosse um Agente Autônomo
+        contexto_json = json.dumps([item.dict() for item in ctx.dados_resumidos], ensure_ascii=False)
         
-        for item in ctx.dados_resumidos:
-            prompt_sistema += (
-                f"- {item.nome}:\n"
-                f"  * Projeção IA vs Comercial: {item.delta_ia_bu:+} CX (Impacto: R$ {item.impacto_ia_brl:,.2f})\n"
-                f"  * Variação de Preço (PMV): {item.var_pmv:+.1f}%\n"
-                f"  * Crescimento vs Histórico: {item.crescimento:+.1f}%\n"
-                f"  * Assertividade IA (M-1): {item.assertividade_ia}% de acurácia no mês passado\n"
-                f"  * Justificativa de Supply: {item.justificativa if item.justificativa else 'Sem registro'}\n"
-                f"  * Faturamento Final: R$ {item.rec_final:,.2f} | Risco Supply: R$ {item.unmet_brl:,.2f}\n\n"
-            )
+        prompt_sistema = f"""Você é o Nexus AI, um analista de dados de S&OP de nível sênior. 
+Acesso à Base de Dados Atuais (Visão: {visao}):
+{contexto_json}
 
-        prompt_sistema += (
-            "DIRETRIZES DE ANÁLISE:\n"
-            "1. Identifique Inovações (Onde a IA previu mais que o vendedor).\n"
-            "2. Analise Risco de Rentabilidade (Quedas de PMV).\n"
-            "3. Cruze as Justificativas de fábrica com o risco em Reais.\n"
-            "4. Seja Executivo, conciso e use negrito para números chaves.\n\n"
-            f"PERGUNTA: \"{payload.pergunta}\""
-        )
+INSTRUÇÕES CRÍTICAS DE COMPORTAMENTO:
+1. RESPONDA APENAS À PERGUNTA DO UTILIZADOR. Não crie introduções, relatórios gerais, ou cumprimentos longos.
+2. Vá direto ao ponto. Use 1 ou 2 parágrafos no máximo.
+3. Se a pergunta for sobre "quem mais cresceu", olhe a chave 'crescimento_pico_vs_historico' e cite apenas o vencedor e o número exato.
+4. Se a pergunta for de justificação de Supply, leia a chave 'justificativas_supply' de forma objetiva.
+5. Se os dados mostrarem 0.0, não minta, mas sugira educadamente: "De acordo com o contexto em ecrã, os valores consolidados constam como 0%. Sugiro avaliar a granularidade do SKU."
+
+Pergunta do Diretor: "{payload.pergunta}"
+Resposta Direta:"""
 
         headers = {'Content-Type': 'application/json'}
         
@@ -81,7 +66,7 @@ def analisar_dados_sop(payload: PayloadAI, usuario: dict = Depends(get_current_u
             "contents": [{"parts": [{"text": prompt_sistema}]}]
         }
 
-        # Timeout de 60s para proteger o seu EC2
+        # Timeout de 60s para dar tempo à IA de processar os dados sem cortar a ligação AWS
         response = requests.post(GEMINI_URL, headers=headers, json=corpo_chamada, timeout=60)
         
         if response.status_code != 200:

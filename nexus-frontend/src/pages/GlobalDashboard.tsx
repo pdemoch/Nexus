@@ -339,7 +339,7 @@ export default function GlobalDashboard() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [aiMessages, isAiTyping]);
 
-  const handleSendAiMessage = async () => {
+const handleSendAiMessage = async () => {
     if (!aiInput.trim()) return;
     const userText = aiInput;
     setAiInput('');
@@ -348,29 +348,33 @@ export default function GlobalDashboard() {
 
     try {
       const dadosAtivos = viewMode === 'categorias' ? dadosAgrupadosCategorias : dadosAgrupadosClientes;
-      const topResumidos = dadosAtivos.slice(0, 5).map(item => {
-          const recFinal = Array.from(item.meses).reduce((acc:any, m:any) => acc + m.rec_final, 0);
-          const risco = Array.from(item.meses).reduce((acc:any, m:any) => acc + m.unmet_brl, 0);
-          const inovacao = Array.from(item.meses).reduce((acc:any, m:any) => acc + m.delta_ia_brl, 0);
+      const topResumidos = dadosAtivos.slice(0, 10).map(item => {
+          const recFinal = Array.from(item.meses).reduce((acc:any, m:any) => acc + (m.rec_final || 0), 0);
+          const risco = Array.from(item.meses).reduce((acc:any, m:any) => acc + (m.unmet_brl || 0), 0);
+          const inovacao = Array.from(item.meses).reduce((acc:any, m:any) => acc + (m.delta_ia_brl || 0), 0);
           
-          let sumVarPmv = 0, sumCresc = 0, sumAccIa = 0, cnt = 0;
-          const justificativas = new Set<string>();
+          let bestCresc = 0; let bestAcc = 0;
+          item.subRows?.forEach((sku:any) => {
+              sku.meses?.forEach((m:any) => {
+                  if (m.crescimento_hist_pct > bestCresc) bestCresc = m.crescimento_hist_pct;
+                  if (m.assertividade_ia > bestAcc) bestAcc = m.assertividade_ia;
+              });
+          });
 
+          const justificativas = new Set<string>();
           Array.from(item.meses).forEach((m: any) => {
-              if (m.var_pmv_pct !== undefined) { sumVarPmv += m.var_pmv_pct; sumCresc += m.crescimento_hist_pct; sumAccIa += m.assertividade_ia; cnt++; }
               Array.from(m.justificativas || []).forEach(j => justificativas.add(j as string));
           });
 
           return {
               nome: item.nome, 
-              delta_ia_bu: Array.from(item.meses).reduce((acc:any, m:any) => acc + m.vol_ia - m.vol_bu, 0),
+              delta_ia_bu: Array.from(item.meses).reduce((acc:any, m:any) => acc + (m.vol_ia - m.vol_bu || 0), 0),
               impacto_ia_brl: inovacao,
-              var_pmv: cnt > 0 ? sumVarPmv / cnt : 0,
-              crescimento: cnt > 0 ? sumCresc / cnt : 0,
-              assertividade_ia: cnt > 0 ? sumAccIa / cnt : 0,
-              justificativa: justificativas.size > 0 ? Array.from(justificativas).join('; ') : "",
+              crescimento_pico_vs_historico: bestCresc,
+              assertividade_ia_pico: bestAcc,
+              justificativas_supply: justificativas.size > 0 ? Array.from(justificativas).join('; ') : "Sem restrições",
               rec_final: recFinal,
-              unmet_brl: risco
+              risco_ruptura_brl: risco
           };
       });
 
