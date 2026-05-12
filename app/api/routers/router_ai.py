@@ -9,7 +9,7 @@ from app.api.routers.router_auth import get_current_user
 router = APIRouter(prefix="/api/v1/ai", tags=["Nexus AI Analyst"])
 
 # =====================================================================
-# SCHEMAS PARA O CONTEXTO E PERGUNTA
+# SCHEMAS
 # =====================================================================
 class ItemResumido(BaseModel):
     nome: str
@@ -33,29 +33,25 @@ class PayloadAI(BaseModel):
     contexto_dashboard: ContextoDashboard
 
 # =====================================================================
-# CONFIGURAÇÃO GOOGLE GEMINI
+# CONFIGURAÇÃO GOOGLE GEMINI (VERSÃO 2.5 FLASH VALIDADA)
 # =====================================================================
 GEMINI_API_KEY = "AIzaSyAmNP1mhQAcN-afbSibO8m-0VibJ22nNSw"
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_API_KEY}"
+
+# URL atualizada com o modelo exato retornado pelo seu terminal
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
 
 @router.post("/analise-sop")
 def analisar_dados_sop(payload: PayloadAI, usuario: dict = Depends(get_current_user)):
-    """
-    Consome os dados enriquecidos do dashboard e utiliza o Gemini para 
-    gerar insights estratégicos sobre o ciclo S&OP.
-    """
     try:
         ctx = payload.contexto_dashboard
         visao = "Categorias" if ctx.visao_ativa == "categorias" else "Clientes Curva A"
         
-        # 1. CONSTRUÇÃO DO PROMPT ESTRATÉGICO
-        # Aqui injetamos a inteligência de negócio que o Gemini deve seguir
         prompt_sistema = (
             "Você é o Nexus AI, um Diretor de S&OP Estratégico. Analise os dados abaixo para uma reunião de diretoria.\n\n"
             f"CONTEXTO DO PAINEL:\n"
             f"- Visão Atual: {visao}\n"
             f"- Risco Total de Receita (Cortes de Supply): R$ {ctx.risco_supply_total_brl:,.2f}\n"
-            f"- Oportunidade de Inovação (Sinal IA acima do Comercial): R$ {ctx.oportunidade_ia_total_brl:,.2f}\n\n"
+            f"- Oportunidade de Inovação (Sinal IA > Comercial): R$ {ctx.oportunidade_ia_total_brl:,.2f}\n\n"
             "DADOS DETALHADOS DOS TOP ITENS:\n"
         )
         
@@ -66,41 +62,41 @@ def analisar_dados_sop(payload: PayloadAI, usuario: dict = Depends(get_current_u
                 f"  * Variação de Preço (PMV): {item.var_pmv:+.1f}%\n"
                 f"  * Crescimento vs Histórico: {item.crescimento:+.1f}%\n"
                 f"  * Assertividade IA (M-1): {item.assertividade_ia}% de acurácia no mês passado\n"
-                f"  * Justificativa de Supply: {item.justificativa if item.justificativa else 'Nenhuma observação técnica'}\n"
+                f"  * Justificativa de Supply: {item.justificativa if item.justificativa else 'Sem registro'}\n"
                 f"  * Faturamento Final: R$ {item.rec_final:,.2f} | Risco Supply: R$ {item.unmet_brl:,.2f}\n\n"
             )
 
         prompt_sistema += (
-            "SUAS DIRETRIZES DE ANÁLISE:\n"
-            "1. Identifique 'Pontos de Inovação': Destaque onde a IA vê demanda que o comercial não viu e valide isso com a Assertividade da IA.\n"
-            "2. Analise a 'Erosão de Margem': Alerte se o faturamento sobe mas o PMV cai (indício de descontos excessivos).\n"
-            "3. Interprete o 'Risco de Ruptura': Use as justificativas de supply para explicar por que o faturamento de grandes itens está em risco.\n"
-            "4. Seja Executivo: Use termos como 'Aderência ao Plano', 'Gargalo Logístico' e 'Market Share'.\n"
-            "5. Responda em Português (PT-BR) de forma concisa e em negrito para números importantes.\n\n"
-            f"PERGUNTA DO USUÁRIO: \"{payload.pergunta}\""
+            "DIRETRIZES DE ANÁLISE:\n"
+            "1. Identifique Inovações (Onde a IA previu mais que o vendedor).\n"
+            "2. Analise Risco de Rentabilidade (Quedas de PMV).\n"
+            "3. Cruze as Justificativas de fábrica com o risco em Reais.\n"
+            "4. Seja Executivo, conciso e use negrito para números chaves.\n\n"
+            f"PERGUNTA: \"{payload.pergunta}\""
         )
 
-        # 2. CHAMADA AO GEMINI
         headers = {'Content-Type': 'application/json'}
+        
         corpo_chamada = {
-            "contents": [{
-                "parts": [{"text": prompt_sistema}]
-            }]
+            "contents": [{"parts": [{"text": prompt_sistema}]}]
         }
 
-        response = requests.post(GEMINI_URL, headers=headers, json=corpo_chamada)
+        # Timeout de 15s para proteger o seu EC2
+        response = requests.post(GEMINI_URL, headers=headers, json=corpo_chamada, timeout=15)
         
         if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail="Falha na comunicação com o motor de IA.")
+            print(f"[ERRO NEXUS AI] Status {response.status_code}: {response.text}")
+            erro_msg = response.json().get('error', {}).get('message', 'Erro desconhecido')
+            return {"status": "success", "resposta": f"⚠️ **Erro na API do Google (Status {response.status_code}):** {erro_msg}"}
             
         dados_ia = response.json()
-        
-        try:
-            resposta_texto = dados_ia['candidates'][0]['content']['parts'][0]['text']
-        except (KeyError, IndexError):
-            resposta_texto = "O Nexus AI não conseguiu processar esta análise no momento. Por favor, tente novamente."
+        resposta_texto = dados_ia['candidates'][0]['content']['parts'][0]['text']
 
         return {"status": "success", "resposta": resposta_texto}
 
+    except requests.exceptions.Timeout:
+        print("[ERRO NEXUS AI] Timeout de rede.")
+        return {"status": "success", "resposta": "⚠️ **Timeout de Rede:** O servidor AWS EC2 demorou muito para aceder ao Google. Tente novamente."}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERRO NEXUS AI] Falha Geral: {e}")
+        return {"status": "success", "resposta": f"❌ **Falha interna de processamento:** {str(e)}"}
