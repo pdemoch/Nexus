@@ -81,8 +81,8 @@ def analisar_dados_sop(payload: PayloadAI, usuario: dict = Depends(get_current_u
             "contents": [{"parts": [{"text": prompt_sistema}]}]
         }
 
-        # Timeout de 15s para proteger o seu EC2
-        response = requests.post(GEMINI_URL, headers=headers, json=corpo_chamada, timeout=15)
+        # Timeout de 60s para proteger o seu EC2
+        response = requests.post(GEMINI_URL, headers=headers, json=corpo_chamada, timeout=60)
         
         if response.status_code != 200:
             print(f"[ERRO NEXUS AI] Status {response.status_code}: {response.text}")
