@@ -71,6 +71,35 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
                 "pmv_hist_media": pmv_medio
             }
 
+        # 1.1 ASSERTIVIDADE IA (M-1) - Vol IA do Ciclo Anterior vs Venda Real
+        mes_passado = m2_date - relativedelta(months=1)
+        ia_m1_query = db.query(
+            FatoIbpGranular.sku, FatoIbpGranular.cgc, func.sum(FatoIbpGranular.vol_ia).label('vol_ia_m1')
+        ).filter(
+            FatoIbpGranular.ciclo_sop == ciclo_anterior,
+            FatoIbpGranular.mes_projetado == mes_passado
+        ).group_by(FatoIbpGranular.sku, FatoIbpGranular.cgc).all()
+        
+        vendas_m1_query = db.query(
+            FatoVendas.sku, FatoVendas.cgc, func.sum(FatoVendas.qt_pedido).label('vol_real_m1')
+        ).filter(
+            FatoVendas.data_pedido >= mes_passado,
+            FatoVendas.data_pedido < m2_date
+        ).group_by(FatoVendas.sku, FatoVendas.cgc).all()
+
+        assertividade_map = {}
+        vendas_m1_dict = {f"{v.sku}|{v.cgc}": float(v.vol_real_m1 or 0) for v in vendas_m1_query}
+        for ia in ia_m1_query:
+            chave = f"{ia.sku}|{ia.cgc}"
+            v_real = vendas_m1_dict.get(chave, 0)
+            v_ia = float(ia.vol_ia_m1 or 0)
+            if v_real > 0 and v_ia > 0:
+                erro_abs = abs(v_ia - v_real)
+                acc = max(0, 100 - ((erro_abs / v_real) * 100))
+            else:
+                acc = 0 if v_real > 0 else 100 if v_ia == 0 else 0
+            assertividade_map[chave] = acc
+
         # 2. SOMBRA DO CICLO ANTERIOR - Para medir Volatilidade (Nervosismo do Plano)
         prev_query = db.query(
             FatoIbpGranular.sku, FatoIbpGranular.cgc, FatoIbpGranular.mes_projetado,
@@ -96,7 +125,6 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
             FatoIbpGranular.vol_bottomup, FatoIbpGranular.vol_supply, FatoIbpGranular.vol_final, 
             FatoIbpGranular.vol_meta, FatoIbpGranular.pmv_aplicado,
             
-            # Buscando o campo de texto para a LLM ler
             FatoIbpGranular.justificativa_supply,
             
             (FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('rec_ia'),
@@ -117,39 +145,31 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
             chave_hist = f"{sku}|{cgc}"
             chave_prev = f"{sku}|{cgc}|{mes_str}"
 
-            # Dados base
             vol_ia = float(r.vol_ia or 0)
             vol_final = float(r.vol_final or 0)
             vol_bu = float(r.vol_bottomup or 0)
             vol_sp = float(r.vol_supply or 0)
             pmv_atual = float(r.pmv_aplicado or 0)
             
-            # Buscando as referências cruzadas
             historico = hist_map.get(chave_hist, {"vol_hist_media": 0, "pmv_hist_media": 0})
             anterior = prev_map.get(chave_prev, {"vol_anterior": vol_final, "pmv_anterior": pmv_atual})
+            assertividade = assertividade_map.get(chave_hist, 0.0)
 
-            # --- CÁLCULOS EXECUTIVOS ---
-            
-            # Risco de Supply (Unmet Demand)
             corte_supply_vol = max(0, vol_bu - vol_sp)
             unmet_demand_brl = corte_supply_vol * pmv_atual
             
-            # Volatilidade (Nervosismo do S&OP)
             delta_ciclo_vol = vol_final - anterior["vol_anterior"]
             
-            # Precificação e Histórico
             pmv_hist = historico["pmv_hist_media"]
             var_pmv_pct = ((pmv_atual / pmv_hist) - 1) * 100 if pmv_hist > 0 else 0
             
             vol_hist = historico["vol_hist_media"]
             crescimento_hist_pct = ((vol_final / vol_hist) - 1) * 100 if vol_hist > 0 else 100 if vol_final > 0 else 0
 
-            # Oportunidade de IA (Acréscimo de Inovação)
             delta_ia_comercial_vol = vol_ia - vol_bu
             impacto_financeiro_ia_brl = delta_ia_comercial_vol * pmv_atual
 
             dados_enriquecidos.append({
-                # Metadados de Identificação
                 "categoria": r.categoria,
                 "sku": sku,
                 "descricao": r.descricao,
@@ -157,7 +177,6 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
                 "razaosocial": r.razaosocial,
                 "mes_projetado": mes_str,
                 
-                # Volumes Clássicos
                 "vol_ia": int(vol_ia),
                 "vol_topdown": int(r.vol_topdown or 0),
                 "vol_bottomup": int(vol_bu),
@@ -165,7 +184,6 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
                 "vol_final": int(vol_final),
                 "vol_meta": int(r.vol_meta or 0),
                 
-                # Faturamentos Clássicos
                 "pmv_aplicado": pmv_atual,
                 "rec_ia": float(r.rec_ia or 0),
                 "rec_td": float(r.rec_td or 0),
@@ -173,7 +191,6 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
                 "rec_supply": float(r.rec_supply or 0),
                 "rec_final": float(r.rec_final or 0),
 
-                # --- SUPER ENRIQUECIMENTO (IA & DASHBOARDS) ---
                 "justificativa_supply": getattr(r, 'justificativa_supply', '') or "",
                 
                 "delta_ia_comercial_vol": int(delta_ia_comercial_vol),
@@ -182,6 +199,7 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
                 "vol_hist_media": float(vol_hist),
                 "pmv_hist_media": float(pmv_hist),
                 "crescimento_hist_pct": round(crescimento_hist_pct, 2),
+                "assertividade_ia": round(assertividade, 1),
                 
                 "vol_anterior": int(anterior["vol_anterior"]),
                 "delta_ciclo_vol": int(delta_ciclo_vol),
@@ -192,7 +210,6 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
                 "var_pmv_pct": round(var_pmv_pct, 2)
             })
         
-        # Verificação do status dos cadeados
         reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo_atual, ControleCiclo.origem == 'S&OP-Final').first()
         is_locked = reg.status == 'Fechado' if reg else False
         
@@ -210,9 +227,19 @@ async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria',
     """Constrói a linha do tempo mesclando Histórico Real e Projeções (S&OE)"""
     try:
         partes = chave_matriz.split('|')
-        categoria = partes[0] if len(partes) > 0 else None
-        sku = partes[1] if len(partes) > 1 else None
-        cliente = partes[2] if len(partes) > 2 else None
+        categoria = None
+        sku = None
+        cliente = None
+        
+        # Correção da leitura da chave para Clientes não aparecerem zerados
+        if nivel_hierarquia == 'cliente':
+            cliente = partes[0]
+            if len(partes) > 1:
+                sku = partes[1]
+        else:
+            categoria = partes[0]
+            if len(partes) > 1:
+                sku = partes[1]
 
         m2_str, _ = get_projection_window(db)
         m2_date = parse_date_safe(m2_str)
@@ -238,15 +265,16 @@ async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria',
          .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)
 
         # Filtros Dinâmicos
-        if categoria:
-            q_hist = q_hist.filter(DimProduto.categoria == categoria.strip())
-            q_all_ibp = q_all_ibp.filter(DimProduto.categoria == categoria.strip())
-        if sku:
-            q_hist = q_hist.filter(FatoVendas.sku == sku.strip())
-            q_all_ibp = q_all_ibp.filter(FatoIbpGranular.sku == sku.strip())
         if cliente:
             q_hist = q_hist.filter(func.upper(func.trim(DimCliente.razaosocial)) == cliente.strip().upper())
             q_all_ibp = q_all_ibp.filter(func.upper(func.trim(DimCliente.razaosocial)) == cliente.strip().upper())
+        elif categoria:
+            q_hist = q_hist.filter(DimProduto.categoria == categoria.strip())
+            q_all_ibp = q_all_ibp.filter(DimProduto.categoria == categoria.strip())
+            
+        if sku:
+            q_hist = q_hist.filter(FatoVendas.sku == sku.strip())
+            q_all_ibp = q_all_ibp.filter(FatoIbpGranular.sku == sku.strip())
 
         hist_dict = {h.mes_ano: int(h.vol or 0) for h in q_hist.group_by('mes_ano').all()}
         all_ibp_res = q_all_ibp.group_by(FatoIbpGranular.ciclo_sop, FatoIbpGranular.mes_projetado).all()
@@ -261,21 +289,24 @@ async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria',
             }
 
         timeline = []
+        meses_pt = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
 
         # 3. Construção do Passado (S&OE)
-        for i in range(24, 0, -1):
+        for i in range(12, 0, -1):
             dt = mes_atual_inicio - relativedelta(months=i)
             mes_str = dt.strftime('%Y-%m')
             dt_iso = dt.strftime('%Y-%m-%d')
-            
             ciclo_do_mes = dt.strftime('%m/%Y')
             ciclo_mes_passado = (dt - relativedelta(months=1)).strftime('%m/%Y')
             
             dados_mes = ibp_map.get(dt_iso, {}).get(ciclo_do_mes, {})
             dados_lag1 = ibp_map.get(dt_iso, {}).get(ciclo_mes_passado, {})
             
+            # Formatação padronizada "Jan/26"
+            mes_label = f"{meses_pt[dt.month - 1]}/{dt.strftime('%y')}"
+            
             timeline.append({
-                "name": dt.strftime("%b/%y").capitalize(), 
+                "name": mes_label,
                 "data_iso": dt_iso,
                 "Realizado": hist_dict.get(mes_str, 0), 
                 "IA": dados_mes.get('ia', None),
@@ -285,32 +316,37 @@ async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria',
                 "CicloAnterior": dados_lag1.get('final', None)
             })
 
-        # 4. Presente (M0) e Futuro
+        # 4. Presente (M0)
         curr_iso = mes_atual_inicio.strftime('%Y-%m-%d')
         dados_atual_m0 = ibp_map.get(curr_iso, {}).get(ciclo_atual, {})
+        mes_label_m0 = f"{meses_pt[mes_atual_inicio.month - 1]}/{mes_atual_inicio.strftime('%y')} (S&OE)"
+        
         timeline.append({
-            "name": hoje.strftime("%b/%y").capitalize() + " (S&OE)", "data_iso": curr_iso,
+            "name": mes_label_m0, "data_iso": curr_iso,
             "Realizado": hist_dict.get(hoje.strftime('%Y-%m'), 0), 
             "IA": dados_atual_m0.get('ia', None), 
             "Comercial": None, "Supply": None, "Final": None,
             "CicloAnterior": ibp_map.get(curr_iso, {}).get(ciclo_ant, {}).get('final', None)
         })
 
-        futuros = [d for d in ibp_map.keys() if ciclo_atual in ibp_map[d] and parse_date_safe(d) > mes_atual_inicio]
-        futuros.sort()
-
-        for p_iso in futuros:
-            p_date = parse_date_safe(p_iso)
+        # 5. Futuro (Projeção e Sombra do Ciclo Anterior até M4)
+        for i in range(1, 6):
+            dt = mes_atual_inicio + relativedelta(months=i)
+            p_iso = dt.strftime('%Y-%m-%d')
             dados_futuro = ibp_map.get(p_iso, {}).get(ciclo_atual, {})
+            dados_futuro_ant = ibp_map.get(p_iso, {}).get(ciclo_ant, {})
+            
+            is_projection = dt >= m2_date
+            mes_label_futuro = f"{meses_pt[dt.month - 1]}/{dt.strftime('%y')}"
             
             timeline.append({
-                "name": p_date.strftime("%b/%y").capitalize(), "data_iso": p_iso,
+                "name": mes_label_futuro, "data_iso": p_iso,
                 "Realizado": None, 
                 "IA": dados_futuro.get('ia', None), 
-                "Comercial": dados_futuro.get('bu', None) if p_date >= m2_date else None, 
-                "Supply": dados_futuro.get('sp', None) if p_date >= m2_date else None, 
-                "Final": dados_futuro.get('final', None) if p_date >= m2_date else None, 
-                "CicloAnterior": ibp_map.get(p_iso, {}).get(ciclo_ant, {}).get('final', None)
+                "Comercial": dados_futuro.get('bu', None) if is_projection else None, 
+                "Supply": dados_futuro.get('sp', None) if is_projection else None, 
+                "Final": dados_futuro.get('final', None) if is_projection else None, 
+                "CicloAnterior": dados_futuro_ant.get('final', None)
             })
 
         return {"status": "success", "dados": timeline}
@@ -340,14 +376,12 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
             linhas = query.all()
             if not linhas: continue
 
-            # AUDITORIA: Salvar o estado antigo antes do rateio
             total_base_antigo = sum([float(l.vol_final or 0) for l in linhas])
             total_base = total_base_antigo
             
             soma_dist = 0
             volume_alvo = int(ajuste.novo_volume)
             
-            # LÓGICA DE RATEIO: Distribui o volume editado proporcionalmente
             for i, l in enumerate(linhas):
                 if i == len(linhas) - 1:
                     rateado = volume_alvo - soma_dist 
@@ -375,7 +409,6 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
         else:
             registro.status = 'Fechado'
 
-        # Sincroniza a Demanda Irrestrita com a Meta Oficial
         db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo).update({
             FatoIbpGranular.vol_meta: FatoIbpGranular.vol_final
         }, synchronize_session=False)

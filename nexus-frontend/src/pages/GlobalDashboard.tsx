@@ -7,7 +7,7 @@ import {
   Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
   Layers, Lock, Download, AlertTriangle, ShieldCheck, Check, Globe, Package, 
   Users, Search, Filter, BarChart3, TrendingUp, TrendingDown, Activity, Hash, Target,
-  ArrowRightLeft, AlertCircle, Info, Bot, Send, X, Sparkles
+  ArrowRightLeft, AlertCircle, Info, Bot, Send, X, Sparkles, Lightbulb
 } from 'lucide-react';
 import axios from 'axios';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
@@ -41,7 +41,6 @@ export default function GlobalDashboard() {
   const [lockMessage, setLockMessage] = useState('');
   
   const [viewMode, setViewMode] = useState<'categorias' | 'clientes'>('categorias');
-  const [celulasEditadas, setCelulasEditadas] = useState<any>({});
   const [expanded, setExpanded] = useState({});
   const [sorting, setSorting] = useState<SortingState>([]);
   const [busca, setBusca] = useState('');
@@ -49,14 +48,13 @@ export default function GlobalDashboard() {
   const [chartExpanded, setChartExpanded] = useState<string | null>(null);
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
-  const [mesPareto, setMesPareto] = useState<string>('');
 
-  // --- ESTADOS DA INTELIGÊNCIA ARTIFICIAL ---
+  // --- ESTADOS DA IA ---
   const [isAiOpen, setIsAiOpen] = useState(false);
   const [aiInput, setAiInput] = useState('');
   const [isAiTyping, setIsAiTyping] = useState(false);
   const [aiMessages, setAiMessages] = useState<{role: 'ai' | 'user', content: string}[]>([
-    { role: 'ai', content: 'Olá! Sou o **Nexus AI**. Consigo ler todos os dados desta tela, cruzar com o histórico e analisar as justificativas de Supply. O que o preocupa neste ciclo S&OP?' }
+    { role: 'ai', content: 'Olá! Sou o **Nexus AI Copilot**. Já processei a matemática de Supply, Volatilidade, PMV e Assertividade deste S&OP. Como posso apoiar a sua análise?' }
   ]);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -68,7 +66,6 @@ export default function GlobalDashboard() {
       setDadosBrutos(res.data.dados || []);
       setIsLocked(res.data.is_locked);
       setLockMessage(res.data.lock_message);
-      setCelulasEditadas({});
       setExpanded({});
       setChartExpanded(null);
     } catch (e) { console.error(e); } finally { setIsLoading(false); }
@@ -80,10 +77,6 @@ export default function GlobalDashboard() {
     const meses = new Set(dadosBrutos.map(d => d.mes_projetado));
     return Array.from(meses).sort() as string[];
   }, [dadosBrutos]);
-
-  useEffect(() => {
-    if (mesesDisponiveis.length > 0 && !mesPareto) setMesPareto(mesesDisponiveis[0]);
-  }, [mesesDisponiveis, mesPareto]);
 
   const handleExportExcel = async () => {
     try {
@@ -99,14 +92,8 @@ export default function GlobalDashboard() {
     if (isLocked) return; 
     if (!window.confirm("Confirmar a publicação do plano oficial? Isto irá congelar as metas do ciclo.")) return;
     setIsProcessing(true);
-    const ajustes = Object.entries(celulasEditadas).flatMap(([chave, meses]: any) => 
-      Object.entries(meses).map(([mes, val]: any) => ({
-        nivel: chave.split('|').length === 3 ? 'cliente' : 'produto',
-        chave: chave, mes_projetado: mes, novo_volume: val.novo_volume === '' ? 0 : Number(val.novo_volume || 0)
-      }))
-    );
     try {
-      await axios.post('/api/v1/dashboard/aprovar', { ajustes });
+      await axios.post('/api/v1/dashboard/aprovar', { ajustes: [] });
       alert("✅ S&OP Global Aprovado!");
       fetchData(); 
     } catch (e: any) { alert(e.response?.data?.detail || "Erro ao aprovar."); } 
@@ -207,30 +194,30 @@ export default function GlobalDashboard() {
       }));
   }, [dadosBrutos, busca, viewMode]);
 
-  // --- STATS GERAIS ---
+  // --- STATS GERAIS (CARDS DO TOPO) ---
   const stats = useMemo(() => {
     let t_ia = 0, t_td = 0, t_bu = 0, t_sp = 0, t_final = 0;
     let r_ia = 0, r_td = 0, r_bu = 0, r_sp = 0, r_final = 0;
-    let risco_total_brl = 0;
+    let risco_total_brl = 0, oportunidade_ia_total_brl = 0;
     const porMes: Record<string, any> = {};
 
     dadosBrutos.forEach(r => {
       if (!porMes[r.mes_projetado]) porMes[r.mes_projetado] = { vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, rec_ia:0, rec_td:0, rec_bu:0, rec_sp:0, rec_final:0 };
       const m = porMes[r.mes_projetado];
       m.vol_ia += (r.vol_ia || 0); m.vol_td += (r.vol_topdown || 0); m.vol_bu += (r.vol_bottomup || 0); m.vol_sp += (r.vol_supply || 0); m.vol_final += (r.vol_final || 0);
-      m.rec_ia += (r.rec_ia || 0); m.rec_td += (r.rec_td || 0); m.rec_bu += (r.rec_bu || 0); m.rec_sp += (r.rec_supply || 0); r_final += (r.rec_final || 0);
+      m.rec_ia += (r.rec_ia || 0); m.rec_td += (r.rec_td || 0); m.rec_bu += (r.rec_bu || 0); m.rec_sp += (r.rec_supply || 0); m.rec_final += (r.rec_final || 0);
+      
       t_ia += (r.vol_ia || 0); t_td += (r.vol_topdown || 0); t_bu += (r.vol_bottomup || 0); t_sp += (r.vol_supply || 0); t_final += (r.vol_final || 0);
       r_ia += (r.rec_ia || 0); r_td += (r.rec_td || 0); r_bu += (r.rec_bu || 0); r_sp += (r.rec_supply || 0); r_final += (r.rec_final || 0);
+      
       risco_total_brl += (r.unmet_demand_brl || 0);
+      oportunidade_ia_total_brl += (r.impacto_financeiro_ia_brl || 0);
     });
 
-    const chartData = Object.keys(porMes).sort().map(mes => ({
-      name: mes.split('-').reverse().slice(1).join('/'),
-      IA: porMes[mes].vol_ia, TD: porMes[mes].vol_td, BU: porMes[mes].vol_bu, SP: porMes[mes].vol_sp, Final: porMes[mes].vol_final,
-      RIA: porMes[mes].rec_ia, RTD: porMes[mes].rec_td, RBU: porMes[mes].rec_bu, RSP: porMes[mes].rec_sp, RFinal: porMes[mes].rec_final
-    }));
-
-    return { porMes, chartData, risco_total_brl, cards: { vol: { ia: t_ia, td: t_td, bu: t_bu, sp: t_sp, final: t_final }, rec: { ia: r_ia, td: r_td, bu: r_bu, sp: r_sp, final: r_final } } };
+    return { 
+      porMes, risco_total_brl, oportunidade_ia_total_brl, 
+      cards: { vol: { ia: t_ia, td: t_td, bu: t_bu, sp: t_sp, final: t_final }, rec: { ia: r_ia, td: r_td, bu: r_bu, sp: r_sp, final: r_final } } 
+    };
   }, [dadosBrutos]);
 
   // --- FUNÇÕES DA IA (CHAT) ---
@@ -246,57 +233,65 @@ export default function GlobalDashboard() {
     setIsAiTyping(true);
 
     try {
-      // O Segredo: Context Injection. Montamos um resumo leve do Dashboard atual.
       const dadosAtivos = viewMode === 'categorias' ? dadosAgrupadosCategorias : dadosAgrupadosClientes;
+      const topResumidos = dadosAtivos.slice(0, 5).map(item => {
+          const recFinal = Array.from(item.meses).reduce((acc:any, m:any) => acc + m.rec_final, 0);
+          const risco = Array.from(item.meses).reduce((acc:any, m:any) => acc + m.unmet_brl, 0);
+          const inovacao = Array.from(item.meses).reduce((acc:any, m:any) => acc + m.delta_ia_brl, 0);
+          
+          let sumVarPmv = 0, sumCresc = 0, sumAccIa = 0, cnt = 0;
+          const justificativas = new Set<string>();
+
+          Array.from(item.meses).forEach((m: any) => {
+              if (m.var_pmv_pct !== undefined) { sumVarPmv += m.var_pmv_pct; sumCresc += m.crescimento_hist_pct; sumAccIa += m.assertividade_ia; cnt++; }
+              Array.from(m.justificativas || []).forEach(j => justificativas.add(j as string));
+          });
+
+          return {
+              nome: item.nome, 
+              delta_ia_bu: Array.from(item.meses).reduce((acc:any, m:any) => acc + m.vol_ia - m.vol_bu, 0),
+              impacto_ia_brl: inovacao,
+              var_pmv: cnt > 0 ? sumVarPmv / cnt : 0,
+              crescimento: cnt > 0 ? sumCresc / cnt : 0,
+              assertividade_ia: cnt > 0 ? sumAccIa / cnt : 0,
+              justificativa: justificativas.size > 0 ? Array.from(justificativas).join('; ') : "",
+              rec_final: recFinal,
+              unmet_brl: risco
+          };
+      });
+
       const contextSummary = {
         visao_ativa: viewMode,
         risco_supply_total_brl: stats.risco_total_brl,
-        top_itens: dadosAtivos.slice(0, 5).map(item => ({
-            nome: item.nome, 
-            receita_total: Array.from(item.meses).reduce((acc:any, m:any) => acc + m.rec_final, 0),
-            risco_supply_brl: Array.from(item.meses).reduce((acc:any, m:any) => acc + m.unmet_brl, 0)
-        }))
+        oportunidade_ia_total_brl: stats.oportunidade_ia_total_brl,
+        dados_resumidos: topResumidos
       };
 
-      const res = await axios.post('/api/v1/ai/analise-sop', {
-        pergunta: userText,
-        contexto_dashboard: contextSummary
-      });
-      
+      const res = await axios.post('/api/v1/ai/analise-sop', { pergunta: userText, contexto_dashboard: contextSummary });
       setAiMessages(prev => [...prev, { role: 'ai', content: res.data.resposta }]);
     } catch (error) {
-      setAiMessages(prev => [...prev, { role: 'ai', content: '❌ *Erro de conexão com o motor Nexus AI.* Verifique se o serviço de IA está ativo.' }]);
+      setAiMessages(prev => [...prev, { role: 'ai', content: '❌ *Erro de comunicação com o motor Nexus AI.* Verifique a conexão com o backend ou a chave de API.' }]);
     } finally {
       setIsAiTyping(false);
     }
   };
 
   const sugestoesIA = viewMode === 'categorias' 
-    ? ["Qual categoria tem maior risco de Supply?", "Resuma a volatilidade do plano", "Onde a IA sugeriu acréscimos?"]
-    : ["Quais clientes do Pareto perderam faturamento?", "Explique as justificativas de Supply", "Qual cliente mais cresceu vs Histórico?"];
-
+    ? ["Qual categoria teve maior corte de Supply?", "A IA sugeriu inovação em qual linha?", "Houve queda no preço médio (PMV)?"]
+    : ["Quais clientes perderam faturamento?", "Explique as justificativas da fábrica", "Qual cliente mais cresceu vs Histórico?"];
 
   // --- LOGICA DE GRÁFICO EXPANSÍVEL ---
   const toggleChart = async (row: any) => {
     const chave = row.original.chave_matriz;
     if (chartExpanded === chave) { setChartExpanded(null); return; }
     setChartExpanded(chave);
+    
     if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
-        const res = await axios.get('/api/v1/dashboard/grafico', { params: { chave_matriz: chave } });
-        const historico = res.data.dados || [];
-        const projectionData = row.original.meses.map((m: any) => ({
-          name: m.mes_banco.split('-').reverse().slice(1).join('/'), data_iso: m.mes_banco,
-          IA: m.vol_ia, Comercial: m.vol_bu, Supply: m.vol_sp, Final: m.vol_final, CicloAnterior: m.vol_anterior || null, Realizado: null
-        }));
-        const merged: any[] = [];
-        historico.forEach((h: any) => {
-           const isProjection = projectionData.find((p: any) => p.data_iso === h.data_iso);
-           if (!isProjection) merged.push({ ...h });
-        });
-        const finalTimeline = [...merged, ...projectionData].sort((a: any, b: any) => a.data_iso.localeCompare(b.data_iso));
-        setDadosGraficoCache((p: any) => ({ ...p, [chave]: finalTimeline }));
+        const nivel = viewMode === 'clientes' ? 'cliente' : 'categoria';
+        const res = await axios.get('/api/v1/dashboard/grafico', { params: { chave_matriz: chave, nivel_hierarquia: nivel } });
+        setDadosGraficoCache((p: any) => ({ ...p, [chave]: res.data.dados || [] }));
       } catch (e) {
         console.error("Erro no gráfico", e);
       } finally { setLoadingGrafico(null); }
@@ -310,14 +305,21 @@ export default function GlobalDashboard() {
 
     const baseCols: ColumnDef<any>[] = [
       {
-        id: 'nome', header: viewMode === 'categorias' ? 'Hierarquia / Portfólio' : 'Top Clientes (Pareto 80%)',
+        id: 'nome', header: viewMode === 'categorias' ? 'Hierarquia de Portfólio' : 'Top Clientes (Curva A)',
         accessorFn: (row: any) => row.nome,
         cell: (info: any) => {
           const row = info.row;
           const { tipo, nome, produto } = row.original;
           return (
             <div style={{ paddingLeft: `${row.depth * 2}rem` }} className="flex items-center gap-3 py-1.5 min-w-[380px]">
-              <button onClick={row.getToggleExpandedHandler()} className="p-1 hover:bg-slate-100 rounded text-slate-500 transition-transform">
+              {/* SETA DE EXPANSÃO CORRIGIDA */}
+              <button 
+                onClick={(e) => {
+                  e.stopPropagation();
+                  row.toggleExpanded();
+                }} 
+                className="p-1 hover:bg-slate-100 rounded text-slate-500 transition-transform"
+              >
                 {row.getIsExpanded() ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
               </button>
               
@@ -354,7 +356,7 @@ export default function GlobalDashboard() {
           const valorInteiro = Math.round(Number(dadosMes?.vol_final || 0));
           const receitaExibida = dadosMes?.rec_final || 0;
 
-          // Indicadores Analíticos
+          // Indicadores de Alerta IA & Supply
           const corteSupply = (dadosMes?.vol_bu || 0) - (dadosMes?.vol_sp || 0);
           const acrescimoIA = (dadosMes?.vol_ia || 0) - (dadosMes?.vol_bu || 0);
           const hasJustification = dadosMes?.justificativas?.size > 0;
@@ -364,8 +366,8 @@ export default function GlobalDashboard() {
               <div className="flex items-center gap-2">
                  <div className="font-black text-slate-900 text-sm">{formatVolume(valorInteiro)}</div>
                  <div className="flex flex-col gap-0.5">
-                    {corteSupply > 10 && <div className="w-1.5 h-1.5 bg-rose-500 rounded-full animate-pulse" title={`Corte: -${formatVolume(corteSupply)} CX\nRisco: ${formatMoeda(dadosMes.unmet_brl)}`} />}
-                    {acrescimoIA > 10 && <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full" title={`Inovação IA: +${formatVolume(acrescimoIA)} CX\nOportunidade: ${formatMoeda(dadosMes.delta_ia_brl)}`} />}
+                    {corteSupply > 10 && <div className="w-1.5 h-1.5 bg-rose-500 rounded-full animate-pulse" title={`Corte Fábrica: -${formatVolume(corteSupply)} CX\nRisco: ${formatMoeda(dadosMes.unmet_brl)}`} />}
+                    {acrescimoIA > 10 && <div className="w-1.5 h-1.5 bg-amber-400 rounded-full" title={`Oportunidade IA: +${formatVolume(acrescimoIA)} CX\nInovação: ${formatMoeda(dadosMes.delta_ia_brl)}`} />}
                  </div>
               </div>
               <div className="text-[10px] font-bold text-emerald-600 mt-0.5">{formatMoeda(receitaExibida)}</div>
@@ -390,13 +392,31 @@ export default function GlobalDashboard() {
     getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel(), getSortedRowModel: getSortedRowModel(),
   });
 
+  // --- CÁLCULO DINÂMICO DO RODAPÉ (TFOOT) ---
+  const totaisMesTfoot = useMemo(() => {
+    // Soma apenas as linhas de Topo (depth 0) que passaram pelo filtro atual
+    const rows = table.getFilteredRowModel().rows.filter(r => r.depth === 0);
+    const totals: Record<string, {vol: number, rec: number}> = {};
+    mesesDisponiveis.forEach(m => {
+        totals[m] = { vol: 0, rec: 0 };
+        rows.forEach(r => {
+            const mData = r.original.meses.find((mes: any) => mes.mes_banco === m);
+            if (mData) {
+                totals[m].vol += (mData.vol_final || 0);
+                totals[m].rec += (mData.rec_final || 0);
+            }
+        });
+    });
+    return totals;
+  }, [table.getFilteredRowModel().rows, mesesDisponiveis]);
+
   if (isLoading) return (
     <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
       <div className="relative">
         <Loader2 className="w-12 h-12 animate-spin text-indigo-600" />
         <Globe className="w-6 h-6 text-indigo-300 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
       </div>
-      <span className="text-slate-400 font-black text-[10px] tracking-[0.2em] uppercase mt-6 animate-pulse">Cruzando Dados Estratégicos...</span>
+      <span className="text-slate-400 font-black text-[10px] tracking-[0.2em] uppercase mt-6 animate-pulse">A Consolidar Informações S&OP...</span>
     </div>
   );
 
@@ -439,7 +459,10 @@ export default function GlobalDashboard() {
             { label: 'Final S&OP', v: stats.cards.vol.final, r: stats.cards.rec.final, bV: stats.cards.vol.sp, bR: stats.cards.rec.sp }
           ].map((card, i) => (
             <div key={i} className={`p-6 rounded-[32px] shadow-sm border border-slate-100 flex flex-col justify-between transition-all hover:shadow-md ${i === 4 ? 'bg-indigo-600 text-white' : 'bg-white'}`}>
-               <span className={`text-[10px] font-black uppercase tracking-widest mb-4 ${i === 4 ? 'text-indigo-200' : 'text-slate-400'}`}>{card.label}</span>
+               <span className={`text-[10px] font-black uppercase tracking-widest mb-4 flex items-center justify-between ${i === 4 ? 'text-indigo-200' : 'text-slate-400'}`}>
+                  {card.label}
+                  {i === 4 && <ShieldCheck className="w-4 h-4 text-emerald-400" />}
+               </span>
                <div className="space-y-4">
                   <div><p className="text-2xl font-black leading-none tracking-tighter">{formatVolume(card.v)} <span className="text-[10px] opacity-60">CX</span></p>{i > 0 && <VarBadge atual={card.v} anterior={card.bV} />}</div>
                   <div className={`pt-3 border-t ${i === 4 ? 'border-white/10' : 'border-slate-100'}`}><p className="text-[13px] font-black">{formatMoeda(card.r)}</p>{i > 0 && <VarBadge atual={card.r} anterior={card.bR} />}</div>
@@ -454,7 +477,7 @@ export default function GlobalDashboard() {
                 <button onClick={() => setViewMode('categorias')} className={`flex-1 flex items-center justify-center gap-3 py-4 rounded-[18px] text-[11px] font-black uppercase tracking-widest transition-all ${viewMode === 'categorias' ? 'bg-slate-900 text-white shadow-lg' : 'text-slate-400 hover:text-slate-600'}`}>
                     <Layers className="w-4 h-4" /> Portfólio de Categorias
                 </button>
-                <button onClick={() => setViewMode('clientes')} className={`flex-1 flex items-center justify-center gap-3 py-4 rounded-[18px] text-[11px] font-black uppercase tracking-widest transition-all ${viewMode === 'clientes' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-600'}`}>
+                <button onClick={() => setViewMode('clientes')} className={`flex-1 flex items-center justify-center gap-3 py-4 rounded-[18px] text-[11px] font-black uppercase tracking-widest transition-all ${viewMode === 'clientes' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-600'}`}>
                     <Users className="w-4 h-4" /> Clientes Curva A (80%)
                 </button>
             </div>
@@ -495,17 +518,18 @@ export default function GlobalDashboard() {
                                 <div>
                                    <div className="flex items-center gap-3 mb-1">
                                       <div className="w-2 h-2 bg-indigo-500 rounded-full animate-ping" />
-                                      <h3 className="text-lg font-black text-slate-800 uppercase tracking-tighter flex items-center gap-3">Análise S&OE: {row.original.nome}</h3>
+                                      <h3 className="text-lg font-black text-slate-800 uppercase tracking-tighter flex items-center gap-3">Análise de Horizonte S&OP: {row.original.nome}</h3>
                                    </div>
-                                   <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-5">Cruzamento de Histórico, Ciclo Anterior e Projeção Atual</p>
+                                   <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-5">Histórico Real vs Proposta Mês Passado vs Projeções</p>
                                 </div>
                                 <button onClick={() => setChartExpanded(null)} className="p-3 bg-slate-50 hover:bg-rose-50 text-slate-400 hover:text-rose-500 rounded-full transition-all shadow-sm"><AlertCircle className="w-6 h-6" /></button>
                               </div>
                               <div className="w-full h-[280px]">
-                                 {loadingGrafico === row.original.chave_matriz ? <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-4"><Loader2 className="animate-spin w-8 h-8" /><span className="font-black text-[10px] uppercase tracking-widest">Reconstruindo Timeline...</span></div> : (
+                                 {loadingGrafico === row.original.chave_matriz ? <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-4"><Loader2 className="animate-spin w-8 h-8" /><span className="font-black text-[10px] uppercase tracking-widest">A carregar linha do tempo...</span></div> : (
                                    <ResponsiveContainer width="100%" height="100%">
                                       <LineChart data={dadosGraficoCache[row.original.chave_matriz] || []} margin={{ top: 10, right: 30, left: 10, bottom: 0 }}>
                                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                         {/* EIXO X PADRONIZADO (Jan/26) */}
                                          <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} dy={10} />
                                          <YAxis tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
                                          <Tooltip contentStyle={{backgroundColor: '#fff', border: 'none', borderRadius: '20px', boxShadow: '0 20px 40px rgba(0,0,0,0.1)', fontWeight: 900}} formatter={(val: any) => formatVolume(val)} itemSorter={tooltipSorterRow} />
@@ -529,21 +553,22 @@ export default function GlobalDashboard() {
                 ))}
               </tbody>
               
+              {/* TFOOT RECALCULADO COM BASE NO FILTRO DA TELA */}
               <tfoot className="bg-slate-900 text-white sticky bottom-0 z-20">
                 <tr>
                   {table.getHeaderGroups()[0].headers.map(header => {
                     if (header.id === 'nome') return (
                       <td key={header.id} className="px-10 py-6 text-right">
                         <div className="flex flex-col">
-                          <span className="font-black uppercase tracking-[0.2em] text-[9px] text-indigo-400 mb-1">Visão Consolidada M2-M4</span>
-                          <span className="font-bold text-sm text-white uppercase tracking-tighter">Total Global Nexus</span>
+                          <span className="font-black uppercase tracking-[0.2em] text-[9px] text-indigo-400 mb-1">Cálculo Visível na Tela</span>
+                          <span className="font-bold text-sm text-white uppercase tracking-tighter">Total {viewMode}</span>
                         </div>
                       </td>
                     );
                     if (header.id.startsWith('mes_')) {
                       const mesBanco = header.id.replace('mes_', '');
-                      const volM = stats.porMes[mesBanco]?.vol_final || 0;
-                      const recM = stats.porMes[mesBanco]?.rec_final || 0;
+                      const volM = totaisMesTfoot[mesBanco]?.vol || 0;
+                      const recM = totaisMesTfoot[mesBanco]?.rec || 0;
                       return (
                         <td key={header.id} className="px-10 py-6 border-l border-white/5">
                           <div className="flex flex-col items-center justify-center min-w-[120px]">
@@ -563,10 +588,9 @@ export default function GlobalDashboard() {
       </div>
 
       {/* ========================================================= */}
-      {/* NEXUS AI COPILOT (FLOATING CHAT)                          */}
+      {/* NEXUS AI COPILOT (CHAT ESTRATÉGICO 360º)                  */}
       {/* ========================================================= */}
       
-      {/* BOTÃO FLUTUANTE */}
       <button 
         onClick={() => setIsAiOpen(true)}
         className={`fixed bottom-8 right-8 p-4 bg-slate-900 text-white rounded-full shadow-2xl hover:scale-110 hover:bg-black transition-all z-40 group ${isAiOpen ? 'hidden' : 'flex'}`}
@@ -574,28 +598,23 @@ export default function GlobalDashboard() {
         <Sparkles className="w-6 h-6 text-indigo-400 group-hover:text-indigo-300" />
       </button>
 
-      {/* DRAWER DO CHAT */}
       {isAiOpen && (
-        <div className="fixed top-0 right-0 h-full w-[450px] bg-white shadow-2xl z-50 flex flex-col animate-in slide-in-from-right duration-300 border-l border-slate-200">
-          
-          {/* AI Header */}
+        <div className="fixed top-0 right-0 h-full w-[480px] bg-white shadow-2xl z-50 flex flex-col animate-in slide-in-from-right duration-300 border-l border-slate-200">
           <div className="p-6 bg-slate-900 text-white flex justify-between items-center">
-            <div className="flex items-center gap-3">
-              <div className="p-2 bg-indigo-500/20 rounded-xl"><Bot className="w-6 h-6 text-indigo-400" /></div>
+            <div className="flex items-center gap-4">
+              <div className="p-2 bg-indigo-500/20 rounded-xl"><Bot className="w-7 h-7 text-indigo-400" /></div>
               <div>
-                <h2 className="font-black text-lg tracking-tighter">Nexus AI</h2>
-                <p className="text-[10px] text-indigo-300 uppercase tracking-widest font-bold">Copiloto Executivo S&OP</p>
+                <h2 className="font-black text-lg tracking-tighter flex items-center gap-2">Nexus AI <span className="text-[9px] bg-indigo-600 px-2 py-0.5 rounded-full">BETA</span></h2>
+                <p className="text-[10px] text-indigo-300 uppercase tracking-widest font-bold">Conselheiro Estratégico S&OP</p>
               </div>
             </div>
             <button onClick={() => setIsAiOpen(false)} className="p-2 hover:bg-white/10 rounded-full transition-colors"><X className="w-5 h-5" /></button>
           </div>
 
-          {/* AI Messages Area */}
           <div className="flex-1 overflow-y-auto p-6 bg-slate-50 flex flex-col gap-4 custom-scrollbar">
             {aiMessages.map((msg, idx) => (
               <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div className={`max-w-[85%] p-4 rounded-2xl text-sm leading-relaxed ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-sm' : 'bg-white border border-slate-200 text-slate-700 shadow-sm rounded-tl-sm'}`}>
-                  {/* Renderização simples de Negrito do Markdown */}
                   <span dangerouslySetInnerHTML={{ __html: msg.content.replace(/\*\*(.*?)\*\*/g, '<strong class="font-black text-slate-900">$1</strong>') }} />
                 </div>
               </div>
@@ -612,7 +631,6 @@ export default function GlobalDashboard() {
             <div ref={chatEndRef} />
           </div>
 
-          {/* AI Input Area */}
           <div className="p-6 bg-white border-t border-slate-100 flex flex-col gap-3">
             <div className="flex gap-2 overflow-x-auto pb-2 custom-scrollbar">
               {sugestoesIA.map(sugestao => (
@@ -628,7 +646,7 @@ export default function GlobalDashboard() {
               <input 
                 type="text" value={aiInput} onChange={(e) => setAiInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSendAiMessage()}
-                placeholder="Pergunte sobre riscos, variações..."
+                placeholder="Ex: Onde a IA inovou?"
                 className="w-full bg-slate-50 border border-slate-200 rounded-[20px] py-4 pl-4 pr-12 text-sm font-bold text-slate-800 outline-none focus:border-indigo-500 focus:bg-white transition-colors"
               />
               <button 
@@ -639,10 +657,8 @@ export default function GlobalDashboard() {
               </button>
             </div>
           </div>
-
         </div>
       )}
-
     </div>
   );
 }
