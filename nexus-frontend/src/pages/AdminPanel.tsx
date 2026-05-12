@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import axios from 'axios';
 import { 
   Settings, RefreshCw, Terminal, Play, ShieldAlert, Loader2, Download, 
-  UserPlus, Check, X, Unlock, Calendar, Users, KeyRound, Database, Shield, History, Search, ArrowRight, TrendingUp, TrendingDown 
+  UserPlus, Check, X, Unlock, Calendar, Users, KeyRound, Database, Shield, History, Search, ArrowRight, TrendingUp, TrendingDown, Trash2 
 } from 'lucide-react';
 
 export default function AdminPanel() {
@@ -141,6 +141,16 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
     } catch (e: any) { alert(e.response?.data?.detail || "Erro ao resetar a senha."); }
   };
 
+  // NOVA FUNÇÃO: Excluir Utilizador do Sistema
+  const handleDeleteUser = async (id: number, nome: string) => {
+    if (!window.confirm(`⚠️ EXCLUSÃO PERMANENTE: Deseja realmente remover o utilizador "${nome}" do Nexus? \n\nEsta ação não pode ser desfeita.`)) return;
+    try {
+      await axios.delete(`/api/v1/admin/delete-user/${id}`);
+      alert(`✅ Utilizador ${nome} removido com sucesso.`);
+      fetchData();
+    } catch (e: any) { alert(e.response?.data?.detail || "Erro ao excluir o utilizador."); }
+  };
+
   const handleExportarBase = async () => {
     setIsExporting(true);
     try {
@@ -257,7 +267,6 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
         {/* CONTEÚDO DA ABA: MOTOR S&OP */}
         {activeTab === 'motor' && (
             <div className="flex flex-col lg:flex-row gap-6 items-stretch animate-in fade-in duration-300">
-                {/* COLUNA ESQUERDA: MÁQUINA DO TEMPO E CADEADOS */}
                 <div className="w-full lg:w-1/3 flex flex-col gap-6">
                     <div className="bg-white rounded-[32px] p-6 lg:p-8 shadow-sm border border-slate-100 flex flex-col relative overflow-hidden">
                         <div className="absolute top-0 left-0 w-full h-1.5 bg-indigo-500"></div>
@@ -310,7 +319,6 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
                     </div>
                 </div>
 
-                {/* COLUNA DIREITA: TERMINAL */}
                 <div className="w-full lg:w-2/3 bg-slate-950 rounded-[32px] p-2 shadow-2xl border border-slate-800 flex flex-col relative min-h-[500px]">
                     <div className="bg-slate-900 rounded-[24px] p-6 border border-slate-800 m-2 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 flex-shrink-0">
                         <div>
@@ -408,9 +416,14 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
                                         {user.supervisor_nome && <span className="text-[10px] font-bold text-slate-600 truncate">Equipa: {user.supervisor_nome}</span>}
                                         {user.gerente_nome && <span className="text-[10px] font-bold text-slate-600 truncate">Gerente: {user.gerente_nome}</span>}
                                     </div>
-                                    <button onClick={() => handleResetSenha(user.id, user.nome)} className="mt-1 w-full flex items-center justify-center gap-2 bg-white border border-slate-200 hover:border-amber-300 hover:bg-amber-50 text-slate-600 hover:text-amber-700 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all">
-                                        <KeyRound className="w-3.5 h-3.5" /> Resetar Senha
-                                    </button>
+                                    <div className="flex items-center gap-2 mt-1">
+                                        <button onClick={() => handleResetSenha(user.id, user.nome)} className="flex-1 flex items-center justify-center gap-2 bg-white border border-slate-200 hover:border-amber-300 hover:bg-amber-50 text-slate-600 hover:text-amber-700 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all">
+                                            <KeyRound className="w-4 h-4" /> Resetar Senha
+                                        </button>
+                                        <button onClick={() => handleDeleteUser(user.id, user.nome)} className="flex-1 flex items-center justify-center gap-2 bg-white border border-rose-200 hover:border-rose-300 hover:bg-rose-50 text-slate-600 hover:text-rose-700 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all">
+                                            <Trash2 className="w-4 h-4" /> Excluir
+                                        </button>
+                                    </div>
                                 </div>
                             ))
                         )}
@@ -421,68 +434,77 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
 
         {/* CONTEÚDO DA ABA: TRILHA DE AUDITORIA */}
         {activeTab === 'auditoria' && (
-            <div className="bg-white rounded-[32px] shadow-sm border border-slate-100 flex flex-col animate-in fade-in duration-300 overflow-hidden min-h-[500px]">
-                
-                <div className="p-6 border-b border-slate-100 flex flex-col md:flex-row gap-4 items-center justify-between">
-                    <div>
-                        <h2 className="text-lg font-black text-slate-900 tracking-tighter flex items-center gap-2">
-                            <History className="w-5 h-5 text-indigo-600" /> Extrato de Operações S&OP
-                        </h2>
-                        <p className="text-xs font-bold text-slate-400 mt-1 uppercase tracking-widest">Últimas 500 alterações gravadas no banco de dados.</p>
+            <div className="bg-white rounded-[32px] p-6 lg:p-10 shadow-sm border border-slate-100 animate-in fade-in duration-300 min-h-[600px] flex flex-col">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8 pb-6 border-b border-slate-100 flex-shrink-0">
+                    <div className="flex items-center gap-4">
+                        <div className="p-3 bg-slate-100 rounded-2xl">
+                            <History className="w-6 h-6 text-slate-600" />
+                        </div>
+                        <div>
+                            <h2 className="text-xl font-black text-slate-800 tracking-tighter uppercase">Trilha de Auditoria</h2>
+                            <p className="text-xs font-bold text-slate-400">Histórico de alterações e movimentos manuais no sistema.</p>
+                        </div>
                     </div>
-                    <div className="flex items-center gap-3 px-4 bg-slate-50 rounded-xl border border-slate-200 w-full md:w-96">
-                        <Search className="w-5 h-5 text-slate-400" />
+
+                    <div className="relative w-full md:w-96">
+                        <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                         <input 
-                            type="text" placeholder="Filtrar por Usuário, Tela, Cliente ou Produto..." 
-                            value={buscaAuditoria} onChange={e => setBuscaAuditoria(e.target.value)}
-                            className="w-full bg-transparent py-3 text-sm font-bold text-slate-800 outline-none placeholder:text-slate-400"
+                            type="text" 
+                            placeholder="Buscar por usuário, cliente ou produto..." 
+                            value={buscaAuditoria}
+                            onChange={(e) => setBuscaAuditoria(e.target.value)}
+                            className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl py-3 pl-12 pr-4 text-sm font-bold text-slate-700 outline-none focus:border-indigo-500 transition-all"
                         />
                     </div>
                 </div>
 
-                <div className="flex-1 overflow-x-auto">
-                    <table className="w-full text-left">
-                        <thead className="bg-slate-50 border-b-2 border-slate-100">
-                            <tr>
+                <div className="flex-1 overflow-x-auto custom-scrollbar">
+                    <table className="w-full border-collapse">
+                        <thead>
+                            <tr className="text-left">
                                 <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Data / Hora</th>
-                                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Usuário & Origem</th>
-                                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Cliente</th>
-                                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Produto / SKU</th>
-                                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Mês Ref.</th>
-                                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Alteração (CX)</th>
+                                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Usuário</th>
+                                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Movimentação</th>
+                                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Detalhes do Item</th>
+                                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Ajuste (CX)</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-50">
                             {auditoriaFiltrada.length === 0 ? (
-                                <tr><td colSpan={6} className="px-6 py-12 text-center text-sm font-bold text-slate-400">Nenhum registro de auditoria encontrado.</td></tr>
+                                <tr>
+                                    <td colSpan={5} className="py-20 text-center">
+                                        <div className="flex flex-col items-center gap-3 text-slate-300">
+                                            <Search className="w-12 h-12" />
+                                            <span className="text-xs font-black uppercase tracking-widest">Nenhum registo encontrado</span>
+                                        </div>
+                                    </td>
+                                </tr>
                             ) : (
                                 auditoriaFiltrada.map((log) => {
                                     const aumentou = log.para > log.de;
                                     const diminuiu = log.para < log.de;
-
                                     return (
                                         <tr key={log.id} className="hover:bg-slate-50/50 transition-colors">
-                                            <td className="px-6 py-4">
-                                                <span className="text-xs font-black text-slate-600">{log.data}</span>
-                                            </td>
-                                            <td className="px-6 py-4">
+                                            <td className="px-6 py-4 whitespace-nowrap">
                                                 <div className="flex flex-col">
-                                                    <span className="text-sm font-black text-slate-900">{log.usuario}</span>
-                                                    <span className="text-[10px] font-bold uppercase tracking-widest text-indigo-500">{log.origem}</span>
+                                                    <span className="text-sm font-black text-slate-700">{log.data.split(' ')[0]}</span>
+                                                    <span className="text-[10px] font-bold text-slate-400">{log.data.split(' ')[1]}</span>
                                                 </div>
                                             </td>
                                             <td className="px-6 py-4">
-                                                <span className="text-xs font-bold text-slate-600 max-w-[200px] truncate block" title={log.cliente}>
-                                                    {log.cliente}
-                                                </span>
+                                                <span className="text-sm font-black text-indigo-600">{log.usuario}</span>
                                             </td>
                                             <td className="px-6 py-4">
-                                                <span className="text-xs font-bold text-slate-600 max-w-[200px] truncate block" title={log.sku}>
-                                                    {log.sku}
-                                                </span>
+                                                <div className="flex items-center gap-2">
+                                                    <span className="px-2 py-1 bg-slate-100 rounded-lg text-[10px] font-black text-slate-600 uppercase tracking-tight">{log.origem}</span>
+                                                </div>
                                             </td>
-                                            <td className="px-6 py-4">
-                                                <span className="text-xs font-black bg-slate-100 px-2 py-1 rounded text-slate-600">{log.mes_ref}</span>
+                                            <td className="px-6 py-4 max-w-xs">
+                                                <div className="flex flex-col">
+                                                    <span className="text-sm font-black text-slate-800 truncate">{log.cliente}</span>
+                                                    <span className="text-[10px] font-bold text-slate-400 truncate">{log.sku}</span>
+                                                    <span className="w-fit mt-1 px-2 py-0.5 bg-slate-100 rounded-md text-[9px] font-black text-slate-500 uppercase">{log.mes_ref}</span>
+                                                </div>
                                             </td>
                                             <td className="px-6 py-4">
                                                 <div className="flex items-center gap-2">

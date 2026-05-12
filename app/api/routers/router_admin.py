@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from app.core.database import get_db
 from app.core.state import AppState
 from app.models.domain_models import ControleCiclo, DimProduto, DimCliente, FatoIbpGranular, AuditoriaAjuste
+from app.models.auth_models import User  # IMPORTAÇÃO ADICIONADA: Necessária para a gestão de usuários
 from app.etl.pipeline import executar_pipeline_nexus
 from app.api.routers.router_auth import get_current_user
 from app.api.routers.shared_ibp import get_current_cycle, get_truth_query, get_projection_window
@@ -74,7 +75,7 @@ async def atualizar_ciclo_ativo(payload: PayloadCiclo, db: Session = Depends(get
         raise HTTPException(status_code=500, detail=str(e))
 
 # =====================================================================
-# GESTÃO DE CADEADOS E EXPORTAÇÃO (ATUALIZADO COM 'db')
+# GESTÃO DE CADEADOS E EXPORTAÇÃO
 # =====================================================================
 
 @router.post("/reabrir-ciclo")
@@ -82,7 +83,6 @@ async def reabrir_ciclo(origem: str, db: Session = Depends(get_db), usuario_loga
     if usuario_logado['funcao'] != 'Administrador':
         raise HTTPException(status_code=403, detail="Acesso negado.")
         
-    # ATUALIZAÇÃO: Passando 'db' para a função
     ciclo_atual = get_current_cycle(db)
     try:
         cadeado = db.query(ControleCiclo).filter(
@@ -106,7 +106,6 @@ async def exportar_base_granular(db: Session = Depends(get_db), usuario_logado: 
         raise HTTPException(status_code=403, detail="Acesso negado.")
         
     try:
-        # ATUALIZAÇÃO: Passando 'db' para as funções de tempo
         ciclo = get_current_cycle(db)
         m2, m4 = get_projection_window(db)
         
@@ -177,3 +176,36 @@ async def listar_logs_auditoria(db: Session = Depends(get_db), usuario_logado: d
         return {"status": "success", "dados": dados}
     except Exception as e:
         raise HTTPException(500, f"Erro ao carregar auditoria: {str(e)}")
+
+# =====================================================================
+# GESTÃO DE USUÁRIOS E SEGURANÇA (NOVA FUNCIONALIDADE)
+# =====================================================================
+
+@router.delete("/delete-user/{user_id}")
+async def excluir_usuario_sistema(user_id: int, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
+    """Exclui permanentemente um usuário ativo do sistema"""
+    
+    if usuario_logado['funcao'] != 'Administrador':
+        raise HTTPException(status_code=403, detail="Acesso negado. Apenas administradores podem excluir usuários.")
+    
+    user_to_delete = db.query(User).filter(User.id == user_id).first()
+    
+    if not user_to_delete:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    
+    # Trava de segurança para impedir a auto-exclusão do administrador ativo
+    if user_to_delete.id == usuario_logado['id']:
+        raise HTTPException(
+            status_code=400, 
+            detail="Operação negada: Você não pode excluir a sua própria conta de administrador."
+        )
+
+    try:
+        db.delete(user_to_delete)
+        db.commit()
+        # Usa o 'nome' amigável se existir, caso contrário usa o username
+        nome_display = getattr(user_to_delete, 'nome', user_to_delete.username)
+        return {"status": "success", "message": f"Utilizador {nome_display} removido com sucesso do Nexus."}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao excluir utilizador: {str(e)}")

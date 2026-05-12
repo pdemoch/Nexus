@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List
 from sqlalchemy.orm import Session
@@ -7,7 +8,6 @@ import datetime
 from dateutil.relativedelta import relativedelta
 import io
 import pandas as pd
-from fastapi.responses import StreamingResponse
 
 from app.core.database import get_db
 from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, ControleCiclo, FatoVendas
@@ -25,6 +25,9 @@ from app.api.routers.shared_ibp import (
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["S&OP Global Dashboard"])
 
+# =====================================================================
+# SCHEMAS
+# =====================================================================
 class AjusteGlobal(BaseModel):
     nivel: str
     chave: str
@@ -34,15 +37,22 @@ class AjusteGlobal(BaseModel):
 class PayloadAprovarGlobal(BaseModel):
     ajustes: List[AjusteGlobal]
 
+# =====================================================================
+# ENDPOINTS
+# =====================================================================
+
 @router.get("/global")
 async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] not in ['Administrador', 'Gerente', 'Supply Chain', 'Marketing', 'C-Level']:
+    # Travas de segurança corrigidas (usando Supply ao invés de Planejamento)
+    perfis_permitidos = ['Administrador', 'Gerente', 'Supply Chain', 'Marketing', 'C-Level', 'Supply', 'Diretoria']
+    if usuario_logado.get('funcao') not in perfis_permitidos:
         raise HTTPException(status_code=403, detail="Acesso restrito à Diretoria, Gerência ou Supply Chain.")
         
     try:
         ciclo = get_current_cycle(db)
         m2, m4 = get_projection_window(db)
 
+        # Extração de dados granulares plana - O frontend fará o agrupamento (Top Clientes, Categorias, etc)
         query = get_truth_query(db, ciclo, m2, m4).with_entities(
             DimProduto.categoria, FatoIbpGranular.sku, DimProduto.descricao, DimCliente.razaosocial, 
             FatoIbpGranular.mes_projetado, FatoIbpGranular.vol_ia, FatoIbpGranular.vol_topdown, 
@@ -57,9 +67,8 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
 
         resultados = query.all()
         
-        dados_formatados = []
-        for r in resultados:
-            dados_formatados.append({
+        dados_formatados = [
+            {
                 "categoria": r.categoria,
                 "sku": r.sku,
                 "descricao": r.descricao,
@@ -77,20 +86,27 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
                 "rec_bu": float(r.rec_bu or 0),
                 "rec_supply": float(r.rec_supply or 0),
                 "rec_final": float(r.rec_final or 0)
-            })
+            }
+            for r in resultados
+        ]
         
+        # Verificação do status dos cadeados (S&OP Final e Supply Review)
         reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
         is_locked = reg.status == 'Fechado' if reg else False
         
         reg_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
+        
         if not is_locked and (not reg_sp or reg_sp.status != 'Fechado'):
             return {
-                "status": "success", "is_locked": True, 
-                "lock_message": "Aguardando encerramento do Supply Review (Fase 3)", "dados": dados_formatados
+                "status": "success", 
+                "is_locked": True, 
+                "lock_message": "Aguardando encerramento do Supply Review (Fase 3)", 
+                "dados": dados_formatados
             }
 
         return {
-            "status": "success", "is_locked": is_locked, 
+            "status": "success", 
+            "is_locked": is_locked, 
             "lock_message": "Demanda Irrestrita Publicada" if is_locked else "Plano Aberto para Aprovação Final", 
             "dados": dados_formatados
         }
@@ -99,6 +115,7 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
 
 @router.get("/grafico")
 async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria', db: Session = Depends(get_db)):
+    """Constrói a linha do tempo mesclando Histórico Real e Projeções (S&OE)"""
     try:
         partes = chave_matriz.split('|')
         categoria = partes[0] if len(partes) > 0 else None
@@ -117,7 +134,7 @@ async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria',
                    .join(DimCliente, FatoVendas.cgc == DimCliente.cgc)\
                    .filter(FatoVendas.data_pedido >= hoje - relativedelta(years=2))
 
-        # 2. Histórico Mestre IBP (Super Query do Dashboard)
+        # 2. Histórico Mestre IBP
         q_all_ibp = db.query(
             FatoIbpGranular.ciclo_sop,
             FatoIbpGranular.mes_projetado,
@@ -139,21 +156,21 @@ async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria',
             q_hist = q_hist.filter(func.upper(func.trim(DimCliente.razaosocial)) == cliente.strip().upper())
             q_all_ibp = q_all_ibp.filter(func.upper(func.trim(DimCliente.razaosocial)) == cliente.strip().upper())
 
-        # Execução e Mapeamento 3D
         hist_dict = {h.mes_ano: int(h.vol or 0) for h in q_hist.group_by('mes_ano').all()}
         all_ibp_res = q_all_ibp.group_by(FatoIbpGranular.ciclo_sop, FatoIbpGranular.mes_projetado).all()
 
         ibp_map = {}
         for r in all_ibp_res:
             d_iso = str(r.mes_projetado)
-            if d_iso not in ibp_map: ibp_map[d_iso] = {}
+            if d_iso not in ibp_map: 
+                ibp_map[d_iso] = {}
             ibp_map[d_iso][r.ciclo_sop] = {
                 'ia': int(r.ia or 0), 'bu': int(r.bu or 0), 'sp': int(r.sp or 0), 'final': int(r.final or 0)
             }
 
         timeline = []
 
-        # 3. CONSTRUÇÃO DA TIMELINE S&OE (O PASSADO)
+        # 3. Construção do Passado (S&OE)
         for i in range(24, 0, -1):
             dt = mes_atual_inicio - relativedelta(months=i)
             mes_str = dt.strftime('%Y-%m')
@@ -176,7 +193,7 @@ async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria',
                 "CicloAnterior": dados_lag1.get('final', None)
             })
 
-        # 4. O PRESENTE M0 E O FUTURO
+        # 4. Presente (M0) e Futuro
         curr_iso = mes_atual_inicio.strftime('%Y-%m-%d')
         dados_atual_m0 = ibp_map.get(curr_iso, {}).get(ciclo_atual, {})
         timeline.append({
@@ -210,8 +227,9 @@ async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria',
 
 @router.post("/aprovar")
 async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
-    if usuario['funcao'] not in ['Administrador']:
-        raise HTTPException(status_code=403, detail="Apenas a Administrador pode publicar o Plano Final.")
+    """Aprova o plano S&OP e aplica o Rateio (Top-Down) aos ajustes realizados no dashboard."""
+    if usuario.get('funcao') not in ['Administrador', 'Diretoria', 'C-Level']:
+        raise HTTPException(status_code=403, detail="Apenas Administradores e C-Level podem publicar o Plano Final.")
 
     try:
         ciclo = get_current_cycle(db)
@@ -230,16 +248,17 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
             linhas = query.all()
             if not linhas: continue
 
-            # AUDITORIA: Salvar o estado antigo
+            # AUDITORIA: Salvar o estado antigo antes do rateio
             total_base_antigo = sum([float(l.vol_final or 0) for l in linhas])
-
-            total_base = sum([float(l.vol_final or 0) for l in linhas])
+            total_base = total_base_antigo
+            
             soma_dist = 0
             volume_alvo = int(ajuste.novo_volume)
             
+            # LÓGICA DE RATEIO: Distribui o volume editado proporcionalmente entre os clientes/regiões
             for i, l in enumerate(linhas):
                 if i == len(linhas) - 1:
-                    rateado = volume_alvo - soma_dist
+                    rateado = volume_alvo - soma_dist # Último recebe o resto para evitar erro de arredondamento
                 else:
                     peso = float(l.vol_final or 0) / total_base if total_base > 0 else 1.0 / len(linhas)
                     rateado = int(round(volume_alvo * peso))
@@ -258,12 +277,14 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
                 mes=data_alvo, v_antigo=int(total_base_antigo), v_novo=ajuste.novo_volume
             )
 
+        # Gestão dos Cadeados do Ciclo
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
         if not registro:
             db.add(ControleCiclo(ciclo_sop=ciclo, origem='S&OP-Final', status='Fechado'))
         else:
             registro.status = 'Fechado'
 
+        # Sincroniza a Demanda Irrestrita (vol_final) com a Meta Oficial (vol_meta)
         db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo).update({
             FatoIbpGranular.vol_meta: FatoIbpGranular.vol_final
         }, synchronize_session=False)
@@ -276,6 +297,7 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
 
 @router.get("/export")
 async def exportar_oficial(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+    """Exporta a Base Granular Oficial para o Excel"""
     try:
         ciclo = get_current_cycle(db)
         m2, m4 = get_projection_window(db)
@@ -295,10 +317,12 @@ async def exportar_oficial(db: Session = Depends(get_db), usuario: dict = Depend
         if not resultados:
             raise HTTPException(404, detail="Sem dados para exportar.")
 
-        dados = []
-        for r in resultados:
-            dados.append({
-                "Categoria": r.categoria, "SKU": r.sku, "Produto": r.descricao, "Cliente": r.razaosocial,
+        dados = [
+            {
+                "Categoria": r.categoria, 
+                "SKU": r.sku, 
+                "Produto": r.descricao, 
+                "Cliente": r.razaosocial,
                 "Mês": r.mes_projetado.strftime("%m/%Y") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado), 
                 "Sinal IA": int(r.vol_ia or 0),
                 "Meta Gerencial": int(r.vol_topdown or 0),
@@ -307,7 +331,9 @@ async def exportar_oficial(db: Session = Depends(get_db), usuario: dict = Depend
                 "Demanda Irrestrita": int(r.vol_final or 0),
                 "Meta Oficial": int(r.vol_meta or 0),
                 "Receita Prevista (R$)": float(r.rec_final or 0)
-            })
+            }
+            for r in resultados
+        ]
 
         df = pd.DataFrame(dados)
         buffer = io.BytesIO()
