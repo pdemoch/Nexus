@@ -115,8 +115,6 @@ class NexusLoader:
         try:
             ciclo_atual = ciclo_alvo 
             log_callback(f"   -> [LOAD] Iniciando construção da matriz FatoIBP para o ciclo {ciclo_atual}...")
-
-            from sqlalchemy import text
             
             # BLINDAGEM DO RATEIO: Exclui INATIVOS usando o mesmo padrão do shared_ibp
             query_share = text("""
@@ -200,3 +198,93 @@ class NexusLoader:
             db.rollback()
             log_callback(f"❌ [LOAD] Erro Crítico no Rateio: {str(e)}")
             raise e
+
+    # =========================================================================
+    # NOVA FUNÇÃO: ATUALIZAÇÃO RETROATIVA DE HIERARQUIA NO BANCO
+    # =========================================================================
+    def atualizar_hierarquia_historica(self, lf_clientes: pl.LazyFrame, log_callback=print) -> None:
+        from app.core.database import SessionLocal
+        
+        log_callback("      • Sincronizando Histórico de Vendas com a Hierarquia Atual (Retroativo)...")
+        db = SessionLocal()
+        try:
+            # Pega as colunas vitais e converte para RAM
+            df_clientes = lf_clientes.select([
+                "cgc", "vendedor_nome", "gerente_nome", "supervisor_nome"
+            ]).unique(subset=["cgc"]).collect()
+
+            if df_clientes.is_empty():
+                log_callback("⚠️ [LOADER] Cadastro de clientes vazio. Pulando sincronização histórica.")
+                return
+
+            # Cria temp table
+            query_temp = text("""
+                CREATE TEMP TABLE temp_clientes_hierarquia (
+                    cgc VARCHAR(255),
+                    vendedor_nome VARCHAR(255),
+                    gerente_nome VARCHAR(255),
+                    supervisor_nome VARCHAR(255)
+                ) ON COMMIT DROP;
+            """)
+            db.execute(query_temp)
+
+            # Prepara os dicionários para inserção rápida
+            dados_clientes = df_clientes.to_dicts()
+            
+            # Insere em massa na tabela temporária usando os parâmetros da engine SQLAlchemy
+            query_insert = text("""
+                INSERT INTO temp_clientes_hierarquia (cgc, vendedor_nome, gerente_nome, supervisor_nome)
+                VALUES (:cgc, :vendedor_nome, :gerente_nome, :supervisor_nome)
+            """)
+            
+            db.execute(query_insert, dados_clientes)
+
+            # O UPDATE MAJESTOSO NA FATO VENDAS (Apenas onde houver divergência)
+            # Como a hierarquia na fato_vendas do seu modelo atual aparentemente mora na fato_vendas
+            # ou deve ser atualizada em cascata através de joins.
+            query_update = text("""
+                WITH hierarquia_atualizada AS (
+                    UPDATE fato_vendas f
+                    SET vendedor_nome = t.vendedor_nome
+                    FROM temp_clientes_hierarquia t
+                    WHERE f.cgc = t.cgc
+                      AND f.vendedor_nome IS DISTINCT FROM t.vendedor_nome
+                    RETURNING f.cgc
+                )
+                SELECT count(*) FROM hierarquia_atualizada;
+            """)
+            
+            # Executamos o update nas vendas (caso possua a coluna lá como denormalizada)
+            res = db.execute(query_update)
+            linhas_vendas_atualizadas = res.scalar() or 0
+
+            # Atualiza também a Dimensão Clientes para garantir que o espelho está 100% igual
+            query_update_dim = text("""
+                WITH dim_atualizada AS (
+                    UPDATE dim_clientes d
+                    SET vendedor_nome = t.vendedor_nome,
+                        gerente_nome = t.gerente_nome,
+                        supervisor_nome = t.supervisor_nome
+                    FROM temp_clientes_hierarquia t
+                    WHERE d.cgc = t.cgc
+                    AND (
+                        d.vendedor_nome IS DISTINCT FROM t.vendedor_nome OR
+                        d.gerente_nome IS DISTINCT FROM t.gerente_nome OR
+                        d.supervisor_nome IS DISTINCT FROM t.supervisor_nome
+                    )
+                    RETURNING d.cgc
+                )
+                SELECT count(*) FROM dim_atualizada;
+            """)
+            res_dim = db.execute(query_update_dim)
+            linhas_dim_atualizadas = res_dim.scalar() or 0
+
+            db.commit()
+            log_callback(f"✅ [LOADER] Histórico Sincronizado! {linhas_vendas_atualizadas} Vendas antigas e {linhas_dim_atualizadas} Clientes atualizados.")
+
+        except Exception as e:
+            db.rollback()
+            log_callback(f"❌ [LOADER] Erro ao sincronizar hierarquia histórica: {e}")
+            raise e
+        finally:
+            db.close()

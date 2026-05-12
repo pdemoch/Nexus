@@ -1,7 +1,7 @@
 import polars as pl
 
 class NexusTransformer:
-    def processar_camada_silver(self, lf_150: pl.LazyFrame, lf_188: pl.LazyFrame, df_seg: pl.DataFrame) -> pl.LazyFrame:
+    def processar_camada_silver(self, lf_150: pl.LazyFrame, lf_188: pl.LazyFrame, df_seg: pl.DataFrame):
         print("\n⚙️ [SILVER] Harmonizando dados para Injeção no Banco (Upsert)...")
 
         # 1. Tratamento da Tabela de Vendas (150)
@@ -20,6 +20,13 @@ class NexusTransformer:
             pl.concat_str([pl.col("cliente"), pl.lit("_"), pl.col("loja")]).alias("cliente_loja")
         ])
 
+        # REMOVER HIERARQUIA SUJA DO 150 ANTES DO JOIN
+        colunas_vendas = lf_vendas.columns
+        colunas_conflito = ["vendedor_nome", "gerente_nome", "supervisor_nome", "cgc", "razao social", "cliente_razaosocial", "bloqueado"]
+        col_remover = [c for c in colunas_conflito if c in colunas_vendas]
+        if col_remover:
+            lf_vendas = lf_vendas.drop(col_remover)
+
         # 2. Tratamento do Cadastro de Clientes (188)
         lf_clientes = lf_188.select([
             "cod", "loja", "cgc", "razao social", "bloqueado", "vendedor_nome", "gerente_nome", "supervisor_nome"
@@ -30,9 +37,22 @@ class NexusTransformer:
             pl.col("loja").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars(),
             pl.col("cgc").cast(pl.Utf8).str.strip_chars(),
             pl.col("cliente_razaosocial").cast(pl.Utf8).str.strip_chars(),
-            # PADRONIZAÇÃO DO STATUS: Maiúsculas e sem espaços perdidos
             pl.col("bloqueado").cast(pl.Utf8).str.to_uppercase().str.strip_chars(), 
-            pl.col("gerente_nome").cast(pl.Utf8).fill_null("SEM GERENTE").str.to_uppercase().str.strip_chars()
+            pl.col("vendedor_nome").cast(pl.Utf8).fill_null("SEM VENDEDOR").str.to_uppercase().str.strip_chars(),
+            pl.col("gerente_nome").cast(pl.Utf8).fill_null("SEM GERENTE").str.to_uppercase().str.strip_chars(),
+            pl.col("supervisor_nome").cast(pl.Utf8).str.to_uppercase().str.strip_chars()
+        ])
+
+        # A REGRA DE OURO DIRETO NA FONTE DE CLIENTES!
+        lf_clientes = lf_clientes.with_columns([
+            pl.when(
+                pl.col("supervisor_nome").is_null() | 
+                (pl.col("supervisor_nome") == "") | 
+                (pl.col("supervisor_nome") == "NULL") | 
+                (pl.col("supervisor_nome") == "NAN")
+            )
+            .then(pl.col("gerente_nome"))
+            .otherwise(pl.col("supervisor_nome")).alias("supervisor_nome")
         ]).with_columns([
             pl.concat_str([pl.col("cod"), pl.lit("_"), pl.col("loja")]).alias("cod_loja")
         ]).unique(subset=["cod_loja"], keep="first")
@@ -40,17 +60,12 @@ class NexusTransformer:
         # 3. Cruzamento Vendas x Clientes
         lf_vendas = lf_vendas.join(
             lf_clientes, left_on="cliente_loja", right_on="cod_loja", how="left"
-        )
-
-        # A REGRA DE OURO DA HERANÇA DO SUPERVISOR
-        lf_vendas = lf_vendas.with_columns([
-            pl.when(pl.col("supervisor_nome").is_null() | (pl.col("supervisor_nome").str.strip_chars() == ""))
-            .then(pl.col("gerente_nome"))
-            .otherwise(pl.col("supervisor_nome")).alias("supervisor_nome"),
-            
+        ).with_columns([
             pl.col("cgc").fill_null("SEM_CGC"),
             pl.col("cliente_razaosocial").fill_null("SEM_NOME"),
             pl.col("bloqueado").fill_null("ATIVO"),
+            pl.col("supervisor_nome").fill_null("SEM SUPERVISOR"),
+            pl.col("gerente_nome").fill_null("SEM GERENTE"),
             pl.col("vendedor_nome").fill_null("SEM VENDEDOR")
         ])
 
@@ -77,7 +92,7 @@ class NexusTransformer:
                 pl.col("2026").fill_null("ATIVO")
             ])
         else:
-            return pl.LazyFrame()
+            return None, None
 
         lf_silver = lf_silver.with_columns(pl.col("cliente").alias("cod_cliente"))
         lf_final = lf_silver.with_columns(pl.col("2026").alias("curva_2026"))
@@ -87,13 +102,10 @@ class NexusTransformer:
         # Substituímos o '.unique()' por um agrupamento e soma das métricas.
         # ---------------------------------------------------------------------
         lf_final = lf_final.group_by(["pedido", "produto", "cgc"]).agg([
-            # Métricas Quantitativas (SOMADAS)
             pl.col("qtpedido").sum().alias("qtpedido"),
             pl.col("vlpedido").sum().alias("vlpedido"),
             pl.col("qtfatura").sum().alias("qtfatura"),
             pl.col("qtcorte").sum().alias("qtcorte"),
-            
-            # Dados Qualitativos (Mantemos o primeiro registro do agrupamento)
             pl.col("dtapedido").first().alias("dtapedido"),
             pl.col("cod_cliente").first().alias("cod_cliente"),
             pl.col("loja").first().alias("loja"),
@@ -110,4 +122,5 @@ class NexusTransformer:
             pl.col("curva_2026").first().alias("curva_2026")
         ])
         
-        return lf_final
+        # RETORNA A VENDA (PARA UPSERT) E O CADASTRO DE CLIENTES (PARA ATUALIZAÇÃO HISTÓRICA)
+        return lf_final, lf_clientes
