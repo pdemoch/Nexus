@@ -26,6 +26,9 @@ services:
       - nexus-db
     env_file:
       - .env
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
 
   # 3. O Frontend (React / Nginx)
   nexus-web:
