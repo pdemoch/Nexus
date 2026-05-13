@@ -76,7 +76,8 @@ export default function TopDownArena() {
     setIsLoading(true);
     try {
       const [res, statusRes] = await Promise.all([
-        axios.get('/api/v1/consensus/macro/list'), // ROTA ATUALIZADA PARA BUSCAR DOSSIÊ
+        // REMOVA O /list DESTA LINHA ABAIXO:
+        axios.get('/api/v1/consensus/macro'), 
         axios.get('/api/v1/consensus/macro/status')
       ]);
       setDadosBrutos(res.data.dados || []);
