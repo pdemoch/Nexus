@@ -76,8 +76,7 @@ export default function TopDownArena() {
     setIsLoading(true);
     try {
       const [res, statusRes] = await Promise.all([
-        // REMOVA O /list DESTA LINHA ABAIXO:
-        axios.get('/api/v1/consensus/macro'), 
+        axios.get('/api/v1/consensus/macro'),
         axios.get('/api/v1/consensus/macro/status')
       ]);
       setDadosBrutos(res.data.dados || []);
@@ -439,17 +438,8 @@ export default function TopDownArena() {
                                  <h3 className="text-lg font-black text-slate-800 uppercase tracking-tighter">
                                    Dossiê Estratégico: {row.original.produto}
                                  </h3>
-                                 <div className="grid grid-cols-2 gap-4">
-                                    <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                                       <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">Média Mensal (Últ. 3 Meses)</span>
-                                       <span className="text-xl font-black text-slate-800">{formatVolume(row.original.media_vendas_3m || 0)} <span className="text-xs text-slate-500">CX</span></span>
-                                    </div>
-                                    <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                                       <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">PMV Histórico (3M)</span>
-                                       <span className="text-xl font-black text-slate-800">{formatMoeda(row.original.pmv_historico_3m || 0)}</span>
-                                    </div>
-                                 </div>
-                                 <div className="flex gap-2">
+
+                                 <div className="flex gap-2 mt-4">
                                     <div className="flex items-center gap-1.5 bg-slate-100 text-slate-700 px-3 py-1.5 rounded-xl border border-slate-200">
                                       <BrainCircuit className="w-4 h-4"/>
                                       <span className="text-[10px] font-black uppercase tracking-widest">
