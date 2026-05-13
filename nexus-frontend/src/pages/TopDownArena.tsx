@@ -7,13 +7,54 @@ import {
   getSortedRowModel,
   SortingState
 } from '@tanstack/react-table';
-import { Loader2, ChevronDown, ChevronUp, ArrowUpDown, ArrowUp, ArrowDown, Activity, BrainCircuit, ShieldCheck, Check, Hash, Search, Filter, Download, X } from 'lucide-react';
+import { Loader2, ChevronDown, ChevronUp, ArrowUpDown, ArrowUp, ArrowDown, Activity, BrainCircuit, ShieldCheck, Check, Hash, Search, Filter, Download, X, Target, History, Wand2 } from 'lucide-react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import * as XLSX from 'xlsx';
 
 const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor));
 const formatVolume = (val: number) => Math.round(val).toLocaleString('pt-BR');
+
+// =====================================================================
+// NOVO COMPONENTE: GERADOR DE INSIGHTS COM IA SOB DEMANDA
+// =====================================================================
+const AiInsightBox = ({ produto, pmv, mediaHist, ia, anterior }: { produto: string, pmv: number, mediaHist: number, ia: number, anterior: number }) => {
+  const [insight, setInsight] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const getInsight = async () => {
+    setLoading(true);
+    try {
+      const res = await axios.post('/api/v1/ai-sql/perguntar', {
+        pergunta: `Faça o dossiê executivo 360° para o SKU ${produto}. Extraia a cascata de volumes, o histórico de vendas e o pmv_aplicado. Apresente o diagnóstico financeiro (R$) e estratégico utilizando a metodologia dos 4 pilares.`,
+        contexto: { tela_ativa: 'Top-Down Arena', ciclo_status: 'Aberto' }
+      });
+      setInsight(res.data.resposta);
+    } catch (e) {
+      setInsight('Erro ao gerar insight.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="mt-6 bg-indigo-50/50 rounded-2xl p-6 border border-indigo-100 flex items-start gap-4">
+      <div className="p-3 bg-indigo-100 text-indigo-600 rounded-xl">
+        <Wand2 className="w-6 h-6" />
+      </div>
+      <div className="flex-1">
+        <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-2">Nexus AI Insight 360°</h4>
+        {insight ? (
+          <div className="text-sm font-medium text-slate-600 leading-relaxed whitespace-pre-wrap" dangerouslySetInnerHTML={{ __html: insight.replace(/\*\*(.*?)\*\*/g, '<strong class="font-black text-slate-900">$1</strong>') }} />
+        ) : (
+          <button onClick={getInsight} disabled={loading} className="text-xs font-bold bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition flex items-center gap-2 disabled:opacity-50">
+            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Gerar Parecer Estratégico 360°'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+};
 
 export default function TopDownArena() {
   const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
@@ -35,7 +76,7 @@ export default function TopDownArena() {
     setIsLoading(true);
     try {
       const [res, statusRes] = await Promise.all([
-        axios.get('/api/v1/consensus/macro'),
+        axios.get('/api/v1/consensus/macro/list'), // ROTA ATUALIZADA PARA BUSCAR DOSSIÊ
         axios.get('/api/v1/consensus/macro/status')
       ]);
       setDadosBrutos(res.data.dados || []);
@@ -63,6 +104,7 @@ export default function TopDownArena() {
         const edicao = celulasEditadas[row.produto]?.[m.mes_banco];
         const volFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : m.vol_ajustado));
         linha[`${m.mes_str} (Base IA)`] = Math.round(Number(m.vol_ia));
+        linha[`${m.mes_str} (Mês Passado)`] = Math.round(Number(m.vol_anterior || 0)); // EXPORTA O MÊS PASSADO
         linha[`${m.mes_str} (Top-Down)`] = volFinal;
       });
       return linha;
@@ -111,24 +153,27 @@ export default function TopDownArena() {
   ), [dadosBrutos, busca, categoriaSelecionada, segmentoSelecionado]);
 
   // =========================================================================
-  // A MÁGICA DA RECEITA: Usa o banco de dados como Fonte da Verdade
+  // A MÁGICA DA RECEITA E VOLUME DINÂMICO
   // =========================================================================
-  const totaisFaturamento = useMemo(() => {
-    const totais: Record<string, number> = {};
-    dadosFiltrados.forEach(row => row.meses.forEach((m: any) => totais[m.mes_banco] = 0));
+  const totaisCalculados = useMemo(() => {
+    const totais: Record<string, { faturamento: number, volume: number }> = {};
+    dadosFiltrados.forEach(row => row.meses.forEach((m: any) => {
+      totais[m.mes_banco] = { faturamento: 0, volume: 0 };
+    }));
     
     dadosFiltrados.forEach(row => {
-      const pmvBase = row.meses[0]?.pmv || 0;
+      const pmvBase = row.pmv_base || row.meses[0]?.pmv || 0;
       
       row.meses.forEach((mes: any) => {
         const edicao = celulasEditadas[row.produto]?.[mes.mes_banco];
         const isPendente = edicao !== undefined;
         const volumeFinal = Math.round(Number(isPendente ? edicao.novo_volume : mes.vol_ajustado));
         
-        // Se a célula está pendente de gravação, usamos a simulação matemática.
-        // Se não, extraímos a receita EXATA calculada no PostgreSQL.
-        const receitaReal = isPendente ? (volumeFinal * pmvBase) : (mes.receita || 0);
-        totais[mes.mes_banco] += receitaReal;
+        const receitaReal = isPendente ? (volumeFinal * pmvBase) : (mes.receita || (volumeFinal * pmvBase));
+        
+        if (!totais[mes.mes_banco]) totais[mes.mes_banco] = { faturamento: 0, volume: 0 };
+        totais[mes.mes_banco].faturamento += receitaReal;
+        totais[mes.mes_banco].volume += volumeFinal;
       });
     });
     return totais;
@@ -168,7 +213,7 @@ export default function TopDownArena() {
         accessorFn: (row: any) => row.descricao,
         cell: (info: any) => (
           <div className="flex flex-col py-1">
-            <span className="font-bold text-gray-900 text-sm truncate max-w-[320px]">{info.row.original.descricao}</span>
+            <span className="font-bold text-gray-900 text-sm truncate max-w-[320px]" title={info.row.original.descricao}>{info.row.original.descricao}</span>
             <div className="flex items-center gap-2 mt-1">
               <span className="text-[10px] text-slate-400 font-black uppercase tracking-tighter bg-slate-100 px-2 py-0.5 rounded-md">{info.row.original.produto}</span>
               <span className="text-[10px] text-indigo-400 font-black uppercase tracking-tighter">{info.row.original.categoria}</span>
@@ -192,7 +237,7 @@ export default function TopDownArena() {
       },
       {
         id: 'pmv_base', header: 'PMV Ponderado',
-        accessorFn: (row: any) => row.meses[0]?.pmv || 0,
+        accessorFn: (row: any) => row.pmv_base || row.meses[0]?.pmv || 0,
         cell: (info: any) => (
           <div className="flex flex-col py-1">
             <span className="font-bold text-slate-700 text-[13px] bg-slate-100 px-3 py-1.5 rounded-lg inline-block w-max border border-slate-200">
@@ -220,24 +265,34 @@ export default function TopDownArena() {
           const valorReal = isPendente ? edicao.novo_volume : (dadosMes?.vol_ajustado || 0);
           const valorInteiro = Math.round(Number(valorReal));
           const baseIA = Math.round(Number(dadosMes?.vol_ia || 0));
+          const volAnterior = Math.round(Number(dadosMes?.vol_anterior || 0)); // VALOR DO MÊS PASSADO
           const isChanged = valorInteiro !== baseIA;
           
-          const pmvBase = row.meses[0]?.pmv || 0;
-          
-          const faturamentoPrevisto = isPendente ? (valorInteiro * pmvBase) : (dadosMes?.receita || 0);
+          const pmvBase = row.pmv_base || row.meses[0]?.pmv || 0;
+          const faturamentoPrevisto = isPendente ? (valorInteiro * pmvBase) : (dadosMes?.receita || (valorInteiro * pmvBase));
 
           return (
-            <div className="flex flex-col w-28 gap-1">
-              <span className="text-[9px] text-slate-400 font-black opacity-60 uppercase text-center tracking-widest">
-                Base IA: {baseIA.toLocaleString('pt-BR')}
-              </span>
+            <div className="flex flex-col min-w-[130px] gap-1">
+              
+              {/* O NOVO CABEÇALHO DA CÉLULA (IA vs ANTERIOR) */}
+              <div className="flex items-center justify-between px-1 mb-0.5">
+                <div className="flex items-center gap-1" title="Sinal da IA">
+                  <Target className="w-3 h-3 text-slate-300" />
+                  <span className="text-[9px] font-bold text-slate-400">{formatVolume(baseIA)}</span>
+                </div>
+                <div className="flex items-center gap-1" title="Volume Acordado no Ciclo Anterior">
+                  <History className="w-3 h-3 text-purple-300" />
+                  <span className="text-[9px] font-bold text-purple-500">{formatVolume(volAnterior)}</span>
+                </div>
+              </div>
+
               <input
                 type="number" disabled={isCicloFechado} value={valorInteiro === 0 ? '' : valorInteiro} placeholder="0"
                 onChange={(e) => meta.updateCell(row.produto, m.mes_banco, e.target.value)}
-                className={`text-sm text-center font-black p-2.5 rounded-xl outline-none border-2 transition-all w-full
+                className={`text-sm text-center font-black p-2 rounded-xl outline-none border-2 transition-all w-full
                   ${isCicloFechado ? 'cursor-not-allowed opacity-50 bg-slate-100 border-gray-200' : isChanged ? 'bg-slate-800 border-slate-700 text-white shadow-md' : 'bg-gray-50 border-transparent text-gray-800 focus:bg-white focus:border-slate-300'}`}
               />
-              <span className="text-[10px] font-black text-emerald-600 text-center pr-1 tracking-tight">
+              <span className="text-[10px] font-black text-emerald-600 text-center pr-1 tracking-tight mt-0.5">
                 {formatMoeda(faturamentoPrevisto)}
               </span>
             </div>
@@ -377,61 +432,83 @@ export default function TopDownArena() {
                         <td colSpan={table.getAllColumns().length} className="bg-slate-50/50 p-8 border-b border-gray-100">
                           <div className="bg-white rounded-[40px] p-8 shadow-inner border border-gray-100 animate-in fade-in duration-500">
                             
-                            <div className="flex justify-between items-start mb-6 px-2">
-                               <div className="flex flex-col gap-3">
+                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-6">
+                               {/* BLOCO 1: INFO E KPIs DO DOSSIÊ */}
+                               <div className="flex flex-col gap-4">
                                  <h3 className="text-lg font-black text-slate-800 uppercase tracking-tighter">
-                                   Curva Consolidada Brasil (Real x Gerencial)
+                                   Dossiê Estratégico: {row.original.produto}
                                  </h3>
-                                 <div className="flex gap-4">
-                                    <div className="flex items-center gap-2 bg-slate-100 text-slate-700 px-4 py-2 rounded-2xl border border-slate-200 shadow-sm">
-                                      <BrainCircuit className="w-5 h-5"/>
-                                      <span className="text-xs font-black uppercase tracking-widest">
+                                 <div className="grid grid-cols-2 gap-4">
+                                    <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                                       <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">Média Mensal (Últ. 3 Meses)</span>
+                                       <span className="text-xl font-black text-slate-800">{formatVolume(row.original.media_vendas_3m || 0)} <span className="text-xs text-slate-500">CX</span></span>
+                                    </div>
+                                    <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                                       <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">PMV Histórico (3M)</span>
+                                       <span className="text-xl font-black text-slate-800">{formatMoeda(row.original.pmv_historico_3m || 0)}</span>
+                                    </div>
+                                 </div>
+                                 <div className="flex gap-2">
+                                    <div className="flex items-center gap-1.5 bg-slate-100 text-slate-700 px-3 py-1.5 rounded-xl border border-slate-200">
+                                      <BrainCircuit className="w-4 h-4"/>
+                                      <span className="text-[10px] font-black uppercase tracking-widest">
                                         Modelo: {row.original.modelo_vencedor || 'IA Padrão'}
                                       </span>
                                     </div>
-                                    <div className="flex items-center gap-2 bg-emerald-50 text-emerald-700 px-4 py-2 rounded-2xl border border-emerald-100 shadow-sm">
-                                      <ShieldCheck className="w-5 h-5"/>
-                                      <span className="text-xs font-black uppercase tracking-widest">
+                                    <div className="flex items-center gap-1.5 bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-xl border border-emerald-100">
+                                      <ShieldCheck className="w-4 h-4"/>
+                                      <span className="text-[10px] font-black uppercase tracking-widest">
                                         Acurácia: {row.original.acuracia_ia || 0}%
                                       </span>
                                     </div>
                                  </div>
                                </div>
+
+                               {/* BLOCO 2: GRÁFICO (OCUPA 2 COLUNAS) */}
+                               <div className="lg:col-span-2 h-[250px] w-full bg-slate-50 rounded-3xl p-4 border border-slate-100">
+                                 {loadingGrafico === row.original.produto ? (
+                                   <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-3">
+                                     <Loader2 className="animate-spin w-8 h-8 text-indigo-500" />
+                                     <span className="text-[10px] font-black uppercase tracking-widest">Construindo Horizonte...</span>
+                                   </div>
+                                 ) : (
+                                   <ResponsiveContainer width="100%" height="100%">
+                                     <LineChart 
+                                       data={
+                                         (dadosGraficoCache[row.original.produto] || []).map((p: any) => {
+                                             const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
+                                             const edicao = celulasEditadas[row.original.produto]?.[p.data_iso];
+                                             const valDiretoria = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
+                                             return { ...p, Consenso: valDiretoria !== null ? valDiretoria : p.Consenso };
+                                         })
+                                       }
+                                       margin={{ top: 10, right: 20, left: 0, bottom: 0 }}
+                                     >
+                                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                                       <XAxis dataKey="name" tick={{fontSize: 9, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
+                                       <YAxis tick={{fontSize: 9, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
+                                       <Tooltip contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)', fontSize: '12px'}} formatter={(val: any) => formatVolume(val)} />
+                                       <Legend iconType="circle" wrapperStyle={{paddingTop: '10px', fontSize: '10px', fontWeight: '900'}} />
+                                       
+                                       <Line type="monotone" dataKey="CicloAnterior" name="Proposta Mês Passado" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
+                                       <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={3} dot={{r: 3, fill: '#0f172a'}} connectNulls={false} />
+                                       <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
+                                       <Line type="monotone" dataKey="Consenso" name="Meta Gerencial" stroke="#3b82f6" strokeWidth={4} dot={{r: 5, fill: '#3b82f6', strokeWidth: 2, stroke: '#fff'}} connectNulls={false} />
+                                     </LineChart>
+                                   </ResponsiveContainer>
+                                 )}
+                               </div>
                             </div>
 
-                            {/* REMOVIDO: -ml-4 para evitar que o gráfico empurre contra a parede */}
-                            <div className="h-[250px] w-full">
-                              {loadingGrafico === row.original.produto ? (
-                                <div className="h-full flex items-center justify-center text-slate-800"><Loader2 className="animate-spin w-8 h-8" /></div>
-                              ) : (
-                                <ResponsiveContainer width="100%" height="100%">
-                                  <LineChart 
-                                    data={
-                                      (dadosGraficoCache[row.original.produto] || []).map((p: any) => {
-                                          const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
-                                          const edicao = celulasEditadas[row.original.produto]?.[p.data_iso];
-                                          const valDiretoria = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
-                                          return { ...p, Consenso: valDiretoria !== null ? valDiretoria : p.Consenso };
-                                      })
-                                    }
-                                    // ADICIONADO: Margem de respiro para as bolinhas não serem cortadas
-                                    margin={{ top: 20, right: 30, left: 20, bottom: 10 }}
-                                  >
-                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                                    <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900}} axisLine={false} tickLine={false} />
-                                    <YAxis tick={{fontSize: 10}} axisLine={false} tickLine={false} />
-                                    <Tooltip contentStyle={{borderRadius: '20px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)'}} />
-                                    <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900'}} />
-                                    
-                                    <Line type="monotone" dataKey="CicloAnterior" name="Proposta Mês Passado" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
-
-                                    <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={4} dot={{r: 3, fill: '#0f172a'}} connectNulls={false} />
-                                    <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
-                                    <Line type="monotone" dataKey="Consenso" name="Meta Gerencial" stroke="#3b82f6" strokeWidth={5} dot={{r: 6, fill: '#3b82f6', strokeWidth: 2, stroke: '#fff'}} connectNulls={false} />
-                                  </LineChart>
-                                </ResponsiveContainer>
-                              )}
-                            </div>
+                            {/* BLOCO 3: INSIGHT DA IA (NOVO) */}
+                            <AiInsightBox 
+                              produto={row.original.descricao}
+                              pmv={row.original.pmv_base || row.original.meses[0]?.pmv || 0}
+                              mediaHist={row.original.media_vendas_3m || 0}
+                              ia={row.original.meses[0]?.vol_ia || 0}
+                              anterior={row.original.meses[0]?.vol_anterior || 0}
+                            />
+                            
                           </div>
                         </td>
                       </tr>
@@ -447,17 +524,19 @@ export default function TopDownArena() {
                     if (header.id === 'info') return (
                       <td key={header.id} className="px-8 py-5 text-right">
                         <div className="flex flex-col">
-                          <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Receita Consolidada</span>
-                          <span className="font-bold text-sm text-white">TOTAL NA TELA (R$)</span>
+                          <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Totais da Tela</span>
+                          <span className="font-bold text-sm text-white">VOLUME E RECEITA</span>
                         </div>
                       </td>
                     );
                     if (header.id.startsWith('mes_')) {
                       const mesBanco = header.id.replace('mes_', '');
+                      const tot = totaisCalculados[mesBanco] || { volume: 0, faturamento: 0 };
                       return (
                         <td key={header.id} className="px-8 py-5">
-                          <div className="bg-slate-800/80 inline-block px-3 py-1.5 rounded-xl border border-slate-700/50">
-                            <span className="font-black text-emerald-400 text-[13px] tracking-tight">{formatMoeda(totaisFaturamento[mesBanco] || 0)}</span>
+                          <div className="flex flex-col items-center gap-1 bg-slate-800/80 px-3 py-1.5 rounded-xl border border-slate-700/50">
+                            <span className="font-black text-white text-[11px] tracking-tight">{formatVolume(tot.volume)} cx</span>
+                            <span className="font-black text-emerald-400 text-[13px] tracking-tight">{formatMoeda(tot.faturamento)}</span>
                           </div>
                         </td>
                       );

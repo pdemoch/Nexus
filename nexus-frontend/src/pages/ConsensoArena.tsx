@@ -4,7 +4,7 @@ import {
 } from '@tanstack/react-table';
 import { 
   Check, TrendingUp, Filter, Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
-  Lock, Search, X, Store, Package, Users, Download, BarChart2, Activity, ShieldAlert
+  Lock, Search, X, Store, Package, Users, Download, BarChart2, Activity, ShieldAlert, Wand2
 } from 'lucide-react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
@@ -12,6 +12,51 @@ import * as XLSX from 'xlsx';
 
 const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor));
 const formatVolume = (val: number) => Math.round(val).toLocaleString('pt-BR');
+
+// =====================================================================
+// NOVO COMPONENTE: GERADOR DE INSIGHTS COM IA SOB DEMANDA (TEMA ESCURO)
+// =====================================================================
+const AiInsightBox = ({ alvo, tipo, pmv }: { alvo: string, tipo: string, pmv: number }) => {
+  const [insight, setInsight] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const getInsight = async () => {
+    setLoading(true);
+    try {
+      const res = await axios.post('/api/v1/ai-sql/perguntar', {
+        pergunta: `Faça o dossiê executivo 360° para o ${tipo} "${alvo}". Extraia a cascata de volumes, o histórico de vendas e o pmv_aplicado. Apresente o diagnóstico financeiro (R$) e estratégico utilizando a metodologia dos 4 pilares.`,
+        contexto: { tela_ativa: 'Bottom-Up Comercial', ciclo_status: 'Aberto/Em Ajuste' }
+      });
+      setInsight(res.data.resposta);
+    } catch (e) {
+      setInsight('Erro ao gerar insight.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="bg-slate-900/50 rounded-2xl p-6 border border-slate-700 flex flex-col gap-4 h-full">
+      <div className="flex items-center gap-3">
+         <div className="p-2.5 bg-indigo-500/20 text-indigo-400 rounded-xl">
+           <Wand2 className="w-5 h-5" />
+         </div>
+         <h4 className="text-sm font-black text-white uppercase tracking-widest">Nexus AI Insight 360°</h4>
+      </div>
+      
+      {insight ? (
+        <div className="text-sm font-medium text-slate-300 leading-relaxed whitespace-pre-wrap overflow-y-auto custom-scrollbar pr-2" dangerouslySetInnerHTML={{ __html: insight.replace(/\*\*(.*?)\*\*/g, '<strong class="font-black text-white">$1</strong>') }} />
+      ) : (
+        <div className="flex flex-col items-start gap-3 mt-2">
+           <p className="text-xs text-slate-500 font-medium">Acione o consultor executivo para cruzar dados de S&OP, Faturamento Histórico e metas do ciclo.</p>
+           <button onClick={getInsight} disabled={loading} className="mt-2 text-xs font-bold bg-indigo-600 text-white px-4 py-3 rounded-xl hover:bg-indigo-700 transition flex items-center gap-2 disabled:opacity-50 w-full justify-center shadow-lg shadow-indigo-900/20">
+             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Gerar Parecer Estratégico 360°'}
+           </button>
+        </div>
+      )}
+    </div>
+  );
+};
 
 export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }) {
   const isCoordenador = usuarioSessao?.funcao === 'Coordenador';
@@ -491,48 +536,66 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                       <tr>
                         <td colSpan={table.getAllColumns().length} className="bg-slate-900 p-8 border-b border-slate-800">
                           <div className="bg-slate-950 rounded-[32px] p-8 shadow-inner border border-slate-800 animate-in fade-in duration-500">
-                            <div className="flex justify-between items-start mb-6 px-2">
-                               <div className="flex flex-col gap-1">
-                                 <h3 className="text-lg font-black text-white uppercase tracking-tighter flex items-center gap-2">
-                                   <Activity className="w-5 h-5 text-emerald-400" /> Curva S&OE ({row.original.tipo === 'vendedor' ? 'Visão da Carteira' : row.original.tipo === 'cliente' ? 'Visão Conta Global' : 'Visão Produto'})
-                                 </h3>
-                                 <p className="text-xs font-bold text-slate-400 tracking-widest uppercase">
-                                   {row.original.nome}
-                                 </p>
+                            
+                            {/* LAYOUT EM GRADE PARA GRÁFICO + IA INSIGHT */}
+                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                               
+                               {/* COLUNA ESQUERDA: GRÁFICO */}
+                               <div className="lg:col-span-2">
+                                 <div className="flex justify-between items-start mb-6 px-2">
+                                    <div className="flex flex-col gap-1">
+                                      <h3 className="text-lg font-black text-white uppercase tracking-tighter flex items-center gap-2">
+                                        <Activity className="w-5 h-5 text-emerald-400" /> Curva S&OE ({row.original.tipo === 'vendedor' ? 'Visão da Carteira' : row.original.tipo === 'cliente' ? 'Visão Conta Global' : 'Visão Produto'})
+                                      </h3>
+                                      <p className="text-xs font-bold text-slate-400 tracking-widest uppercase">
+                                        {row.original.nome}
+                                      </p>
+                                    </div>
+                                 </div>
+
+                                 <div className="h-[250px] w-full">
+                                   {loadingGrafico === row.original.chave_matriz ? (
+                                     <div className="h-full flex items-center justify-center text-slate-600"><Loader2 className="animate-spin w-8 h-8" /></div>
+                                   ) : (
+                                     <ResponsiveContainer width="100%" height="100%">
+                                       <LineChart 
+                                         data={
+                                           (dadosGraficoCache[row.original.chave_matriz] || []).map((p: any) => {
+                                               const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
+                                               const edicao = celulasEditadas[row.original.chave_matriz]?.[p.data_iso];
+                                               const valComercial = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
+                                               return { ...p, Consenso: valComercial !== null ? valComercial : p.Consenso };
+                                           })
+                                         }
+                                         margin={{ top: 20, right: 30, left: 20, bottom: 10 }}
+                                       >
+                                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
+                                         <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
+                                         <YAxis tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} tickLine={false} />
+                                         <Tooltip contentStyle={{borderRadius: '20px', backgroundColor: '#0f172a', border: '1px solid #1e293b', color: '#fff', boxShadow: '0 10px 30px rgba(0,0,0,0.5)'}} />
+                                         <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900', color: '#cbd5e1'}} />
+                                         
+                                         <Line type="monotone" dataKey="CicloAnterior" name="Sua Promessa (Mês Passado)" stroke="#f59e0b" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
+
+                                         <Line type="monotone" dataKey="Realizado" name="Venda Real" stroke="#f8fafc" strokeWidth={4} dot={{r: 3, fill: '#f8fafc'}} connectNulls={false} />
+                                         <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#475569" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
+                                         <Line type="monotone" dataKey="Consenso" name="Sua Proposta (Atual)" stroke="#10b981" strokeWidth={5} dot={{r: 6, fill: '#10b981', strokeWidth: 2, stroke: '#0f172a'}} connectNulls={false} />
+                                       </LineChart>
+                                     </ResponsiveContainer>
+                                   )}
+                                 </div>
+                               </div>
+
+                               {/* COLUNA DIREITA: BOTÃO IA 360° */}
+                               <div className="flex flex-col justify-start">
+                                 <AiInsightBox 
+                                    alvo={row.original.nome} 
+                                    tipo={row.original.tipo === 'vendedor' ? 'Vendedor' : row.original.tipo === 'cliente' ? 'Cliente' : 'SKU'} 
+                                    pmv={row.original.meses[0]?.pmv || 0}
+                                 />
                                </div>
                             </div>
 
-                            <div className="h-[250px] w-full">
-                              {loadingGrafico === row.original.chave_matriz ? (
-                                <div className="h-full flex items-center justify-center text-slate-600"><Loader2 className="animate-spin w-8 h-8" /></div>
-                              ) : (
-                                <ResponsiveContainer width="100%" height="100%">
-                                  <LineChart 
-                                    data={
-                                      (dadosGraficoCache[row.original.chave_matriz] || []).map((p: any) => {
-                                          const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
-                                          const edicao = celulasEditadas[row.original.chave_matriz]?.[p.data_iso];
-                                          const valComercial = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
-                                          return { ...p, Consenso: valComercial !== null ? valComercial : p.Consenso };
-                                      })
-                                    }
-                                    margin={{ top: 20, right: 30, left: 20, bottom: 10 }}
-                                  >
-                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
-                                    <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                                    <YAxis tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                                    <Tooltip contentStyle={{borderRadius: '20px', backgroundColor: '#0f172a', border: '1px solid #1e293b', color: '#fff', boxShadow: '0 10px 30px rgba(0,0,0,0.5)'}} />
-                                    <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900', color: '#cbd5e1'}} />
-                                    
-                                    <Line type="monotone" dataKey="CicloAnterior" name="Sua Promessa (Mês Passado)" stroke="#f59e0b" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
-
-                                    <Line type="monotone" dataKey="Realizado" name="Venda Real" stroke="#f8fafc" strokeWidth={4} dot={{r: 3, fill: '#f8fafc'}} connectNulls={false} />
-                                    <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#475569" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
-                                    <Line type="monotone" dataKey="Consenso" name="Sua Proposta (Atual)" stroke="#10b981" strokeWidth={5} dot={{r: 6, fill: '#10b981', strokeWidth: 2, stroke: '#0f172a'}} connectNulls={false} />
-                                  </LineChart>
-                                </ResponsiveContainer>
-                              )}
-                            </div>
                           </div>
                         </td>
                       </tr>

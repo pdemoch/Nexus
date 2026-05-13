@@ -58,7 +58,9 @@ async def listar_macro(db: Session = Depends(get_db), usuario: dict = Depends(re
     try:
         m2, m4 = get_projection_window(db)
         ciclo = get_current_cycle(db)
+        ciclo_anterior = get_previous_cycle(db) # NOVO: Buscar o ciclo passado
 
+        # 1. DADOS DO CICLO ATUAL
         query_base = get_truth_query(db, ciclo, m2, m4)
         
         projecoes = query_base.with_entities(
@@ -75,6 +77,33 @@ async def listar_macro(db: Session = Depends(get_db), usuario: dict = Depends(re
             DimProduto.modelo_vencedor, DimProduto.acuracia_ia
         ).all()
 
+        # 2. DADOS DO CICLO ANTERIOR (A Referência "Roxa")
+        query_anterior = db.query(
+            FatoIbpGranular.sku,
+            FatoIbpGranular.mes_projetado,
+            func.sum(FatoIbpGranular.vol_topdown).label('v_td_ant')
+        ).filter(
+            FatoIbpGranular.ciclo_sop == ciclo_anterior,
+            FatoIbpGranular.mes_projetado >= m2,
+            FatoIbpGranular.mes_projetado <= m4
+        ).group_by(FatoIbpGranular.sku, FatoIbpGranular.mes_projetado).all()
+        
+        mapa_anterior = {(r.sku, r.mes_projetado): int(r.v_td_ant or 0) for r in query_anterior}
+
+        # 3. HISTÓRICO DE VENDAS PARA O DOSSIÊ (Média de 3 meses)
+        m2_date = parse_date_safe(m2.strftime('%m/%Y')) if not isinstance(m2, datetime.date) else m2
+        inicio_hist = m2_date - relativedelta(months=3)
+        hist_query = db.query(
+            FatoVendas.sku,
+            func.avg(FatoVendas.qt_pedido).label('media_vol')
+        ).filter(
+            FatoVendas.data_pedido >= inicio_hist,
+            FatoVendas.data_pedido < m2_date
+        ).group_by(FatoVendas.sku).all()
+        
+        mapa_hist = {h.sku: float(h.media_vol or 0) for h in hist_query}
+
+        # 4. MONTAGEM DA RESPOSTA
         prod_map = defaultdict(lambda: {"meses": []})
         for r in projecoes:
             p = prod_map[r.sku]
@@ -82,17 +111,20 @@ async def listar_macro(db: Session = Depends(get_db), usuario: dict = Depends(re
                 p.update({
                     "produto": r.sku, "descricao": r.descricao, "categoria": r.categoria, 
                     "segmento": r.segmento, "modelo_vencedor": r.modelo_vencedor or "N/A", 
-                    "acuracia_ia": float(r.acuracia_ia or 0)
+                    "acuracia_ia": float(r.acuracia_ia or 0),
+                    "media_vendas_3m": mapa_hist.get(r.sku, 0.0) # INJETADO PARA O DOSSIÊ
                 })
             
             v_td = int(r.v_td or 0)
             rec_td = float(r.rec_td or 0)
             pmv_real = (rec_td / v_td) if v_td > 0 else float(r.pmv_avg or 0)
+            vol_anterior = mapa_anterior.get((r.sku, r.mes_projetado), 0) # INJETADO PARA A TELA
             
             p["meses"].append({
                 "mes_banco": str(r.mes_projetado), 
                 "mes_str": r.mes_projetado.strftime("%b/%y").capitalize(), 
-                "vol_ia": int(r.v_ia or 0), "vol_ajustado": v_td, "pmv": pmv_real, "receita": rec_td  
+                "vol_ia": int(r.v_ia or 0), "vol_ajustado": v_td, "pmv": pmv_real, "receita": rec_td,
+                "vol_anterior": vol_anterior # INJETADO PARA A TELA
             })
             
         return {"status": "success", "dados": list(prod_map.values())}

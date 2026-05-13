@@ -7,7 +7,7 @@ import {
   Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
   Layers, Lock, Download, AlertTriangle, ShieldCheck, Check, Globe, Package, 
   Users, Search, Filter, BarChart3, TrendingUp, TrendingDown, Activity, Hash, Target,
-  ArrowRightLeft, AlertCircle, Info, Bot, Send, X, Sparkles, Lightbulb, History, Zap
+  ArrowRightLeft, AlertCircle, Info, Bot, Send, X, Sparkles, Lightbulb, History, Zap, Wand2
 } from 'lucide-react';
 import axios from 'axios';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area } from 'recharts';
@@ -31,6 +31,51 @@ const VarBadge = ({ atual = 0, anterior = 0 }: { atual?: number, anterior?: numb
 const tooltipSorterRow = (item: any) => {
   const order: Record<string, number> = { 'Histórico Real': 1, 'Proposta Mês Passado': 2, 'Sinal IA': 3, 'Proposta Comercial': 4, 'Restrição Supply': 5, 'Global S&OP': 6 };
   return order[item.name] || 99;
+};
+
+// =====================================================================
+// NOVO COMPONENTE: GERADOR DE INSIGHTS COM IA SOB DEMANDA
+// =====================================================================
+const AiInsightBox = ({ alvo, tipo }: { alvo: string, tipo: string }) => {
+  const [insight, setInsight] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const getInsight = async () => {
+    setLoading(true);
+    try {
+      const res = await axios.post('/api/v1/ai-sql/perguntar', {
+        pergunta: `Faça o dossiê executivo 360° para a ${tipo} "${alvo}". Extraia a cascata de volumes, o histórico de vendas e calcule as oportunidades e riscos financeiros. Apresente o diagnóstico estratégico utilizando a metodologia dos 4 pilares.`,
+        contexto: { tela_ativa: `Painel Global S&OP - Visão ${tipo}`, ciclo_status: 'Analítico/Consolidado' }
+      });
+      setInsight(res.data.resposta);
+    } catch (e) {
+      setInsight('Erro ao gerar insight.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="bg-indigo-50/50 rounded-[24px] p-6 border border-indigo-100 flex flex-col gap-4 h-full shadow-sm">
+      <div className="flex items-center gap-3">
+         <div className="p-2.5 bg-indigo-100 text-indigo-600 rounded-xl">
+           <Wand2 className="w-5 h-5" />
+         </div>
+         <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest">Nexus AI Insight 360°</h4>
+      </div>
+      
+      {insight ? (
+        <div className="text-sm font-medium text-slate-600 leading-relaxed whitespace-pre-wrap overflow-y-auto custom-scrollbar pr-2" dangerouslySetInnerHTML={{ __html: insight.replace(/\*\*(.*?)\*\*/g, '<strong class="font-black text-slate-900">$1</strong>').replace(/\n/g, '<br/>') }} />
+      ) : (
+        <div className="flex flex-col items-start gap-3 mt-2">
+           <p className="text-xs text-slate-500 font-medium">Acione o consultor executivo para avaliar o histórico, a cascata S&OP e identificar oportunidades financeiras nesta visão.</p>
+           <button onClick={getInsight} disabled={loading} className="mt-2 text-xs font-bold bg-indigo-600 text-white px-4 py-3 rounded-xl hover:bg-indigo-700 transition flex items-center gap-2 disabled:opacity-50 w-full justify-center shadow-lg shadow-indigo-900/20">
+             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Gerar Parecer Estratégico 360°'}
+           </button>
+        </div>
+      )}
+    </div>
+  );
 };
 
 // =========================================================
@@ -345,7 +390,11 @@ export default function GlobalDashboard() {
     try {
       // O LangChain no backend trata de analisar a base de dados
       const res = await axios.post('/api/v1/ai-sql/perguntar', {
-        pergunta: userText
+        pergunta: userText,
+        contexto: {
+          tela_ativa: viewMode === 'categorias' ? 'Painel Global S&OP - Portfólio' : 'Painel Global S&OP - Clientes',
+          ciclo_status: isLocked ? 'Ciclo Fechado/Congelado' : 'Ciclo Aberto/Em Andamento'
+        }
       });
       
       setAiMessages(prev => [...prev, { role: 'ai', content: res.data.resposta }]);
@@ -604,18 +653,25 @@ export default function GlobalDashboard() {
                     {chartExpanded === row.original.chave_matriz && (
                       <tr>
                         <td colSpan={table.getAllColumns().length} className="bg-slate-100/30 p-8 border-b border-slate-200">
-                           <div className="bg-white rounded-[40px] p-10 border border-slate-200 shadow-2xl h-[450px] relative">
-                              <div className="flex justify-between items-center mb-10">
-                                <div>
-                                   <div className="flex items-center gap-3 mb-1">
-                                      <div className="w-2 h-2 bg-indigo-500 rounded-full animate-ping" />
-                                      <h3 className="text-lg font-black text-slate-800 uppercase tracking-tighter flex items-center gap-3">Análise de Horizonte S&OP: {row.original.nome}</h3>
-                                   </div>
-                                   <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-5">Histórico Real vs Proposta Mês Passado vs Projeções</p>
-                                </div>
-                                <button onClick={() => setChartExpanded(null)} className="p-3 bg-slate-50 hover:bg-rose-50 text-slate-400 hover:text-rose-500 rounded-full transition-all shadow-sm"><AlertCircle className="w-6 h-6" /></button>
-                              </div>
-                              <div className="w-full h-[280px]">
+                          <div className="bg-white rounded-[32px] p-8 shadow-inner border border-slate-100 animate-in fade-in duration-500">
+                            
+                            {/* LAYOUT EM GRADE PARA GRÁFICO + IA INSIGHT */}
+                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                               
+                               {/* COLUNA ESQUERDA: GRÁFICO */}
+                               <div className="lg:col-span-2">
+                                 <div className="flex justify-between items-start mb-6 px-2">
+                                    <div className="flex flex-col gap-1">
+                                      <h3 className="text-lg font-black text-slate-800 uppercase tracking-tighter flex items-center gap-2">
+                                        <Activity className="w-5 h-5 text-indigo-500" /> Detalhamento Histórico vs. Projeção
+                                      </h3>
+                                      <p className="text-xs font-bold text-slate-400 tracking-widest uppercase">
+                                        {row.original.nome}
+                                      </p>
+                                    </div>
+                                 </div>
+
+                                 <div className="h-[300px] w-full">
                                  {loadingGrafico === row.original.chave_matriz ? <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-4"><Loader2 className="animate-spin w-8 h-8" /><span className="font-black text-[10px] uppercase tracking-widest">Reconstruindo Horizonte...</span></div> : (
                                    <ResponsiveContainer width="100%" height="100%">
                                       <LineChart data={dadosGraficoCache[row.original.chave_matriz] || []} margin={{ top: 10, right: 30, left: 10, bottom: 0 }}>
@@ -633,8 +689,19 @@ export default function GlobalDashboard() {
                                       </LineChart>
                                    </ResponsiveContainer>
                                  )}
-                              </div>
-                           </div>
+                            </div>
+                               </div>
+
+                               {/* COLUNA DIREITA: BOTÃO IA 360° */}
+                               <div className="flex flex-col justify-start">
+                                 <AiInsightBox 
+                                    alvo={row.original.nome} 
+                                    tipo={viewMode === 'categorias' ? 'Categoria' : 'Cliente'} 
+                                 />
+                               </div>
+                            </div>
+
+                          </div>
                         </td>
                       </tr>
                     )}
@@ -704,7 +771,9 @@ export default function GlobalDashboard() {
             {aiMessages.map((msg, idx) => (
               <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div className={`max-w-[85%] p-4 rounded-2xl text-sm leading-relaxed ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-sm' : 'bg-white border border-slate-200 text-slate-700 shadow-sm rounded-tl-sm'}`}>
-                  <span dangerouslySetInnerHTML={{ __html: msg.content.replace(/\*\*(.*?)\*\*/g, '<strong class="font-black text-slate-900">$1</strong>') }} />
+                  {msg.role === 'ai' 
+                    ? <span dangerouslySetInnerHTML={{ __html: msg.content.replace(/\*\*(.*?)\*\*/g, '<strong class="font-black text-slate-900">$1</strong>').replace(/\n/g, '<br/>') }} />
+                    : msg.content}
                 </div>
               </div>
             ))}

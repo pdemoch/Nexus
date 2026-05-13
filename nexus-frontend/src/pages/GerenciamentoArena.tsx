@@ -4,7 +4,7 @@ import {
 } from '@tanstack/react-table';
 import { 
   Check, Filter, Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
-  Lock, Unlock, Search, X, Store, Package, Users, Download, BarChart2, Activity, Shield
+  Lock, Unlock, Search, X, Store, Package, Users, Download, BarChart2, Activity, Shield, Wand2
 } from 'lucide-react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
@@ -12,6 +12,51 @@ import * as XLSX from 'xlsx';
 
 const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor));
 const formatVolume = (val: number) => Math.round(val).toLocaleString('pt-BR');
+
+// =====================================================================
+// NOVO COMPONENTE: GERADOR DE INSIGHTS COM IA SOB DEMANDA (TEMA ESCURO)
+// =====================================================================
+const AiInsightBox = ({ alvo, tipo, pmv }: { alvo: string, tipo: string, pmv: number }) => {
+  const [insight, setInsight] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const getInsight = async () => {
+    setLoading(true);
+    try {
+      const res = await axios.post('/api/v1/ai-sql/perguntar', {
+        pergunta: `Faça o dossiê executivo 360° para o ${tipo} "${alvo}". Extraia a cascata de volumes, o histórico de vendas e o pmv_aplicado. Apresente o diagnóstico financeiro (R$) e estratégico utilizando a metodologia dos 4 pilares.`,
+        contexto: { tela_ativa: 'Bottom-Up Gerencial', ciclo_status: 'Aberto/Em Ajuste' }
+      });
+      setInsight(res.data.resposta);
+    } catch (e) {
+      setInsight('Erro ao gerar insight.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="bg-slate-900/50 rounded-2xl p-6 border border-slate-700 flex flex-col gap-4 h-full">
+      <div className="flex items-center gap-3">
+         <div className="p-2.5 bg-blue-500/20 text-blue-400 rounded-xl">
+           <Wand2 className="w-5 h-5" />
+         </div>
+         <h4 className="text-sm font-black text-white uppercase tracking-widest">Nexus AI Insight 360°</h4>
+      </div>
+      
+      {insight ? (
+        <div className="text-sm font-medium text-slate-300 leading-relaxed whitespace-pre-wrap overflow-y-auto custom-scrollbar pr-2" dangerouslySetInnerHTML={{ __html: insight.replace(/\*\*(.*?)\*\*/g, '<strong class="font-black text-white">$1</strong>') }} />
+      ) : (
+        <div className="flex flex-col items-start gap-3 mt-2">
+           <p className="text-xs text-slate-500 font-medium">Acione o consultor executivo para cruzar dados de S&OP, Faturamento Histórico e metas do ciclo.</p>
+           <button onClick={getInsight} disabled={loading} className="mt-2 text-xs font-bold bg-blue-600 text-white px-4 py-3 rounded-xl hover:bg-blue-700 transition flex items-center gap-2 disabled:opacity-50 w-full justify-center shadow-lg shadow-blue-900/20">
+             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Gerar Parecer Estratégico 360°'}
+           </button>
+        </div>
+      )}
+    </div>
+  );
+};
 
 export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: any }) {
   const [nivelHierarquia, setNivelHierarquia] = useState('regional');
@@ -35,7 +80,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   const [opcoesBusca, setOpcoesBusca] = useState<{coordenadores: string[], vendedores: string[], regionais: string[]}>({coordenadores: [], vendedores: [], regionais: []});
 
   useEffect(() => {
-    axios.get('/api/v1/consensus/gerenciamento/filtros')
+    axios.get('/api/v1/consensus/micro/filtros')
          .then(res => setOpcoesBusca(res.data)).catch(console.error);
 
     axios.get('/api/v1/consensus/macro/status')
@@ -46,10 +91,14 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const res = await axios.get('/api/v1/consensus/gerenciamento/vendedores', { 
-        params: { nivel_filtro: nivelHierarquia, valor_filtro: nomeResponsavel } 
-      });
-      setDadosBrutos(res.data.dados || []);
+      const params = { nivel_hierarquia: nivelHierarquia, nome_responsavel: nomeResponsavel || '' };
+      
+      const [dadosRes] = await Promise.all([
+        axios.get('/api/v1/consensus/micro', { params })
+      ]);
+      
+      setDadosBrutos(dadosRes.data.dados || []);
+      
       setCelulasEditadas({});
       setExpanded({});
       setChartExpanded(null);
@@ -65,26 +114,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     if (isTopDownFechado) fetchData(); 
   }, [fetchData, isTopDownFechado]);
 
-  const handleToggleLock = async (origem: string) => {
-    if (!isTopDownFechado) return;
-    try {
-       await axios.post('/api/v1/consensus/gerenciamento/toggle-lock', { origem });
-       fetchData();
-    } catch (e: any) {
-       alert(e.response?.data?.detail || "Erro ao trancar/destrancar alvo.");
-    }
-  };
-
-  const handleLockAll = async (acao: 'Trancar' | 'Destrancar') => {
-    if (!window.confirm(`Deseja ${acao.toLowerCase()} todas as carteiras visíveis?`)) return;
-    try {
-       await axios.post('/api/v1/consensus/gerenciamento/lock-all', { acao, gerente_nome: usuarioSessao?.gerente_nome || '' });
-       fetchData();
-    } catch (e: any) {
-       alert(e.response?.data?.detail || `Erro ao ${acao.toLowerCase()} carteiras.`);
-    }
-  };
-
   const handleExportExcel = () => {
     if (dadosBrutos.length === 0) return alert("Não há dados na tela para exportar.");
     const dadosExcel: any[] = [];
@@ -94,20 +123,16 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
         vendedor.subRows.forEach((cliente: any) => {
           cliente.subRows.forEach((prod: any) => {
             const linha: any = {
-              "COORDENADOR": coord.nome,
-              "VENDEDOR": vendedor.nome, 
-              "STATUS CARTEIRA": vendedor.status,
-              "CNPJ": cliente.cnpj,
-              "RAZÃO SOCIAL": cliente.nome, 
-              "CÓDIGO SKU": prod.produto, 
-              "DESCRIÇÃO": prod.nome, 
-              "PMV PONDERADO (R$)": prod.meses[0]?.pmv || 0
+              "COORDENADOR": coord.nome, "VENDEDOR": vendedor.nome,
+              "RAZÃO SOCIAL": cliente.nome, "CÓDIGO SKU": prod.produto, "DESCRIÇÃO": prod.nome, 
+              "CATEGORIA": prod.categoria, "SEGMENTO": prod.segmento, "PMV PONDERADO (R$)": prod.meses[0]?.pmv || 0
             };
             prod.meses.forEach((m: any) => {
               const edicao = celulasEditadas[prod.chave_matriz]?.[m.mes_banco];
               const volFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : m.vol_ajustado));
               linha[`${m.mes_str} (Base IA)`] = Math.round(Number(m.vol_ia));
-              linha[`${m.mes_str} (Gerencial)`] = volFinal;
+              linha[`${m.mes_str} (Top-Down)`] = Math.round(Number(m.vol_td || 0));
+              linha[`${m.mes_str} (Comercial)`] = volFinal;
             });
             dadosExcel.push(linha);
           });
@@ -117,9 +142,9 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
 
     const worksheet = XLSX.utils.json_to_sheet(dadosExcel);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Gerenciamento_SOP");
-    worksheet['!cols'] = [{ wch: 20 }, { wch: 25 }, { wch: 15 }, { wch: 18 }, { wch: 30 }, { wch: 15 }, { wch: 40 }, { wch: 18 }];
-    XLSX.writeFile(workbook, `SOP_Nexus_Gerenciamento_${new Date().toISOString().split('T')[0]}.xlsx`);
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Gerencial_Consenso");
+    worksheet['!cols'] = [{ wch: 25 }, { wch: 25 }, { wch: 30 }, { wch: 15 }, { wch: 40 }, { wch: 20 }, { wch: 20 }, { wch: 18 }];
+    XLSX.writeFile(workbook, `SOP_Nexus_Gerencial_${new Date().toISOString().split('T')[0]}.xlsx`);
   };
 
   const handleSalvar = async () => {
@@ -129,7 +154,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
       Object.entries(meses).forEach(([mes, val]: any) => {
         const partes = chave.split('|');
         const nivel = partes.length === 4 ? 'produto' : partes.length === 3 ? 'cliente' : partes.length === 2 ? 'vendedor' : 'coordenador';
-        
+
         ajustes.push({ 
           nivel: nivel, 
           chave: chave, 
@@ -140,11 +165,25 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     });
 
     try {
-      await axios.post(`/api/v1/consensus/gerenciamento/aprovar`, { ajustes });
-      alert("✅ Volume gerencial salvo com sucesso e rateado para as estruturas inferiores!");
+      await axios.post(`/api/v1/consensus/micro/congelar`, { origem_ajuste: "Comercial", ajustes });
+      alert("✅ Ajustes Gerenciais salvos e consolidados!");
       fetchData(); 
     } catch (e: any) {
-      alert(e.response?.data?.detail || "Erro ao guardar as alterações.");
+      alert(e.response?.data?.detail || "Erro ao guardar.");
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const alternarTrancaRegional = async () => {
+    if (!window.confirm("Atenção: Ao destrancar a Regional, os coordenadores e vendedores poderão alterar as cotas novamente. Confirma?")) return;
+    setIsProcessing(true);
+    try {
+      await axios.post(`/api/v1/consensus/micro/destrancar`, { regional: nomeResponsavel || "TODAS" });
+      alert("🔓 Regional(is) destrancada(s) para ajustes da base.");
+      fetchData();
+    } catch(e) {
+      alert("Erro ao destrancar regional.");
     } finally {
       setIsProcessing(false);
     }
@@ -157,11 +196,11 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     return dadosBrutos.map(coord => {
       if (coord.nome.toLowerCase().includes(term)) return coord;
       
-      const vendsFiltrados = coord.subRows.map((vendedor: any) => {
+      const vendedoresFiltrados = coord.subRows.map((vendedor: any) => {
         if (vendedor.nome.toLowerCase().includes(term)) return vendedor;
         
         const clientesFiltrados = vendedor.subRows.map((cliente: any) => {
-          if (cliente.nome.toLowerCase().includes(term) || (cliente.cnpj && cliente.cnpj.includes(term))) return cliente;
+          if (cliente.nome.toLowerCase().includes(term)) return cliente;
           
           const prodsFiltrados = cliente.subRows.filter((p: any) => 
             (p.nome.toLowerCase().includes(term) || (p.produto && p.produto.toLowerCase().includes(term)))
@@ -175,7 +214,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
         return null;
       }).filter(Boolean);
 
-      if (vendsFiltrados.length > 0) return { ...coord, subRows: vendsFiltrados };
+      if (vendedoresFiltrados.length > 0) return { ...coord, subRows: vendedoresFiltrados };
       return null;
     }).filter(Boolean);
   }, [dadosBrutos, busca]);
@@ -217,7 +256,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
-        const res = await axios.get('/api/v1/consensus/gerenciamento/grafico', { 
+        const res = await axios.get('/api/v1/consensus/micro/grafico', { 
             params: { chave_matriz: chave } 
         });
         setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
@@ -227,13 +266,15 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   };
 
   const qtdEdicoes = Object.keys(celulasEditadas).length;
+  // A Regional como um todo está fechada se o primeiro coordenador estiver fechado (Lógica simplificada de gestão visual)
+  const isAllFechado = dadosBrutos.length > 0 && dadosBrutos[0].status === 'Fechado';
 
   const columns = useMemo(() => {
     if (dadosFiltrados.length === 0) return [];
     
     const baseCols: any[] = [
       {
-        id: 'nome', header: 'Hierarquia S&OP',
+        id: 'nome', header: 'Supervisão / Vendedor / Cliente / Produto',
         accessorFn: (row: any) => row.nome,
         cell: (info: any) => {
           const row = info.row;
@@ -243,7 +284,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           const isProduto = row.original.tipo === 'produto';
 
           return (
-            <div style={{ paddingLeft: `${row.depth * 2}rem` }} className="flex items-center gap-3 py-2 min-w-[350px]">
+            <div style={{ paddingLeft: `${row.depth * 2}rem` }} className="flex items-center gap-3 py-2 min-w-[320px]">
               {!isProduto ? (
                 <button onClick={row.getToggleExpandedHandler()} className="p-1.5 hover:bg-slate-200 text-slate-500 rounded-lg transition-colors">
                   {row.getIsExpanded() ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
@@ -252,11 +293,14 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                 <div className="w-8"></div>
               )}
               
-              <button onClick={() => toggleChart(row)} className={`p-1.5 rounded-lg transition-colors border ${chartExpanded === row.original.chave_matriz ? 'bg-indigo-100 border-indigo-200 text-indigo-600 shadow-sm' : 'hover:bg-slate-100 border-transparent text-slate-400 hover:text-slate-600'}`} title="Ver Gráfico de Evolução">
+              <button onClick={() => toggleChart(row)} className={`p-1.5 rounded-lg transition-colors border ${chartExpanded === row.original.chave_matriz ? 'bg-blue-100 border-blue-200 text-blue-600 shadow-sm' : 'hover:bg-slate-100 border-transparent text-slate-400 hover:text-slate-600'}`} title="Ver Gráfico S&OE">
                 <BarChart2 className="w-4 h-4" />
               </button>
 
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center border flex-shrink-0 ${isCoordenador ? 'bg-indigo-900 border-indigo-950 text-white' : isVendedor ? 'bg-blue-100 border-blue-200 text-blue-600' : isCliente ? 'bg-indigo-50 border-indigo-100 text-indigo-600' : 'bg-slate-50 border-slate-200 text-slate-400'}`}>
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center border flex-shrink-0 
+                 ${isCoordenador ? 'bg-slate-800 border-slate-700 text-white' : 
+                   isVendedor ? 'bg-blue-50 border-blue-100 text-blue-600' : 
+                   isCliente ? 'bg-indigo-50 border-indigo-100 text-indigo-600' : 'bg-slate-50 border-slate-100 text-slate-400'}`}>
                 {isCoordenador ? <Shield className="w-4 h-4" /> : isVendedor ? <Users className="w-4 h-4" /> : isCliente ? <Store className="w-4 h-4" /> : <Package className="w-4 h-4" />}
               </div>
               
@@ -264,24 +308,19 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                  <span className={`text-sm ${!isProduto ? 'font-black text-slate-800 uppercase tracking-tighter' : 'font-bold text-slate-600 truncate max-w-[250px]'}`}>
                    {info.getValue()}
                  </span>
-                 {/* MOSTRA O CNPJ AQUI EMBAIXO DO NOME DO CLIENTE */}
-                 {isCliente && row.original.cnpj && (
-                   <div className="flex items-center gap-2 mt-0.5">
-                     <span className="text-[10px] text-slate-400 font-bold tracking-widest uppercase">CNPJ: {row.original.cnpj}</span>
-                   </div>
+                 {isCoordenador && (
+                     <div className="flex items-center gap-1 mt-1">
+                         {row.original.status === 'Fechado' ? <Lock className="w-3 h-3 text-rose-500"/> : <Unlock className="w-3 h-3 text-emerald-500"/>}
+                         <span className={`text-[9px] font-black uppercase tracking-widest ${row.original.status === 'Fechado' ? 'text-rose-500' : 'text-emerald-500'}`}>{row.original.status}</span>
+                     </div>
                  )}
                  {isProduto && (
                    <div className="flex items-center gap-2 mt-1">
                      <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">{row.original.produto}</span>
+                     <span className="text-[9px] text-emerald-600 font-black uppercase tracking-widest bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100">PMV: {formatMoeda(row.original.meses[0]?.pmv || 0)}</span>
                    </div>
                  )}
               </div>
-
-              {(isCoordenador || isVendedor) && (
-                <button onClick={() => handleToggleLock(row.original.nome)} title={row.original.status === 'Fechado' ? 'Destrancar' : 'Trancar'} className={`ml-auto px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest flex items-center gap-1.5 shadow-sm transition-all hover:scale-105 ${row.original.status === 'Fechado' ? 'bg-rose-500 text-white border border-rose-600' : 'bg-emerald-500 text-white border border-emerald-600'}`}>
-                   {row.original.status === 'Fechado' ? <><Lock className="w-3 h-3"/> Trancado</> : <><Unlock className="w-3 h-3"/> Aberto</>}
-                </button>
-              )}
             </div>
           )
         }
@@ -289,7 +328,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     ];
 
     const mesesMap = new Map();
-    dadosFiltrados.forEach(c => c.meses.forEach((m: any) => mesesMap.set(m.mes_banco, m)));
+    dadosFiltrados.forEach(v => v.meses.forEach((m: any) => mesesMap.set(m.mes_banco, m)));
     
     Array.from(mesesMap.values()).sort((a: any, b: any) => a.mes_banco.localeCompare(b.mes_banco)).forEach((m: any) => {
       baseCols.push({
@@ -309,21 +348,18 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           const valorReal = isPendente ? edicao.novo_volume : (dadosMes?.vol_ajustado || 0);
           const valorInteiro = Math.round(Number(valorReal));
           const baseIA = Math.round(Number(dadosMes?.vol_ia || 0));
+          const baseTopDown = Math.round(Number(dadosMes?.vol_td || 0));
           const isChanged = valorInteiro !== baseIA;
+          
           const faturamentoPrevisto = isPendente ? (valorInteiro * (dadosMes?.pmv || 0)) : (dadosMes?.receita || 0);
+          const temPressao = baseTopDown > valorInteiro;
           
-          const partes = row.chave_matriz.split('|');
-          const coordenadorNome = partes[0];
-          const vendedorNome = partes[1]; 
-
-          const nodeCoordenador = dadosFiltrados.find(c => c.nome === coordenadorNome);
-          const nodeVendedor = nodeCoordenador?.subRows.find((v: any) => v.nome === vendedorNome);
+          const bloqueadoPelaEquipa = isCoordenador ? false : row.status === 'Fechado'; // Gerente pode editar tudo, menos se ele mesmo não quiser.
           
-          const bloqueado = !isTopDownFechado || nodeCoordenador?.status === 'Fechado' || nodeVendedor?.status === 'Fechado';
-
-          if (isCoordenador) {
+          if (isCoordenador || isVendedor) {
             return (
-              <div className="flex flex-col items-center justify-center py-2 w-28">
+              <div className="flex flex-col items-center justify-center py-2 w-28 relative">
+                 {temPressao && <span className="absolute -top-1 text-[8px] text-rose-500 font-black uppercase tracking-widest bg-rose-50 px-1 rounded border border-rose-100" title="Meta da Diretoria">TD: {baseTopDown}</span>}
                  <span className="text-sm font-black text-slate-800">{formatVolume(valorInteiro)}</span>
                  <span className="text-[10px] font-black text-emerald-600 mt-1">{formatMoeda(dadosMes?.receita || 0)}</span>
               </div>
@@ -333,19 +369,19 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           return (
             <div className="flex flex-col w-28 gap-1.5 relative">
               <div className="flex justify-between items-center px-1">
-                 <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest" title="Sinal da IA">IA: {baseIA}</span>
+                 <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest" title="Sugestão IA">IA: {baseIA}</span>
+                 {temPressao && <span className="text-[9px] text-rose-500 font-black uppercase tracking-widest bg-rose-50 px-1 rounded border border-rose-100" title="Meta da Diretoria (Top-Down)">TD: {baseTopDown}</span>}
               </div>
               <input
                 type="number" value={valorInteiro === 0 ? '' : valorInteiro} placeholder="0"
-                disabled={bloqueado}
                 onChange={(e) => meta.updateCell(row.chave_matriz, m.mes_banco, e.target.value)}
                 className={`text-sm text-center font-black p-2.5 rounded-xl outline-none border-2 transition-all w-full
-                  ${bloqueado ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed opacity-80' : 
-                    isCliente || isVendedor ? 'border-dashed border-indigo-200 focus:border-indigo-500 focus:bg-indigo-50 text-indigo-900 bg-white' : 'border-solid'} 
-                  ${isChanged && !isCliente && !isVendedor && !bloqueado ? 'bg-indigo-600 border-indigo-700 text-white shadow-md' : !isCliente && !isVendedor && !bloqueado ? 'bg-slate-50 border-transparent text-slate-800 focus:bg-white focus:border-slate-300' : ''}`}
-                title={bloqueado ? "Carteira Trancada" : isVendedor ? "Editar Equipa Comercial (Rateia para todos abaixo)" : isCliente ? "Editar Matriz (Rateia para os SKUs do cliente)" : "Editar SKU"}
+                  ${bloqueadoPelaEquipa ? 'bg-amber-50 border-amber-200 text-amber-700 focus:border-amber-500' : 
+                    isCliente ? 'border-dashed border-blue-200 focus:border-blue-500 focus:bg-blue-50 text-blue-900 bg-white' : 'border-solid'} 
+                  ${isChanged && !isCliente ? 'bg-blue-600 border-blue-700 text-white shadow-md' : !isCliente ? 'bg-slate-50 border-transparent text-slate-800 focus:bg-white focus:border-slate-300' : ''}`}
+                title={bloqueadoPelaEquipa ? "Equipa Trancada! Edição Gerencial Forçada" : isCliente ? "Editar Matriz (Rateia por todos os SKUs)" : "Editar SKU"}
               />
-              <span className={`text-[10px] font-black text-center tracking-tight ${bloqueado ? 'text-slate-400' : isCliente || isVendedor ? 'text-indigo-500' : 'text-emerald-600'}`}>
+              <span className={`text-[10px] font-black text-center tracking-tight ${isCliente ? 'text-blue-500' : 'text-emerald-600'}`}>
                 {formatMoeda(faturamentoPrevisto)}
               </span>
             </div>
@@ -354,7 +390,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
       });
     });
     return baseCols;
-  }, [dadosFiltrados, chartExpanded, isTopDownFechado]);
+  }, [dadosFiltrados, chartExpanded]);
 
   const table = useReactTable({
     data: dadosFiltrados, columns, state: { expanded, sorting },
@@ -364,7 +400,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     meta: {
       celulasEditadas,
       updateCell: (chave: string, mes: string, val: string) => {
-        if (!isTopDownFechado) return; 
         const v = val === '' ? '' : Math.round(Number(val));
         const finalV = Number.isNaN(v as any) && val !== '' ? 0 : v;
         setCelulasEditadas((prev: any) => ({ ...prev, [chave]: { ...(prev[chave] || {}), [mes]: { novo_volume: finalV } } }));
@@ -372,11 +407,12 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     }
   });
 
+  // TELA DE BLOQUEIO DE FASE
   if (isTopDownFechado === null) {
     return (
       <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
-        <Loader2 className="w-8 h-8 animate-spin text-indigo-500 mb-4" />
-        <span className="text-slate-400 font-black text-xs tracking-widest uppercase">A verificar Status do Ciclo...</span>
+        <Loader2 className="w-8 h-8 animate-spin text-blue-500 mb-4" />
+        <span className="text-slate-400 font-black text-xs tracking-widest uppercase">Verificando Status do Ciclo...</span>
       </div>
     );
   }
@@ -390,7 +426,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           </div>
           <h2 className="text-2xl font-black text-slate-900 tracking-tighter mb-4">Aguardando Diretoria (Top-Down)</h2>
           <p className="text-slate-500 font-medium leading-relaxed">
-            A fase de <strong>Gerenciamento</strong> só pode ser iniciada após a aprovação e congelamento da demanda macro pela Diretoria (Fase 1).
+            A fase Gerencial só pode ser iniciada após a aprovação e congelamento da demanda macro pela Diretoria (Fase 1).
           </p>
         </div>
       </div>
@@ -401,71 +437,97 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
       <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative">
         
+        {/* CABEÇALHO */}
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 relative overflow-hidden">
+          
           <div>
             <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
-              <Users className="w-8 h-8 text-blue-600" /> Metas por Cliente (Gerenciamento)
+              <Activity className="w-8 h-8 text-blue-600" /> Cockpit Gerencial
             </h1>
             <p className="text-sm font-bold text-slate-400 mt-1 uppercase tracking-widest pl-11">
-              Ajuste Macro e Gestão de Carteiras de Vendas
+              Visão Panorâmica de Vendas e Correções da Base
             </p>
           </div>
           
           <div className="flex items-center gap-4">
               <div className="flex items-center gap-3 h-full">
-                <div className="flex bg-slate-100 p-1 rounded-2xl mr-4 border border-slate-200">
-                   <button onClick={() => handleLockAll('Trancar')} className="px-4 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest text-slate-600 hover:bg-white hover:shadow-sm hover:text-slate-900 transition-all flex items-center gap-1.5"><Lock className="w-3.5 h-3.5"/> Trancar Todos</button>
-                   <button onClick={() => handleLockAll('Destrancar')} className="px-4 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest text-slate-600 hover:bg-white hover:shadow-sm hover:text-slate-900 transition-all flex items-center gap-1.5"><Unlock className="w-3.5 h-3.5"/> Reabrir Todos</button>
-                </div>
+                
+                {isAllFechado && (
+                   <button onClick={alternarTrancaRegional} disabled={isProcessing} className="flex items-center gap-2 bg-rose-50 hover:bg-rose-100 text-rose-600 px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase transition-all border border-rose-200 shadow-sm disabled:opacity-50">
+                      <Unlock className="w-5 h-5" /> Destrancar Bases
+                   </button>
+                )}
+
                 {qtdEdicoes > 0 && (<button onClick={() => setCelulasEditadas({})} className="flex items-center gap-1 text-xs font-black text-rose-500 hover:text-rose-700 transition tracking-widest uppercase px-4 py-3 rounded-2xl hover:bg-rose-50"><X className="w-4 h-4" /> Descartar</button>)}
-                <button onClick={handleSalvar} disabled={isProcessing || qtdEdicoes === 0} className={`flex items-center gap-2 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase transition-all shadow-lg ${qtdEdicoes === 0 ? 'bg-slate-300 cursor-not-allowed shadow-none' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-600/30'}`}>
+                
+                <button onClick={handleSalvar} disabled={isProcessing} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase transition-all shadow-lg shadow-blue-600/30">
                     {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : <Check className="w-5 h-5" />}
-                    Gravar e Ratear Ajustes
+                    {qtdEdicoes > 0 ? 'Gravar Alterações' : 'Aprovar Ciclo'}
                 </button>
               </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-4 mb-6 bg-white p-4 rounded-2xl shadow-sm border border-slate-100">
-            <span className="text-xs font-black text-slate-500 uppercase tracking-widest">Filtrar Visão:</span>
-            <select value={nivelHierarquia} onChange={e => {setNivelHierarquia(e.target.value); setNomeResponsavel('');}} className="bg-slate-50 border border-slate-200 text-sm font-bold p-2.5 rounded-xl outline-none text-slate-700 cursor-pointer">
-                <option value="regional">Por Regional</option>
-                <option value="coordenador">Por Coordenador</option>
-                <option value="vendedor">Por Vendedor</option>
-            </select>
-            <select value={nomeResponsavel} onChange={e => setNomeResponsavel(e.target.value)} className="flex-1 bg-slate-50 border border-slate-200 p-2.5 rounded-xl text-sm font-bold text-slate-700 outline-none cursor-pointer">
-                <option value="">{nivelHierarquia === 'coordenador' ? '-- Selecione o Coordenador --' : nivelHierarquia === 'vendedor' ? '-- Selecione o Vendedor --' : '-- Selecione a Regional --'}</option>
-                {(nivelHierarquia === 'coordenador' ? opcoesBusca.coordenadores : nivelHierarquia === 'vendedor' ? opcoesBusca.vendedores : opcoesBusca.regionais).map(opt => (
-                    <option key={opt} value={opt}>{opt}</option>
-                ))}
-            </select>
-            <button onClick={fetchData} disabled={isLoading} className="bg-blue-50 text-blue-600 px-6 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-blue-100 transition disabled:opacity-50 flex items-center gap-2">
-                {isLoading ? <Loader2 className="w-4 h-4 animate-spin"/> : <Search className="w-4 h-4"/>} Aplicar Filtro
-            </button>
-        </div>
-
+        {/* CONTROLES E BUSCA */}
         <div className="flex flex-col md:flex-row gap-4 mb-6">
-           <div className="flex-1 bg-white p-3 rounded-[24px] shadow-sm border border-slate-100 flex flex-col md:flex-row items-center gap-3">
-             <div className="flex-1 flex items-center gap-3 px-4 bg-slate-50 rounded-xl border border-slate-100 w-full">
+            <div className="flex items-center gap-4 bg-white p-3 rounded-[24px] shadow-sm border border-slate-100 flex-shrink-0 px-6">
+                <span className="text-xs font-black text-slate-500 uppercase tracking-widest">Visualizar Base:</span>
+                <select 
+                    value={nivelHierarquia} 
+                    onChange={e => { setNivelHierarquia(e.target.value); setNomeResponsavel(''); }} 
+                    className="bg-slate-50 border border-slate-200 p-2.5 rounded-xl text-sm font-bold text-slate-700 outline-none cursor-pointer"
+                >
+                    <option value="regional">Por Regionais</option>
+                    <option value="coordenador">Por Coordenações</option>
+                    <option value="vendedor">Por Vendedores</option>
+                </select>
+
+                <select 
+                    value={nomeResponsavel} 
+                    onChange={e => { setNomeResponsavel(e.target.value); }} 
+                    className="bg-slate-50 border border-slate-200 p-2.5 rounded-xl text-sm font-bold text-slate-700 outline-none cursor-pointer"
+                >
+                    <option value="">-- Todos --</option>
+                    {nivelHierarquia === 'regional' && opcoesBusca.regionais.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                    {nivelHierarquia === 'coordenador' && opcoesBusca.coordenadores.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                    {nivelHierarquia === 'vendedor' && opcoesBusca.vendedores.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                </select>
+
+                <button 
+                  onClick={fetchData} 
+                  disabled={isLoading} 
+                  className="bg-blue-50 text-blue-600 px-6 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-blue-100 transition disabled:opacity-50 flex items-center gap-2"
+                >
+                   {isLoading ? <Loader2 className="w-4 h-4 animate-spin"/> : <Filter className="w-4 h-4"/>} 
+                   Filtrar
+                </button>
+            </div>
+
+           <div className="flex-1 bg-white p-3 rounded-[24px] shadow-sm border border-slate-100 flex items-center gap-3">
+             <div className="flex-1 flex items-center gap-3 px-4 bg-slate-50 rounded-xl border border-slate-100 h-full">
                <Search className="w-5 h-5 text-slate-400" />
-               <input type="text" placeholder="Pesquisar livremente na árvore..." value={busca} onChange={e => setBusca(e.target.value)} className="w-full bg-transparent py-3 text-sm font-bold text-slate-800 outline-none placeholder:text-slate-400" />
+               <input 
+                 type="text" placeholder="Pesquisar livremente por Vendedor, Cliente ou Produto..." value={busca} onChange={e => setBusca(e.target.value)}
+                 className="w-full bg-transparent py-2 text-sm font-bold text-slate-800 outline-none placeholder:text-slate-400"
+               />
              </div>
-             <button onClick={handleExportExcel} className="flex items-center gap-2 bg-slate-100 hover:bg-blue-50 text-slate-700 px-6 py-3 rounded-xl text-xs font-black tracking-widest uppercase transition-all border border-slate-200 ml-auto whitespace-nowrap">
-                <Download className="w-4 h-4" /> Exportar Matriz
+             <button onClick={handleExportExcel} className="flex items-center gap-2 bg-slate-100 hover:bg-blue-50 text-slate-700 px-6 py-3 rounded-xl text-xs font-black tracking-widest uppercase transition-all border border-slate-200 h-full whitespace-nowrap">
+                <Download className="w-4 h-4" /> Exportar Planilha
              </button>
            </div>
         </div>
 
+        {/* TABELA DE DADOS */}
         <div className="bg-white rounded-[40px] shadow-2xl border border-slate-100 overflow-hidden relative min-h-[400px]">
           {isLoading ? (
              <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 backdrop-blur-sm z-10">
                  <Loader2 className="w-8 h-8 animate-spin text-blue-500 mb-4" />
-                 <span className="text-slate-400 font-black text-xs tracking-widest uppercase">A carregar Matriz Gerencial...</span>
+                 <span className="text-slate-400 font-black text-xs tracking-widest uppercase">Processando Sumário Gerencial...</span>
              </div>
           ) : dadosFiltrados.length === 0 ? (
              <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
                  <Filter className="w-12 h-12 mb-4 opacity-20" />
-                 <span className="font-black text-sm tracking-widest uppercase">Nenhum dado encontrado para esta visão</span>
+                 <span className="font-black text-sm tracking-widest uppercase">Nenhum dado encontrado</span>
              </div>
           ) : (
           <div className="overflow-x-auto pb-4">
@@ -492,9 +554,9 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
               <tbody>
                 {table.getRowModel().rows.map(row => (
                   <Fragment key={row.id}>
-                    <tr className={`border-b border-slate-50 transition-colors ${row.getIsExpanded() ? 'bg-blue-50/20' : row.original.tipo === 'coordenador' ? 'bg-indigo-50/40 hover:bg-indigo-50' : row.original.tipo === 'vendedor' ? 'bg-slate-50/80 hover:bg-slate-100' : row.original.tipo === 'cliente' ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/30 hover:bg-slate-50'}`}>
+                    <tr className={`border-b border-slate-50 transition-colors ${row.getIsExpanded() ? 'bg-blue-50/20' : row.original.tipo === 'coordenador' ? 'bg-slate-50 hover:bg-slate-100' : row.original.tipo === 'vendedor' ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/50 hover:bg-slate-100'}`}>
                       {row.getVisibleCells().map(cell => (
-                        <td key={cell.id} className="px-8 py-2">
+                        <td key={cell.id} className="px-8 py-3">
                           {flexRender(cell.column.columnDef.cell, cell.getContext())}
                         </td>
                       ))}
@@ -504,43 +566,65 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                       <tr>
                         <td colSpan={table.getAllColumns().length} className="bg-slate-900 p-8 border-b border-slate-800">
                           <div className="bg-slate-950 rounded-[32px] p-8 shadow-inner border border-slate-800 animate-in fade-in duration-500">
-                            <div className="flex justify-between items-start mb-6 px-2">
-                               <div className="flex flex-col gap-1">
-                                 <h3 className="text-lg font-black text-white uppercase tracking-tighter flex items-center gap-2">
-                                   <Activity className="w-5 h-5 text-blue-400" /> Curva S&OE ({row.original.tipo === 'coordenador' ? 'Visão Supervisão' : row.original.tipo === 'vendedor' ? 'Visão Carteira de Vendas' : row.original.tipo === 'cliente' ? 'Visão Conta Global' : 'Visão Produto'})
-                                 </h3>
-                                 <p className="text-xs font-bold text-slate-400 tracking-widest uppercase">{row.original.nome}</p>
+                            
+                            {/* LAYOUT EM GRADE PARA GRÁFICO + IA INSIGHT */}
+                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                               
+                               {/* COLUNA ESQUERDA: GRÁFICO */}
+                               <div className="lg:col-span-2">
+                                 <div className="flex justify-between items-start mb-6 px-2">
+                                    <div className="flex flex-col gap-1">
+                                      <h3 className="text-lg font-black text-white uppercase tracking-tighter flex items-center gap-2">
+                                        <Activity className="w-5 h-5 text-blue-400" /> Curva S&OE ({row.original.tipo === 'coordenador' ? 'Visão Supervisão' : row.original.tipo === 'vendedor' ? 'Visão Carteira de Vendas' : row.original.tipo === 'cliente' ? 'Visão Conta Global' : 'Visão Produto'})
+                                      </h3>
+                                      <p className="text-xs font-bold text-slate-400 tracking-widest uppercase">
+                                        {row.original.nome}
+                                      </p>
+                                    </div>
+                                 </div>
+
+                                 <div className="h-[250px] w-full">
+                                   {loadingGrafico === row.original.chave_matriz ? (
+                                     <div className="h-full flex items-center justify-center text-slate-600"><Loader2 className="animate-spin w-8 h-8" /></div>
+                                   ) : (
+                                     <ResponsiveContainer width="100%" height="100%">
+                                       <LineChart 
+                                         data={
+                                           (dadosGraficoCache[row.original.chave_matriz] || []).map((p: any) => {
+                                               const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
+                                               const edicao = celulasEditadas[row.original.chave_matriz]?.[p.data_iso];
+                                               const valComercial = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
+                                               return { ...p, Consenso: valComercial !== null ? valComercial : p.Consenso };
+                                           })
+                                         }
+                                         margin={{ top: 20, right: 30, left: 20, bottom: 10 }}
+                                       >
+                                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
+                                         <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
+                                         <YAxis tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} tickLine={false} />
+                                         <Tooltip contentStyle={{borderRadius: '20px', backgroundColor: '#0f172a', border: '1px solid #1e293b', color: '#fff', boxShadow: '0 10px 30px rgba(0,0,0,0.5)'}} />
+                                         <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900', color: '#cbd5e1'}} />
+                                         
+                                         <Line type="monotone" dataKey="CicloAnterior" name="Mês Passado" stroke="#f59e0b" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
+                                         <Line type="monotone" dataKey="Realizado" name="Venda Real" stroke="#f8fafc" strokeWidth={4} dot={{r: 3, fill: '#f8fafc'}} connectNulls={false} />
+                                         <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#475569" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
+                                         <Line type="monotone" dataKey="Consenso" name="Proposta Atual" stroke="#3b82f6" strokeWidth={5} dot={{r: 6, fill: '#3b82f6', strokeWidth: 2, stroke: '#0f172a'}} connectNulls={false} />
+                                       </LineChart>
+                                     </ResponsiveContainer>
+                                   )}
+                                 </div>
+                               </div>
+
+                               {/* COLUNA DIREITA: BOTÃO IA 360° */}
+                               <div className="flex flex-col justify-start">
+                                 <AiInsightBox 
+                                    alvo={row.original.nome} 
+                                    tipo={row.original.tipo === 'coordenador' ? 'Coordenador' : row.original.tipo === 'vendedor' ? 'Vendedor' : row.original.tipo === 'cliente' ? 'Cliente' : 'SKU'} 
+                                    pmv={row.original.meses[0]?.pmv || 0}
+                                 />
                                </div>
                             </div>
-                            <div className="h-[250px] w-full">
-                              {loadingGrafico === row.original.chave_matriz ? (
-                                <div className="h-full flex items-center justify-center text-slate-600"><Loader2 className="animate-spin w-8 h-8" /></div>
-                              ) : (
-                                <ResponsiveContainer width="100%" height="100%">
-                                  <LineChart 
-                                    data={
-                                      (dadosGraficoCache[row.original.chave_matriz] || []).map((p: any) => {
-                                          const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
-                                          const edicao = celulasEditadas[row.original.chave_matriz]?.[p.data_iso];
-                                          const valGerencial = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
-                                          return { ...p, Consenso: valGerencial !== null ? valGerencial : p.Consenso };
-                                      })
-                                    }
-                                    margin={{ top: 20, right: 30, left: 20, bottom: 10 }}
-                                  >
-                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
-                                    <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                                    <YAxis tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                                    <Tooltip contentStyle={{borderRadius: '20px', backgroundColor: '#0f172a', border: '1px solid #1e293b', color: '#fff', boxShadow: '0 10px 30px rgba(0,0,0,0.5)'}} />
-                                    <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900', color: '#cbd5e1'}} />
-                                    <Line type="monotone" dataKey="CicloAnterior" name="Mês Passado" stroke="#f59e0b" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
-                                    <Line type="monotone" dataKey="Realizado" name="Venda Real" stroke="#f8fafc" strokeWidth={4} dot={{r: 3, fill: '#f8fafc'}} connectNulls={false} />
-                                    <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#475569" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
-                                    <Line type="monotone" dataKey="Consenso" name="Proposta Atual" stroke="#3b82f6" strokeWidth={5} dot={{r: 6, fill: '#3b82f6', strokeWidth: 2, stroke: '#0f172a'}} connectNulls={false} />
-                                  </LineChart>
-                                </ResponsiveContainer>
-                              )}
-                            </div>
+
                           </div>
                         </td>
                       </tr>
