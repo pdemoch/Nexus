@@ -430,76 +430,70 @@ export default function TopDownArena() {
                     {row.getIsExpanded() && (
                       <tr>
                         <td colSpan={table.getAllColumns().length} className="bg-slate-50/50 p-8 border-b border-gray-100">
-                          <div className="bg-white rounded-[40px] p-8 shadow-inner border border-gray-100 animate-in fade-in duration-500">
+                          <div className="bg-white rounded-[48px] p-10 shadow-inner border border-gray-100 animate-in fade-in duration-500">
                             
-                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-6">
-                               {/* BLOCO 1: INFO E KPIs DO DOSSIÊ */}
-                               <div className="flex flex-col gap-4">
-                                 <h3 className="text-lg font-black text-slate-800 uppercase tracking-tighter">
-                                   Dossiê Estratégico: {row.original.produto}
-                                 </h3>
-
-                                 <div className="flex gap-2 mt-4">
-                                    <div className="flex items-center gap-1.5 bg-slate-100 text-slate-700 px-3 py-1.5 rounded-xl border border-slate-200">
-                                      <BrainCircuit className="w-4 h-4"/>
-                                      <span className="text-[10px] font-black uppercase tracking-widest">
-                                        Modelo: {row.original.modelo_vencedor || 'IA Padrão'}
-                                      </span>
+                            {/* LAYOUT ESTENDIDO (FULL WIDTH) */}
+                            <div className="flex flex-col gap-8">
+                               
+                               {/* LINHA 1: CABEÇALHO COM INFO E BADGES */}
+                               <div className="flex items-center justify-between border-b border-slate-100 pb-6">
+                                 <div className="flex flex-col gap-1">
+                                   <h3 className="text-xl font-black text-slate-900 uppercase tracking-tighter">Dossiê Estratégico</h3>
+                                   <p className="text-sm font-bold text-slate-400 uppercase tracking-widest">{row.original.descricao}</p>
+                                 </div>
+                                 <div className="flex gap-3">
+                                    <div className="flex items-center gap-2 bg-slate-100 text-slate-700 px-4 py-2 rounded-2xl border border-slate-200">
+                                      <BrainCircuit className="w-5 h-5 text-indigo-500"/>
+                                      <span className="text-[11px] font-black uppercase tracking-widest">Modelo: {row.original.modelo_vencedor}</span>
                                     </div>
-                                    <div className="flex items-center gap-1.5 bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-xl border border-emerald-100">
-                                      <ShieldCheck className="w-4 h-4"/>
-                                      <span className="text-[10px] font-black uppercase tracking-widest">
-                                        Acurácia: {row.original.acuracia_ia || 0}%
-                                      </span>
+                                    <div className="flex items-center gap-2 bg-emerald-50 text-emerald-700 px-4 py-2 rounded-2xl border border-emerald-100">
+                                      <ShieldCheck className="w-5 h-5"/>
+                                      <span className="text-[11px] font-black uppercase tracking-widest">Acurácia: {row.original.acuracia_ia}%</span>
                                     </div>
                                  </div>
                                </div>
 
-                               {/* BLOCO 2: GRÁFICO (OCUPA 2 COLUNAS) */}
-                               <div className="lg:col-span-2 h-[250px] w-full bg-slate-50 rounded-3xl p-4 border border-slate-100">
+                               {/* LINHA 2: GRÁFICO DOMINANDO A LARGURA TOTAL */}
+                               <div className="w-full h-[350px] bg-slate-50 rounded-[40px] p-8 border border-slate-100 shadow-inner">
                                  {loadingGrafico === row.original.produto ? (
                                    <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-3">
-                                     <Loader2 className="animate-spin w-8 h-8 text-indigo-500" />
+                                     <Loader2 className="animate-spin w-10 h-10 text-indigo-500" />
                                      <span className="text-[10px] font-black uppercase tracking-widest">Construindo Horizonte...</span>
                                    </div>
                                  ) : (
                                    <ResponsiveContainer width="100%" height="100%">
                                      <LineChart 
-                                       data={
-                                         (dadosGraficoCache[row.original.produto] || []).map((p: any) => {
+                                       data={(dadosGraficoCache[row.original.produto] || []).map((p: any) => {
                                              const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
                                              const edicao = celulasEditadas[row.original.produto]?.[p.data_iso];
                                              const valDiretoria = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
                                              return { ...p, Consenso: valDiretoria !== null ? valDiretoria : p.Consenso };
-                                         })
-                                       }
-                                       margin={{ top: 10, right: 20, left: 0, bottom: 0 }}
+                                         })}
+                                       margin={{ top: 10, right: 30, left: 10, bottom: 0 }}
                                      >
                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                                       <XAxis dataKey="name" tick={{fontSize: 9, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                                       <YAxis tick={{fontSize: 9, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
-                                       <Tooltip contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)', fontSize: '12px'}} formatter={(val: any) => formatVolume(val)} />
-                                       <Legend iconType="circle" wrapperStyle={{paddingTop: '10px', fontSize: '10px', fontWeight: '900'}} />
-                                       
-                                       <Line type="monotone" dataKey="CicloAnterior" name="Proposta Mês Passado" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
-                                       <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={3} dot={{r: 3, fill: '#0f172a'}} connectNulls={false} />
+                                       <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
+                                       <YAxis tick={{fontSize: 10, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
+                                       <Tooltip contentStyle={{borderRadius: '24px', border: 'none', boxShadow: '0 20px 50px rgba(0,0,0,0.1)', fontSize: '13px', fontWeight: '900'}} formatter={(val: any) => formatVolume(val)} />
+                                       <Legend iconType="circle" wrapperStyle={{paddingTop: '30px', fontSize: '11px', fontWeight: '900'}} />
+                                       <Line type="monotone" dataKey="CicloAnterior" name="Proposta Mês Passado" stroke="#a855f7" strokeWidth={2} strokeDasharray="6 4" dot={false} connectNulls={false} />
+                                       <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={4} dot={{r: 4, fill: '#0f172a'}} connectNulls={false} />
                                        <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
-                                       <Line type="monotone" dataKey="Consenso" name="Meta Gerencial" stroke="#3b82f6" strokeWidth={4} dot={{r: 5, fill: '#3b82f6', strokeWidth: 2, stroke: '#fff'}} connectNulls={false} />
+                                       <Line type="monotone" dataKey="Consenso" name="Meta Gerencial" stroke="#3b82f6" strokeWidth={6} dot={{r: 6, fill: '#3b82f6', strokeWidth: 3, stroke: '#fff'}} connectNulls={false} />
                                      </LineChart>
                                    </ResponsiveContainer>
                                  )}
                                </div>
-                            </div>
 
-                            {/* BLOCO 3: INSIGHT DA IA (NOVO) */}
-                            <AiInsightBox 
-                              produto={row.original.descricao}
-                              pmv={row.original.pmv_base || row.original.meses[0]?.pmv || 0}
-                              mediaHist={row.original.media_vendas_3m || 0}
-                              ia={row.original.meses[0]?.vol_ia || 0}
-                              anterior={row.original.meses[0]?.vol_anterior || 0}
-                            />
-                            
+                               {/* LINHA 3: PARECER DA IA LOGO ABAIXO */}
+                               <AiInsightBox 
+                                  produto={row.original.descricao} 
+                                  pmv={row.original.pmv_base || row.original.meses[0]?.pmv || 0} 
+                                  mediaHist={0} 
+                                  ia={row.original.meses[0]?.vol_ia || 0} 
+                                  anterior={row.original.meses[0]?.vol_anterior || 0} 
+                               />
+                            </div>
                           </div>
                         </td>
                       </tr>
