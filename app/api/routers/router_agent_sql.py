@@ -23,8 +23,13 @@ class PerguntaAgente(BaseModel):
     contexto: Optional[ContextoUI] = ContextoUI()
 
 os.environ["GOOGLE_API_KEY"] = "AIzaSyAmNP1mhQAcN-afbSibO8m-0VibJ22nNSw"
-# Temperatura 0 garante que a IA não invente dados SQL, mas o prompt garante a fluidez textual
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+
+# Pulmão aumentado para evitar cortes no Output e garantir o parse do LangChain
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash", 
+    temperature=0.0, 
+    max_output_tokens=4096 
+)
 
 DATABASE_URL_RO = "postgresql+psycopg2://nexus_ai_readonly:SenhaForteIA2026@nexus-db:5432/nexus_db"
 engine = create_engine(DATABASE_URL_RO)
@@ -32,38 +37,34 @@ db_langchain = SQLDatabase(engine)
 toolkit = SQLDatabaseToolkit(db=db_langchain, llm=llm)
 
 # =====================================================================
-# O CÉREBRO 360° (CHAIN OF THOUGHT)
+# O CÉREBRO 360° (CHAIN OF THOUGHT COM FEW-SHOT PROMPTING)
 # =====================================================================
 def get_executive_prefix(contexto: ContextoUI):
     return f"""
     VOCÊ É O NEXUS AI - CONSULTOR ESTRATÉGICO DE S&OP.
-    Você tem acesso livre ao banco de dados SQL para responder a QUALQUER pergunta do usuário sobre produtos, clientes, categorias, ciclos passados e faturamento.
     
-    CONTEXTO DO USUÁRIO: Tela '{contexto.tela_ativa}' | Status do Ciclo: '{contexto.ciclo_status}'.
+    CONTEXTO ATUAL: Tela '{contexto.tela_ativa}' | Ciclo: '{contexto.ciclo_status}'.
 
-    DICIONÁRIO DE DADOS E RELACIONAMENTOS:
-    - 'fato_vendas': Histórico real (o passado). O volume é 'qt_pedido' e o faturamento é 'vl_pedido'. As rupturas passadas são 'qtcorte'.
-    - 'fato_ibp_granular': Projeções (o futuro). Cruzar com 'dim_produtos' (via sku) e 'dim_clientes' (via cgc).
-    - 'fato_acuracia': Contém o histórico de assertividade dos modelos de IA ('acuracia_ia', 'modelo_vencedor').
+    🚨 REGRAS DE OURO OBRIGATÓRIAS (PUNIÇÃO SE IGNORADAS):
+    1. PROIBIDO ALUCINAR: Você nunca pode assumir dados de exemplos do schema. Você DEVE usar o `sql_db_query` para buscar o SKU ou Cliente exato solicitado pelo usuário.
+    2. CASCATA IBP (fato_ibp_granular): A tabela projeta o futuro por cliente. Para ver o cenário de um SKU, você OBRIGATORIAMENTE deve agrupar (GROUP BY mes_projetado) e somar os volumes.
+    3. HISTÓRICO (fato_vendas): Nunca leia uma linha isolada. Um produto tem vários pedidos no mês. OBRIGATÓRIO usar SUM(qt_pedido) e GROUP BY TO_CHAR(data_pedido, 'YYYY-MM').
+    4. PMV MÉDIO PRATICADO: Nunca some PMVs. Calcule sempre pela fórmula matemática real: ROUND((SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0))::numeric, 2).
+    5. RESPOSTA FINAL: OBRIGATÓRIO iniciar sua conclusão textual com a string exata "Final Answer: ".
 
-    A CASCATA DE DEMANDA (Obrigatório entender esta ordem na fato_ibp_granular):
-    1. vol_ia (Sinal Estatístico Base) -> 2. vol_topdown (Meta Diretoria) -> 3. vol_bottomup (Acordo Comercial) -> 4. vol_supply (Restrição de Fábrica) -> 5. vol_final.
+    [EXEMPLO DE QUERY PARA HISTÓRICO (COPIE ESTA ESTRUTURA)]:
+    SELECT TO_CHAR(data_pedido, 'YYYY-MM') AS mes, SUM(qt_pedido) AS vol_real, SUM(qtcorte) as cortes, ROUND((SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0))::numeric, 2) AS pmv
+    FROM fato_vendas WHERE sku = 'ID_DO_SKU' AND data_pedido >= CURRENT_DATE - INTERVAL '6 months' GROUP BY mes ORDER BY mes DESC;
 
-    A REGRA DA DUPLA MOEDA (Física e Financeira):
-    - Sempre que falar de projeções de demanda, apresente o VOLUME (em caixas/unidades) E O VALOR FINANCEIRO (em R$).
-    - O Valor Financeiro projetado é SEMPRE = (Volume Alvo * 'pmv_aplicado').
-    - Exemplo de resposta correta: "O corte de Supply foi de 500 caixas, o que representa um risco de R$ 45.000,00 na receita."
+    [EXEMPLO DE QUERY PARA CASCATA (COPIE ESTA ESTRUTURA)]:
+    SELECT mes_projetado, SUM(vol_ia) as ia, SUM(vol_topdown) as td, SUM(vol_bottomup) as bu, SUM(vol_supply) as supply, SUM(vol_final) as final
+    FROM fato_ibp_granular WHERE sku = 'ID_DO_SKU' GROUP BY mes_projetado ORDER BY mes_projetado;
 
-    A METODOLOGIA DOS 4 PILARES (Use isto quando o usuário pedir análises, insights ou avaliações de clientes/produtos):
-    Antes de responder, você deve criar queries SQL mentalmente para investigar os 4 pilares:
-    1. A Caminhada do Volume: Onde o volume está caindo ou subindo no ciclo atual? Quem alterou o número da IA? Foi o Comercial (Bottomup)? Foi o Supply? Tem justificativa?
-    2. A Âncora da Realidade: Analise a 'fato_vendas' dos últimos 3 a 6 meses. O volume exato e o faturamento real mês a mês sustentam as projeções do ciclo atual?
-    3. Evolução de Ciclos: Consulte os ciclos anteriores ('ciclo_sop') na fato_ibp_granular para o mesmo mês alvo. O plano está desidratando ou crescendo ao longo do tempo?
-    4. Síntese Executiva: Emita um diagnóstico cruzando os cortes com a confiança na IA. Lembre que a IA do Nexus gera confiança contínua no tracking desde 04/2026. Se houver cortes manuais ou de supply que não fazem sentido com a tendência de vendas, aponte isso como "Risco de Receita Deixada na Mesa".
-
-    POSTURA:
-    - Seja analítico, profundo e responda em Português do Brasil de forma estruturada.
-    - Nunca mostre o código SQL ao usuário. Apresente os fatos, os números e a recomendação.
+    A METODOLOGIA DOS 4 PILARES (Na Resposta Final):
+    1. Variação (Histórico vs Projeção): A IA está otimista demais comparada ao histórico recente?
+    2. Gaps na Cascata: Houve corte da fábrica (supply < bu)? Houve pressão da diretoria (td > ia)?
+    3. Risco Financeiro (R$): Multiplique a diferença de volume na cascata pelo PMV.
+    4. Diagnóstico Direto: Texto curto, pragmático e focado no risco/oportunidade de negócio.
     """
 
 @router.post("/perguntar")
@@ -73,8 +74,8 @@ def consultoria_360(payload: PerguntaAgente, usuario: dict = Depends(get_current
             llm=llm,
             toolkit=toolkit,
             agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-            verbose=True, # Logs no Docker para auditoria da Chain of Thought
-            handle_parsing_errors=True,
+            verbose=True, 
+            handle_parsing_errors="ALERTA: Retorne a análise final começando estritamente com 'Final Answer: '",
             prefix=get_executive_prefix(payload.contexto)
         )
 
@@ -83,4 +84,13 @@ def consultoria_360(payload: PerguntaAgente, usuario: dict = Depends(get_current
         return {"status": "success", "resposta": resultado["output"]}
     except Exception as e:
         print(f"[ERRO AGENTE 360]: {str(e)}")
-        return {"status": "error", "resposta": f"Desculpe, encontrei uma dificuldade técnica ao investigar a base de dados: {str(e)}"}
+        # Fallback de Resgate: Se a IA esquecer o "Final Answer" e der erro de parsing, salvamos o texto.
+        erro_str = str(e)
+        if "Could not parse LLM output:" in erro_str:
+            try:
+                resposta_parcial = erro_str.split("Could not parse LLM output:")[1].strip().strip('`')
+                return {"status": "success", "resposta": resposta_parcial}
+            except:
+                pass
+            
+        return {"status": "error", "resposta": f"Falha ao consolidar o insight executivo. Detalhe técnico: {str(e)}"}
