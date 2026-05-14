@@ -1,24 +1,37 @@
 import React, { useState, useMemo, useEffect, useCallback, Fragment } from 'react';
 import {
-  useReactTable,
-  getCoreRowModel,
-  flexRender,
-  getExpandedRowModel,
-  getSortedRowModel,
-  SortingState
+  useReactTable, getCoreRowModel, flexRender, getExpandedRowModel,
+  ColumnDef
 } from '@tanstack/react-table';
-import { Loader2, ChevronDown, ChevronUp, ArrowUpDown, ArrowUp, ArrowDown, Activity, BrainCircuit, ShieldCheck, Check, Hash, Search, Filter, Download, X, Target, History, Wand2 } from 'lucide-react';
+import { 
+    Loader2, ChevronDown, ChevronRight, Layers, Package, Target, 
+    ShieldCheck, Check, Search, Download, TrendingUp, TrendingDown,
+    BrainCircuit, BarChart3, Activity, Wand2, Filter
+} from 'lucide-react';
 import axios from 'axios';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import * as XLSX from 'xlsx';
 
-const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor));
-const formatVolume = (val: number) => Math.round(val).toLocaleString('pt-BR');
+// --- HELPERS DE FORMATAÇÃO ---
+const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor || 0));
+const formatVolume = (val: number) => Math.round(val || 0).toLocaleString('pt-BR');
+const calcVar = (atual: number, ant: number) => ant > 0 ? ((atual - ant) / ant) * 100 : 0;
+
+const FvaBadge = ({ atual, anterior }: { atual: number, anterior: number }) => {
+    const v = calcVar(atual, anterior);
+    if (v === 0 || anterior === 0) return <span className="text-[10px] text-slate-400 font-bold">-</span>;
+    const isPos = v > 0;
+    return (
+      <span className={`text-[10px] font-black flex items-center gap-0.5 px-2 py-0.5 rounded ${isPos ? 'bg-indigo-100 text-indigo-700' : 'bg-rose-100 text-rose-700'}`}>
+        {isPos ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />} {Math.abs(v).toFixed(1)}% vs Ciclo Ant.
+      </span>
+    );
+};
 
 // =====================================================================
-// NOVO COMPONENTE: GERADOR DE INSIGHTS COM IA SOB DEMANDA
+// COMPONENTE RECUPERADO: NEXUS AI INSIGHT 360°
 // =====================================================================
-const AiInsightBox = ({ produto, pmv, mediaHist, ia, anterior }: { produto: string, pmv: number, mediaHist: number, ia: number, anterior: number }) => {
+const AiInsightBox = ({ alvo, tipo }: { alvo: string, tipo: string }) => {
   const [insight, setInsight] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -26,51 +39,168 @@ const AiInsightBox = ({ produto, pmv, mediaHist, ia, anterior }: { produto: stri
     setLoading(true);
     try {
       const res = await axios.post('/api/v1/ai-sql/perguntar', {
-        pergunta: `Faça o dossiê executivo 360° para o SKU ${produto}. Extraia a cascata de volumes, o histórico de vendas e o pmv_aplicado. Apresente o diagnóstico financeiro (R$) e estratégico utilizando a metodologia dos 4 pilares.`,
+        pergunta: `Faça o dossiê executivo 360° para a ${tipo} "${alvo}". Extraia a cascata de volumes, histórico de vendas e pmv_aplicado. Apresente o diagnóstico financeiro (R$) e estratégico utilizando a metodologia dos 4 pilares.`,
         contexto: { tela_ativa: 'Top-Down Arena', ciclo_status: 'Aberto' }
       });
       setInsight(res.data.resposta);
     } catch (e) {
-      setInsight('Erro ao gerar insight.');
+      setInsight('Erro ao gerar insight. Verifique a conexão com o Agente SQL.');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="mt-6 bg-indigo-50/50 rounded-2xl p-6 border border-indigo-100 flex items-start gap-4">
-      <div className="p-3 bg-indigo-100 text-indigo-600 rounded-xl">
-        <Wand2 className="w-6 h-6" />
+    <div className="bg-indigo-50/50 rounded-3xl p-6 border border-indigo-100 flex flex-col gap-4 h-full shadow-sm">
+      <div className="flex items-center gap-3">
+         <div className="p-2.5 bg-indigo-100 text-indigo-600 rounded-xl">
+           <Wand2 className="w-5 h-5" />
+         </div>
+         <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest">Nexus AI Insight 360°</h4>
       </div>
-      <div className="flex-1">
-        <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-2">Nexus AI Insight 360°</h4>
-        {insight ? (
-          <div className="text-sm font-medium text-slate-600 leading-relaxed whitespace-pre-wrap" dangerouslySetInnerHTML={{ __html: insight.replace(/\*\*(.*?)\*\*/g, '<strong class="font-black text-slate-900">$1</strong>') }} />
-        ) : (
-          <button onClick={getInsight} disabled={loading} className="text-xs font-bold bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition flex items-center gap-2 disabled:opacity-50">
-            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Gerar Parecer Estratégico 360°'}
-          </button>
-        )}
-      </div>
+      
+      {insight ? (
+        <div className="text-sm font-medium text-slate-600 leading-relaxed whitespace-pre-wrap overflow-y-auto custom-scrollbar pr-2 max-h-[200px]" dangerouslySetInnerHTML={{ __html: insight.replace(/\*\*(.*?)\*\*/g, '<strong class="font-black text-slate-900">$1</strong>').replace(/\n/g, '<br/>') }} />
+      ) : (
+        <div className="flex flex-col items-start gap-3 mt-2 h-full justify-center">
+           <p className="text-xs text-slate-500 font-medium">Acione o consultor executivo para avaliar a performance e os riscos financeiros desta {tipo.toLowerCase()}.</p>
+           <button onClick={getInsight} disabled={loading} className="mt-2 text-xs font-bold bg-indigo-600 text-white px-4 py-3 rounded-xl hover:bg-indigo-700 transition flex items-center gap-2 disabled:opacity-50 w-full justify-center shadow-lg shadow-indigo-900/20">
+             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Gerar Parecer Estratégico'}
+           </button>
+        </div>
+      )}
     </div>
   );
 };
 
+// =========================================================
+// DOSSIÊ DA CATEGORIA (MACRO)
+// =========================================================
+const CategoriaDossier = ({ data }: { data: any }) => {
+    const chartData = data.meses.map((m: any) => ({
+        name: m.mes.split('-')[1] + '/' + m.mes.split('-')[0],
+        "Ciclo Anterior": m.vol_ciclo_anterior,
+        "Nova Projeção": m.vol_td
+    }));
+
+    const receitaTotal = data.meses.reduce((acc: number, m: any) => acc + m.rec_td, 0);
+    const volumeTotal = data.meses.reduce((acc: number, m: any) => acc + m.vol_td, 0);
+
+    return (
+        <div className="p-8 bg-slate-50/80 border-y border-slate-200">
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 flex flex-col justify-center">
+                    <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2"><Target className="w-4 h-4"/> Saúde da Categoria</h4>
+                    <p className="text-3xl font-black text-slate-900 mb-1">{formatMoeda(receitaTotal)}</p>
+                    <p className="text-sm font-bold text-slate-500 mb-6">Receita Projetada (M2-M4)</p>
+                    <div className="p-4 bg-indigo-50 text-indigo-800 rounded-2xl">
+                        <p className="text-[11px] font-black uppercase mb-1">Volume Projetado</p>
+                        <p className="text-xl font-black">{formatVolume(volumeTotal)} CX</p>
+                    </div>
+                </div>
+                <div className="lg:col-span-2 bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
+                    <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2"><BarChart3 className="w-4 h-4"/> Ponte de Ciclo (FVA Macro)</h4>
+                    <div className="h-[200px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} />
+                                <YAxis tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
+                                <Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)'}} />
+                                <Legend iconType="circle" wrapperStyle={{fontSize: '11px', fontWeight: 900}} />
+                                <Bar dataKey="Ciclo Anterior" fill="#cbd5e1" radius={[4, 4, 0, 0]} />
+                                <Bar dataKey="Nova Projeção" fill="#6366f1" radius={[4, 4, 0, 0]} />
+                            </BarChart>
+                        </ResponsiveContainer>
+                    </div>
+                </div>
+                <div>
+                    <AiInsightBox alvo={data.nome} tipo="Categoria" />
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// =========================================================
+// DOSSIÊ DO SKU (MICRO)
+// =========================================================
+const SkuDossier = ({ data }: { data: any }) => {
+    const [chartData, setChartData] = useState<any[]>([]);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        axios.get('/api/v1/consensus/macro/grafico', { params: { produto: data.sku } })
+            .then(res => { setChartData(res.data.dados || []); setLoading(false); })
+            .catch(() => setLoading(false));
+    }, [data.sku]);
+
+    return (
+        <div className="p-8 bg-slate-50/80 border-y border-slate-200">
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+                
+                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 flex flex-col gap-4">
+                    <h4 className="text-xs font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2"><BrainCircuit className="w-4 h-4"/> Engine Estatística</h4>
+                    <div>
+                        <p className="text-[10px] font-bold text-slate-400 uppercase">Modelo Vencedor</p>
+                        <p className="text-lg font-black text-slate-800">{data.modelo_vencedor}</p>
+                    </div>
+                    <div className="mt-2">
+                        <p className="text-[10px] font-bold text-slate-400 uppercase">Acurácia IA Histórica</p>
+                        <div className="flex items-end gap-2">
+                            <p className="text-3xl font-black text-emerald-500">{data.acuracia_ia.toFixed(1)}%</p>
+                            <span className="text-[10px] font-bold text-emerald-600 mb-1 bg-emerald-50 px-2 py-0.5 rounded">Alta Confiança</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="lg:col-span-2 bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
+                    <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2"><Activity className="w-4 h-4"/> S&OE Timeline</h4>
+                    <div className="h-[220px] w-full">
+                        {loading ? <div className="h-full flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-slate-300" /></div> : (
+                            <ResponsiveContainer width="100%" height="100%">
+                                <LineChart data={chartData} margin={{ top: 5, right: 20, left: 0, bottom: 0 }}>
+                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                    <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} />
+                                    <YAxis tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
+                                    <Tooltip contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)'}} />
+                                    <Legend iconType="circle" wrapperStyle={{fontSize: '11px', fontWeight: 900}} />
+                                    <Line type="monotone" dataKey="Realizado" stroke="#0f172a" strokeWidth={3} dot={{r: 4, fill: '#0f172a'}} connectNulls />
+                                    <Line type="monotone" dataKey="IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls />
+                                    <Line type="monotone" dataKey="Comercial" stroke="#6366f1" strokeWidth={2} dot={{r: 3}} connectNulls />
+                                    <Line type="monotone" dataKey="Final" stroke="#10b981" strokeWidth={4} dot={{r: 5, fill: '#10b981'}} connectNulls />
+                                </LineChart>
+                            </ResponsiveContainer>
+                        )}
+                    </div>
+                </div>
+
+                <div>
+                    <AiInsightBox alvo={data.descricao} tipo="SKU" />
+                </div>
+
+            </div>
+        </div>
+    );
+};
+
+// =====================================================================
+// MAIN COMPONENT: TOP-DOWN ARENA
+// =====================================================================
 export default function TopDownArena() {
-  const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
+  const [hierarquiaBruta, setHierarquiaBruta] = useState<any[]>([]);
+  const [mesesJanela, setMesesJanela] = useState<string[]>([]);
+  const [cicloAtivo, setCicloAtivo] = useState('');
+  const [isCicloFechado, setIsCicloFechado] = useState(false);
+  
   const [isLoading, setIsLoading] = useState(true);
+  const [isProcessing, setIsProcessing] = useState(false);
   const [celulasEditadas, setCelulasEditadas] = useState<any>({});
   const [expanded, setExpanded] = useState({});
-  const [sorting, setSorting] = useState<SortingState>([]);
-  const [isCicloFechado, setIsCicloFechado] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
-  
-  const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
-  const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
-  
   const [busca, setBusca] = useState('');
+  
+  // Filtros Recuperados
   const [categoriaSelecionada, setCategoriaSelecionada] = useState('TODAS');
-  const [segmentoSelecionado, setSegmentoSelecionado] = useState('TODOS');
 
   const fetchData = useCallback(async () => {
     setIsLoading(true);
@@ -79,460 +209,287 @@ export default function TopDownArena() {
         axios.get('/api/v1/consensus/macro'),
         axios.get('/api/v1/consensus/macro/status')
       ]);
-      setDadosBrutos(res.data.dados || []);
+      setHierarquiaBruta(res.data.hierarquia || []);
+      setMesesJanela(res.data.meses_janela || []);
+      setCicloAtivo(res.data.ciclo_ativo || '');
       setIsCicloFechado(statusRes.data.is_topdown_fechado);
-    } catch (e) {
-      console.error(e);
-      setDadosBrutos([]);
-    } finally {
-      setIsLoading(false);
-    }
+      setExpanded({});
+    } catch (e) { console.error(e); } 
+    finally { setIsLoading(false); }
   }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
+  const categoriasUnicas = useMemo(() => {
+    return Array.from(new Set(hierarquiaBruta.map(c => c.nome))).sort();
+  }, [hierarquiaBruta]);
+
+  // Transformação de Dados: Agrega as categorias no Front-End para a Árvore
+  const dadosFormatados = useMemo(() => {
+    if (!hierarquiaBruta.length) return [];
+    
+    return hierarquiaBruta
+      .filter(cat => categoriaSelecionada === 'TODAS' || cat.nome === categoriaSelecionada)
+      .map(cat => {
+        // Filtra os SKUs pela busca
+        const skusFiltrados = cat.skus.filter((s:any) => 
+            (s.sku + ' ' + s.descricao).toLowerCase().includes(busca.toLowerCase())
+        );
+        
+        if (skusFiltrados.length === 0) return null;
+
+        // Soma os meses da Categoria com base nos filtros
+        const mesesCategoria = mesesJanela.map(mesStr => {
+            const totaisM = { mes: mesStr, vol_ia: 0, vol_td: 0, vol_final: 0, vol_ciclo_anterior: 0, rec_td: 0 };
+            skusFiltrados.forEach((s:any) => {
+                const mk = s.meses.find((x:any) => x.mes === mesStr);
+                
+                // Pega a edição pendente se houver para não perder o total na tela
+                const edicao = celulasEditadas[s.sku]?.[mesStr];
+                const isEdited = edicao !== undefined && edicao.novo_volume !== '';
+                const volAtual = isEdited ? parseInt(edicao.novo_volume) : (mk ? mk.vol_td : 0);
+
+                if (mk) {
+                    totaisM.vol_ia += mk.vol_ia;
+                    totaisM.vol_td += volAtual; // Atualiza dinamicamente a soma da categoria
+                    totaisM.vol_final += mk.vol_final;
+                    totaisM.vol_ciclo_anterior += mk.vol_ciclo_anterior;
+                    totaisM.rec_td += (volAtual * mk.pmv_medio); // Receita dinâmica
+                }
+            });
+            return totaisM;
+        });
+
+        return {
+            ...cat, 
+            isCategory: true, 
+            meses: mesesCategoria,
+            subRows: skusFiltrados.map((s:any) => ({ ...s, isSku: true }))
+        };
+    }).filter(Boolean);
+  }, [hierarquiaBruta, mesesJanela, busca, categoriaSelecionada, celulasEditadas]);
+
+  // Edição no Front-End
+  const onCellChange = (sku: string, mesStr: string, val: string) => {
+    setCelulasEditadas((prev: any) => ({
+      ...prev,
+      [sku]: { ...(prev[sku] || {}), [mesStr]: { novo_volume: val } }
+    }));
+  };
+
+  // Exportação Excel Recuperada
   const handleExportExcel = (isSnapshot = false) => {
-    if (dadosFiltrados.length === 0) return alert("Não há dados na tela para exportar.");
-    const dadosExcel = dadosFiltrados.map(row => {
-      const pmvBase = row.meses[0]?.pmv || 0;
-      const linha: any = {
-        "CÓDIGO SKU": row.produto, "DESCRIÇÃO": row.descricao, "CATEGORIA": row.categoria,
-        "SEGMENTO": row.segmento, "MODELO IA": row.modelo_vencedor, "ACURÁCIA IA (%)": row.acuracia_ia,
-        "PMV PONDERADO (R$)": pmvBase
-      };
-      row.meses.forEach((m: any) => {
-        const edicao = celulasEditadas[row.produto]?.[m.mes_banco];
-        const volFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : m.vol_ajustado));
-        linha[`${m.mes_str} (Base IA)`] = Math.round(Number(m.vol_ia));
-        linha[`${m.mes_str} (Mês Passado)`] = Math.round(Number(m.vol_anterior || 0)); // EXPORTA O MÊS PASSADO
-        linha[`${m.mes_str} (Top-Down)`] = volFinal;
-      });
-      return linha;
+    if (dadosFormatados.length === 0) return alert("Não há dados na tela para exportar.");
+    
+    const dadosExcel: any[] = [];
+    dadosFormatados.forEach(cat => {
+        cat.subRows.forEach((row: any) => {
+            const linha: any = {
+                "CATEGORIA": cat.nome, "CÓDIGO SKU": row.sku, "DESCRIÇÃO": row.descricao,
+                "MODELO IA": row.modelo_vencedor, "ACURÁCIA IA (%)": row.acuracia_ia
+            };
+            
+            mesesJanela.forEach(mesStr => {
+                const m = row.meses.find((x:any) => x.mes === mesStr);
+                const edicao = celulasEditadas[row.sku]?.[mesStr];
+                const volFinal = Math.round(Number(edicao !== undefined && edicao.novo_volume !== '' ? edicao.novo_volume : (m ? m.vol_td : 0)));
+                
+                linha[`${mesStr} (Base IA)`] = Math.round(Number(m ? m.vol_ia : 0));
+                linha[`${mesStr} (Ciclo Anterior)`] = Math.round(Number(m ? m.vol_ciclo_anterior : 0));
+                linha[`${mesStr} (Top-Down)`] = volFinal;
+            });
+            dadosExcel.push(linha);
+        });
     });
 
     const worksheet = XLSX.utils.json_to_sheet(dadosExcel);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Top_Down_Consenso");
-    worksheet['!cols'] = [{ wch: 15 }, { wch: 40 }, { wch: 20 }, { wch: 20 }, { wch: 20 }, { wch: 15 }, { wch: 18 }];
     
-    const fileName = `SOP_Nexus_TopDown_${isSnapshot ? 'CONGELADO' : 'DRAFT'}_${new Date().toISOString().split('T')[0]}.xlsx`;
+    const fileName = `SOP_TopDown_${isSnapshot ? 'CONGELADO' : 'DRAFT'}_${new Date().toISOString().split('T')[0]}.xlsx`;
     XLSX.writeFile(workbook, fileName);
   };
 
-  const handleCongelarCiclo = async () => {
-    if (!window.confirm("Atenção: Ao gravar e assinar o ciclo Executivo, a meta será rateada para toda a operação. Deseja continuar?")) return;
-    setIsProcessing(true);
-    
+  const handleGravar = async () => {
     const ajustes: any[] = [];
-    Object.entries(celulasEditadas).forEach(([produto, meses]: any) => {
+    Object.entries(celulasEditadas).forEach(([sku, meses]: any) => {
       Object.entries(meses).forEach(([mes, val]: any) => {
-        ajustes.push({ produto: produto, mes_projetado: mes, novo_volume: val.novo_volume === '' ? 0 : val.novo_volume });
+        if (val.novo_volume !== '') ajustes.push({ sku: sku, mes: mes, novo_volume: parseInt(val.novo_volume) });
       });
     });
+
+    if (ajustes.length === 0) return alert("Nenhuma alteração detectada.");
+    setIsProcessing(true);
 
     try {
-      handleExportExcel(true); 
-      await axios.post('/api/v1/consensus/macro/congelar', { origem_ajuste: "Top-Down", ajustes });
-      alert("🔒 Ciclo Top-Down congelado e rateado com sucesso!");
+      await axios.post('/api/v1/consensus/save', { ajustes });
+      alert("✅ Edições gravadas e rateadas com sucesso!");
       setCelulasEditadas({});
       fetchData(); 
-    } catch (e: any) { 
-      alert(e.response?.data?.detail || "Erro ao processar rateio."); 
-    } finally { 
-      setIsProcessing(false); 
-    }
+    } catch (e: any) { alert(e.response?.data?.detail || "Erro ao gravar."); } 
+    finally { setIsProcessing(false); }
   };
 
-  const categoriasUnicas = useMemo(() => Array.from(new Set(dadosBrutos.map(d => d.categoria).filter(Boolean))).sort(), [dadosBrutos]);
-  const segmentosUnicos = useMemo(() => Array.from(new Set(dadosBrutos.map(d => d.segmento).filter(Boolean))).sort(), [dadosBrutos]);
-
-  const dadosFiltrados = useMemo(() => dadosBrutos.filter(d => 
-    (d.produto + ' ' + d.descricao).toLowerCase().includes(busca.toLowerCase()) &&
-    (categoriaSelecionada === 'TODAS' || d.categoria === categoriaSelecionada) &&
-    (segmentoSelecionado === 'TODOS' || d.segmento === segmentoSelecionado)
-  ), [dadosBrutos, busca, categoriaSelecionada, segmentoSelecionado]);
-
-  // =========================================================================
-  // A MÁGICA DA RECEITA E VOLUME DINÂMICO
-  // =========================================================================
-  const totaisCalculados = useMemo(() => {
-    const totais: Record<string, { faturamento: number, volume: number }> = {};
-    dadosFiltrados.forEach(row => row.meses.forEach((m: any) => {
-      totais[m.mes_banco] = { faturamento: 0, volume: 0 };
-    }));
-    
-    dadosFiltrados.forEach(row => {
-      const pmvBase = row.pmv_base || row.meses[0]?.pmv || 0;
-      
-      row.meses.forEach((mes: any) => {
-        const edicao = celulasEditadas[row.produto]?.[mes.mes_banco];
-        const isPendente = edicao !== undefined;
-        const volumeFinal = Math.round(Number(isPendente ? edicao.novo_volume : mes.vol_ajustado));
-        
-        const receitaReal = isPendente ? (volumeFinal * pmvBase) : (mes.receita || (volumeFinal * pmvBase));
-        
-        if (!totais[mes.mes_banco]) totais[mes.mes_banco] = { faturamento: 0, volume: 0 };
-        totais[mes.mes_banco].faturamento += receitaReal;
-        totais[mes.mes_banco].volume += volumeFinal;
-      });
-    });
-    return totais;
-  }, [dadosFiltrados, celulasEditadas]);
-
-  const toggleRow = async (row: any) => {
-    const isExpanding = !row.getIsExpanded();
-    const chave = row.original.produto;
-    
-    if (isExpanding && !dadosGraficoCache[chave]) {
-      setLoadingGrafico(chave);
-      try {
-        const res = await axios.get('/api/v1/consensus/macro/grafico', { params: { produto: chave } });
-        setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
-      } catch (e) { console.error(e); }
-      finally { setLoadingGrafico(null); }
-    }
-    row.toggleExpanded();
-  };
-
-  const qtdEdicoes = Object.keys(celulasEditadas).length;
-
-  const columns = useMemo(() => {
-    if (dadosFiltrados.length === 0) return [];
-    
-    const baseCols: any[] = [
+  const columns = useMemo<ColumnDef<any>[]>(() => {
+    const baseCols: ColumnDef<any>[] = [
       {
-        id: 'expander', enableSorting: false, header: () => null,
-        cell: ({ row }: any) => (
-          <button onClick={() => toggleRow(row)} className="p-2 hover:bg-slate-100 rounded-xl transition-all">
-            {row.getIsExpanded() ? <ChevronUp className="w-5 h-5 text-indigo-600" /> : <ChevronDown className="w-5 h-5 text-slate-400" />}
-          </button>
-        ),
-      },
-      {
-        id: 'info', header: 'SKU (Visão Brasil)',
-        accessorFn: (row: any) => row.descricao,
-        cell: (info: any) => (
-          <div className="flex flex-col py-1">
-            <span className="font-bold text-gray-900 text-sm truncate max-w-[320px]" title={info.row.original.descricao}>{info.row.original.descricao}</span>
-            <div className="flex items-center gap-2 mt-1">
-              <span className="text-[10px] text-slate-400 font-black uppercase tracking-tighter bg-slate-100 px-2 py-0.5 rounded-md">{info.row.original.produto}</span>
-              <span className="text-[10px] text-indigo-400 font-black uppercase tracking-tighter">{info.row.original.categoria}</span>
-            </div>
-          </div>
-        )
-      },
-      {
-        id: 'acuracia', header: 'Motor IA', accessorFn: (row: any) => row.acuracia_ia,
-        cell: (info: any) => {
-          const acc = info.getValue();
-          const modelo = info.row.original.modelo_vencedor;
-          const cor = acc >= 80 ? 'text-emerald-500' : acc >= 60 ? 'text-amber-500' : 'text-rose-500';
+        id: 'nome', header: 'Hierarquia S&OP / Dossiê',
+        accessorFn: (row: any) => row.nome || row.descricao,
+        cell: ({ row }: any) => {
+          const isCat = row.original.isCategory;
           return (
-            <div className="flex flex-col items-start w-28">
-               <span className={`text-xs font-black flex items-center gap-1 ${cor}`}><BrainCircuit className="w-3 h-3"/> {acc.toFixed(1)}%</span>
-               <span className="text-[8px] text-slate-400 font-bold uppercase tracking-widest truncate max-w-full" title={modelo}>{modelo}</span>
+            <div style={{ paddingLeft: `${row.depth * 2}rem` }} className="flex items-center gap-3 py-2 min-w-[300px]">
+              <button onClick={(e) => { e.stopPropagation(); row.toggleExpanded(); }} className={`p-1.5 rounded-lg border transition-all ${row.getIsExpanded() ? 'bg-slate-900 border-slate-900 text-white shadow-lg' : 'hover:bg-slate-100 border-transparent text-slate-400'}`}>
+                {row.getIsExpanded() ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+              </button>
+              <div className={`w-8 h-8 rounded-xl flex items-center justify-center border flex-shrink-0 ${isCat ? 'bg-slate-900 border-slate-700 text-white shadow-md' : 'bg-indigo-50 border-indigo-100 text-indigo-600'}`}>
+                {isCat ? <Layers className="w-4 h-4" /> : <Package className="w-4 h-4" />}
+              </div>
+              <div className="flex flex-col overflow-hidden">
+                <span className={`text-[13px] truncate ${isCat ? 'font-black uppercase tracking-widest' : 'font-bold text-slate-700'}`}>{isCat ? row.original.nome : row.original.descricao}</span>
+                {!isCat && <span className="text-[10px] text-slate-400 font-black tracking-widest">{row.original.sku}</span>}
+              </div>
             </div>
-          );
+          )
         }
-      },
-      {
-        id: 'pmv_base', header: 'PMV Ponderado',
-        accessorFn: (row: any) => row.pmv_base || row.meses[0]?.pmv || 0,
-        cell: (info: any) => (
-          <div className="flex flex-col py-1">
-            <span className="font-bold text-slate-700 text-[13px] bg-slate-100 px-3 py-1.5 rounded-lg inline-block w-max border border-slate-200">
-              {formatMoeda(info.getValue())}
-            </span>
-          </div>
-        )
       }
     ];
 
-    const mesesMap = new Map();
-    dadosFiltrados.forEach(r => r.meses.forEach((m: any) => mesesMap.set(m.mes_banco, m)));
-    
-    Array.from(mesesMap.values()).sort((a: any, b: any) => a.mes_banco.localeCompare(b.mes_banco)).forEach((m: any) => {
-      baseCols.push({
-        id: `mes_${m.mes_banco}`, header: m.mes_str,
-        accessorFn: (row: any) => row.meses.find((rm: any) => rm.mes_banco === m.mes_banco)?.vol_ajustado || 0,
-        cell: (info: any) => {
-          const row = info.row.original;
-          const dadosMes = row.meses.find((rm: any) => rm.mes_banco === m.mes_banco);
-          const meta = info.table.options.meta as any;
-          const edicao = meta.celulasEditadas[row.produto]?.[m.mes_banco];
-          
-          const isPendente = edicao !== undefined;
-          const valorReal = isPendente ? edicao.novo_volume : (dadosMes?.vol_ajustado || 0);
-          const valorInteiro = Math.round(Number(valorReal));
-          const baseIA = Math.round(Number(dadosMes?.vol_ia || 0));
-          const volAnterior = Math.round(Number(dadosMes?.vol_anterior || 0)); // VALOR DO MÊS PASSADO
-          const isChanged = valorInteiro !== baseIA;
-          
-          const pmvBase = row.pmv_base || row.meses[0]?.pmv || 0;
-          const faturamentoPrevisto = isPendente ? (valorInteiro * pmvBase) : (dadosMes?.receita || (valorInteiro * pmvBase));
+    mesesJanela.forEach(mesStr => {
+        const mesDisplay = mesStr.split('-').reverse().slice(1).join('/');
+        baseCols.push({
+            id: `mes_${mesStr}`, header: mesDisplay,
+            cell: ({ row }: any) => {
+                const isCat = row.original.isCategory;
+                const mData = row.original.meses.find((m:any) => m.mes === mesStr);
+                const volProj = mData ? mData.vol_td : 0;
+                const volAntigo = mData ? mData.vol_ciclo_anterior : 0;
+                
+                if (isCat) {
+                    return (
+                        <div className="flex flex-col items-center justify-center min-w-[120px]">
+                            <span className="font-black text-slate-900 text-base">{formatVolume(volProj)}</span>
+                            <FvaBadge atual={volProj} anterior={volAntigo} />
+                        </div>
+                    );
+                }
 
-          return (
-            <div className="flex flex-col min-w-[130px] gap-1">
-              
-              {/* O NOVO CABEÇALHO DA CÉLULA (IA vs ANTERIOR) */}
-              <div className="flex items-center justify-between px-1 mb-0.5">
-                <div className="flex items-center gap-1" title="Sinal da IA">
-                  <Target className="w-3 h-3 text-slate-300" />
-                  <span className="text-[9px] font-bold text-slate-400">{formatVolume(baseIA)}</span>
-                </div>
-                <div className="flex items-center gap-1" title="Volume Acordado no Ciclo Anterior">
-                  <History className="w-3 h-3 text-purple-300" />
-                  <span className="text-[9px] font-bold text-purple-500">{formatVolume(volAnterior)}</span>
-                </div>
-              </div>
+                const edicao = celulasEditadas[row.original.sku]?.[mesStr];
+                const isEdited = edicao !== undefined && edicao.novo_volume !== '';
+                const displayVal = isEdited ? edicao.novo_volume : volProj;
+                const recProjetada = (Number(displayVal) || 0) * (mData?.pmv_medio || 0);
 
-              <input
-                type="number" disabled={isCicloFechado} value={valorInteiro === 0 ? '' : valorInteiro} placeholder="0"
-                onChange={(e) => meta.updateCell(row.produto, m.mes_banco, e.target.value)}
-                className={`text-sm text-center font-black p-2 rounded-xl outline-none border-2 transition-all w-full
-                  ${isCicloFechado ? 'cursor-not-allowed opacity-50 bg-slate-100 border-gray-200' : isChanged ? 'bg-slate-800 border-slate-700 text-white shadow-md' : 'bg-gray-50 border-transparent text-gray-800 focus:bg-white focus:border-slate-300'}`}
-              />
-              <span className="text-[10px] font-black text-emerald-600 text-center pr-1 tracking-tight mt-0.5">
-                {formatMoeda(faturamentoPrevisto)}
-              </span>
-            </div>
-          );
-        }
-      });
+                return (
+                    <div className="flex flex-col items-center justify-center min-w-[120px]">
+                        <input
+                            type="number"
+                            disabled={isCicloFechado}
+                            value={displayVal}
+                            onChange={(e) => onCellChange(row.original.sku, mesStr, e.target.value)}
+                            className={`w-24 text-center font-black rounded-lg py-2 transition-all ${isCicloFechado ? 'bg-slate-50 text-slate-400 border-transparent cursor-not-allowed' : isEdited ? 'bg-indigo-50 border-2 border-indigo-400 text-indigo-700 shadow-inner outline-none' : 'bg-white border border-slate-200 text-slate-700 hover:border-indigo-300 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none'}`}
+                        />
+                        {isEdited && <span className="text-[9px] font-bold text-indigo-500 uppercase mt-1 animate-pulse">Pendente</span>}
+                        {!isEdited && <span className="text-[10px] font-bold text-emerald-600 mt-1">{formatMoeda(recProjetada)}</span>}
+                    </div>
+                );
+            }
+        });
     });
     return baseCols;
-  }, [dadosFiltrados, isCicloFechado]);
+  }, [mesesJanela, celulasEditadas, isCicloFechado]);
 
   const table = useReactTable({
-    data: dadosFiltrados, columns, state: { expanded, sorting },
-    onExpandedChange: setExpanded, onSortingChange: setSorting,
-    getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel(), getSortedRowModel: getSortedRowModel(),
-    meta: {
-      celulasEditadas,
-      updateCell: (chave: string, mes: string, val: string) => {
-        if (isCicloFechado) return;
-        const v = val === '' ? '' : Math.round(Number(val));
-        const finalV = Number.isNaN(v as any) && val !== '' ? 0 : v;
-        setCelulasEditadas((prev: any) => ({ ...prev, [chave]: { ...(prev[chave] || {}), [mes]: { novo_volume: finalV } } }));
-      }
-    }
+    data: dadosFormatados, columns, state: { expanded },
+    onExpandedChange: setExpanded, getSubRows: row => row.subRows,
+    getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel(),
   });
 
-  if (isLoading) {
-    return (
-      <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
-        <Loader2 className="w-8 h-8 animate-spin text-indigo-500 mb-4" />
-        <span className="text-slate-400 font-black text-xs tracking-widest uppercase">Iniciando Visão Executiva...</span>
-      </div>
-    );
-  }
+  if (isLoading) return (
+    <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
+      <Loader2 className="w-12 h-12 animate-spin text-indigo-600" />
+      <span className="text-slate-400 font-black text-[10px] tracking-[0.2em] uppercase mt-6 animate-pulse">Recalculando Rateios...</span>
+    </div>
+  );
 
   return (
     <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
-      <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative">
+      <div className="max-w-[1600px] mx-auto p-6 lg:p-10">
         
-        {/* CABEÇALHO */}
-        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 bg-white p-6 rounded-[32px] shadow-sm border border-gray-100">
-          <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
-            <Activity className="w-8 h-8 text-slate-800" /> Plano de Demanda Irrestrita
-          </h1>
-          <div className="flex items-center gap-4">
-            {isCicloFechado ? (
-                <div className="flex items-center gap-3">
-                  <div className="flex items-center gap-2 bg-slate-800 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-slate-800/20">
-                      <Check className="w-5 h-5 text-emerald-400" /> Top-Down Congelado
-                  </div>
-                </div>
-            ) : (
-                <div className="flex items-center gap-3 h-full">
-                  {qtdEdicoes > 0 && (<button onClick={() => setCelulasEditadas({})} className="flex items-center gap-1 text-xs font-black text-rose-500 hover:text-rose-700 transition tracking-widest uppercase px-4 py-3 rounded-2xl hover:bg-rose-50"><X className="w-4 h-4" /> Descartar</button>)}
-                  <button onClick={handleCongelarCiclo} disabled={isProcessing} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase shadow-lg shadow-indigo-600/30 transition-all disabled:opacity-50">
-                      {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : qtdEdicoes > 0 ? 'Gravar e Ratear Lojas' : <ShieldCheck className="w-5 h-5" />}
-                      {qtdEdicoes > 0 ? '' : 'Aprovar Ciclo Base IA'}
-                  </button>
-                </div>
-            )}
+        {/* --- HEADER E EXPORTAÇÃO --- */}
+        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6 mb-8 bg-white p-8 rounded-[40px] shadow-sm border border-slate-100 relative">
+          {isCicloFechado && (
+              <div className="absolute top-0 left-0 w-full bg-emerald-500 text-white text-[10px] font-black py-2 flex justify-center items-center gap-3 tracking-[0.3em] uppercase rounded-t-[40px]"><ShieldCheck className="w-4 h-4"/> Metas da Diretoria Congeladas</div>
+          )}
+          <div className={isCicloFechado ? "pt-6" : ""}>
+            <div className="flex items-center gap-4">
+              <div className="p-3 bg-indigo-50 rounded-2xl"><Target className="w-8 h-8 text-indigo-600" /></div>
+              <div>
+                <h1 className="text-3xl font-black text-slate-900 tracking-tighter uppercase">Marketing & Category</h1>
+                <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Consenso Top-Down - Ciclo {cicloAtivo}</p>
+              </div>
+            </div>
+          </div>
+          <div className={`flex items-center gap-4 ${isCicloFechado ? "pt-6" : ""}`}>
+             <button onClick={() => handleExportExcel(isCicloFechado)} className="flex items-center gap-2 bg-slate-50 hover:bg-slate-100 text-slate-700 px-6 py-4 rounded-2xl text-[10px] font-black tracking-widest uppercase border border-slate-200 transition-all shadow-sm">
+                <Download className="w-4 h-4" /> Exportar
+             </button>
+             <button disabled={isCicloFechado || isProcessing} onClick={handleGravar} className={`flex items-center gap-3 text-white px-10 py-4 rounded-2xl text-xs font-black tracking-widest uppercase shadow-xl transition-all ${isCicloFechado ? 'bg-slate-300 shadow-none' : 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-200'}`}>
+                {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : <Check className="w-5 h-5" />} Gravar e Ratear
+             </button>
           </div>
         </div>
 
-        {/* BARRA DE FILTROS */}
-        <div className="flex flex-col md:flex-row gap-4 mb-6">
-           <div className="bg-slate-900 text-white px-8 py-4 rounded-[24px] flex items-center gap-4 shadow-lg flex-shrink-0">
-             <div className="bg-slate-800 p-2 rounded-full"><Hash className="w-6 h-6 text-indigo-400" /></div>
-             <div>
-               <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-0.5">Skus na Tela</p>
-               <p className="text-2xl font-black leading-none">{dadosFiltrados.length}</p>
-             </div>
-           </div>
-
-           <div className="flex-1 bg-white p-3 rounded-[24px] shadow-sm border border-gray-100 flex flex-col md:flex-row items-center gap-3">
-             <div className="flex-1 flex items-center gap-3 px-4 bg-slate-50 rounded-xl border border-slate-100 w-full">
-               <Search className="w-5 h-5 text-slate-400" />
-               <input 
-                 type="text" placeholder="Buscar por código ou descrição do SKU..." value={busca} onChange={e => setBusca(e.target.value)}
-                 className="w-full bg-transparent py-3 text-sm font-bold text-slate-800 outline-none placeholder:text-slate-400"
-               />
-             </div>
-             <div className="flex items-center gap-2 px-4 bg-slate-50 rounded-xl border border-slate-100 w-full md:w-auto">
-               <Filter className="w-4 h-4 text-slate-400" />
-               <select value={categoriaSelecionada} onChange={e => setCategoriaSelecionada(e.target.value)} className="bg-transparent py-3 text-sm font-bold text-slate-700 outline-none cursor-pointer">
-                 <option value="TODAS">TODAS AS CATEGORIAS</option>
-                 {categoriasUnicas.map(c => <option key={c as string} value={c as string}>{c as string}</option>)}
-               </select>
-             </div>
-             <div className="flex items-center gap-2 px-4 bg-slate-50 rounded-xl border border-slate-100 w-full md:w-auto">
-               <Filter className="w-4 h-4 text-slate-400" />
-               <select value={segmentoSelecionado} onChange={e => setSegmentoSelecionado(e.target.value)} className="bg-transparent py-3 text-sm font-bold text-slate-700 outline-none cursor-pointer">
-                 <option value="TODOS">TODOS OS SEGMENTOS</option>
-                 {segmentosUnicos.map(s => <option key={s as string} value={s as string}>{s as string}</option>)}
-               </select>
-             </div>
-             <button onClick={() => handleExportExcel(false)} className="flex items-center gap-2 bg-slate-100 hover:bg-indigo-50 text-slate-700 px-6 py-3 rounded-xl text-xs font-black tracking-widest uppercase transition-all border border-slate-200 ml-auto whitespace-nowrap">
-                <Download className="w-4 h-4" /> Exportar
-             </button>
-           </div>
+        {/* --- FILTROS E BUSCA --- */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+            <div className="relative md:col-span-2">
+                <Search className="absolute left-6 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-300" />
+                <input type="text" placeholder="Procurar por SKU ou Descrição..." value={busca} onChange={e => setBusca(e.target.value)} className="w-full h-full min-h-[60px] bg-white border border-slate-100 rounded-[24px] pl-16 pr-6 text-sm font-bold text-slate-800 outline-none focus:ring-2 focus:ring-indigo-500/20 shadow-sm" />
+            </div>
+            <div className="relative">
+                <Filter className="absolute left-6 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-300" />
+                <select value={categoriaSelecionada} onChange={(e) => setCategoriaSelecionada(e.target.value)} className="w-full h-full min-h-[60px] bg-white border border-slate-100 rounded-[24px] pl-16 pr-10 text-sm font-bold text-slate-800 outline-none focus:ring-2 focus:ring-indigo-500/20 shadow-sm appearance-none cursor-pointer">
+                    <option value="TODAS">TODAS AS CATEGORIAS</option>
+                    {categoriasUnicas.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+                <ChevronDown className="absolute right-6 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+            </div>
         </div>
 
-        {/* TABELA DE DADOS E GRÁFICOS */}
-        <div className="bg-white rounded-[40px] shadow-2xl border border-gray-100 overflow-hidden relative">
-          <div className="overflow-x-auto pb-4">
+        {/* --- GRID HIERÁRQUICO --- */}
+        <div className="bg-white rounded-[48px] shadow-2xl border border-slate-100 overflow-hidden">
+          <div className="overflow-x-auto custom-scrollbar">
             <table className="w-full text-left border-collapse">
-              <thead className="bg-white border-b-2 border-gray-100 shadow-sm">
+              <thead className="bg-slate-50/50 border-b-2 border-slate-100">
                 {table.getHeaderGroups().map(hg => (
                   <tr key={hg.id}>
-                    {hg.headers.map(header => (
-                      <th key={header.id} className={`px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest ${header.column.getCanSort() ? 'cursor-pointer hover:bg-slate-50 transition-colors' : ''}`} onClick={header.column.getToggleSortingHandler()}>
-                        <div className="flex items-center gap-2">
-                          {flexRender(header.column.columnDef.header, header.getContext())}
-                          {header.column.getCanSort() && (
-                            <span className="text-slate-300">
-                              {{ asc: <ArrowUp className="w-4 h-4 text-slate-500" />, desc: <ArrowDown className="w-4 h-4 text-slate-500" /> }[header.column.getIsSorted() as string] ?? <ArrowUpDown className="w-4 h-4 opacity-30" />}
-                            </span>
-                          )}
-                        </div>
-                      </th>
+                    {hg.headers.map(h => (
+                      <th key={h.id} className="px-10 py-8 text-[10px] font-black text-slate-400 uppercase tracking-widest">{flexRender(h.column.columnDef.header, h.getContext())}</th>
                     ))}
                   </tr>
                 ))}
               </thead>
-              
               <tbody>
                 {table.getRowModel().rows.map(row => (
-                  <React.Fragment key={row.id}>
-                    <tr className={`border-b border-gray-50 transition-colors ${row.getIsExpanded() ? 'bg-slate-50/60' : 'hover:bg-slate-50/30'}`}>
-                      {row.getVisibleCells().map(cell => (
-                        <td key={cell.id} className="px-8 py-4">
-                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                        </td>
-                      ))}
+                  <Fragment key={row.id}>
+                    <tr className={`border-b border-slate-50 transition-all ${row.depth === 0 ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/30 hover:bg-slate-100/50'}`}>
+                      {row.getVisibleCells().map(cell => (<td key={cell.id} className="px-10 py-4">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>))}
                     </tr>
                     
+                    {/* EXPANDIR DOSSIÊ */}
                     {row.getIsExpanded() && (
                       <tr>
-                        <td colSpan={table.getAllColumns().length} className="bg-slate-50/50 p-8 border-b border-gray-100">
-                          <div className="bg-white rounded-[48px] p-10 shadow-inner border border-gray-100 animate-in fade-in duration-500">
-                            
-                            {/* LAYOUT ESTENDIDO (FULL WIDTH) */}
-                            <div className="flex flex-col gap-8">
-                               
-                               {/* LINHA 1: CABEÇALHO COM INFO E BADGES */}
-                               <div className="flex items-center justify-between border-b border-slate-100 pb-6">
-                                 <div className="flex flex-col gap-1">
-                                   <h3 className="text-xl font-black text-slate-900 uppercase tracking-tighter">Dossiê Estratégico</h3>
-                                   <p className="text-sm font-bold text-slate-400 uppercase tracking-widest">{row.original.descricao}</p>
-                                 </div>
-                                 <div className="flex gap-3">
-                                    <div className="flex items-center gap-2 bg-slate-100 text-slate-700 px-4 py-2 rounded-2xl border border-slate-200">
-                                      <BrainCircuit className="w-5 h-5 text-indigo-500"/>
-                                      <span className="text-[11px] font-black uppercase tracking-widest">Modelo: {row.original.modelo_vencedor}</span>
-                                    </div>
-                                    <div className="flex items-center gap-2 bg-emerald-50 text-emerald-700 px-4 py-2 rounded-2xl border border-emerald-100">
-                                      <ShieldCheck className="w-5 h-5"/>
-                                      <span className="text-[11px] font-black uppercase tracking-widest">Acurácia: {row.original.acuracia_ia}%</span>
-                                    </div>
-                                 </div>
-                               </div>
-
-                               {/* LINHA 2: GRÁFICO DOMINANDO A LARGURA TOTAL */}
-                               <div className="w-full h-[350px] bg-slate-50 rounded-[40px] p-8 border border-slate-100 shadow-inner">
-                                 {loadingGrafico === row.original.produto ? (
-                                   <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-3">
-                                     <Loader2 className="animate-spin w-10 h-10 text-indigo-500" />
-                                     <span className="text-[10px] font-black uppercase tracking-widest">Construindo Horizonte...</span>
-                                   </div>
-                                 ) : (
-                                   <ResponsiveContainer width="100%" height="100%">
-                                     <LineChart 
-                                       data={(dadosGraficoCache[row.original.produto] || []).map((p: any) => {
-                                             const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
-                                             const edicao = celulasEditadas[row.original.produto]?.[p.data_iso];
-                                             const valDiretoria = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
-                                             return { ...p, Consenso: valDiretoria !== null ? valDiretoria : p.Consenso };
-                                         })}
-                                       margin={{ top: 10, right: 30, left: 10, bottom: 0 }}
-                                     >
-                                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                                       <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                                       <YAxis tick={{fontSize: 10, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
-                                       <Tooltip contentStyle={{borderRadius: '24px', border: 'none', boxShadow: '0 20px 50px rgba(0,0,0,0.1)', fontSize: '13px', fontWeight: '900'}} formatter={(val: any) => formatVolume(val)} />
-                                       <Legend iconType="circle" wrapperStyle={{paddingTop: '30px', fontSize: '11px', fontWeight: '900'}} />
-                                       <Line type="monotone" dataKey="CicloAnterior" name="Proposta Mês Passado" stroke="#a855f7" strokeWidth={2} strokeDasharray="6 4" dot={false} connectNulls={false} />
-                                       <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={4} dot={{r: 4, fill: '#0f172a'}} connectNulls={false} />
-                                       <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
-                                       <Line type="monotone" dataKey="Consenso" name="Meta Gerencial" stroke="#3b82f6" strokeWidth={6} dot={{r: 6, fill: '#3b82f6', strokeWidth: 3, stroke: '#fff'}} connectNulls={false} />
-                                     </LineChart>
-                                   </ResponsiveContainer>
-                                 )}
-                               </div>
-
-                               {/* LINHA 3: PARECER DA IA LOGO ABAIXO */}
-                               <AiInsightBox 
-                                  produto={row.original.descricao} 
-                                  pmv={row.original.pmv_base || row.original.meses[0]?.pmv || 0} 
-                                  mediaHist={0} 
-                                  ia={row.original.meses[0]?.vol_ia || 0} 
-                                  anterior={row.original.meses[0]?.vol_anterior || 0} 
-                               />
-                            </div>
-                          </div>
+                        <td colSpan={table.getAllColumns().length} className="p-0">
+                          {row.original.isCategory ? <CategoriaDossier data={row.original} /> : <SkuDossier data={row.original} />}
                         </td>
                       </tr>
                     )}
-                  </React.Fragment>
+                  </Fragment>
                 ))}
               </tbody>
-              
-              <tfoot className="bg-slate-900 text-white">
-                <tr>
-                  {table.getHeaderGroups()[0].headers.map(header => {
-                    if (header.id === 'expander' || header.id === 'pmv_base' || header.id === 'acuracia') return <td key={header.id} className="px-8 py-5"></td>;
-                    if (header.id === 'info') return (
-                      <td key={header.id} className="px-8 py-5 text-right">
-                        <div className="flex flex-col">
-                          <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Totais da Tela</span>
-                          <span className="font-bold text-sm text-white">VOLUME E RECEITA</span>
-                        </div>
-                      </td>
-                    );
-                    if (header.id.startsWith('mes_')) {
-                      const mesBanco = header.id.replace('mes_', '');
-                      const tot = totaisCalculados[mesBanco] || { volume: 0, faturamento: 0 };
-                      return (
-                        <td key={header.id} className="px-8 py-5">
-                          <div className="flex flex-col items-center gap-1 bg-slate-800/80 px-3 py-1.5 rounded-xl border border-slate-700/50">
-                            <span className="font-black text-white text-[11px] tracking-tight">{formatVolume(tot.volume)} cx</span>
-                            <span className="font-black text-emerald-400 text-[13px] tracking-tight">{formatMoeda(tot.faturamento)}</span>
-                          </div>
-                        </td>
-                      );
-                    }
-                    return <td key={header.id} className="px-8 py-5"></td>;
-                  })}
-                </tr>
-              </tfoot>
             </table>
           </div>
         </div>
+
       </div>
     </div>
   );

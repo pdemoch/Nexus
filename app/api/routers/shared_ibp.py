@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, text
 import datetime
 from dateutil.relativedelta import relativedelta
+from typing import List, Tuple
 from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, ControleCiclo, AuditoriaAjuste
 from fastapi import HTTPException
 
@@ -19,23 +20,48 @@ def _get_active_date(db: Session) -> datetime.date:
         return datetime.date.today().replace(day=1)
 
 def get_current_cycle(db: Session) -> str:
+    """Retorna a string do ciclo ativo oficial. Ex: '05/2026'."""
     return _get_active_date(db).strftime("%m/%Y")
 
 def get_previous_cycle(db: Session) -> str:
+    """Retorna o ciclo imediatamente anterior ao ciclo ativo."""
     return (_get_active_date(db) - relativedelta(months=1)).strftime("%m/%Y")
 
-def get_projection_window(db: Session) -> tuple[datetime.date, datetime.date]:
+def get_projection_window(db: Session) -> Tuple[datetime.date, datetime.date]:
+    """Retorna a tupla original (Data Início M2, Data Fim M4). Mantido para compatibilidade legado."""
     hoje_ficticio = _get_active_date(db)
     return (hoje_ficticio + relativedelta(months=2), hoje_ficticio + relativedelta(months=4))
 
+# --- NOVAS FUNÇÕES PARA O DOSSIÊ TOP-DOWN (FVA E HIERARQUIA) ---
+
+def get_working_window_months(db: Session) -> List[datetime.date]:
+    """Retorna a lista exata dos meses táticos de foco (M2, M3 e M4)."""
+    data_ini, data_fim = get_projection_window(db)
+    meses = []
+    atual = data_ini
+    while atual <= data_fim:
+        meses.append(atual)
+        atual += relativedelta(months=1)
+    return meses
+
+def get_comparison_intersection(db: Session) -> List[datetime.date]:
+    """
+    Retorna os meses da janela atual (M2 e M3) que também existiam 
+    na projeção do ciclo passado. Essencial para a ponte Cycle-over-Cycle.
+    """
+    return get_working_window_months(db)[:2]
+
 def parse_date_safe(date_input) -> datetime.date:
-    if isinstance(date_input, datetime.date): return date_input
+    """Garante que a entrada vira um datetime.date seguro."""
+    if isinstance(date_input, datetime.date): 
+        return date_input
     return datetime.datetime.strptime(str(date_input).split("T")[0], "%Y-%m-%d").date()
 
 # =====================================================================
 # A FONTE DA VERDADE ÚNICA (SINGLE SOURCE OF TRUTH)
 # =====================================================================
 def get_truth_query(db: Session, ciclo: str, data_ini: datetime.date, data_fim: datetime.date):
+    """Query blindada base para o Motor de S&OP, bloqueando clientes inativos."""
     return db.query(FatoIbpGranular)\
         .outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
         .outerjoin(DimProduto, FatoIbpGranular.sku == DimProduto.sku)\
@@ -43,8 +69,6 @@ def get_truth_query(db: Session, ciclo: str, data_ini: datetime.date, data_fim: 
             FatoIbpGranular.mes_projetado >= data_ini,
             FatoIbpGranular.mes_projetado <= data_fim,
             FatoIbpGranular.ciclo_sop == ciclo,
-            # BLINDAGEM MÁXIMA CONTRA INATIVOS (Com Trim e Upper forçados)
-            # Garante que os rateios gerenciais não enviem caixas para o buraco negro
             func.upper(func.trim(func.coalesce(DimCliente.bloqueado, 'ATIVO'))) != 'INATIVO'
         )
 
@@ -52,6 +76,7 @@ def get_truth_query(db: Session, ciclo: str, data_ini: datetime.date, data_fim: 
 # VALIDADOR DE TRAVAS E GERADOR DE AUDITORIA
 # =====================================================================
 def check_global_lock(db: Session, ciclo: str):
+    """Valida se a publicação final do S&OP fechou as edições."""
     registro = db.query(ControleCiclo).filter(
         ControleCiclo.ciclo_sop == ciclo, 
         ControleCiclo.origem == 'S&OP-Final', 
@@ -62,6 +87,7 @@ def check_global_lock(db: Session, ciclo: str):
         raise HTTPException(status_code=403, detail="Acesso Negado: S&OP Global já está publicado.")
 
 def check_origin_lock(db: Session, ciclo: str, origem: str):
+    """Valida trancas individuais por departamento."""
     if not origem: return
     registro = db.query(ControleCiclo).filter(
         ControleCiclo.ciclo_sop == ciclo, 
@@ -73,7 +99,7 @@ def check_origin_lock(db: Session, ciclo: str, origem: str):
         raise HTTPException(status_code=403, detail=f"Acesso Negado: A carteira de '{origem}' foi trancada e não pode receber alterações.")
 
 def registrar_log_auditoria(db: Session, ciclo: str, origem: str, usuario: str, sku: str, cliente: str, mes: datetime.date, v_antigo: int, v_novo: int):
-    """Grava uma linha na trilha de auditoria se houver mudança de valor"""
+    """Grava uma linha na trilha de auditoria se houver mudança de valor."""
     if int(v_antigo) == int(v_novo):
         return
         

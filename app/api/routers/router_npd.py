@@ -5,9 +5,13 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import date
 from dateutil.relativedelta import relativedelta
+
 from app.core.database import get_db
 from app.models.domain_models import DimProduto, FatoIbpGranular
 from app.api.routers.router_auth import get_current_user
+
+# IMPORT DA FUNÇÃO OFICIAL DO CICLO (A VACINA)
+from app.api.routers.shared_ibp import get_current_cycle
 
 router = APIRouter(prefix="/api/v1/npd", tags=["New Product Development"])
 
@@ -72,6 +76,9 @@ async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db),
         hoje = date.today()
         mes_base_dinamico = hoje.replace(day=1) + relativedelta(months=2) 
         
+        # DECLARAÇÃO DA VARIÁVEL: Pega o ciclo ativo oficial no banco
+        ciclo_oficial = get_current_cycle(db)
+        
         novas_linhas = []
         for i, proj in enumerate(payload.projecao):
             mes_alvo = mes_base_dinamico + relativedelta(months=i)
@@ -83,15 +90,15 @@ async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db),
                 if volume_cliente == 0: continue
                     
                 nova_fato = FatoIbpGranular(
-                    ciclo_sop=date.today().strftime("%m/%Y"), # CORREÇÃO DO ERRO AQUI!
+                    ciclo_sop=ciclo_oficial, # AQUI ENTRA A VARIÁVEL CORRIGIDA
                     mes_projetado=mes_alvo,
                     sku=payload.codigo_lancamento,
                     cgc=cliente.cgc,
                     vendedor_nome=cliente.vendedor_nome,
                     vol_ia=volume_cliente, 
-                    vol_topdown=volume_cliente, # Adequado à nova regra de Cascata
-                    vol_bottomup=volume_cliente, # Adequado à nova regra de Cascata
-                    vol_final=volume_cliente,    # Adequado à nova regra de Cascata
+                    vol_topdown=volume_cliente,
+                    vol_bottomup=volume_cliente,
+                    vol_final=volume_cliente,
                     pmv_aplicado=payload.pmv
                 )
                 novas_linhas.append(nova_fato)
