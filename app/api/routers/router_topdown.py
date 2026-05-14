@@ -1,11 +1,13 @@
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
-from sqlalchemy import func
-from typing import List
+from sqlalchemy import func, and_
+from typing import List, Optional
 from pydantic import BaseModel
+from datetime import date, datetime
+from dateutil.relativedelta import relativedelta
 
 from app.core.database import get_db
-from app.models.domain_models import FatoIbpGranular, DimProduto
+from app.models.domain_models import FatoIbpGranular, DimProduto, FatoVendas, ControleCiclo
 from app.api.routers.router_auth import get_current_user
 from app.api.routers.shared_ibp import (
     get_current_cycle, get_previous_cycle, get_working_window_months, 
@@ -15,7 +17,7 @@ from app.api.routers.shared_ibp import (
 
 router = APIRouter(prefix="/api/v1/consensus", tags=["Consenso Top-Down"])
 
-# --- SCHEMAS DE ENTRADA (MANTIDOS PARA NÃO QUEBRAR O FRONT) ---
+# --- SCHEMAS (Contratos de Dados) ---
 class AjusteTopDown(BaseModel):
     sku: str
     mes: str
@@ -24,37 +26,48 @@ class AjusteTopDown(BaseModel):
 class PayloadSalvarTopDown(BaseModel):
     ajustes: List[AjusteTopDown]
 
+class PayloadCongelar(BaseModel):
+    origem_ajuste: str
+    ajustes: List[dict]
+
 # =====================================================================
-# ROTA GET: ÁRVORE HIERÁRQUICA E DOSSIÊ 360º
+# SERVIÇOS DE APOIO (Lógica de Negócio Isolada - SOLID)
 # =====================================================================
+class TopDownService:
+    @staticmethod
+    def get_sku_history(db: Session, sku: str):
+        """Busca o realizado de vendas dos últimos 12 meses."""
+        hoje = date.today().replace(day=1)
+        inicio = hoje - relativedelta(months=12)
+        
+        vendas = db.query(
+            func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes'),
+            func.sum(FatoVendas.qt_pedido).label('realizado')
+        ).filter(FatoVendas.sku == sku, FatoVendas.data_pedido >= inicio)\
+         .group_by('mes').order_by('mes').all()
+        
+        return {v.mes: int(v.realizado) for v in vendas}
+
+# =====================================================================
+# ROTAS DE CONSULTA (GET)
+# =====================================================================
+
 @router.get("/macro")
 def obter_hierarquia_topdown(db: Session = Depends(get_db), usuario=Depends(get_current_user)):
-    """
-    Retorna a estrutura expansiva: Categoria -> SKU -> Meses (M2-M4).
-    Cruza com o ciclo passado para FVA e traz a acurácia da IA.
-    """
-    if usuario['funcao'] not in ['Administrador', 'Marketing', 'Comercial']:
-        raise HTTPException(status_code=403, detail="Acesso restrito.")
-
+    """Retorna a Árvore Hierárquica: Categoria -> SKU -> Meses (M2-M4)."""
     ciclo_atual = get_current_cycle(db)
     ciclo_anterior = get_previous_cycle(db)
     meses_trabalho = get_working_window_months(db)
-    
     data_ini, data_fim = meses_trabalho[0], meses_trabalho[-1]
 
-    # 1. Buscar a base de verdade do CICLO ATUAL (Agrupando Categoria e SKU)
+    # 1. Dados do Ciclo Atual
     query_atual = get_truth_query(db, ciclo_atual, data_ini, data_fim)
     dados_atual = query_atual.with_entities(
-        DimProduto.categoria,
-        DimProduto.sku,
-        DimProduto.descricao,
-        DimProduto.modelo_vencedor,
-        DimProduto.acuracia_ia,
+        DimProduto.categoria, DimProduto.sku, DimProduto.descricao,
+        DimProduto.modelo_vencedor, DimProduto.acuracia_ia,
         FatoIbpGranular.mes_projetado,
         func.sum(FatoIbpGranular.vol_ia).label('vol_ia'),
         func.sum(FatoIbpGranular.vol_topdown).label('vol_td'),
-        func.sum(FatoIbpGranular.vol_bottomup).label('vol_bu'),
-        func.sum(FatoIbpGranular.vol_supply).label('vol_sp'),
         func.sum(FatoIbpGranular.vol_final).label('vol_final'),
         func.avg(FatoIbpGranular.pmv_aplicado).label('pmv_medio')
     ).group_by(
@@ -62,127 +75,136 @@ def obter_hierarquia_topdown(db: Session = Depends(get_db), usuario=Depends(get_
         DimProduto.modelo_vencedor, DimProduto.acuracia_ia, FatoIbpGranular.mes_projetado
     ).all()
 
-    # 2. Buscar o CICLO ANTERIOR para o cálculo da "Ponte de Ciclo" (Cycle-over-Cycle)
+    # 2. Dados do Ciclo Anterior (Ponte Cycle-over-Cycle)
     query_anterior = get_truth_query(db, ciclo_anterior, data_ini, data_fim)
     dados_anterior = query_anterior.with_entities(
-        DimProduto.sku,
-        FatoIbpGranular.mes_projetado,
-        func.sum(FatoIbpGranular.vol_final).label('vol_final_ant')
-    ).group_by(DimProduto.sku, FatoIbpGranular.mes_projetado).all()
+        FatoIbpGranular.sku, FatoIbpGranular.mes_projetado,
+        func.sum(FatoIbpGranular.vol_final).label('vol_ant')
+    ).group_by(FatoIbpGranular.sku, FatoIbpGranular.mes_projetado).all()
+    
+    dict_ant = {(d.sku, d.mes_projetado): d.vol_ant for d in dados_anterior}
 
-    # Dicionário de acesso rápido O(1) para o volume antigo
-    dict_anterior = {(d.sku, d.mes_projetado): d.vol_final_ant for d in dados_anterior}
-
-    # 3. Construir a Árvore JSON (Hierarquia)
-    categorias_dict = {}
-
-    for row in dados_atual:
-        cat_nome = row.categoria or "OUTROS"
-        sku = row.sku
-        mes = row.mes_projetado
+    # 3. Montagem da Árvore
+    tree = {}
+    for r in dados_atual:
+        cat = r.categoria or "SEM CATEGORIA"
+        if cat not in tree: tree[cat] = {"nome": cat, "skus": {}}
         
-        # Inicia a Categoria
-        if cat_nome not in categorias_dict:
-            categorias_dict[cat_nome] = {"nome": cat_nome, "skus": {}}
-            
-        # Inicia o SKU dentro da Categoria
-        if sku not in categorias_dict[cat_nome]["skus"]:
-            categorias_dict[cat_nome]["skus"][sku] = {
-                "sku": sku,
-                "descricao": row.descricao,
-                "modelo_vencedor": row.modelo_vencedor or "Ensemble Estatístico",
-                "acuracia_ia": float(row.acuracia_ia) if row.acuracia_ia else 0.0,
+        if r.sku not in tree[cat]["skus"]:
+            tree[cat]["skus"][r.sku] = {
+                "sku": r.sku, "descricao": r.descricao,
+                "modelo_vencedor": r.modelo_vencedor or "Ensemble",
+                "acuracia_ia": float(r.acuracia_ia or 0.0),
                 "meses": []
             }
-            
-        vol_antigo = dict_anterior.get((sku, mes), 0)
         
-        # Popula o Mês
-        categorias_dict[cat_nome]["skus"][sku]["meses"].append({
-            "mes": mes.strftime("%Y-%m-%d"),
-            "vol_ia": int(row.vol_ia or 0),
-            "vol_td": int(row.vol_td or 0),
-            "vol_bu": int(row.vol_bu or 0),
-            "vol_sp": int(row.vol_sp or 0),
-            "vol_final": int(row.vol_final or 0),
-            "pmv_medio": float(row.pmv_medio or 0.0),
+        vol_antigo = dict_ant.get((r.sku, r.mes_projetado), 0)
+        tree[cat]["skus"][r.sku]["meses"].append({
+            "mes": r.mes_projetado.strftime("%Y-%m-%d"),
+            "vol_ia": int(r.vol_ia or 0),
+            "vol_td": int(r.vol_td or 0),
+            "vol_final": int(r.vol_final or 0),
+            "pmv_medio": float(r.pmv_medio or 0.0),
             "vol_ciclo_anterior": int(vol_antigo)
         })
 
-    # 4. Formatar e ordenar para o Front-End
-    hierarquia_final = []
-    for cat_nome, cat_data in categorias_dict.items():
-        lista_skus = list(cat_data["skus"].values())
-        for s in lista_skus:
-            s["meses"].sort(key=lambda x: x["mes"]) # Garante a ordem cronológica M2, M3, M4
-            
-        hierarquia_final.append({
-            "nome": cat_nome,
-            "skus": sorted(lista_skus, key=lambda x: x["descricao"])
+    # Formatação final para o Front-End
+    hierarquia = []
+    for cat_nome, content in tree.items():
+        skus_list = list(content["skus"].values())
+        for s in skus_list: s["meses"].sort(key=lambda x: x["mes"])
+        hierarquia.append({"nome": cat_nome, "skus": sorted(skus_list, key=lambda x: x["descricao"])})
+
+    return {"status": "success", "ciclo_ativo": ciclo_atual, "meses_janela": [m.strftime("%Y-%m-%d") for m in meses_trabalho], "hierarquia": sorted(hierarquia, key=lambda x: x["nome"])}
+
+@router.get("/macro/status")
+def obter_status_topdown(db: Session = Depends(get_db)):
+    """Verifica se as travas globais ou de departamento estão ativas."""
+    ciclo = get_current_cycle(db)
+    travas = db.query(ControleCiclo).filter(
+        ControleCiclo.ciclo_sop == ciclo,
+        and_(ControleCiclo.origem.in_(['Top-Down', 'S&OP-Final']), ControleCiclo.status == 'Fechado')
+    ).first()
+    return {"status": "success", "ciclo": ciclo, "is_topdown_fechado": travas is not None}
+
+@router.get("/macro/grafico")
+def obter_timeline_dossie(produto: str, db: Session = Depends(get_db)):
+    """Gera a timeline 'Passado + Futuro' para o dossiê do SKU."""
+    historico = TopDownService.get_sku_history(db, produto)
+    ciclo = get_current_cycle(db)
+    
+    # Futuro (Próximos 4 meses para o gráfico ser completo)
+    hoje = date.today().replace(day=1)
+    fim_grafico = hoje + relativedelta(months=5)
+    
+    projeções = db.query(
+        func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes'),
+        func.sum(FatoIbpGranular.vol_ia).label('ia'),
+        func.sum(FatoIbpGranular.vol_topdown).label('td'),
+        func.sum(FatoIbpGranular.vol_final).label('final')
+    ).filter(FatoIbpGranular.sku == produto, FatoIbpGranular.ciclo_sop == ciclo)\
+     .group_by('mes').all()
+
+    timeline = []
+    # Mesclar Passado
+    for mes, vol in historico.items():
+        timeline.append({"name": mes, "Realizado": vol})
+    
+    # Mesclar Futuro
+    for p in projeções:
+        timeline.append({
+            "name": p.mes,
+            "IA": int(p.ia or 0),
+            "Comercial": int(p.td or 0),
+            "Final": int(p.final or 0)
         })
-        
-    hierarquia_final.sort(key=lambda x: x["nome"])
-
-    return {
-        "status": "success",
-        "ciclo_ativo": ciclo_atual,
-        "meses_janela": [m.strftime("%Y-%m-%d") for m in meses_trabalho],
-        "hierarquia": hierarquia_final
-    }
+    
+    return {"status": "success", "dados": timeline}
 
 # =====================================================================
-# ROTA POST: GRAVAR EDIÇÕES DO TOP-DOWN E RATEAR
+# ROTAS DE AÇÃO (POST)
 # =====================================================================
+
 @router.post("/save")
-def salvar_ajustes_topdown(payload: PayloadSalvarTopDown, db: Session = Depends(get_db), usuario=Depends(get_current_user)):
-    """Recebe as edições da tela, faz o rateio para os clientes e gera auditoria."""
-    if usuario['funcao'] not in ['Administrador', 'Marketing']:
-        raise HTTPException(status_code=403, detail="Acesso restrito.")
-
+def salvar_topdown(payload: PayloadSalvarTopDown, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Aplica o rateio das edições de Marketing nos clientes."""
     ciclo = get_current_cycle(db)
     check_global_lock(db, ciclo)
     check_origin_lock(db, ciclo, 'Top-Down')
-
-    skus_afetados = list(set([a.sku for a in payload.ajustes]))
     
-    # Validação M2-M4: Impede edição fora da janela permitida
-    meses_validos = get_working_window_months(db)
-
-    for ajuste in payload.ajustes:
-        mes_dt = parse_date_safe(ajuste.mes)
-        if mes_dt not in meses_validos:
-            continue # Ignora se tentar gravar M1 ou M5 via API
-
-        # RATEIO PROPORCIONAL: Busca como as caixas estão divididas entre os clientes
+    for aj in payload.ajustes:
+        mes_dt = parse_date_safe(aj.mes)
         linhas = db.query(FatoIbpGranular).filter(
-            FatoIbpGranular.ciclo_sop == ciclo,
-            FatoIbpGranular.sku == ajuste.sku,
-            FatoIbpGranular.mes_projetado == mes_dt
+            FatoIbpGranular.ciclo_sop == ciclo, FatoIbpGranular.sku == aj.sku, FatoIbpGranular.mes_projetado == mes_dt
         ).all()
-
+        
         if not linhas: continue
-
-        vol_atual_total = sum(l.vol_topdown for l in linhas)
-        if vol_atual_total == ajuste.novo_volume: continue 
-
-        diferenca = ajuste.novo_volume - vol_atual_total
-
-        # Ordena para garantir que a sobra do arredondamento vá para o maior cliente
+        total_atual = sum(l.vol_topdown for l in linhas)
+        if total_atual == aj.novo_volume: continue
+        
+        diff = aj.novo_volume - total_atual
         linhas.sort(key=lambda x: x.vol_topdown, reverse=True)
-
+        
         for idx, linha in enumerate(linhas):
-            peso = linha.vol_topdown / vol_atual_total if vol_atual_total > 0 else 1 / len(linhas)
-            incremento = int(round(diferenca * peso))
+            peso = linha.vol_topdown / total_atual if total_atual > 0 else 1/len(linhas)
+            inc = diff - sum(int(round(diff * (l.vol_topdown/total_atual if total_atual > 0 else 1/len(linhas)))) for l in linhas[:-1]) if idx == len(linhas)-1 else int(round(diff * peso))
             
-            # Se for o último cliente da lista, ele absorve a quebra de arredondamento
-            if idx == len(linhas) - 1:
-                incremento = diferenca - sum(int(round(diferenca * (l.vol_topdown / vol_atual_total if vol_atual_total > 0 else 1/len(linhas)))) for l in linhas[:-1])
-
-            vol_antigo = linha.vol_topdown
-            linha.vol_topdown = max(0, vol_antigo + incremento)
-            linha.vol_final = linha.vol_topdown # Cascata direta
-
-            registrar_log_auditoria(db, ciclo, 'Top-Down', usuario['nome'], ajuste.sku, linha.cgc, mes_dt, vol_antigo, linha.vol_topdown)
-
+            v_ant = linha.vol_topdown
+            linha.vol_topdown = max(0, v_ant + inc)
+            linha.vol_final = linha.vol_topdown
+            registrar_log_auditoria(db, ciclo, 'Top-Down', user['nome'], aj.sku, linha.cgc, mes_dt, v_ant, linha.vol_topdown)
+            
     db.commit()
-    return {"status": "success", "message": f"{len(skus_afetados)} SKUs atualizados e rateados com sucesso."}
+    return {"status": "success"}
+
+@router.post("/macro/congelar")
+def congelar_ciclo_topdown(payload: PayloadCongelar, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Tranca as edições do Top-Down para este ciclo."""
+    if user['funcao'] not in ['Administrador', 'Marketing']:
+        raise HTTPException(status_code=403, detail="Permissão negada.")
+    
+    ciclo = get_current_cycle(db)
+    trava = ControleCiclo(ciclo_sop=ciclo, origem='Top-Down', status='Fechado', data_fechamento=datetime.now())
+    db.add(trava)
+    db.commit()
+    return {"status": "success", "message": "Ciclo Top-Down congelado."}
