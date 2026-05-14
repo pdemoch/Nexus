@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
-from typing import List, Optional
+from typing import List
 from pydantic import BaseModel
 from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
@@ -17,7 +17,6 @@ from app.api.routers.shared_ibp import (
 
 router = APIRouter(prefix="/api/v1/consensus", tags=["Consenso Top-Down"])
 
-# --- SCHEMAS (Contratos de Dados) ---
 class AjusteTopDown(BaseModel):
     sku: str
     mes: str
@@ -30,85 +29,47 @@ class PayloadCongelar(BaseModel):
     origem_ajuste: str
     ajustes: List[dict]
 
-# =====================================================================
-# SERVIÇOS DE APOIO (Lógica de Negócio Isolada - SOLID)
-# =====================================================================
-class TopDownService:
-    @staticmethod
-    def get_sku_history(db: Session, sku: str):
-        """Busca o realizado de vendas dos últimos 12 meses."""
-        hoje = date.today().replace(day=1)
-        inicio = hoje - relativedelta(months=12)
-        
-        vendas = db.query(
-            func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes'),
-            func.sum(FatoVendas.qt_pedido).label('realizado')
-        ).filter(FatoVendas.sku == sku, FatoVendas.data_pedido >= inicio)\
-         .group_by('mes').order_by('mes').all()
-        
-        return {v.mes: int(v.realizado) for v in vendas}
-
-# =====================================================================
-# ROTAS DE CONSULTA (GET)
-# =====================================================================
-
 @router.get("/macro")
 def obter_hierarquia_topdown(db: Session = Depends(get_db), usuario=Depends(get_current_user)):
-    """Retorna a Árvore Hierárquica: Categoria -> SKU -> Meses (M2-M4)."""
     ciclo_atual = get_current_cycle(db)
     ciclo_anterior = get_previous_cycle(db)
     meses_trabalho = get_working_window_months(db)
     data_ini, data_fim = meses_trabalho[0], meses_trabalho[-1]
 
-    # 1. Dados do Ciclo Atual
     query_atual = get_truth_query(db, ciclo_atual, data_ini, data_fim)
     dados_atual = query_atual.with_entities(
         DimProduto.categoria, DimProduto.sku, DimProduto.descricao,
-        DimProduto.modelo_vencedor, DimProduto.acuracia_ia,
-        FatoIbpGranular.mes_projetado,
-        func.sum(FatoIbpGranular.vol_ia).label('vol_ia'),
-        func.sum(FatoIbpGranular.vol_topdown).label('vol_td'),
-        func.sum(FatoIbpGranular.vol_final).label('vol_final'),
-        func.avg(FatoIbpGranular.pmv_aplicado).label('pmv_medio')
+        DimProduto.modelo_vencedor, DimProduto.acuracia_ia, FatoIbpGranular.mes_projetado,
+        func.sum(FatoIbpGranular.vol_ia).label('vol_ia'), func.sum(FatoIbpGranular.vol_topdown).label('vol_td'),
+        func.sum(FatoIbpGranular.vol_final).label('vol_final'), func.avg(FatoIbpGranular.pmv_aplicado).label('pmv_medio')
     ).group_by(
         DimProduto.categoria, DimProduto.sku, DimProduto.descricao, 
         DimProduto.modelo_vencedor, DimProduto.acuracia_ia, FatoIbpGranular.mes_projetado
     ).all()
 
-    # 2. Dados do Ciclo Anterior (Ponte Cycle-over-Cycle)
     query_anterior = get_truth_query(db, ciclo_anterior, data_ini, data_fim)
     dados_anterior = query_anterior.with_entities(
-        FatoIbpGranular.sku, FatoIbpGranular.mes_projetado,
-        func.sum(FatoIbpGranular.vol_final).label('vol_ant')
+        FatoIbpGranular.sku, FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_final).label('vol_ant')
     ).group_by(FatoIbpGranular.sku, FatoIbpGranular.mes_projetado).all()
     
     dict_ant = {(d.sku, d.mes_projetado): d.vol_ant for d in dados_anterior}
 
-    # 3. Montagem da Árvore
     tree = {}
     for r in dados_atual:
         cat = r.categoria or "SEM CATEGORIA"
         if cat not in tree: tree[cat] = {"nome": cat, "skus": {}}
-        
         if r.sku not in tree[cat]["skus"]:
             tree[cat]["skus"][r.sku] = {
-                "sku": r.sku, "descricao": r.descricao,
-                "modelo_vencedor": r.modelo_vencedor or "Ensemble",
-                "acuracia_ia": float(r.acuracia_ia or 0.0),
-                "meses": []
+                "sku": r.sku, "descricao": r.descricao, "modelo_vencedor": r.modelo_vencedor or "Ensemble",
+                "acuracia_ia": float(r.acuracia_ia or 0.0), "meses": []
             }
         
         vol_antigo = dict_ant.get((r.sku, r.mes_projetado), 0)
         tree[cat]["skus"][r.sku]["meses"].append({
-            "mes": r.mes_projetado.strftime("%Y-%m-%d"),
-            "vol_ia": int(r.vol_ia or 0),
-            "vol_td": int(r.vol_td or 0),
-            "vol_final": int(r.vol_final or 0),
-            "pmv_medio": float(r.pmv_medio or 0.0),
-            "vol_ciclo_anterior": int(vol_antigo)
+            "mes": r.mes_projetado.strftime("%Y-%m-%d"), "vol_ia": int(r.vol_ia or 0), "vol_td": int(r.vol_td or 0),
+            "vol_final": int(r.vol_final or 0), "pmv_medio": float(r.pmv_medio or 0.0), "vol_ciclo_anterior": int(vol_antigo)
         })
 
-    # Formatação final para o Front-End
     hierarquia = []
     for cat_nome, content in tree.items():
         skus_list = list(content["skus"].values())
@@ -119,7 +80,6 @@ def obter_hierarquia_topdown(db: Session = Depends(get_db), usuario=Depends(get_
 
 @router.get("/macro/status")
 def obter_status_topdown(db: Session = Depends(get_db)):
-    """Verifica se as travas globais ou de departamento estão ativas."""
     ciclo = get_current_cycle(db)
     travas = db.query(ControleCiclo).filter(
         ControleCiclo.ciclo_sop == ciclo,
@@ -129,45 +89,81 @@ def obter_status_topdown(db: Session = Depends(get_db)):
 
 @router.get("/macro/grafico")
 def obter_timeline_dossie(produto: str, db: Session = Depends(get_db)):
-    """Gera a timeline 'Passado + Futuro' para o dossiê do SKU."""
-    historico = TopDownService.get_sku_history(db, produto)
-    ciclo = get_current_cycle(db)
-    
-    # Futuro (Próximos 4 meses para o gráfico ser completo)
+    ciclo_atual = get_current_cycle(db)
     hoje = date.today().replace(day=1)
-    fim_grafico = hoje + relativedelta(months=5)
     
-    projeções = db.query(
-        func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes'),
-        func.sum(FatoIbpGranular.vol_ia).label('ia'),
-        func.sum(FatoIbpGranular.vol_topdown).label('td'),
-        func.sum(FatoIbpGranular.vol_final).label('final')
-    ).filter(FatoIbpGranular.sku == produto, FatoIbpGranular.ciclo_sop == ciclo)\
+    # 1. Calendário Contínuo (Garante zeros nos últimos 24 meses)
+    inicio_hist = hoje - relativedelta(months=24)
+    calendario = {}
+    curr = inicio_hist
+    while curr <= hoje + relativedelta(months=4):
+        calendario[curr.strftime('%Y-%m')] = {"Realizado": None, "IA": None, "Comercial": None, "Final": None}
+        curr += relativedelta(months=1)
+        
+    vendas = db.query(
+        func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes'),
+        func.sum(FatoVendas.qt_pedido).label('realizado')
+    ).filter(FatoVendas.sku == produto, FatoVendas.data_pedido >= inicio_hist)\
      .group_by('mes').all()
-
+     
+    for v in vendas:
+        if v.mes in calendario:
+            calendario[v.mes]["Realizado"] = int(v.realizado)
+            
+    # 2. Projeções (Stitching / Costura de IA Passada e Futura)
+    projecoes = db.query(
+        FatoIbpGranular.mes_projetado, FatoIbpGranular.ciclo_sop,
+        func.sum(FatoIbpGranular.vol_ia).label('ia'), func.sum(FatoIbpGranular.vol_topdown).label('td'),
+        func.sum(FatoIbpGranular.vol_final).label('final')
+    ).filter(FatoIbpGranular.sku == produto).group_by(
+        FatoIbpGranular.mes_projetado, FatoIbpGranular.ciclo_sop
+    ).all()
+    
+    proj_por_mes = {}
+    for p in projecoes:
+        m_str = p.mes_projetado.strftime('%Y-%m')
+        if m_str not in proj_por_mes: proj_por_mes[m_str] = {}
+        proj_por_mes[m_str][p.ciclo_sop] = {"ia": p.ia, "td": p.td, "final": p.final}
+        
+    for mes_str in calendario.keys():
+        mes_dt = datetime.strptime(mes_str, '%Y-%m').date()
+        if mes_str not in proj_por_mes: continue
+        
+        m2 = hoje + relativedelta(months=2) # Janela Tática M2
+        if mes_dt >= m2 and ciclo_atual in proj_por_mes[mes_str]:
+            # Futuro: Usa o ciclo atual
+            p = proj_por_mes[mes_str][ciclo_atual]
+        else:
+            # Passado/M1: Busca o "Lag Forecast" (A projeção feita M-1 ou a mais próxima disponível daquele mês)
+            ciclo_m1 = (mes_dt - relativedelta(months=1)).strftime('%m/%Y')
+            ciclo_m2 = (mes_dt - relativedelta(months=2)).strftime('%m/%Y')
+            
+            ciclo_alvo = ciclo_m1
+            if ciclo_alvo not in proj_por_mes[mes_str]:
+                if ciclo_m2 in proj_por_mes[mes_str]: ciclo_alvo = ciclo_m2
+                else: ciclo_alvo = list(proj_por_mes[mes_str].keys())[-1] # Fallback pro mais recente
+            
+            p = proj_por_mes[mes_str][ciclo_alvo]
+            
+        calendario[mes_str]["IA"] = int(p["ia"] or 0)
+        calendario[mes_str]["Comercial"] = int(p["td"] or 0)
+        calendario[mes_str]["Final"] = int(p["final"] or 0)
+            
     timeline = []
-    # Mesclar Passado
-    for mes, vol in historico.items():
-        timeline.append({"name": mes, "Realizado": vol})
-    
-    # Mesclar Futuro
-    for p in projeções:
+    for mes_str, valores in sorted(calendario.items()):
+        mes_dt = datetime.strptime(mes_str, '%Y-%m').date()
+        realizado = valores["Realizado"]
+        if mes_dt < hoje and realizado is None: realizado = 0 # Preenche buracos do passado com 0
+            
         timeline.append({
-            "name": p.mes,
-            "IA": int(p.ia or 0),
-            "Comercial": int(p.td or 0),
-            "Final": int(p.final or 0)
+            "name": mes_str, "Realizado": realizado, "IA": valores["IA"],
+            "Comercial": valores["Comercial"], "Final": valores["Final"]
         })
-    
+        
     return {"status": "success", "dados": timeline}
-
-# =====================================================================
-# ROTAS DE AÇÃO (POST)
-# =====================================================================
 
 @router.post("/save")
 def salvar_topdown(payload: PayloadSalvarTopDown, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """Aplica o rateio das edições de Marketing nos clientes."""
     ciclo = get_current_cycle(db)
     check_global_lock(db, ciclo)
     check_origin_lock(db, ciclo, 'Top-Down')
@@ -199,10 +195,7 @@ def salvar_topdown(payload: PayloadSalvarTopDown, db: Session = Depends(get_db),
 
 @router.post("/macro/congelar")
 def congelar_ciclo_topdown(payload: PayloadCongelar, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """Tranca as edições do Top-Down para este ciclo."""
-    if user['funcao'] not in ['Administrador', 'Marketing']:
-        raise HTTPException(status_code=403, detail="Permissão negada.")
-    
+    if user['funcao'] not in ['Administrador', 'Marketing']: raise HTTPException(status_code=403, detail="Permissão negada.")
     ciclo = get_current_cycle(db)
     trava = ControleCiclo(ciclo_sop=ciclo, origem='Top-Down', status='Fechado', data_fechamento=datetime.now())
     db.add(trava)

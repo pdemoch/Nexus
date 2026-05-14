@@ -12,24 +12,25 @@ import axios from 'axios';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import * as XLSX from 'xlsx';
 
-// --- HELPERS DE FORMATAÇÃO ---
+// --- HELPERS ---
 const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor || 0));
 const formatVolume = (val: number) => Math.round(val || 0).toLocaleString('pt-BR');
 const calcVar = (atual: number, ant: number) => ant > 0 ? ((atual - ant) / ant) * 100 : 0;
 
-const FvaBadge = ({ atual, anterior }: { atual: number, anterior: number }) => {
+// Badge Compacto de Variação (FVA)
+const FvaBadge = ({ atual, anterior, label }: { atual: number, anterior: number, label: string }) => {
     const v = calcVar(atual, anterior);
-    if (v === 0 || anterior === 0) return <span className="text-[10px] text-slate-400 font-bold">-</span>;
+    if (v === 0 || anterior === 0) return null;
     const isPos = v > 0;
     return (
-      <span className={`text-[10px] font-black flex items-center gap-0.5 px-2 py-0.5 rounded ${isPos ? 'bg-indigo-100 text-indigo-700' : 'bg-rose-100 text-rose-700'}`}>
-        {isPos ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />} {Math.abs(v).toFixed(1)}% vs Ciclo Ant.
+      <span className={`text-[9px] font-black flex items-center gap-0.5 px-1 rounded ${isPos ? 'text-emerald-600' : 'text-rose-600'}`} title={`Variação de ${label} vs Ciclo Anterior`}>
+        {isPos ? <TrendingUp className="w-2.5 h-2.5" /> : <TrendingDown className="w-2.5 h-2.5" />} {Math.abs(v).toFixed(1)}%
       </span>
     );
 };
 
 // =====================================================================
-// COMPONENTE RECUPERADO: NEXUS AI INSIGHT 360°
+// AI INSIGHT 360
 // =====================================================================
 const AiInsightBox = ({ alvo, tipo }: { alvo: string, tipo: string }) => {
   const [insight, setInsight] = useState('');
@@ -45,20 +46,15 @@ const AiInsightBox = ({ alvo, tipo }: { alvo: string, tipo: string }) => {
       setInsight(res.data.resposta);
     } catch (e) {
       setInsight('Erro ao gerar insight. Verifique a conexão com o Agente SQL.');
-    } finally {
-      setLoading(false);
-    }
+    } finally { setLoading(false); }
   };
 
   return (
     <div className="bg-indigo-50/50 rounded-3xl p-6 border border-indigo-100 flex flex-col gap-4 h-full shadow-sm">
       <div className="flex items-center gap-3">
-         <div className="p-2.5 bg-indigo-100 text-indigo-600 rounded-xl">
-           <Wand2 className="w-5 h-5" />
-         </div>
+         <div className="p-2.5 bg-indigo-100 text-indigo-600 rounded-xl"><Wand2 className="w-5 h-5" /></div>
          <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest">Nexus AI Insight 360°</h4>
       </div>
-      
       {insight ? (
         <div className="text-sm font-medium text-slate-600 leading-relaxed whitespace-pre-wrap overflow-y-auto custom-scrollbar pr-2 max-h-[200px]" dangerouslySetInnerHTML={{ __html: insight.replace(/\*\*(.*?)\*\*/g, '<strong class="font-black text-slate-900">$1</strong>').replace(/\n/g, '<br/>') }} />
       ) : (
@@ -74,15 +70,13 @@ const AiInsightBox = ({ alvo, tipo }: { alvo: string, tipo: string }) => {
 };
 
 // =========================================================
-// DOSSIÊ DA CATEGORIA (MACRO)
+// DOSSIÊS (MACRO E MICRO)
 // =========================================================
 const CategoriaDossier = ({ data }: { data: any }) => {
     const chartData = data.meses.map((m: any) => ({
         name: m.mes.split('-')[1] + '/' + m.mes.split('-')[0],
-        "Ciclo Anterior": m.vol_ciclo_anterior,
-        "Nova Projeção": m.vol_td
+        "Ciclo Anterior": m.vol_ciclo_anterior, "Nova Projeção": m.vol_td
     }));
-
     const receitaTotal = data.meses.reduce((acc: number, m: any) => acc + m.rec_td, 0);
     const volumeTotal = data.meses.reduce((acc: number, m: any) => acc + m.vol_td, 0);
 
@@ -114,31 +108,37 @@ const CategoriaDossier = ({ data }: { data: any }) => {
                         </ResponsiveContainer>
                     </div>
                 </div>
-                <div>
-                    <AiInsightBox alvo={data.nome} tipo="Categoria" />
-                </div>
+                <div><AiInsightBox alvo={data.nome} tipo="Categoria" /></div>
             </div>
         </div>
     );
 };
 
-// =========================================================
-// DOSSIÊ DO SKU (MICRO)
-// =========================================================
-const SkuDossier = ({ data }: { data: any }) => {
-    const [chartData, setChartData] = useState<any[]>([]);
+const SkuDossier = ({ data, celulasEditadas }: { data: any, celulasEditadas: any }) => {
+    const [chartDataOrigem, setChartDataOrigem] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
         axios.get('/api/v1/consensus/macro/grafico', { params: { produto: data.sku } })
-            .then(res => { setChartData(res.data.dados || []); setLoading(false); })
+            .then(res => { setChartDataOrigem(res.data.dados || []); setLoading(false); })
             .catch(() => setLoading(false));
     }, [data.sku]);
+
+    const chartDataDinamico = useMemo(() => {
+        if (!chartDataOrigem.length) return [];
+        return chartDataOrigem.map(point => {
+            const mesBanco = point.name + '-01'; 
+            const edicao = celulasEditadas[data.sku]?.[mesBanco];
+            if (edicao && edicao.novo_volume !== '') {
+                return { ...point, Comercial: parseInt(edicao.novo_volume), Final: parseInt(edicao.novo_volume) };
+            }
+            return point;
+        });
+    }, [chartDataOrigem, celulasEditadas, data.sku]);
 
     return (
         <div className="p-8 bg-slate-50/80 border-y border-slate-200">
             <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-                
                 <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 flex flex-col gap-4">
                     <h4 className="text-xs font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2"><BrainCircuit className="w-4 h-4"/> Engine Estatística</h4>
                     <div>
@@ -159,7 +159,7 @@ const SkuDossier = ({ data }: { data: any }) => {
                     <div className="h-[220px] w-full">
                         {loading ? <div className="h-full flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-slate-300" /></div> : (
                             <ResponsiveContainer width="100%" height="100%">
-                                <LineChart data={chartData} margin={{ top: 5, right: 20, left: 0, bottom: 0 }}>
+                                <LineChart data={chartDataDinamico} margin={{ top: 5, right: 20, left: 0, bottom: 0 }}>
                                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                                     <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} />
                                     <YAxis tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
@@ -174,11 +174,7 @@ const SkuDossier = ({ data }: { data: any }) => {
                         )}
                     </div>
                 </div>
-
-                <div>
-                    <AiInsightBox alvo={data.descricao} tipo="SKU" />
-                </div>
-
+                <div><AiInsightBox alvo={data.descricao} tipo="SKU" /></div>
             </div>
         </div>
     );
@@ -198,8 +194,6 @@ export default function TopDownArena() {
   const [celulasEditadas, setCelulasEditadas] = useState<any>({});
   const [expanded, setExpanded] = useState({});
   const [busca, setBusca] = useState('');
-  
-  // Filtros Recuperados
   const [categoriaSelecionada, setCategoriaSelecionada] = useState('TODAS');
 
   const fetchData = useCallback(async () => {
@@ -220,80 +214,73 @@ export default function TopDownArena() {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const categoriasUnicas = useMemo(() => {
-    return Array.from(new Set(hierarquiaBruta.map(c => c.nome))).sort();
-  }, [hierarquiaBruta]);
+  const categoriasUnicas = useMemo(() => Array.from(new Set(hierarquiaBruta.map(c => c.nome))).sort(), [hierarquiaBruta]);
 
-  // Transformação de Dados: Agrega as categorias no Front-End para a Árvore
   const dadosFormatados = useMemo(() => {
     if (!hierarquiaBruta.length) return [];
     
     return hierarquiaBruta
       .filter(cat => categoriaSelecionada === 'TODAS' || cat.nome === categoriaSelecionada)
       .map(cat => {
-        // Filtra os SKUs pela busca
-        const skusFiltrados = cat.skus.filter((s:any) => 
-            (s.sku + ' ' + s.descricao).toLowerCase().includes(busca.toLowerCase())
-        );
-        
+        const skusFiltrados = cat.skus.filter((s:any) => (s.sku + ' ' + s.descricao).toLowerCase().includes(busca.toLowerCase()));
         if (skusFiltrados.length === 0) return null;
 
-        // Soma os meses da Categoria com base nos filtros
         const mesesCategoria = mesesJanela.map(mesStr => {
-            const totaisM = { mes: mesStr, vol_ia: 0, vol_td: 0, vol_final: 0, vol_ciclo_anterior: 0, rec_td: 0 };
+            const totaisM = { mes: mesStr, vol_ia: 0, vol_td: 0, vol_final: 0, vol_ciclo_anterior: 0, rec_td: 0, rec_ciclo_anterior: 0, pmv_medio: 0 };
             skusFiltrados.forEach((s:any) => {
                 const mk = s.meses.find((x:any) => x.mes === mesStr);
-                
-                // Pega a edição pendente se houver para não perder o total na tela
                 const edicao = celulasEditadas[s.sku]?.[mesStr];
                 const isEdited = edicao !== undefined && edicao.novo_volume !== '';
                 const volAtual = isEdited ? parseInt(edicao.novo_volume) : (mk ? mk.vol_td : 0);
 
                 if (mk) {
+                    totaisM.pmv_medio = mk.pmv_medio;
                     totaisM.vol_ia += mk.vol_ia;
-                    totaisM.vol_td += volAtual; // Atualiza dinamicamente a soma da categoria
+                    totaisM.vol_td += volAtual; 
                     totaisM.vol_final += mk.vol_final;
                     totaisM.vol_ciclo_anterior += mk.vol_ciclo_anterior;
-                    totaisM.rec_td += (volAtual * mk.pmv_medio); // Receita dinâmica
+                    totaisM.rec_td += (volAtual * mk.pmv_medio); 
+                    totaisM.rec_ciclo_anterior += (mk.vol_ciclo_anterior * mk.pmv_medio);
                 }
             });
             return totaisM;
         });
 
-        return {
-            ...cat, 
-            isCategory: true, 
-            meses: mesesCategoria,
-            subRows: skusFiltrados.map((s:any) => ({ ...s, isSku: true }))
-        };
+        return { ...cat, isCategory: true, meses: mesesCategoria, subRows: skusFiltrados.map((s:any) => ({ ...s, isSku: true })) };
     }).filter(Boolean);
   }, [hierarquiaBruta, mesesJanela, busca, categoriaSelecionada, celulasEditadas]);
 
-  // Edição no Front-End
+  // TOTALIZADORES GERAIS (BARRA FIXA INFERIOR)
+  const totaisGerais = useMemo(() => {
+    const totais: Record<string, { vol: number, rec: number }> = {};
+    mesesJanela.forEach(m => totais[m] = { vol: 0, rec: 0 });
+    
+    dadosFormatados.forEach(cat => {
+        mesesJanela.forEach(mesStr => {
+           const m = cat.meses.find((x:any) => x.mes === mesStr);
+           if(m) {
+               totais[mesStr].vol += m.vol_td;
+               totais[mesStr].rec += m.rec_td;
+           }
+        });
+    });
+    return totais;
+  }, [dadosFormatados, mesesJanela]);
+
   const onCellChange = (sku: string, mesStr: string, val: string) => {
-    setCelulasEditadas((prev: any) => ({
-      ...prev,
-      [sku]: { ...(prev[sku] || {}), [mesStr]: { novo_volume: val } }
-    }));
+    setCelulasEditadas((prev: any) => ({ ...prev, [sku]: { ...(prev[sku] || {}), [mesStr]: { novo_volume: val } } }));
   };
 
-  // Exportação Excel Recuperada
   const handleExportExcel = (isSnapshot = false) => {
     if (dadosFormatados.length === 0) return alert("Não há dados na tela para exportar.");
-    
     const dadosExcel: any[] = [];
     dadosFormatados.forEach(cat => {
         cat.subRows.forEach((row: any) => {
-            const linha: any = {
-                "CATEGORIA": cat.nome, "CÓDIGO SKU": row.sku, "DESCRIÇÃO": row.descricao,
-                "MODELO IA": row.modelo_vencedor, "ACURÁCIA IA (%)": row.acuracia_ia
-            };
-            
+            const linha: any = { "CATEGORIA": cat.nome, "CÓDIGO SKU": row.sku, "DESCRIÇÃO": row.descricao, "MODELO IA": row.modelo_vencedor, "ACURÁCIA IA (%)": row.acuracia_ia };
             mesesJanela.forEach(mesStr => {
                 const m = row.meses.find((x:any) => x.mes === mesStr);
                 const edicao = celulasEditadas[row.sku]?.[mesStr];
                 const volFinal = Math.round(Number(edicao !== undefined && edicao.novo_volume !== '' ? edicao.novo_volume : (m ? m.vol_td : 0)));
-                
                 linha[`${mesStr} (Base IA)`] = Math.round(Number(m ? m.vol_ia : 0));
                 linha[`${mesStr} (Ciclo Anterior)`] = Math.round(Number(m ? m.vol_ciclo_anterior : 0));
                 linha[`${mesStr} (Top-Down)`] = volFinal;
@@ -301,13 +288,10 @@ export default function TopDownArena() {
             dadosExcel.push(linha);
         });
     });
-
     const worksheet = XLSX.utils.json_to_sheet(dadosExcel);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Top_Down_Consenso");
-    
-    const fileName = `SOP_TopDown_${isSnapshot ? 'CONGELADO' : 'DRAFT'}_${new Date().toISOString().split('T')[0]}.xlsx`;
-    XLSX.writeFile(workbook, fileName);
+    XLSX.writeFile(workbook, `SOP_TopDown_${isSnapshot ? 'CONGELADO' : 'DRAFT'}_${new Date().toISOString().split('T')[0]}.xlsx`);
   };
 
   const handleGravar = async () => {
@@ -320,7 +304,6 @@ export default function TopDownArena() {
 
     if (ajustes.length === 0) return alert("Nenhuma alteração detectada.");
     setIsProcessing(true);
-
     try {
       await axios.post('/api/v1/consensus/save', { ajustes });
       alert("✅ Edições gravadas e rateadas com sucesso!");
@@ -333,8 +316,7 @@ export default function TopDownArena() {
   const columns = useMemo<ColumnDef<any>[]>(() => {
     const baseCols: ColumnDef<any>[] = [
       {
-        id: 'nome', header: 'Hierarquia S&OP / Dossiê',
-        accessorFn: (row: any) => row.nome || row.descricao,
+        id: 'nome', header: 'Hierarquia S&OP / Dossiê', accessorFn: (row: any) => row.nome || row.descricao,
         cell: ({ row }: any) => {
           const isCat = row.original.isCategory;
           return (
@@ -356,40 +338,55 @@ export default function TopDownArena() {
     ];
 
     mesesJanela.forEach(mesStr => {
-        const mesDisplay = mesStr.split('-').reverse().slice(1).join('/');
         baseCols.push({
-            id: `mes_${mesStr}`, header: mesDisplay,
+            id: `mes_${mesStr}`, header: mesStr.split('-').reverse().slice(1).join('/'),
             cell: ({ row }: any) => {
                 const isCat = row.original.isCategory;
                 const mData = row.original.meses.find((m:any) => m.mes === mesStr);
                 const volProj = mData ? mData.vol_td : 0;
                 const volAntigo = mData ? mData.vol_ciclo_anterior : 0;
                 
+                // Renderização da Categoria (Compacto com Volume e Receita)
                 if (isCat) {
+                    const recProj = mData ? mData.rec_td : 0;
+                    const recAntiga = mData ? mData.rec_ciclo_anterior : 0;
                     return (
-                        <div className="flex flex-col items-center justify-center min-w-[120px]">
-                            <span className="font-black text-slate-900 text-base">{formatVolume(volProj)}</span>
-                            <FvaBadge atual={volProj} anterior={volAntigo} />
+                        <div className="flex flex-col items-center justify-center min-w-[140px] gap-1">
+                            <div className="w-full flex justify-between items-center bg-slate-50 px-2 py-1 rounded">
+                                <span className="font-black text-slate-900 text-xs">{formatVolume(volProj)} cx</span>
+                                <FvaBadge atual={volProj} anterior={volAntigo} label="Volume" />
+                            </div>
+                            <div className="w-full flex justify-between items-center bg-slate-50 px-2 py-1 rounded">
+                                <span className="font-black text-emerald-600 text-[10px]">{formatMoeda(recProj)}</span>
+                                <FvaBadge atual={recProj} anterior={recAntiga} label="Receita" />
+                            </div>
                         </div>
                     );
                 }
 
+                // Renderização do SKU (Editável com Indicadores)
                 const edicao = celulasEditadas[row.original.sku]?.[mesStr];
                 const isEdited = edicao !== undefined && edicao.novo_volume !== '';
                 const displayVal = isEdited ? edicao.novo_volume : volProj;
-                const recProjetada = (Number(displayVal) || 0) * (mData?.pmv_medio || 0);
+                const pmv = mData?.pmv_medio || 0;
+                const recProjetada = (Number(displayVal) || 0) * pmv;
 
                 return (
-                    <div className="flex flex-col items-center justify-center min-w-[120px]">
+                    <div className="flex flex-col items-center justify-center min-w-[140px] gap-0.5">
                         <input
-                            type="number"
-                            disabled={isCicloFechado}
-                            value={displayVal}
-                            onChange={(e) => onCellChange(row.original.sku, mesStr, e.target.value)}
-                            className={`w-24 text-center font-black rounded-lg py-2 transition-all ${isCicloFechado ? 'bg-slate-50 text-slate-400 border-transparent cursor-not-allowed' : isEdited ? 'bg-indigo-50 border-2 border-indigo-400 text-indigo-700 shadow-inner outline-none' : 'bg-white border border-slate-200 text-slate-700 hover:border-indigo-300 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none'}`}
+                            type="number" disabled={isCicloFechado} value={displayVal} onChange={(e) => onCellChange(row.original.sku, mesStr, e.target.value)}
+                            className={`w-24 text-center font-black rounded-lg py-1.5 transition-all ${isCicloFechado ? 'bg-slate-50 text-slate-400 border-transparent cursor-not-allowed' : isEdited ? 'bg-indigo-50 border-2 border-indigo-400 text-indigo-700 shadow-inner outline-none' : 'bg-white border border-slate-200 text-slate-700 hover:border-indigo-300 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none'}`}
                         />
-                        {isEdited && <span className="text-[9px] font-bold text-indigo-500 uppercase mt-1 animate-pulse">Pendente</span>}
-                        {!isEdited && <span className="text-[10px] font-bold text-emerald-600 mt-1">{formatMoeda(recProjetada)}</span>}
+                        <div className="w-full flex justify-between items-center mt-1 px-3">
+                            <div className="flex flex-col items-start leading-none">
+                                {isEdited ? (
+                                    <span className="text-[9px] font-bold text-indigo-500 uppercase animate-pulse">Pendente</span>
+                                ) : (
+                                    <span className="text-[10px] font-bold text-emerald-600">{formatMoeda(recProjetada)}</span>
+                                )}
+                            </div>
+                            <FvaBadge atual={Number(displayVal)} anterior={volAntigo} label="Volume" />
+                        </div>
                     </div>
                 );
             }
@@ -415,7 +412,6 @@ export default function TopDownArena() {
     <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
       <div className="max-w-[1600px] mx-auto p-6 lg:p-10">
         
-        {/* --- HEADER E EXPORTAÇÃO --- */}
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6 mb-8 bg-white p-8 rounded-[40px] shadow-sm border border-slate-100 relative">
           {isCicloFechado && (
               <div className="absolute top-0 left-0 w-full bg-emerald-500 text-white text-[10px] font-black py-2 flex justify-center items-center gap-3 tracking-[0.3em] uppercase rounded-t-[40px]"><ShieldCheck className="w-4 h-4"/> Metas da Diretoria Congeladas</div>
@@ -430,16 +426,13 @@ export default function TopDownArena() {
             </div>
           </div>
           <div className={`flex items-center gap-4 ${isCicloFechado ? "pt-6" : ""}`}>
-             <button onClick={() => handleExportExcel(isCicloFechado)} className="flex items-center gap-2 bg-slate-50 hover:bg-slate-100 text-slate-700 px-6 py-4 rounded-2xl text-[10px] font-black tracking-widest uppercase border border-slate-200 transition-all shadow-sm">
-                <Download className="w-4 h-4" /> Exportar
-             </button>
+             <button onClick={() => handleExportExcel(isCicloFechado)} className="flex items-center gap-2 bg-slate-50 hover:bg-slate-100 text-slate-700 px-6 py-4 rounded-2xl text-[10px] font-black tracking-widest uppercase border border-slate-200 transition-all shadow-sm"><Download className="w-4 h-4" /> Exportar</button>
              <button disabled={isCicloFechado || isProcessing} onClick={handleGravar} className={`flex items-center gap-3 text-white px-10 py-4 rounded-2xl text-xs font-black tracking-widest uppercase shadow-xl transition-all ${isCicloFechado ? 'bg-slate-300 shadow-none' : 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-200'}`}>
                 {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : <Check className="w-5 h-5" />} Gravar e Ratear
              </button>
           </div>
         </div>
 
-        {/* --- FILTROS E BUSCA --- */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
             <div className="relative md:col-span-2">
                 <Search className="absolute left-6 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-300" />
@@ -455,37 +448,47 @@ export default function TopDownArena() {
             </div>
         </div>
 
-        {/* --- GRID HIERÁRQUICO --- */}
         <div className="bg-white rounded-[48px] shadow-2xl border border-slate-100 overflow-hidden">
-          <div className="overflow-x-auto custom-scrollbar">
+          <div className="overflow-x-auto custom-scrollbar relative">
             <table className="w-full text-left border-collapse">
-              <thead className="bg-slate-50/50 border-b-2 border-slate-100">
+              <thead className="bg-slate-50/50 border-b-2 border-slate-100 sticky top-0 z-10">
                 {table.getHeaderGroups().map(hg => (
                   <tr key={hg.id}>
-                    {hg.headers.map(h => (
-                      <th key={h.id} className="px-10 py-8 text-[10px] font-black text-slate-400 uppercase tracking-widest">{flexRender(h.column.columnDef.header, h.getContext())}</th>
-                    ))}
+                    {hg.headers.map(h => (<th key={h.id} className="px-10 py-8 text-[10px] font-black text-slate-400 uppercase tracking-widest">{flexRender(h.column.columnDef.header, h.getContext())}</th>))}
                   </tr>
                 ))}
               </thead>
-              <tbody>
+              <tbody className="mb-20">
                 {table.getRowModel().rows.map(row => (
                   <Fragment key={row.id}>
                     <tr className={`border-b border-slate-50 transition-all ${row.depth === 0 ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/30 hover:bg-slate-100/50'}`}>
                       {row.getVisibleCells().map(cell => (<td key={cell.id} className="px-10 py-4">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>))}
                     </tr>
-                    
-                    {/* EXPANDIR DOSSIÊ */}
                     {row.getIsExpanded() && (
                       <tr>
                         <td colSpan={table.getAllColumns().length} className="p-0">
-                          {row.original.isCategory ? <CategoriaDossier data={row.original} /> : <SkuDossier data={row.original} />}
+                          {row.original.isCategory ? <CategoriaDossier data={row.original} /> : <SkuDossier data={row.original} celulasEditadas={celulasEditadas} />}
                         </td>
                       </tr>
                     )}
                   </Fragment>
                 ))}
               </tbody>
+              <tfoot className="bg-slate-900 text-white shadow-inner sticky bottom-0 z-20">
+                 <tr>
+                    <td className="px-10 py-5 font-black text-xs tracking-widest uppercase rounded-bl-[48px] border-t border-slate-700">
+                        Totalizadores Dinâmicos
+                    </td>
+                    {mesesJanela.map(mesStr => (
+                        <td key={mesStr} className="px-10 py-5 border-t border-slate-700 text-center">
+                            <div className="flex flex-col items-center justify-center">
+                                <span className="text-xl font-black">{formatVolume(totaisGerais[mesStr]?.vol)} CX</span>
+                                <span className="text-xs text-emerald-400 font-bold tracking-widest">{formatMoeda(totaisGerais[mesStr]?.rec)}</span>
+                            </div>
+                        </td>
+                    ))}
+                 </tr>
+              </tfoot>
             </table>
           </div>
         </div>

@@ -47,22 +47,17 @@ def get_executive_prefix(contexto: ContextoUI):
     
     🚨 [MUITO IMPORTANTE: REGRAS PARA NÃO ESTOURAR O LIMITE DE DADOS (TOKENS)] 🚨
     Você ESTÁ PROIBIDO de fazer um "SELECT *" ou consultar todas as linhas da fato_vendas ou fato_ibp_granular.
-    Use SEMPRE GROUP BY e SUM() para consolidar a informação.
+    Use SEMPRE GROUP BY e SUM() para consolidar a informação e cruze (JOIN) com dim_produtos para filtrar por Categoria ou SKU.
     Se precisar ver detalhes soltos, limite a consulta a LIMIT 5.
 
-    [COPIE E USE EXATAMENTE ESTAS QUERIES DE BASE (SUBSTITUINDO O ID_DO_SKU)]:
-    1) Para ver Histórico:
-    SELECT TO_CHAR(data_pedido, 'YYYY-MM') AS mes, SUM(qt_pedido) AS vol_real, SUM(qtcorte) as cortes, ROUND((SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0))::numeric, 2) AS pmv
-    FROM fato_vendas WHERE sku = 'ID_DO_SKU' AND data_pedido >= CURRENT_DATE - INTERVAL '6 months' GROUP BY mes ORDER BY mes DESC;
-
-    2) Para ver Cascata e Projeções Futuras:
-    SELECT mes_projetado, SUM(vol_ia) as ia, SUM(vol_topdown) as td, SUM(vol_bottomup) as bu, SUM(vol_supply) as supply, SUM(vol_final) as final
-    FROM fato_ibp_granular WHERE sku = 'ID_DO_SKU' GROUP BY mes_projetado ORDER BY mes_projetado;
+    [DICAS DE QUERIES (ADAPTE CONFORME NECESSÁRIO)]:
+    - Para Histórico de Vendas (fato_vendas): Agrupe por TO_CHAR(data_pedido, 'YYYY-MM'), use SUM(qt_pedido), SUM(vl_pedido).
+    - Para Projeções (fato_ibp_granular): Agrupe por mes_projetado, use SUM(vol_ia), SUM(vol_topdown), SUM(vol_final).
 
     FORMATO DA SUA RESPOSTA:
-    Seja breve, no máximo 3 parágrafos focados em risco e dinheiro.
-    Use quebras de linha (<br/>) para organizar.
-    OBRIGATÓRIO: A sua resposta final deve iniciar com "Final Answer: " e depois o seu diagnóstico.
+    - Siga RIGOROSAMENTE o formato Thought / Action / Action Input / Observation / Thought / Final Answer.
+    - Se você já encontrou os dados e está pronto para responder o dossiê, você DEVE iniciar a última etapa obrigatóriamente com "Final Answer: ".
+    - Seja breve no seu texto final, máximo de 3 parágrafos focados em risco e dinheiro. Use <br/> para quebrar linhas e **texto** para negrito.
     """
 
 @router.post("/perguntar")
@@ -73,7 +68,7 @@ def consultoria_360(payload: PerguntaAgente, usuario: dict = Depends(get_current
             toolkit=toolkit,
             agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
             verbose=True,
-            handle_parsing_errors="ALERTA: Escreva a sua recomendação em até 100 palavras e inicie com 'Final Answer: '",
+            handle_parsing_errors=True, # AQUI ESTÁ A CORREÇÃO NATIVA E OFICIAL
             prefix=get_executive_prefix(payload.contexto),
             # Impede que a IA entre num loop infinito
             max_iterations=4 
@@ -84,16 +79,18 @@ def consultoria_360(payload: PerguntaAgente, usuario: dict = Depends(get_current
         return {"status": "success", "resposta": resultado["output"]}
     except Exception as e:
         print(f"[ERRO AGENTE 360]: {str(e)}")
-        # Tratamento do erro de rate limit caso a cota do Google precise de tempo para recuperar
         erro_str = str(e)
+        
+        # Tratamento do erro de rate limit caso a cota do Google precise de tempo para recuperar
         if "429" in erro_str or "Quota exceeded" in erro_str:
             return {"status": "success", "resposta": "⚡ *A IA está a processar muitos cálculos complexos neste momento. Aguarde alguns segundos e tente novamente para receber o seu dossiê executivo.*"}
         
+        # Fallback de blindagem: Se o handle_parsing_errors=True não der conta, a gente limpa a string no backend e manda só a resposta
         if "Could not parse LLM output:" in erro_str:
             try:
-                resposta_parcial = erro_str.split("Could not parse LLM output:")[1].strip().strip('`')
+                resposta_parcial = erro_str.split("Could not parse LLM output:")[1].strip().strip('`').replace("Thought: ", "")
                 return {"status": "success", "resposta": resposta_parcial}
             except:
                 pass
             
-        return {"status": "error", "resposta": f"Falha na IA. Tente Novamente."}
+        return {"status": "error", "resposta": "Falha na construção do dossiê estratégico pela IA. Tente novamente."}
