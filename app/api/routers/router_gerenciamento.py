@@ -27,6 +27,7 @@ router = APIRouter(prefix="/api/v1/consensus/micro", tags=["Consenso Gerenciamen
 # EXPRESSÕES SQL DE AGRUPAMENTO (FALLBACK BLINDADO)
 # =====================================================================
 def get_coord_expr():
+    # Se supervisor for nulo/vazio, pega o gerente. Se ambos nulos, "SEM COORDENADOR"
     return func.coalesce(func.nullif(func.trim(DimCliente.supervisor_nome), ''), func.nullif(func.trim(DimCliente.gerente_nome), ''), 'SEM COORDENADOR')
 
 def get_vend_expr():
@@ -44,7 +45,7 @@ def require_manager_or_admin(usuario: dict = Depends(get_current_user)):
     return usuario
 
 def verificar_vendedor_online(db: Session, alvo_nome: str):
-    if alvo_nome in ["SEM COORDENADOR", "SEM VENDEDOR", "COORDENAÇÃO GERAL"]: return
+    if alvo_nome in ["SEM COORDENADOR", "SEM VENDEDOR"]: return
     user = db.query(Usuario).filter(
         func.or_(
             func.upper(func.trim(Usuario.nome_vendedor)) == alvo_nome.strip().upper(),
@@ -100,7 +101,7 @@ async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = Non
     try:
         ciclo = get_current_cycle(db)
         
-        # Garante a janela desde o mês atual para capturar Maio/Junho
+        # Garante a janela desde o mês atual (M0) para capturar as vendas mais próximas
         hoje = datetime.date.today().replace(day=1)
         data_ini = hoje
         data_fim = hoje + relativedelta(months=4)
@@ -128,7 +129,6 @@ async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = Non
         elif nivel_filtro == 'regional' and valor_filtro:
             query_base = query_base.filter(func.upper(func.trim(DimCliente.regional)) == valor_filtro.strip().upper())
 
-        # O SQL faz todo o agrupamento limpo usando as expressões COALESCE
         resultados = query_base.with_entities(
             coord_expr.label('coord_final'),
             vend_expr.label('vend_final'),
@@ -146,7 +146,7 @@ async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = Non
         
         arvore = {}
         def criar_meses():
-            return {m: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0, "pmv":0} for m in meses_lista}
+            return {m: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0, "pmv":0.0} for m in meses_lista}
 
         for r in resultados:
             c = str(r.coord_final)
@@ -156,7 +156,10 @@ async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = Non
             desc = str(r.descricao).strip() if r.descricao else "PRODUTO SEM CADASTRO"
             ms = str(r.mes_projetado)
             
-            v_ia, v_td, v_bu, pmv_base = int(r.v_ia or 0), int(r.v_td or 0), int(r.v_bu or 0), float(r.pmv or 0)
+            v_ia = int(r.v_ia) if r.v_ia is not None else 0
+            v_td = int(r.v_td) if r.v_td is not None else 0
+            v_bu = int(r.v_bu) if r.v_bu is not None else 0
+            pmv_base = float(r.pmv) if r.pmv is not None else 0.0
             rec = v_bu * pmv_base
 
             if c not in arvore: arvore[c] = {"nome": c, "status": status_dict.get(c.upper(), "Aberto"), "meses": criar_meses(), "vendedores": {}}
@@ -172,7 +175,7 @@ async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = Non
                     t["receita"] += rec
                     t["pmv"] = (t["receita"] / t["vol_ajustado"]) if t["vol_ajustado"] > 0 else pmv_base
 
-        # Conversão pura garantindo listas no subRows sempre preenchidas
+        # Conversão estruturada para Array exigido pelo React Table
         dados_finais = []
         for c_key, c_val in arvore.items():
             sub_vendedores = []
@@ -184,21 +187,21 @@ async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = Non
                         sub_produtos.append({
                             "id": f"{c_key}|{v_key}|{cl_key}|{p_key}", "chave_matriz": f"{c_key}|{v_key}|{cl_key}|{p_key}", 
                             "nome": p_val["nome"], "produto": p_key, "tipo": "produto",
-                            "meses": [{"mes_banco": k, "mes_str": parse_date_safe(k).strftime("%m/%y"), **v} for k, v in p_val["meses"].items()]
+                            "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in p_val["meses"].items()]
                         })
                     sub_clientes.append({
                         "id": f"{c_key}|{v_key}|{cl_key}", "chave_matriz": f"{c_key}|{v_key}|{cl_key}", "nome": cl_val["nome"], "tipo": "cliente",
-                        "meses": [{"mes_banco": k, "mes_str": parse_date_safe(k).strftime("%m/%y"), **v} for k, v in cl_val["meses"].items()],
+                        "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in cl_val["meses"].items()],
                         "subRows": sorted(sub_produtos, key=lambda x: x["nome"])
                     })
                 sub_vendedores.append({
                     "id": f"{c_key}|{v_key}", "chave_matriz": f"{c_key}|{v_key}", "nome": v_val["nome"], "tipo": "vendedor", "status": v_val["status"],
-                    "meses": [{"mes_banco": k, "mes_str": parse_date_safe(k).strftime("%m/%y"), **v} for k, v in v_val["meses"].items()],
+                    "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in v_val["meses"].items()],
                     "subRows": sorted(sub_clientes, key=lambda x: x["nome"])
                 })
             dados_finais.append({
                 "id": c_key, "chave_matriz": c_key, "nome": c_val["nome"], "tipo": "coordenador", "status": c_val["status"],
-                "meses": [{"mes_banco": k, "mes_str": parse_date_safe(k).strftime("%m/%y"), **v} for k, v in c_val["meses"].items()],
+                "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in c_val["meses"].items()],
                 "subRows": sorted(sub_vendedores, key=lambda x: x["nome"])
             })
 
@@ -220,12 +223,14 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
         vend_expr = get_vend_expr()
         cli_expr = get_cli_expr()
 
+        alvos_afetados = list({a.chave.split('|')[0].strip() for a in payload.ajustes if a.chave.split('|')[0] != "SEM COORDENADOR"})
+        for alvo in alvos_afetados: verificar_vendedor_online(db, alvo)
+
         for ajuste in payload.ajustes:
             dt = parse_date_safe(ajuste.mes_projetado)
             p = ajuste.chave.split('|')
             q = get_truth_query(db, ciclo, dt, dt)
 
-            # Os filtros espelham EXATAMENTE as colunas de agrupamento da tela
             if len(p) >= 1: q = q.filter(func.upper(coord_expr) == p[0].upper())
             if len(p) >= 2: q = q.filter(func.upper(vend_expr) == p[1].upper())
             if len(p) >= 3: q = q.filter(func.upper(cli_expr) == p[2].upper())
@@ -335,10 +340,10 @@ async def lock_all(payload: PayloadLockAll, db: Session = Depends(get_db), usuar
 async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
         p = chave_matriz.split('|')
-        coord_alvo = p[0] if len(p) > 0 else None
-        vendedor_alvo = p[1] if len(p) > 1 else None
-        cliente_alvo = p[2] if len(p) > 2 else None
-        sku_alvo = p[3] if len(p) > 3 else None
+        coord_alvo = p[0] if len(p) > 0 and p[0] != "SEM COORDENADOR" else None
+        vendedor_alvo = p[1] if len(p) > 1 and p[1] != "SEM VENDEDOR" else None
+        cliente_alvo = p[2] if len(p) > 2 and p[2] != "CLIENTE NÃO IDENTIFICADO" else None
+        sku_alvo = p[3] if len(p) > 3 and p[3] != "SEM SKU" else None
 
         ciclo_atual = get_current_cycle(db)
         hoje = datetime.date.today().replace(day=1)
@@ -361,8 +366,11 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
         ).outerjoin(DimCliente, FatoVendas.cgc == DimCliente.cgc).filter(FatoVendas.data_pedido >= inicio_hist)
         
         if coord_alvo: q_hist = q_hist.filter(func.upper(coord_expr) == coord_alvo.upper())
+        elif p[0] == "SEM COORDENADOR": q_hist = q_hist.filter(coord_expr == "SEM COORDENADOR")
         if vendedor_alvo: q_hist = q_hist.filter(func.upper(vend_expr) == vendedor_alvo.upper())
+        elif len(p) > 1 and p[1] == "SEM VENDEDOR": q_hist = q_hist.filter(vend_expr == "SEM VENDEDOR")
         if cliente_alvo: q_hist = q_hist.filter(func.upper(cli_expr) == cliente_alvo.upper())
+        elif len(p) > 2 and p[2] == "CLIENTE NÃO IDENTIFICADO": q_hist = q_hist.filter(cli_expr == "CLIENTE NÃO IDENTIFICADO")
         if sku_alvo: q_hist = q_hist.filter(FatoVendas.sku == sku_alvo)
 
         for row in q_hist.group_by('mes_ano').all():
@@ -375,8 +383,11 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
         ).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)
 
         if coord_alvo: q_proj = q_proj.filter(func.upper(coord_expr) == coord_alvo.upper())
+        elif p[0] == "SEM COORDENADOR": q_proj = q_proj.filter(coord_expr == "SEM COORDENADOR")
         if vendedor_alvo: q_proj = q_proj.filter(func.upper(vend_expr) == vendedor_alvo.upper())
+        elif len(p) > 1 and p[1] == "SEM VENDEDOR": q_proj = q_proj.filter(vend_expr == "SEM VENDEDOR")
         if cliente_alvo: q_proj = q_proj.filter(func.upper(cli_expr) == cliente_alvo.upper())
+        elif len(p) > 2 and p[2] == "CLIENTE NÃO IDENTIFICADO": q_proj = q_proj.filter(cli_expr == "CLIENTE NÃO IDENTIFICADO")
         if sku_alvo: q_proj = q_proj.filter(FatoIbpGranular.sku == sku_alvo)
 
         proj_por_mes = defaultdict(dict)

@@ -29,7 +29,7 @@ const AiInsightBox = ({ alvo, tipo, pmv }: { alvo: string, tipo: string, pmv: nu
       });
       setInsight(res.data.resposta);
     } catch (e) {
-      setInsight('Erro ao gerar insight. Verifique a conexão com o Agente SQL.');
+      setInsight('Erro ao gerar insight. Verifique a ligação com o Agente SQL.');
     } finally {
       setLoading(false);
     }
@@ -49,7 +49,7 @@ const AiInsightBox = ({ alvo, tipo, pmv }: { alvo: string, tipo: string, pmv: nu
       ) : (
         <div className="flex flex-col items-start gap-4 mt-2 h-full justify-center">
            <p className="text-xs text-slate-400 font-medium leading-relaxed">
-             Acione o assistente executivo para cruzar o histórico de vendas com as metas atuais e gerar um diagnóstico automático de risco e rentabilidade.
+             Acione o assistente executivo para cruzar o histórico de vendas com as metas atuais e gerar um diagnóstico automático de risco e rentabilidade para este {tipo.toLowerCase()}.
            </p>
            <button onClick={getInsight} disabled={loading} className="mt-2 text-xs font-black bg-blue-600 text-white px-4 py-3 rounded-xl hover:bg-blue-500 transition flex items-center gap-2 disabled:opacity-50 w-full justify-center shadow-lg shadow-blue-900/20">
              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Analisar Saudabilidade (IA)'}
@@ -67,7 +67,7 @@ const PainelSaudabilidade = ({ rowData, celulasEditadas }: { rowData: any, celul
     const kpis = useMemo(() => {
         let volBU = 0; let volTD = 0; let rec = 0; let pmvMedio = 0; let count = 0;
 
-        rowData.meses?.forEach((m: any) => {
+        (rowData.meses || []).forEach((m: any) => {
             const edicao = celulasEditadas[rowData.chave_matriz]?.[m.mes_banco];
             const vFinal = edicao !== undefined ? parseInt(edicao.novo_volume || 0) : (m.vol_ajustado || 0);
             
@@ -105,7 +105,7 @@ const PainelSaudabilidade = ({ rowData, celulasEditadas }: { rowData: any, celul
                 </div>
                 <div className="mt-3 pt-3 border-t border-slate-800 flex justify-between items-center">
                     <span className="text-[9px] text-slate-500 font-bold uppercase">Base IA (Sinal)</span>
-                    <span className="text-[11px] text-slate-300 font-black">{formatVolume(rowData.meses?.reduce((a:any,b:any)=>a+(b.vol_ia||0),0))} cx</span>
+                    <span className="text-[11px] text-slate-300 font-black">{formatVolume((rowData.meses || []).reduce((a:any,b:any)=>a+(b.vol_ia||0),0))} cx</span>
                 </div>
             </div>
 
@@ -187,7 +187,9 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     if (isTopDownFechado) fetchData(); 
   }, [fetchData, isTopDownFechado]);
 
-  // A BLINDAGEM: Programação Defensiva com Optional Chaining (?.) e || [] garantindo arrays sempre válidos
+  // =====================================================================
+  // BLINDAGEM MÁXIMA: Protege contra nós sem subRows e undefined
+  // =====================================================================
   const dadosFiltrados = useMemo(() => {
     if (!busca) return dadosBrutos || [];
     const term = busca.toLowerCase();
@@ -202,7 +204,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           if (cliente?.nome?.toLowerCase().includes(term)) return cliente;
           
           const prodsFiltrados = (cliente?.subRows || []).filter((p: any) => 
-            (p?.nome?.toLowerCase().includes(term) || (p?.produto && p.produto.toLowerCase().includes(term)))
+            (p?.nome?.toLowerCase().includes(term) || (p?.produto?.toLowerCase().includes(term)))
           );
           
           if (prodsFiltrados.length > 0) return { ...cliente, subRows: prodsFiltrados };
@@ -221,19 +223,24 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   const totaisGerais = useMemo(() => {
     const totais: Record<string, {vol: number, fat: number}> = {};
     
-    dadosFiltrados?.forEach(coord => {
-      coord?.meses?.forEach((m: any) => totais[m.mes_banco] = {vol: 0, fat: 0});
+    (dadosFiltrados || []).forEach(coord => {
+      (coord?.meses || []).forEach((m: any) => {
+          if (!totais[m.mes_banco]) totais[m.mes_banco] = {vol: 0, fat: 0};
+      });
     });
     
-    dadosFiltrados?.forEach(coord => {
-      coord?.subRows?.forEach((vendedor: any) => {
-        vendedor?.subRows?.forEach((cliente: any) => {
-          cliente?.subRows?.forEach((prod: any) => {
-            const pmvBase = prod?.meses?.[0]?.pmv || 0;
-            prod?.meses?.forEach((mes: any) => {
-              const edicaoProd = celulasEditadas[prod.chave_matriz]?.[mes.mes_banco];
-              const isPendente = edicaoProd !== undefined;
-              const volumeFinal = Math.round(Number(isPendente ? edicaoProd.novo_volume : mes.vol_ajustado));
+    (dadosFiltrados || []).forEach(coord => {
+      (coord?.subRows || []).forEach((vendedor: any) => {
+        (vendedor?.subRows || []).forEach((cliente: any) => {
+          (cliente?.subRows || []).forEach((prod: any) => {
+            const pmvBase = (prod?.meses && prod.meses.length > 0) ? (prod.meses[0]?.pmv || 0) : 0;
+            
+            (prod?.meses || []).forEach((mes: any) => {
+              const chaveEdicao = celulasEditadas[prod.chave_matriz]?.[mes.mes_banco];
+              const isPendente = chaveEdicao !== undefined;
+              
+              const volCru = isPendente ? chaveEdicao.novo_volume : mes.vol_ajustado;
+              const volumeFinal = Math.round(Number(volCru || 0));
               
               if(totais[mes.mes_banco]) {
                 totais[mes.mes_banco].vol += volumeFinal;
@@ -251,16 +258,16 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     if (!dadosBrutos || dadosBrutos.length === 0) return alert("Não há dados na tela para exportar.");
     const dadosExcel: any[] = [];
     
-    dadosBrutos?.forEach(coord => {
-      coord?.subRows?.forEach((vendedor: any) => {
-        vendedor?.subRows?.forEach((cliente: any) => {
-          cliente?.subRows?.forEach((prod: any) => {
+    (dadosBrutos || []).forEach(coord => {
+      (coord?.subRows || []).forEach((vendedor: any) => {
+        (vendedor?.subRows || []).forEach((cliente: any) => {
+          (cliente?.subRows || []).forEach((prod: any) => {
             const linha: any = {
               "COORDENADOR": coord.nome, "VENDEDOR": vendedor.nome,
               "RAZÃO SOCIAL": cliente.nome, "CÓDIGO SKU": prod.produto, "DESCRIÇÃO": prod.nome, 
-              "PMV PONDERADO (R$)": prod.meses?.[0]?.pmv || 0
+              "PMV PONDERADO (R$)": (prod.meses && prod.meses.length > 0) ? prod.meses[0].pmv : 0
             };
-            prod?.meses?.forEach((m: any) => {
+            (prod?.meses || []).forEach((m: any) => {
               const edicao = celulasEditadas[prod.chave_matriz]?.[m.mes_banco];
               const volFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : m.vol_ajustado));
               linha[`${m.mes_str} (Base IA)`] = Math.round(Number(m.vol_ia));
@@ -385,7 +392,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                  {isProduto && (
                    <div className="flex items-center gap-2 mt-1">
                      <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">{row.original.produto}</span>
-                     <span className="text-[9px] text-emerald-600 font-black uppercase tracking-widest bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100">PMV: {formatMoeda(row.original.meses[0]?.pmv || 0)}</span>
+                     <span className="text-[9px] text-emerald-600 font-black uppercase tracking-widest bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100">PMV: {formatMoeda(row.original.meses?.[0]?.pmv || 0)}</span>
                    </div>
                  )}
               </div>
@@ -396,7 +403,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     ];
 
     const mesesMap = new Map();
-    dadosFiltrados.forEach(v => v?.meses?.forEach((m: any) => mesesMap.set(m.mes_banco, m)));
+    (dadosFiltrados || []).forEach(v => (v?.meses || []).forEach((m: any) => mesesMap.set(m.mes_banco, m)));
     
     Array.from(mesesMap.values()).sort((a: any, b: any) => a.mes_banco.localeCompare(b.mes_banco)).forEach((m: any) => {
       baseCols.push({
@@ -408,7 +415,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           const isVendedor = row.tipo === 'vendedor';
           const isCliente = row.tipo === 'cliente';
           
-          const dadosMes = row.meses?.find((rm: any) => rm.mes_banco === m.mes_banco);
+          const dadosMes = (row.meses || []).find((rm: any) => rm.mes_banco === m.mes_banco);
           const meta = info.table.options.meta as any;
           const edicao = meta.celulasEditadas[row.chave_matriz]?.[m.mes_banco];
           
@@ -421,7 +428,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           
           const faturamentoPrevisto = isPendente ? (valorInteiro * (dadosMes?.pmv || 0)) : (dadosMes?.receita || 0);
           
-          // PRESSÃO DA DIRETORIA: Badge Vermelho surge se o Bottom-Up for menor que o Top-Down
+          // PRESSÃO DA DIRETORIA: O Badge Vermelho surge se o Bottom-Up for menor que o Top-Down
           const temPressao = baseTopDown > valorInteiro;
           
           const bloqueadoPelaEquipa = isCoordenador ? false : row.status === 'Fechado';
@@ -651,7 +658,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                                        <LineChart 
                                          data={
                                            (dadosGraficoCache[row.original.chave_matriz] || []).map((p: any) => {
-                                               const mesNaTab = row.original.meses?.find((m: any) => m.mes_banco === p.data_iso);
+                                               const mesNaTab = (row.original.meses || []).find((m: any) => m.mes_banco === p.data_iso);
                                                const edicao = celulasEditadas[row.original.chave_matriz]?.[p.data_iso];
                                                const valComercial = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
                                                return { ...p, Consenso: valComercial !== null ? valComercial : p.Consenso };
@@ -679,7 +686,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                                  <AiInsightBox 
                                     alvo={row.original.nome} 
                                     tipo={row.original.tipo === 'coordenador' ? 'Coordenador' : row.original.tipo === 'vendedor' ? 'Vendedor' : row.original.tipo === 'cliente' ? 'Cliente' : 'SKU'} 
-                                    pmv={row.original.meses?.[0]?.pmv || 0}
+                                    pmv={(row.original.meses && row.original.meses.length > 0) ? row.original.meses[0].pmv : 0}
                                  />
                                </div>
                             </div>
