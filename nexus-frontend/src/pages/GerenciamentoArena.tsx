@@ -158,7 +158,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   const [opcoesBusca, setOpcoesBusca] = useState<{coordenadores: string[], vendedores: string[], regionais: string[]}>({coordenadores: [], vendedores: [], regionais: []});
 
   useEffect(() => {
-    axios.get('/api/v1/consensus/micro/filtros')
+    axios.get('/api/v1/consensus/gerenciamento/filtros')
          .then(res => setOpcoesBusca(res.data)).catch(console.error);
 
     axios.get('/api/v1/consensus/macro/status')
@@ -176,7 +176,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           nocache: new Date().getTime() 
       };
       
-      const res = await axios.get('/api/v1/consensus/micro', { params });
+      const res = await axios.get('/api/v1/consensus/gerenciamento', { params });
       
       console.log("DADOS FRESCOS DA API:", res.data.dados);
       
@@ -315,7 +315,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     });
 
     try {
-      await axios.post(`/api/v1/consensus/micro/congelar`, { origem_ajuste: "Comercial", ajustes });
+      await axios.post(`//api/v1/consensus/gerenciamento/congelar`, { origem_ajuste: "Comercial", ajustes });
       alert("✅ Ajustes Gerenciais salvos e consolidados!");
       setCelulasEditadas({});
       fetchData(); 
@@ -330,7 +330,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     if (!window.confirm("Atenção: Ao destrancar a Regional, os coordenadores e vendedores poderão alterar as cotas novamente. Confirma?")) return;
     setIsProcessing(true);
     try {
-      await axios.post(`/api/v1/consensus/micro/destrancar`, { regional: nomeResponsavel || "TODAS" });
+      await axios.post(`/api/v1/consensus/gerenciamento/destrancar`, { regional: nomeResponsavel || "TODAS" });
       alert("🔓 Regional(is) destrancada(s) para ajustes da base.");
       fetchData();
     } catch(e) { alert("Erro ao destrancar regional."); } 
@@ -345,7 +345,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
-        const res = await axios.get('/api/v1/consensus/micro/grafico', { params: { chave_matriz: chave } });
+        const res = await axios.get('/api/v1/consensus/gerenciamento/grafico', { params: { chave_matriz: chave } });
         setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
       } catch (e) { console.error(e); }
       finally { setLoadingGrafico(null); }
