@@ -169,11 +169,16 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const params = { nivel_filtro: nivelHierarquia, valor_filtro: nomeResponsavel || '' };
+      // O 'nocache' obriga o Cloudflare a ignorar o cache antigo!
+      const params = { 
+          nivel_filtro: nivelHierarquia, 
+          valor_filtro: nomeResponsavel || '',
+          nocache: new Date().getTime() 
+      };
+      
       const res = await axios.get('/api/v1/consensus/micro', { params });
       
-      // LOG DE DIAGNÓSTICO PROFUNDO
-      console.log("DADOS RECEBIDOS DA API:", res.data.dados);
+      console.log("DADOS FRESCOS DA API:", res.data.dados);
       
       setDadosBrutos(res.data.dados || []);
       setCelulasEditadas({});
