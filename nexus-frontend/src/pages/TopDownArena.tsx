@@ -17,7 +17,6 @@ const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: '
 const formatVolume = (val: number) => Math.round(val || 0).toLocaleString('pt-BR');
 const calcVar = (atual: number, ant: number) => ant > 0 ? ((atual - ant) / ant) * 100 : 0;
 
-// Badge Compacto de Variação (FVA)
 const FvaBadge = ({ atual, anterior, label }: { atual: number, anterior: number, label: string }) => {
     const v = calcVar(atual, anterior);
     if (v === 0 || anterior === 0) return null;
@@ -29,9 +28,6 @@ const FvaBadge = ({ atual, anterior, label }: { atual: number, anterior: number,
     );
 };
 
-// =====================================================================
-// AI INSIGHT 360
-// =====================================================================
 const AiInsightBox = ({ alvo, tipo }: { alvo: string, tipo: string }) => {
   const [insight, setInsight] = useState('');
   const [loading, setLoading] = useState(false);
@@ -70,7 +66,7 @@ const AiInsightBox = ({ alvo, tipo }: { alvo: string, tipo: string }) => {
 };
 
 // =========================================================
-// DOSSIÊS (MACRO E MICRO)
+// DOSSIÊ DA CATEGORIA (BLOCO SUPERIOR E INFERIOR)
 // =========================================================
 const CategoriaDossier = ({ data }: { data: any }) => {
     const chartData = data.meses.map((m: any) => ({
@@ -82,19 +78,26 @@ const CategoriaDossier = ({ data }: { data: any }) => {
 
     return (
         <div className="p-8 bg-slate-50/80 border-y border-slate-200">
-            <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 flex flex-col justify-center">
-                    <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2"><Target className="w-4 h-4"/> Saúde da Categoria</h4>
-                    <p className="text-3xl font-black text-slate-900 mb-1">{formatMoeda(receitaTotal)}</p>
-                    <p className="text-sm font-bold text-slate-500 mb-6">Receita Projetada (M2-M4)</p>
-                    <div className="p-4 bg-indigo-50 text-indigo-800 rounded-2xl">
-                        <p className="text-[11px] font-black uppercase mb-1">Volume Projetado</p>
-                        <p className="text-xl font-black">{formatVolume(volumeTotal)} CX</p>
+            <div className="flex flex-col gap-6">
+                
+                {/* ANDAR SUPERIOR */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 flex flex-col justify-center">
+                        <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2"><Target className="w-4 h-4"/> Saúde da Categoria</h4>
+                        <p className="text-3xl font-black text-slate-900 mb-1">{formatMoeda(receitaTotal)}</p>
+                        <p className="text-sm font-bold text-slate-500 mb-6">Receita Projetada (M2-M4)</p>
+                        <div className="p-4 bg-indigo-50 text-indigo-800 rounded-2xl">
+                            <p className="text-[11px] font-black uppercase mb-1">Volume Projetado</p>
+                            <p className="text-xl font-black">{formatVolume(volumeTotal)} CX</p>
+                        </div>
                     </div>
+                    <div><AiInsightBox alvo={data.nome} tipo="Categoria" /></div>
                 </div>
-                <div className="lg:col-span-2 bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
+
+                {/* ANDAR INFERIOR (GRÁFICO EXPANDIDO 100%) */}
+                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
                     <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2"><BarChart3 className="w-4 h-4"/> Ponte de Ciclo (FVA Macro)</h4>
-                    <div className="h-[200px] w-full">
+                    <div className="h-[250px] w-full">
                         <ResponsiveContainer width="100%" height="100%">
                             <BarChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
                                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
@@ -108,12 +111,15 @@ const CategoriaDossier = ({ data }: { data: any }) => {
                         </ResponsiveContainer>
                     </div>
                 </div>
-                <div><AiInsightBox alvo={data.nome} tipo="Categoria" /></div>
+
             </div>
         </div>
     );
 };
 
+// =========================================================
+// DOSSIÊ DO SKU (BLOCO SUPERIOR E INFERIOR)
+// =========================================================
 const SkuDossier = ({ data, celulasEditadas }: { data: any, celulasEditadas: any }) => {
     const [chartDataOrigem, setChartDataOrigem] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
@@ -138,25 +144,32 @@ const SkuDossier = ({ data, celulasEditadas }: { data: any, celulasEditadas: any
 
     return (
         <div className="p-8 bg-slate-50/80 border-y border-slate-200">
-            <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 flex flex-col gap-4">
-                    <h4 className="text-xs font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2"><BrainCircuit className="w-4 h-4"/> Engine Estatística</h4>
-                    <div>
-                        <p className="text-[10px] font-bold text-slate-400 uppercase">Modelo Vencedor</p>
-                        <p className="text-lg font-black text-slate-800">{data.modelo_vencedor}</p>
-                    </div>
-                    <div className="mt-2">
-                        <p className="text-[10px] font-bold text-slate-400 uppercase">Acurácia IA Histórica</p>
-                        <div className="flex items-end gap-2">
-                            <p className="text-3xl font-black text-emerald-500">{data.acuracia_ia.toFixed(1)}%</p>
-                            <span className="text-[10px] font-bold text-emerald-600 mb-1 bg-emerald-50 px-2 py-0.5 rounded">Alta Confiança</span>
+            <div className="flex flex-col gap-6">
+                
+                {/* ANDAR SUPERIOR */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 flex flex-col gap-4">
+                        <h4 className="text-xs font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2"><BrainCircuit className="w-4 h-4"/> Engine Estatística</h4>
+                        <div>
+                            <p className="text-[10px] font-bold text-slate-400 uppercase">Modelo Vencedor</p>
+                            <p className="text-lg font-black text-slate-800">{data.modelo_vencedor}</p>
+                        </div>
+                        <div className="mt-2">
+                            <p className="text-[10px] font-bold text-slate-400 uppercase">Acurácia IA Histórica</p>
+                            <div className="flex items-end gap-2">
+                                <p className="text-3xl font-black text-emerald-500">{data.acuracia_ia.toFixed(1)}%</p>
+                                <span className="text-[10px] font-bold text-emerald-600 mb-1 bg-emerald-50 px-2 py-0.5 rounded">Alta Confiança</span>
+                            </div>
                         </div>
                     </div>
+                    <div><AiInsightBox alvo={data.descricao} tipo="SKU" /></div>
                 </div>
 
-                <div className="lg:col-span-2 bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
-                    <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2"><Activity className="w-4 h-4"/> S&OE Timeline</h4>
-                    <div className="h-[220px] w-full">
+                {/* ANDAR INFERIOR (GRÁFICO EXPANDIDO 100%) */}
+                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
+                    <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2"><Activity className="w-4 h-4"/> S&OE Timeline Contínua (24 Meses)</h4>
+                    {/* A altura do gráfico subiu de 220px para 320px para melhor análise do histórico longo */}
+                    <div className="h-[320px] w-full">
                         {loading ? <div className="h-full flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-slate-300" /></div> : (
                             <ResponsiveContainer width="100%" height="100%">
                                 <LineChart data={chartDataDinamico} margin={{ top: 5, right: 20, left: 0, bottom: 0 }}>
@@ -174,7 +187,7 @@ const SkuDossier = ({ data, celulasEditadas }: { data: any, celulasEditadas: any
                         )}
                     </div>
                 </div>
-                <div><AiInsightBox alvo={data.descricao} tipo="SKU" /></div>
+
             </div>
         </div>
     );
@@ -346,7 +359,6 @@ export default function TopDownArena() {
                 const volProj = mData ? mData.vol_td : 0;
                 const volAntigo = mData ? mData.vol_ciclo_anterior : 0;
                 
-                // Renderização da Categoria (Compacto com Volume e Receita)
                 if (isCat) {
                     const recProj = mData ? mData.rec_td : 0;
                     const recAntiga = mData ? mData.rec_ciclo_anterior : 0;
@@ -364,7 +376,6 @@ export default function TopDownArena() {
                     );
                 }
 
-                // Renderização do SKU (Editável com Indicadores)
                 const edicao = celulasEditadas[row.original.sku]?.[mesStr];
                 const isEdited = edicao !== undefined && edicao.novo_volume !== '';
                 const displayVal = isEdited ? edicao.novo_volume : volProj;

@@ -5,6 +5,7 @@ from typing import List
 from pydantic import BaseModel
 from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
+import math
 
 from app.core.database import get_db
 from app.models.domain_models import FatoIbpGranular, DimProduto, FatoVendas, ControleCiclo
@@ -110,7 +111,7 @@ def obter_timeline_dossie(produto: str, db: Session = Depends(get_db)):
         if v.mes in calendario:
             calendario[v.mes]["Realizado"] = int(v.realizado)
             
-    # 2. Projeções (Stitching / Costura de IA Passada e Futura)
+    # 2. Projeções: Agrupando as versões disponíveis por ciclo
     projecoes = db.query(
         FatoIbpGranular.mes_projetado, FatoIbpGranular.ciclo_sop,
         func.sum(FatoIbpGranular.vol_ia).label('ia'), func.sum(FatoIbpGranular.vol_topdown).label('td'),
@@ -125,35 +126,44 @@ def obter_timeline_dossie(produto: str, db: Session = Depends(get_db)):
         if m_str not in proj_por_mes: proj_por_mes[m_str] = {}
         proj_por_mes[m_str][p.ciclo_sop] = {"ia": p.ia, "td": p.td, "final": p.final}
         
+    # 3. Stitching: O "Costurador" de Lag Forecast (Encontra o ciclo correto para cada mês)
     for mes_str in calendario.keys():
         mes_dt = datetime.strptime(mes_str, '%Y-%m').date()
         if mes_str not in proj_por_mes: continue
         
-        m2 = hoje + relativedelta(months=2) # Janela Tática M2
-        if mes_dt >= m2 and ciclo_atual in proj_por_mes[mes_str]:
-            # Futuro: Usa o ciclo atual
-            p = proj_por_mes[mes_str][ciclo_atual]
+        diff_months = (mes_dt.year - hoje.year) * 12 + mes_dt.month - hoje.month
+        
+        # M2, M3, M4 buscam o ciclo atual. Restante sofre regressão.
+        if diff_months >= 2:
+            ciclo_alvo = ciclo_atual
         else:
-            # Passado/M1: Busca o "Lag Forecast" (A projeção feita M-1 ou a mais próxima disponível daquele mês)
-            ciclo_m1 = (mes_dt - relativedelta(months=1)).strftime('%m/%Y')
-            ciclo_m2 = (mes_dt - relativedelta(months=2)).strftime('%m/%Y')
+            offset = math.ceil((2 - diff_months) / 2)
+            ciclo_alvo_dt = hoje - relativedelta(months=offset)
+            ciclo_alvo = ciclo_alvo_dt.strftime('%m/%Y')
             
-            ciclo_alvo = ciclo_m1
-            if ciclo_alvo not in proj_por_mes[mes_str]:
-                if ciclo_m2 in proj_por_mes[mes_str]: ciclo_alvo = ciclo_m2
-                else: ciclo_alvo = list(proj_por_mes[mes_str].keys())[-1] # Fallback pro mais recente
-            
+        # Tenta buscar a projeção do ciclo_alvo. Se o sistema não existia na época, busca o mais antigo possível.
+        if ciclo_alvo in proj_por_mes[mes_str]:
             p = proj_por_mes[mes_str][ciclo_alvo]
+        else:
+            available_cycles = sorted(proj_por_mes[mes_str].keys(), key=lambda x: datetime.strptime(x, '%m/%Y'))
+            target_dt = datetime.strptime(ciclo_alvo, '%m/%Y')
+            best_c = available_cycles[-1]
+            for c in reversed(available_cycles):
+                if datetime.strptime(c, '%m/%Y') <= target_dt:
+                    best_c = c
+                    break
+            p = proj_por_mes[mes_str][best_c]
             
         calendario[mes_str]["IA"] = int(p["ia"] or 0)
         calendario[mes_str]["Comercial"] = int(p["td"] or 0)
         calendario[mes_str]["Final"] = int(p["final"] or 0)
             
+    # 4. Finalização
     timeline = []
     for mes_str, valores in sorted(calendario.items()):
         mes_dt = datetime.strptime(mes_str, '%Y-%m').date()
         realizado = valores["Realizado"]
-        if mes_dt < hoje and realizado is None: realizado = 0 # Preenche buracos do passado com 0
+        if mes_dt < hoje and realizado is None: realizado = 0 # Preenche buracos sem venda com 0
             
         timeline.append({
             "name": mes_str, "Realizado": realizado, "IA": valores["IA"],
