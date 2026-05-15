@@ -67,7 +67,7 @@ const PainelSaudabilidade = ({ rowData, celulasEditadas }: { rowData: any, celul
     const kpis = useMemo(() => {
         let volBU = 0; let volTD = 0; let rec = 0; let pmvMedio = 0; let count = 0;
 
-        (rowData.meses || []).forEach((m: any) => {
+        (rowData?.meses || []).forEach((m: any) => {
             const edicao = celulasEditadas[rowData.chave_matriz]?.[m.mes_banco];
             const vFinal = edicao !== undefined ? parseInt(edicao.novo_volume || 0) : (m.vol_ajustado || 0);
             
@@ -105,7 +105,7 @@ const PainelSaudabilidade = ({ rowData, celulasEditadas }: { rowData: any, celul
                 </div>
                 <div className="mt-3 pt-3 border-t border-slate-800 flex justify-between items-center">
                     <span className="text-[9px] text-slate-500 font-bold uppercase">Base IA (Sinal)</span>
-                    <span className="text-[11px] text-slate-300 font-black">{formatVolume((rowData.meses || []).reduce((a:any,b:any)=>a+(b.vol_ia||0),0))} cx</span>
+                    <span className="text-[11px] text-slate-300 font-black">{formatVolume((rowData?.meses || []).reduce((a:any,b:any)=>a+(b.vol_ia||0),0))} cx</span>
                 </div>
             </div>
 
@@ -187,9 +187,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     if (isTopDownFechado) fetchData(); 
   }, [fetchData, isTopDownFechado]);
 
-  // =====================================================================
-  // BLINDAGEM MÁXIMA: Protege contra nós sem subRows e undefined
-  // =====================================================================
+  // Motor de Busca Super Blindado
   const dadosFiltrados = useMemo(() => {
     if (!busca) return dadosBrutos || [];
     const term = busca.toLowerCase();
@@ -263,9 +261,9 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
         (vendedor?.subRows || []).forEach((cliente: any) => {
           (cliente?.subRows || []).forEach((prod: any) => {
             const linha: any = {
-              "COORDENADOR": coord.nome, "VENDEDOR": vendedor.nome,
-              "RAZÃO SOCIAL": cliente.nome, "CÓDIGO SKU": prod.produto, "DESCRIÇÃO": prod.nome, 
-              "PMV PONDERADO (R$)": (prod.meses && prod.meses.length > 0) ? prod.meses[0].pmv : 0
+              "COORDENADOR": coord?.nome, "VENDEDOR": vendedor?.nome,
+              "RAZÃO SOCIAL": cliente?.nome, "CÓDIGO SKU": prod?.produto, "DESCRIÇÃO": prod?.nome, 
+              "PMV PONDERADO (R$)": (prod?.meses && prod.meses.length > 0) ? prod.meses[0].pmv : 0
             };
             (prod?.meses || []).forEach((m: any) => {
               const edicao = celulasEditadas[prod.chave_matriz]?.[m.mes_banco];
@@ -342,7 +340,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   };
 
   const qtdEdicoes = Object.keys(celulasEditadas).length;
-  const isAllFechado = dadosBrutos.length > 0 && dadosBrutos[0].status === 'Fechado';
+  const isAllFechado = dadosBrutos?.length > 0 && dadosBrutos[0]?.status === 'Fechado';
 
   const columns = useMemo(() => {
     if (!dadosFiltrados || dadosFiltrados.length === 0) return [];
@@ -350,13 +348,13 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     const baseCols: any[] = [
       {
         id: 'nome', header: 'Supervisão / Vendedor / Cliente / Produto',
-        accessorFn: (row: any) => row.nome,
+        accessorFn: (row: any) => row?.nome,
         cell: (info: any) => {
           const row = info.row;
-          const isCoordenador = row.original.tipo === 'coordenador';
-          const isVendedor = row.original.tipo === 'vendedor';
-          const isCliente = row.original.tipo === 'cliente';
-          const isProduto = row.original.tipo === 'produto';
+          const isCoordenador = row.original?.tipo === 'coordenador';
+          const isVendedor = row.original?.tipo === 'vendedor';
+          const isCliente = row.original?.tipo === 'cliente';
+          const isProduto = row.original?.tipo === 'produto';
 
           return (
             <div style={{ paddingLeft: `${row.depth * 2}rem` }} className="flex items-center gap-3 py-2 min-w-[320px]">
@@ -368,7 +366,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                 <div className="w-8"></div>
               )}
               
-              <button onClick={() => toggleChart(row)} className={`p-1.5 rounded-lg transition-colors border ${chartExpanded === row.original.chave_matriz ? 'bg-blue-100 border-blue-200 text-blue-600 shadow-sm' : 'hover:bg-slate-100 border-transparent text-slate-400 hover:text-slate-600'}`} title="Ver Dossiê Analítico">
+              <button onClick={() => toggleChart(row)} className={`p-1.5 rounded-lg transition-colors border ${chartExpanded === row.original?.chave_matriz ? 'bg-blue-100 border-blue-200 text-blue-600 shadow-sm' : 'hover:bg-slate-100 border-transparent text-slate-400 hover:text-slate-600'}`} title="Ver Dossiê Analítico">
                 <BarChart2 className="w-4 h-4" />
               </button>
 
@@ -385,14 +383,14 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                  </span>
                  {isCoordenador && (
                      <div className="flex items-center gap-1 mt-1">
-                         {row.original.status === 'Fechado' ? <Lock className="w-3 h-3 text-rose-500"/> : <Unlock className="w-3 h-3 text-emerald-500"/>}
-                         <span className={`text-[9px] font-black uppercase tracking-widest ${row.original.status === 'Fechado' ? 'text-rose-500' : 'text-emerald-500'}`}>{row.original.status}</span>
+                         {row.original?.status === 'Fechado' ? <Lock className="w-3 h-3 text-rose-500"/> : <Unlock className="w-3 h-3 text-emerald-500"/>}
+                         <span className={`text-[9px] font-black uppercase tracking-widest ${row.original?.status === 'Fechado' ? 'text-rose-500' : 'text-emerald-500'}`}>{row.original?.status}</span>
                      </div>
                  )}
                  {isProduto && (
                    <div className="flex items-center gap-2 mt-1">
-                     <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">{row.original.produto}</span>
-                     <span className="text-[9px] text-emerald-600 font-black uppercase tracking-widest bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100">PMV: {formatMoeda(row.original.meses?.[0]?.pmv || 0)}</span>
+                     <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">{row.original?.produto}</span>
+                     <span className="text-[9px] text-emerald-600 font-black uppercase tracking-widest bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100">PMV: {formatMoeda(row.original?.meses?.[0]?.pmv || 0)}</span>
                    </div>
                  )}
               </div>
@@ -411,13 +409,13 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
         accessorFn: (row: any) => row?.meses?.find((rm: any) => rm.mes_banco === m.mes_banco)?.vol_ajustado || 0,
         cell: (info: any) => {
           const row = info.row.original;
-          const isCoordenador = row.tipo === 'coordenador';
-          const isVendedor = row.tipo === 'vendedor';
-          const isCliente = row.tipo === 'cliente';
+          const isCoordenador = row?.tipo === 'coordenador';
+          const isVendedor = row?.tipo === 'vendedor';
+          const isCliente = row?.tipo === 'cliente';
           
-          const dadosMes = (row.meses || []).find((rm: any) => rm.mes_banco === m.mes_banco);
+          const dadosMes = (row?.meses || []).find((rm: any) => rm.mes_banco === m.mes_banco);
           const meta = info.table.options.meta as any;
-          const edicao = meta.celulasEditadas[row.chave_matriz]?.[m.mes_banco];
+          const edicao = meta?.celulasEditadas?.[row?.chave_matriz]?.[m.mes_banco];
           
           const isPendente = edicao !== undefined;
           const valorReal = isPendente ? edicao.novo_volume : (dadosMes?.vol_ajustado || 0);
@@ -428,10 +426,8 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           
           const faturamentoPrevisto = isPendente ? (valorInteiro * (dadosMes?.pmv || 0)) : (dadosMes?.receita || 0);
           
-          // PRESSÃO DA DIRETORIA: O Badge Vermelho surge se o Bottom-Up for menor que o Top-Down
           const temPressao = baseTopDown > valorInteiro;
-          
-          const bloqueadoPelaEquipa = isCoordenador ? false : row.status === 'Fechado';
+          const bloqueadoPelaEquipa = isCoordenador ? false : row?.status === 'Fechado';
           
           if (isCoordenador || isVendedor) {
             return (
@@ -472,7 +468,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   const table = useReactTable({
     data: dadosFiltrados, columns, state: { expanded, sorting },
     onExpandedChange: setExpanded, onSortingChange: setSorting,
-    getSubRows: row => row.subRows,
+    getSubRows: row => row?.subRows,
     getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel(), getSortedRowModel: getSortedRowModel(),
     meta: {
       celulasEditadas,
@@ -557,9 +553,9 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                     className="bg-slate-50 border border-slate-200 p-2.5 rounded-xl text-sm font-bold text-slate-700 outline-none cursor-pointer max-w-[200px] truncate"
                 >
                     <option value="">-- Todos --</option>
-                    {nivelHierarquia === 'regional' && opcoesBusca.regionais.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                    {nivelHierarquia === 'coordenador' && opcoesBusca.coordenadores.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                    {nivelHierarquia === 'vendedor' && opcoesBusca.vendedores.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                    {nivelHierarquia === 'regional' && opcoesBusca?.regionais?.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                    {nivelHierarquia === 'coordenador' && opcoesBusca?.coordenadores?.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                    {nivelHierarquia === 'vendedor' && opcoesBusca?.vendedores?.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                 </select>
                 <button 
                   onClick={fetchData} disabled={isLoading} 
@@ -599,9 +595,9 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           <div className="overflow-x-auto pb-4 custom-scrollbar">
             <table className="w-full text-left border-collapse">
               <thead className="bg-white border-b-2 border-slate-100 shadow-sm sticky top-0 z-10">
-                {table.getHeaderGroups().map(hg => (
+                {table.getHeaderGroups()?.map(hg => (
                   <tr key={hg.id}>
-                    {hg.headers.map(header => (
+                    {hg?.headers?.map(header => (
                       <th key={header.id} className={`px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest ${header.column.getCanSort() ? 'cursor-pointer hover:bg-slate-50 transition-colors' : ''}`} onClick={header.column.getToggleSortingHandler()}>
                         <div className="flex items-center gap-2">
                           {flexRender(header.column.columnDef.header, header.getContext())}
@@ -618,10 +614,10 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
               </thead>
               
               <tbody className="mb-20">
-                {table.getRowModel().rows.map(row => (
+                {table.getRowModel()?.rows?.map(row => (
                   <Fragment key={row.id}>
-                    <tr className={`border-b border-slate-50 transition-colors ${row.getIsExpanded() ? 'bg-blue-50/20' : row.original.tipo === 'coordenador' ? 'bg-slate-50 hover:bg-slate-100' : row.original.tipo === 'vendedor' ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/50 hover:bg-slate-100'}`}>
-                      {row.getVisibleCells().map(cell => (
+                    <tr className={`border-b border-slate-50 transition-colors ${row.getIsExpanded() ? 'bg-blue-50/20' : row.original?.tipo === 'coordenador' ? 'bg-slate-50 hover:bg-slate-100' : row.original?.tipo === 'vendedor' ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/50 hover:bg-slate-100'}`}>
+                      {row.getVisibleCells()?.map(cell => (
                         <td key={cell.id} className="px-8 py-3">
                           {flexRender(cell.column.columnDef.cell, cell.getContext())}
                         </td>
@@ -629,7 +625,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                     </tr>
                     
                     {/* AQUI COMEÇA O DOSSIÊ DE SAUDABILIDADE EXPANDIDO */}
-                    {chartExpanded === row.original.chave_matriz && (
+                    {chartExpanded === row.original?.chave_matriz && (
                       <tr>
                         <td colSpan={table.getAllColumns().length} className="bg-slate-900 p-8 border-b border-slate-800">
                           <div className="bg-slate-950 rounded-[32px] p-8 shadow-inner border border-slate-800 animate-in fade-in duration-500">
@@ -637,10 +633,10 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                             <div className="flex justify-between items-start mb-6 px-2">
                                 <div className="flex flex-col gap-1">
                                     <h3 className="text-lg font-black text-white uppercase tracking-tighter flex items-center gap-2">
-                                    <Activity className="w-5 h-5 text-blue-400" /> Dossiê de Saudabilidade ({row.original.tipo === 'coordenador' ? 'Visão Supervisão' : row.original.tipo === 'vendedor' ? 'Visão Carteira de Vendas' : row.original.tipo === 'cliente' ? 'Visão Conta Global' : 'Visão Produto'})
+                                    <Activity className="w-5 h-5 text-blue-400" /> Dossiê de Saudabilidade ({row.original?.tipo === 'coordenador' ? 'Visão Supervisão' : row.original?.tipo === 'vendedor' ? 'Visão Carteira de Vendas' : row.original?.tipo === 'cliente' ? 'Visão Conta Global' : 'Visão Produto'})
                                     </h3>
                                     <p className="text-xs font-bold text-slate-400 tracking-widest uppercase">
-                                    {row.original.nome}
+                                    {row.original?.nome}
                                     </p>
                                 </div>
                             </div>
@@ -651,15 +647,15 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                                <div className="lg:col-span-2">
                                  <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2"><BarChart2 className="w-3 h-3"/> Timeline S&OE (Lag Forecast)</h4>
                                  <div className="h-[250px] w-full">
-                                   {loadingGrafico === row.original.chave_matriz ? (
+                                   {loadingGrafico === row.original?.chave_matriz ? (
                                      <div className="h-full flex items-center justify-center text-slate-600"><Loader2 className="animate-spin w-8 h-8" /></div>
                                    ) : (
                                      <ResponsiveContainer width="100%" height="100%">
                                        <LineChart 
                                          data={
-                                           (dadosGraficoCache[row.original.chave_matriz] || []).map((p: any) => {
-                                               const mesNaTab = (row.original.meses || []).find((m: any) => m.mes_banco === p.data_iso);
-                                               const edicao = celulasEditadas[row.original.chave_matriz]?.[p.data_iso];
+                                           (dadosGraficoCache[row.original?.chave_matriz] || [])?.map((p: any) => {
+                                               const mesNaTab = (row.original?.meses || []).find((m: any) => m.mes_banco === p.data_iso);
+                                               const edicao = celulasEditadas[row.original?.chave_matriz]?.[p.data_iso];
                                                const valComercial = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
                                                return { ...p, Consenso: valComercial !== null ? valComercial : p.Consenso };
                                            })
@@ -684,9 +680,9 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
 
                                <div className="flex flex-col justify-start">
                                  <AiInsightBox 
-                                    alvo={row.original.nome} 
-                                    tipo={row.original.tipo === 'coordenador' ? 'Coordenador' : row.original.tipo === 'vendedor' ? 'Vendedor' : row.original.tipo === 'cliente' ? 'Cliente' : 'SKU'} 
-                                    pmv={(row.original.meses && row.original.meses.length > 0) ? row.original.meses[0].pmv : 0}
+                                    alvo={row.original?.nome} 
+                                    tipo={row.original?.tipo === 'coordenador' ? 'Coordenador' : row.original?.tipo === 'vendedor' ? 'Vendedor' : row.original?.tipo === 'cliente' ? 'Cliente' : 'SKU'} 
+                                    pmv={(row.original?.meses && row.original.meses.length > 0) ? row.original.meses[0].pmv : 0}
                                  />
                                </div>
                             </div>
@@ -699,7 +695,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
               </tbody>
               <tfoot className="bg-slate-900 text-white shadow-inner sticky bottom-0 z-20">
                 <tr>
-                  {table.getHeaderGroups()[0].headers.map(header => {
+                  {table.getHeaderGroups()?.[0]?.headers?.map(header => {
                     if (header.id === 'nome') return (
                       <td key={header.id} className="px-8 py-5 text-right rounded-bl-[40px]">
                         <div className="flex flex-col"><span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Total Consolidação</span><span className="font-bold text-sm text-white">SUMÁRIO GERENCIAL</span></div>
