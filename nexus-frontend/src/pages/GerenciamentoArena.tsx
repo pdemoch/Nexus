@@ -49,7 +49,7 @@ const AiInsightBox = ({ alvo, tipo, pmv }: { alvo: string, tipo: string, pmv: nu
       ) : (
         <div className="flex flex-col items-start gap-4 mt-2 h-full justify-center">
            <p className="text-xs text-slate-400 font-medium leading-relaxed">
-             Acione o assistente executivo para cruzar o histórico de vendas com as metas atuais e gerar um diagnóstico automático de risco e rentabilidade para este {tipo.toLowerCase()}.
+             Acione o assistente executivo para cruzar o histórico de vendas com as metas atuais e gerar um diagnóstico automático de risco e rentabilidade.
            </p>
            <button onClick={getInsight} disabled={loading} className="mt-2 text-xs font-black bg-blue-600 text-white px-4 py-3 rounded-xl hover:bg-blue-500 transition flex items-center gap-2 disabled:opacity-50 w-full justify-center shadow-lg shadow-blue-900/20">
              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Analisar Saudabilidade (IA)'}
@@ -64,7 +64,6 @@ const AiInsightBox = ({ alvo, tipo, pmv }: { alvo: string, tipo: string, pmv: nu
 // COMPONENTE: DOSSIÊ DE SAUDABILIDADE (NÚMEROS EXECUTIVOS)
 // =====================================================================
 const PainelSaudabilidade = ({ rowData, celulasEditadas }: { rowData: any, celulasEditadas: any }) => {
-    // Calcula os totais dinamicamente com base nas edições pendentes em tela
     const kpis = useMemo(() => {
         let volBU = 0; let volTD = 0; let rec = 0; let pmvMedio = 0; let count = 0;
 
@@ -90,10 +89,10 @@ const PainelSaudabilidade = ({ rowData, celulasEditadas }: { rowData: any, celul
     return (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
             <div className="bg-slate-900 p-5 rounded-2xl border border-slate-700 shadow-sm flex flex-col justify-between">
-                <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 flex items-center gap-2"><Activity className="w-3 h-3"/> Receita Projetada (M2-M4)</h4>
+                <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 flex items-center gap-2"><Activity className="w-3 h-3"/> Receita Projetada S&OP</h4>
                 <p className="text-2xl font-black text-emerald-400 mt-2">{formatMoeda(kpis.receitaProjetada)}</p>
                 <div className="mt-3 pt-3 border-t border-slate-800 flex justify-between items-center">
-                    <span className="text-[9px] text-slate-500 font-bold uppercase">PMV Médio</span>
+                    <span className="text-[9px] text-slate-500 font-bold uppercase">PMV Ponderado</span>
                     <span className="text-[11px] text-slate-300 font-black">{formatMoeda(kpis.pmvMedio)}/cx</span>
                 </div>
             </div>
@@ -188,9 +187,9 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     if (isTopDownFechado) fetchData(); 
   }, [fetchData, isTopDownFechado]);
 
-  // A MÁGICA: Programação Defensiva com Optional Chaining (?.)
+  // A BLINDAGEM: Programação Defensiva com Optional Chaining (?.) e || [] garantindo arrays sempre válidos
   const dadosFiltrados = useMemo(() => {
-    if (!busca) return dadosBrutos;
+    if (!busca) return dadosBrutos || [];
     const term = busca.toLowerCase();
     
     return (dadosBrutos || []).map(coord => {
@@ -422,7 +421,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           
           const faturamentoPrevisto = isPendente ? (valorInteiro * (dadosMes?.pmv || 0)) : (dadosMes?.receita || 0);
           
-          // PRESSÃO DA DIRETORIA: O Badge Vermelho surge se o Bottom-Up for menor que o Top-Down
+          // PRESSÃO DA DIRETORIA: Badge Vermelho surge se o Bottom-Up for menor que o Top-Down
           const temPressao = baseTopDown > valorInteiro;
           
           const bloqueadoPelaEquipa = isCoordenador ? false : row.status === 'Fechado';
@@ -496,7 +495,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           </div>
           <h2 className="text-2xl font-black text-slate-900 tracking-tighter mb-4">Aguardando Diretoria (Top-Down)</h2>
           <p className="text-slate-500 font-medium leading-relaxed">
-            A fase Gerencial só pode ser iniciada após a aprovação e congelamento da demanda macro pela Diretoria (Fase 1).
+            A fase Gerencial só pode ser iniciada após a aprovação e congelamento da demanda macro pela Diretoria.
           </p>
         </div>
       </div>
@@ -590,9 +589,9 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                  <span className="font-black text-sm tracking-widest uppercase">Nenhum dado encontrado</span>
              </div>
           ) : (
-          <div className="overflow-x-auto pb-4">
+          <div className="overflow-x-auto pb-4 custom-scrollbar">
             <table className="w-full text-left border-collapse">
-              <thead className="bg-white border-b-2 border-slate-100 shadow-sm">
+              <thead className="bg-white border-b-2 border-slate-100 shadow-sm sticky top-0 z-10">
                 {table.getHeaderGroups().map(hg => (
                   <tr key={hg.id}>
                     {hg.headers.map(header => (
@@ -611,7 +610,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                 ))}
               </thead>
               
-              <tbody>
+              <tbody className="mb-20">
                 {table.getRowModel().rows.map(row => (
                   <Fragment key={row.id}>
                     <tr className={`border-b border-slate-50 transition-colors ${row.getIsExpanded() ? 'bg-blue-50/20' : row.original.tipo === 'coordenador' ? 'bg-slate-50 hover:bg-slate-100' : row.original.tipo === 'vendedor' ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/50 hover:bg-slate-100'}`}>
@@ -639,11 +638,9 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                                 </div>
                             </div>
 
-                            {/* Os Cards Executivos de Performance */}
                             <PainelSaudabilidade rowData={row.original} celulasEditadas={celulasEditadas} />
                             
                             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                               
                                <div className="lg:col-span-2">
                                  <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2"><BarChart2 className="w-3 h-3"/> Timeline S&OE (Lag Forecast)</h4>
                                  <div className="h-[250px] w-full">
@@ -678,7 +675,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                                  </div>
                                </div>
 
-                               {/* O Painel da IA injetado na visão lateral */}
                                <div className="flex flex-col justify-start">
                                  <AiInsightBox 
                                     alvo={row.original.nome} 
@@ -687,7 +683,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                                  />
                                </div>
                             </div>
-
                           </div>
                         </td>
                       </tr>
@@ -695,11 +690,11 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                   </Fragment>
                 ))}
               </tbody>
-              <tfoot className="bg-slate-900 text-white">
+              <tfoot className="bg-slate-900 text-white shadow-inner sticky bottom-0 z-20">
                 <tr>
                   {table.getHeaderGroups()[0].headers.map(header => {
                     if (header.id === 'nome') return (
-                      <td key={header.id} className="px-8 py-5 text-right">
+                      <td key={header.id} className="px-8 py-5 text-right rounded-bl-[40px]">
                         <div className="flex flex-col"><span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Total Consolidação</span><span className="font-bold text-sm text-white">SUMÁRIO GERENCIAL</span></div>
                       </td>
                     );

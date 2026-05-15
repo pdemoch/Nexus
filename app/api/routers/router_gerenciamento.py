@@ -24,6 +24,18 @@ from app.api.routers.shared_ibp import (
 router = APIRouter(prefix="/api/v1/consensus/micro", tags=["Consenso Gerenciamento"])
 
 # =====================================================================
+# EXPRESSÕES SQL DE AGRUPAMENTO (FALLBACK BLINDADO)
+# =====================================================================
+def get_coord_expr():
+    return func.coalesce(func.nullif(func.trim(DimCliente.supervisor_nome), ''), func.nullif(func.trim(DimCliente.gerente_nome), ''), 'SEM COORDENADOR')
+
+def get_vend_expr():
+    return func.coalesce(func.nullif(func.trim(DimCliente.vendedor_nome), ''), 'SEM VENDEDOR')
+
+def get_cli_expr():
+    return func.coalesce(func.nullif(func.trim(DimCliente.razaosocial), ''), 'CLIENTE NÃO IDENTIFICADO')
+
+# =====================================================================
 # PERMISSÕES E PROTEÇÕES
 # =====================================================================
 def require_manager_or_admin(usuario: dict = Depends(get_current_user)):
@@ -32,6 +44,7 @@ def require_manager_or_admin(usuario: dict = Depends(get_current_user)):
     return usuario
 
 def verificar_vendedor_online(db: Session, alvo_nome: str):
+    if alvo_nome in ["SEM COORDENADOR", "SEM VENDEDOR", "COORDENAÇÃO GERAL"]: return
     user = db.query(Usuario).filter(
         func.or_(
             func.upper(func.trim(Usuario.nome_vendedor)) == alvo_nome.strip().upper(),
@@ -39,7 +52,7 @@ def verificar_vendedor_online(db: Session, alvo_nome: str):
         )
     ).first()
     if user and user.ultima_atividade and (datetime.datetime.utcnow() - user.ultima_atividade).total_seconds() < 60:
-        raise HTTPException(status_code=403, detail=f"⚠️ CONCORRÊNCIA: O utilizador {alvo_nome} está online e com a plataforma aberta neste exato momento.")
+        raise HTTPException(status_code=403, detail=f"⚠️ O utilizador {alvo_nome} está com a plataforma aberta neste exato momento.")
 
 # =====================================================================
 # SCHEMAS
@@ -78,118 +91,115 @@ async def obter_filtros_gerencia(db: Session = Depends(get_db), usuario: dict = 
         "coordenadores": sorted({str(c.supervisor_nome).strip() for c in q.distinct(DimCliente.supervisor_nome).all() if c.supervisor_nome}),
         "vendedores": sorted({str(v.vendedor_nome).strip() for v in q.distinct(DimCliente.vendedor_nome).all() if v.vendedor_nome})
     }
+    res["coordenadores"].append("SEM COORDENADOR")
+    res["vendedores"].append("SEM VENDEDOR")
     return res
 
 @router.get("")
 async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = None, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
         ciclo = get_current_cycle(db)
-        meses_janela = get_working_window_months(db)
-        data_ini, data_fim = meses_janela[0], meses_janela[-1]
         
+        # Garante a janela desde o mês atual para capturar Maio/Junho
+        hoje = datetime.date.today().replace(day=1)
+        data_ini = hoje
+        data_fim = hoje + relativedelta(months=4)
+        
+        meses_lista = []
+        curr = data_ini
+        while curr <= data_fim:
+            meses_lista.append(curr.strftime("%Y-%m-%d"))
+            curr += relativedelta(months=1)
+
         query_base = get_truth_query(db, ciclo, data_ini, data_fim)
         
+        coord_expr = get_coord_expr()
+        vend_expr = get_vend_expr()
+        cli_expr = get_cli_expr()
+
         if usuario['funcao'] == 'Gerente':
             g_nome = usuario['gerente_nome'].strip().upper()
             query_base = query_base.filter(func.upper(func.trim(DimCliente.gerente_nome)) == g_nome)
             
         if nivel_filtro == 'coordenador' and valor_filtro:
-            query_base = query_base.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == valor_filtro.strip().upper())
+            query_base = query_base.filter(func.upper(coord_expr) == valor_filtro.strip().upper())
         elif nivel_filtro == 'vendedor' and valor_filtro:
-            query_base = query_base.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == valor_filtro.strip().upper())
+            query_base = query_base.filter(func.upper(vend_expr) == valor_filtro.strip().upper())
         elif nivel_filtro == 'regional' and valor_filtro:
             query_base = query_base.filter(func.upper(func.trim(DimCliente.regional)) == valor_filtro.strip().upper())
 
+        # O SQL faz todo o agrupamento limpo usando as expressões COALESCE
         resultados = query_base.with_entities(
-            DimCliente.supervisor_nome, DimCliente.vendedor_nome, DimCliente.razaosocial, 
+            coord_expr.label('coord_final'),
+            vend_expr.label('vend_final'),
+            cli_expr.label('cli_final'),
             FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
             func.sum(FatoIbpGranular.vol_topdown).label('v_td'),  
             func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), 
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
         ).group_by(
-            DimCliente.supervisor_nome, DimCliente.vendedor_nome, DimCliente.razaosocial, 
-            FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado
+            coord_expr, vend_expr, cli_expr, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado
         ).all()
 
         status_dict = {c.origem.strip().upper(): c.status for c in db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo).all() if c.origem}
         
-        # O NOVO MOTOR: Construção explícita de dicionários (Evita colisão de memória)
         arvore = {}
-
         def criar_meses():
-            return {m.strftime("%Y-%m-%d"): {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0, "pmv":0} for m in meses_janela}
+            return {m: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0, "pmv":0} for m in meses_lista}
 
         for r in resultados:
-            c = str(r.supervisor_nome).strip() if r.supervisor_nome else "COORDENADOR INDEFINIDO"
-            v = str(r.vendedor_nome).strip() if r.vendedor_nome else "VENDEDOR INDEFINIDO"
-            rz = str(r.razaosocial).strip() if r.razaosocial else "CLIENTE INDEFINIDO"
-            sku = str(r.sku).strip() if r.sku else "SKU INDEFINIDO"
+            c = str(r.coord_final)
+            v = str(r.vend_final)
+            rz = str(r.cli_final)
+            sku = str(r.sku).strip() if r.sku else "SEM SKU"
             desc = str(r.descricao).strip() if r.descricao else "PRODUTO SEM CADASTRO"
             ms = str(r.mes_projetado)
             
-            v_ia = int(r.v_ia or 0)
-            v_td = int(r.v_td or 0)
-            v_bu = int(r.v_bu or 0)
-            pmv_base = float(r.pmv or 0)
+            v_ia, v_td, v_bu, pmv_base = int(r.v_ia or 0), int(r.v_td or 0), int(r.v_bu or 0), float(r.pmv or 0)
             rec = v_bu * pmv_base
 
-            # 1. Nível Coordenador
-            if c not in arvore:
-                arvore[c] = {"nome": c, "status": status_dict.get(c.upper(), "Aberto"), "meses": criar_meses(), "vendedores": {}}
-            
-            # 2. Nível Vendedor
-            if v not in arvore[c]["vendedores"]:
-                arvore[c]["vendedores"][v] = {"nome": v, "status": status_dict.get(v.upper(), "Aberto"), "meses": criar_meses(), "clientes": {}}
-            
-            # 3. Nível Cliente
-            if rz not in arvore[c]["vendedores"][v]["clientes"]:
-                arvore[c]["vendedores"][v]["clientes"][rz] = {"nome": rz, "meses": criar_meses(), "produtos": {}}
-                
-            # 4. Nível Produto
-            if sku not in arvore[c]["vendedores"][v]["clientes"][rz]["produtos"]:
-                arvore[c]["vendedores"][v]["clientes"][rz]["produtos"][sku] = {"nome": desc, "sku": sku, "meses": criar_meses()}
+            if c not in arvore: arvore[c] = {"nome": c, "status": status_dict.get(c.upper(), "Aberto"), "meses": criar_meses(), "vendedores": {}}
+            if v not in arvore[c]["vendedores"]: arvore[c]["vendedores"][v] = {"nome": v, "status": status_dict.get(v.upper(), "Aberto"), "meses": criar_meses(), "clientes": {}}
+            if rz not in arvore[c]["vendedores"][v]["clientes"]: arvore[c]["vendedores"][v]["clientes"][rz] = {"nome": rz, "meses": criar_meses(), "produtos": {}}
+            if sku not in arvore[c]["vendedores"][v]["clientes"][rz]["produtos"]: arvore[c]["vendedores"][v]["clientes"][rz]["produtos"][sku] = {"nome": desc, "sku": sku, "meses": criar_meses()}
 
-            # Atualização Matemática
-            alvos = [
-                arvore[c]["meses"][ms],
-                arvore[c]["vendedores"][v]["meses"][ms],
-                arvore[c]["vendedores"][v]["clientes"][rz]["meses"][ms],
-                arvore[c]["vendedores"][v]["clientes"][rz]["produtos"][sku]["meses"][ms]
-            ]
-            
-            for t in alvos:
-                t["vol_ia"] += v_ia
-                t["vol_td"] += v_td
-                t["vol_ajustado"] += v_bu
-                t["receita"] += rec
-                t["pmv"] = (t["receita"] / t["vol_ajustado"]) if t["vol_ajustado"] > 0 else pmv_base
+            if ms in meses_lista:
+                for t in [arvore[c]["meses"][ms], arvore[c]["vendedores"][v]["meses"][ms], arvore[c]["vendedores"][v]["clientes"][rz]["meses"][ms], arvore[c]["vendedores"][v]["clientes"][rz]["produtos"][sku]["meses"][ms]]:
+                    t["vol_ia"] += v_ia
+                    t["vol_td"] += v_td
+                    t["vol_ajustado"] += v_bu
+                    t["receita"] += rec
+                    t["pmv"] = (t["receita"] / t["vol_ajustado"]) if t["vol_ajustado"] > 0 else pmv_base
 
-        # Conversão de Dicionário para Lista (Para o React Table entender)
+        # Conversão pura garantindo listas no subRows sempre preenchidas
         dados_finais = []
         for c_key, c_val in arvore.items():
+            sub_vendedores = []
+            for v_key, v_val in c_val["vendedores"].items():
+                sub_clientes = []
+                for cl_key, cl_val in v_val["clientes"].items():
+                    sub_produtos = []
+                    for p_key, p_val in cl_val["produtos"].items():
+                        sub_produtos.append({
+                            "id": f"{c_key}|{v_key}|{cl_key}|{p_key}", "chave_matriz": f"{c_key}|{v_key}|{cl_key}|{p_key}", 
+                            "nome": p_val["nome"], "produto": p_key, "tipo": "produto",
+                            "meses": [{"mes_banco": k, "mes_str": parse_date_safe(k).strftime("%m/%y"), **v} for k, v in p_val["meses"].items()]
+                        })
+                    sub_clientes.append({
+                        "id": f"{c_key}|{v_key}|{cl_key}", "chave_matriz": f"{c_key}|{v_key}|{cl_key}", "nome": cl_val["nome"], "tipo": "cliente",
+                        "meses": [{"mes_banco": k, "mes_str": parse_date_safe(k).strftime("%m/%y"), **v} for k, v in cl_val["meses"].items()],
+                        "subRows": sorted(sub_produtos, key=lambda x: x["nome"])
+                    })
+                sub_vendedores.append({
+                    "id": f"{c_key}|{v_key}", "chave_matriz": f"{c_key}|{v_key}", "nome": v_val["nome"], "tipo": "vendedor", "status": v_val["status"],
+                    "meses": [{"mes_banco": k, "mes_str": parse_date_safe(k).strftime("%m/%y"), **v} for k, v in v_val["meses"].items()],
+                    "subRows": sorted(sub_clientes, key=lambda x: x["nome"])
+                })
             dados_finais.append({
                 "id": c_key, "chave_matriz": c_key, "nome": c_val["nome"], "tipo": "coordenador", "status": c_val["status"],
                 "meses": [{"mes_banco": k, "mes_str": parse_date_safe(k).strftime("%m/%y"), **v} for k, v in c_val["meses"].items()],
-                "subRows": [
-                    {
-                        "id": f"{c_key}|{v_key}", "chave_matriz": f"{c_key}|{v_key}", "nome": v_val["nome"], "tipo": "vendedor", "status": v_val["status"],
-                        "meses": [{"mes_banco": k, "mes_str": parse_date_safe(k).strftime("%m/%y"), **v} for k, v in v_val["meses"].items()],
-                        "subRows": [
-                            {
-                                "id": f"{c_key}|{v_key}|{cl_key}", "chave_matriz": f"{c_key}|{v_key}|{cl_key}", "nome": cl_val["nome"], "tipo": "cliente",
-                                "meses": [{"mes_banco": k, "mes_str": parse_date_safe(k).strftime("%m/%y"), **v} for k, v in cl_val["meses"].items()],
-                                "subRows": [
-                                    {
-                                        "id": f"{c_key}|{v_key}|{cl_key}|{p_key}", "chave_matriz": f"{c_key}|{v_key}|{cl_key}|{p_key}", 
-                                        "nome": p_val["nome"], "produto": p_key, "tipo": "produto",
-                                        "meses": [{"mes_banco": k, "mes_str": parse_date_safe(k).strftime("%m/%y"), **v} for k, v in p_val["meses"].items()]
-                                    } for p_key, p_val in cl_val["produtos"].items()
-                                ]
-                            } for cl_key, cl_val in v_val["clientes"].items()
-                        ]
-                    } for v_key, v_val in c_val["vendedores"].items()
-                ]
+                "subRows": sorted(sub_vendedores, key=lambda x: x["nome"])
             })
 
         return {"status": "success", "dados": sorted(dados_finais, key=lambda x: x["nome"])}
@@ -206,17 +216,19 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
         if not reg_td or reg_td.status != 'Fechado':
              raise HTTPException(status_code=403, detail="A estratégia macro ainda não foi liberada pela Diretoria.")
         
-        alvos_afetados = list({a.chave.split('|')[0].strip() for a in payload.ajustes if a.chave.split('|')[0] != "COORDENADOR INDEFINIDO"})
-        for alvo in alvos_afetados: verificar_vendedor_online(db, alvo)
+        coord_expr = get_coord_expr()
+        vend_expr = get_vend_expr()
+        cli_expr = get_cli_expr()
 
         for ajuste in payload.ajustes:
             dt = parse_date_safe(ajuste.mes_projetado)
             p = ajuste.chave.split('|')
             q = get_truth_query(db, ciclo, dt, dt)
 
-            if len(p) >= 1: q = q.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == p[0].upper())
-            if len(p) >= 2: q = q.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == p[1].upper())
-            if len(p) >= 3: q = q.filter(func.upper(func.trim(DimCliente.razaosocial)) == p[2].upper())
+            # Os filtros espelham EXATAMENTE as colunas de agrupamento da tela
+            if len(p) >= 1: q = q.filter(func.upper(coord_expr) == p[0].upper())
+            if len(p) >= 2: q = q.filter(func.upper(vend_expr) == p[1].upper())
+            if len(p) >= 3: q = q.filter(func.upper(cli_expr) == p[2].upper())
             if len(p) >= 4: q = q.filter(FatoIbpGranular.sku == p[3].strip())
 
             linhas = q.all()
@@ -273,8 +285,7 @@ async def toggle_lock_gerenciamento(payload: PayloadToggleLock, db: Session = De
     try:
         ciclo = get_current_cycle(db)
         check_global_lock(db, ciclo)
-        if payload.origem not in ["COORDENADOR INDEFINIDO", "VENDEDOR INDEFINIDO"]:
-            verificar_vendedor_online(db, payload.origem)
+        verificar_vendedor_online(db, payload.origem)
         
         reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, func.upper(func.trim(ControleCiclo.origem)) == payload.origem.strip().upper()).first()
         if reg: reg.status = 'Aberto' if reg.status == 'Fechado' else 'Fechado'
@@ -324,10 +335,10 @@ async def lock_all(payload: PayloadLockAll, db: Session = Depends(get_db), usuar
 async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
         p = chave_matriz.split('|')
-        coord_alvo = p[0] if len(p) > 0 and p[0] != "COORDENADOR INDEFINIDO" else None
-        vendedor_alvo = p[1] if len(p) > 1 and p[1] != "VENDEDOR INDEFINIDO" else None
-        cliente_alvo = p[2] if len(p) > 2 and p[2] != "CLIENTE INDEFINIDO" else None
-        sku_alvo = p[3] if len(p) > 3 and p[3] != "SKU INDEFINIDO" else None
+        coord_alvo = p[0] if len(p) > 0 else None
+        vendedor_alvo = p[1] if len(p) > 1 else None
+        cliente_alvo = p[2] if len(p) > 2 else None
+        sku_alvo = p[3] if len(p) > 3 else None
 
         ciclo_atual = get_current_cycle(db)
         hoje = datetime.date.today().replace(day=1)
@@ -339,27 +350,33 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
             calendario[curr.strftime('%Y-%m')] = {"Realizado": None, "IA": None, "Comercial": None, "Final": None, "CicloAnterior": None}
             curr += relativedelta(months=1)
 
+        coord_expr = get_coord_expr()
+        vend_expr = get_vend_expr()
+        cli_expr = get_cli_expr()
+
+        # Histórico de Vendas
         q_hist = db.query(
             func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'),
             func.sum(FatoVendas.qt_pedido).label('realizado')
         ).outerjoin(DimCliente, FatoVendas.cgc == DimCliente.cgc).filter(FatoVendas.data_pedido >= inicio_hist)
         
-        if coord_alvo: q_hist = q_hist.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == coord_alvo.upper())
-        if vendedor_alvo: q_hist = q_hist.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == vendedor_alvo.upper())
-        if cliente_alvo: q_hist = q_hist.filter(func.upper(func.trim(DimCliente.razaosocial)) == cliente_alvo.upper())
+        if coord_alvo: q_hist = q_hist.filter(func.upper(coord_expr) == coord_alvo.upper())
+        if vendedor_alvo: q_hist = q_hist.filter(func.upper(vend_expr) == vendedor_alvo.upper())
+        if cliente_alvo: q_hist = q_hist.filter(func.upper(cli_expr) == cliente_alvo.upper())
         if sku_alvo: q_hist = q_hist.filter(FatoVendas.sku == sku_alvo)
 
         for row in q_hist.group_by('mes_ano').all():
             if row.mes_ano in calendario: calendario[row.mes_ano]["Realizado"] = int(row.realizado)
 
+        # Projeções S&OP
         q_proj = db.query(
             FatoIbpGranular.mes_projetado, FatoIbpGranular.ciclo_sop,
             func.sum(FatoIbpGranular.vol_ia).label('ia'), func.sum(FatoIbpGranular.vol_bottomup).label('bu'), func.sum(FatoIbpGranular.vol_final).label('final')
         ).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)
 
-        if coord_alvo: q_proj = q_proj.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == coord_alvo.upper())
-        if vendedor_alvo: q_proj = q_proj.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == vendedor_alvo.upper())
-        if cliente_alvo: q_proj = q_proj.filter(func.upper(func.trim(DimCliente.razaosocial)) == cliente_alvo.upper())
+        if coord_alvo: q_proj = q_proj.filter(func.upper(coord_expr) == coord_alvo.upper())
+        if vendedor_alvo: q_proj = q_proj.filter(func.upper(vend_expr) == vendedor_alvo.upper())
+        if cliente_alvo: q_proj = q_proj.filter(func.upper(cli_expr) == cliente_alvo.upper())
         if sku_alvo: q_proj = q_proj.filter(FatoIbpGranular.sku == sku_alvo)
 
         proj_por_mes = defaultdict(dict)
