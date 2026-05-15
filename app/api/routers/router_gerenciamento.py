@@ -78,8 +78,6 @@ async def obter_filtros_gerencia(db: Session = Depends(get_db), usuario: dict = 
         "coordenadores": sorted({str(c.supervisor_nome).strip() for c in q.distinct(DimCliente.supervisor_nome).all() if c.supervisor_nome}),
         "vendedores": sorted({str(v.vendedor_nome).strip() for v in q.distinct(DimCliente.vendedor_nome).all() if v.vendedor_nome})
     }
-    res["coordenadores"].append("SEM COORDENADOR")
-    res["vendedores"].append("SEM VENDEDOR")
     return res
 
 @router.get("")
@@ -116,22 +114,13 @@ async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = Non
 
         status_dict = {c.origem.strip().upper(): c.status for c in db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo).all() if c.origem}
         
-        # Árvore reconstruída de forma estrita
-        arvore = defaultdict(lambda: {
-            "nome": "", "tipo": "coordenador", "status": "Aberto", "meses": defaultdict(lambda: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0, "pmv":0}),
-            "vendedores": defaultdict(lambda: {
-                "nome": "", "tipo": "vendedor", "status": "Aberto", "meses": defaultdict(lambda: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0, "pmv":0}),
-                "clientes": defaultdict(lambda: {
-                    "nome": "", "tipo": "cliente", "meses": defaultdict(lambda: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0, "pmv":0}),
-                    "produtos": defaultdict(lambda: {
-                        "nome": "", "tipo": "produto", "sku": "", "meses": defaultdict(lambda: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0, "pmv":0})
-                    })
-                })
-            })
-        })
+        # O NOVO MOTOR: Construção explícita de dicionários (Evita colisão de memória)
+        arvore = {}
+
+        def criar_meses():
+            return {m.strftime("%Y-%m-%d"): {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0, "pmv":0} for m in meses_janela}
 
         for r in resultados:
-            # Usando os nomes reais que vieram do banco de dados (que sabemos que estão preenchidos)
             c = str(r.supervisor_nome).strip() if r.supervisor_nome else "COORDENADOR INDEFINIDO"
             v = str(r.vendedor_nome).strip() if r.vendedor_nome else "VENDEDOR INDEFINIDO"
             rz = str(r.razaosocial).strip() if r.razaosocial else "CLIENTE INDEFINIDO"
@@ -145,21 +134,38 @@ async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = Non
             pmv_base = float(r.pmv or 0)
             rec = v_bu * pmv_base
 
-            arvore[c]["nome"] = c
-            arvore[c]["status"] = status_dict.get(c.upper(), "Aberto")
-            arvore[c]["vendedores"][v]["nome"] = v
-            arvore[c]["vendedores"][v]["status"] = status_dict.get(v.upper(), "Aberto")
-            arvore[c]["vendedores"][v]["clientes"][rz]["nome"] = rz
-            arvore[c]["vendedores"][v]["clientes"][rz]["produtos"][sku]["nome"] = desc
-            arvore[c]["vendedores"][v]["clientes"][rz]["produtos"][sku]["sku"] = sku
+            # 1. Nível Coordenador
+            if c not in arvore:
+                arvore[c] = {"nome": c, "status": status_dict.get(c.upper(), "Aberto"), "meses": criar_meses(), "vendedores": {}}
             
-            for n in [arvore[c]["meses"][ms], arvore[c]["vendedores"][v]["meses"][ms], arvore[c]["vendedores"][v]["clientes"][rz]["meses"][ms], arvore[c]["vendedores"][v]["clientes"][rz]["produtos"][sku]["meses"][ms]]:
-                n["vol_ia"] += v_ia
-                n["vol_td"] += v_td
-                n["vol_ajustado"] += v_bu
-                n["receita"] += rec
-                n["pmv"] = (n["receita"] / n["vol_ajustado"]) if n["vol_ajustado"] > 0 else pmv_base
+            # 2. Nível Vendedor
+            if v not in arvore[c]["vendedores"]:
+                arvore[c]["vendedores"][v] = {"nome": v, "status": status_dict.get(v.upper(), "Aberto"), "meses": criar_meses(), "clientes": {}}
+            
+            # 3. Nível Cliente
+            if rz not in arvore[c]["vendedores"][v]["clientes"]:
+                arvore[c]["vendedores"][v]["clientes"][rz] = {"nome": rz, "meses": criar_meses(), "produtos": {}}
+                
+            # 4. Nível Produto
+            if sku not in arvore[c]["vendedores"][v]["clientes"][rz]["produtos"]:
+                arvore[c]["vendedores"][v]["clientes"][rz]["produtos"][sku] = {"nome": desc, "sku": sku, "meses": criar_meses()}
 
+            # Atualização Matemática
+            alvos = [
+                arvore[c]["meses"][ms],
+                arvore[c]["vendedores"][v]["meses"][ms],
+                arvore[c]["vendedores"][v]["clientes"][rz]["meses"][ms],
+                arvore[c]["vendedores"][v]["clientes"][rz]["produtos"][sku]["meses"][ms]
+            ]
+            
+            for t in alvos:
+                t["vol_ia"] += v_ia
+                t["vol_td"] += v_td
+                t["vol_ajustado"] += v_bu
+                t["receita"] += rec
+                t["pmv"] = (t["receita"] / t["vol_ajustado"]) if t["vol_ajustado"] > 0 else pmv_base
+
+        # Conversão de Dicionário para Lista (Para o React Table entender)
         dados_finais = []
         for c_key, c_val in arvore.items():
             dados_finais.append({
@@ -200,7 +206,7 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
         if not reg_td or reg_td.status != 'Fechado':
              raise HTTPException(status_code=403, detail="A estratégia macro ainda não foi liberada pela Diretoria.")
         
-        alvos_afetados = list({a.chave.split('|')[0].strip() for a in payload.ajustes if a.chave.split('|')[0] != "SEM COORDENADOR"})
+        alvos_afetados = list({a.chave.split('|')[0].strip() for a in payload.ajustes if a.chave.split('|')[0] != "COORDENADOR INDEFINIDO"})
         for alvo in alvos_afetados: verificar_vendedor_online(db, alvo)
 
         for ajuste in payload.ajustes:
@@ -208,17 +214,10 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
             p = ajuste.chave.split('|')
             q = get_truth_query(db, ciclo, dt, dt)
 
-            if len(p) >= 1:
-                if p[0] == "SEM COORDENADOR": q = q.filter(or_(DimCliente.supervisor_nome == None, DimCliente.supervisor_nome == ''))
-                else: q = q.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == p[0].upper())
-            if len(p) >= 2:
-                if p[1] == "SEM VENDEDOR": q = q.filter(or_(DimCliente.vendedor_nome == None, DimCliente.vendedor_nome == ''))
-                else: q = q.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == p[1].upper())
-            if len(p) >= 3:
-                if p[2] == "CLIENTE NÃO IDENTIFICADO": q = q.filter(or_(DimCliente.razaosocial == None, DimCliente.razaosocial == ''))
-                else: q = q.filter(func.upper(func.trim(DimCliente.razaosocial)) == p[2].upper())
-            if len(p) >= 4:
-                q = q.filter(FatoIbpGranular.sku == p[3].strip())
+            if len(p) >= 1: q = q.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == p[0].upper())
+            if len(p) >= 2: q = q.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == p[1].upper())
+            if len(p) >= 3: q = q.filter(func.upper(func.trim(DimCliente.razaosocial)) == p[2].upper())
+            if len(p) >= 4: q = q.filter(FatoIbpGranular.sku == p[3].strip())
 
             linhas = q.all()
             if not linhas: continue
@@ -274,7 +273,7 @@ async def toggle_lock_gerenciamento(payload: PayloadToggleLock, db: Session = De
     try:
         ciclo = get_current_cycle(db)
         check_global_lock(db, ciclo)
-        if payload.origem not in ["SEM COORDENADOR", "SEM VENDEDOR"]:
+        if payload.origem not in ["COORDENADOR INDEFINIDO", "VENDEDOR INDEFINIDO"]:
             verificar_vendedor_online(db, payload.origem)
         
         reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, func.upper(func.trim(ControleCiclo.origem)) == payload.origem.strip().upper()).first()
@@ -325,10 +324,10 @@ async def lock_all(payload: PayloadLockAll, db: Session = Depends(get_db), usuar
 async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
         p = chave_matriz.split('|')
-        coord_alvo = p[0] if len(p) > 0 and p[0] != "SEM COORDENADOR" else None
-        vendedor_alvo = p[1] if len(p) > 1 and p[1] != "SEM VENDEDOR" else None
-        cliente_alvo = p[2] if len(p) > 2 and p[2] not in ["CLIENTE NÃO CADASTRADO", "CLIENTE NÃO IDENTIFICADO", "DESC"] else None
-        sku_alvo = p[3] if len(p) > 3 and p[3] != "SEM SKU" else None
+        coord_alvo = p[0] if len(p) > 0 and p[0] != "COORDENADOR INDEFINIDO" else None
+        vendedor_alvo = p[1] if len(p) > 1 and p[1] != "VENDEDOR INDEFINIDO" else None
+        cliente_alvo = p[2] if len(p) > 2 and p[2] != "CLIENTE INDEFINIDO" else None
+        sku_alvo = p[3] if len(p) > 3 and p[3] != "SKU INDEFINIDO" else None
 
         ciclo_atual = get_current_cycle(db)
         hoje = datetime.date.today().replace(day=1)
@@ -346,13 +345,9 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
         ).outerjoin(DimCliente, FatoVendas.cgc == DimCliente.cgc).filter(FatoVendas.data_pedido >= inicio_hist)
         
         if coord_alvo: q_hist = q_hist.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == coord_alvo.upper())
-        elif p[0] == "SEM COORDENADOR": q_hist = q_hist.filter(or_(DimCliente.supervisor_nome == None, DimCliente.supervisor_nome == ''))
         if vendedor_alvo: q_hist = q_hist.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == vendedor_alvo.upper())
-        elif len(p) > 1 and p[1] == "SEM VENDEDOR": q_hist = q_hist.filter(or_(DimCliente.vendedor_nome == None, DimCliente.vendedor_nome == ''))
         if cliente_alvo: q_hist = q_hist.filter(func.upper(func.trim(DimCliente.razaosocial)) == cliente_alvo.upper())
-        elif len(p) > 2 and (p[2] in ["CLIENTE NÃO CADASTRADO", "CLIENTE NÃO IDENTIFICADO", "DESC"]): q_hist = q_hist.filter(or_(DimCliente.razaosocial == None, DimCliente.razaosocial == ''))
         if sku_alvo: q_hist = q_hist.filter(FatoVendas.sku == sku_alvo)
-        elif len(p) > 3 and p[3] == "SEM SKU": q_hist = q_hist.filter(or_(FatoVendas.sku == None, FatoVendas.sku == ''))
 
         for row in q_hist.group_by('mes_ano').all():
             if row.mes_ano in calendario: calendario[row.mes_ano]["Realizado"] = int(row.realizado)
@@ -363,13 +358,9 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
         ).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)
 
         if coord_alvo: q_proj = q_proj.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == coord_alvo.upper())
-        elif p[0] == "SEM COORDENADOR": q_proj = q_proj.filter(or_(DimCliente.supervisor_nome == None, DimCliente.supervisor_nome == ''))
         if vendedor_alvo: q_proj = q_proj.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == vendedor_alvo.upper())
-        elif len(p) > 1 and p[1] == "SEM VENDEDOR": q_proj = q_proj.filter(or_(DimCliente.vendedor_nome == None, DimCliente.vendedor_nome == ''))
         if cliente_alvo: q_proj = q_proj.filter(func.upper(func.trim(DimCliente.razaosocial)) == cliente_alvo.upper())
-        elif len(p) > 2 and (p[2] in ["CLIENTE NÃO CADASTRADO", "CLIENTE NÃO IDENTIFICADO", "DESC"]): q_proj = q_proj.filter(or_(DimCliente.razaosocial == None, DimCliente.razaosocial == ''))
         if sku_alvo: q_proj = q_proj.filter(FatoIbpGranular.sku == sku_alvo)
-        elif len(p) > 3 and p[3] == "SEM SKU": q_proj = q_proj.filter(or_(FatoIbpGranular.sku == None, FatoIbpGranular.sku == ''))
 
         proj_por_mes = defaultdict(dict)
         for row in q_proj.group_by(FatoIbpGranular.mes_projetado, FatoIbpGranular.ciclo_sop).all():
