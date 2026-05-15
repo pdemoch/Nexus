@@ -54,6 +54,18 @@ def get_executive_prefix(contexto: ContextoUI):
     1. Não faça "SELECT *". Selecione apenas as colunas que precisa.
     2. Quando tiver os dados consolidados, gere um dossiê executivo analisando a cascata de volumes, a aderência da IA e o diagnóstico financeiro.
     3. Finalize a sua análise usando EXATAMENTE o texto "Final Answer: " seguido do seu dossiê final. O dossiê deve usar tags <br/> para quebras de linha e **negrito** para destacar valores (ex: **R$ 150.000**).
+    4. Responda apenas à pergunta do usuário. Não crie introduções, relatórios gerais, ou cumprimentos longos. Vá direto ao ponto.
+    5. Se a pergunta for sobre "quem mais cresceu", olhe a métrica de crescimento percentual entre o pico projetado e o histórico e cite apenas o vencedor e o número exato.
+    6. Se a pergunta for de justificação de Supply, leia a chave 'justificativas_supply' de forma objetiva.
+    7. Se os dados mostrarem 0.0, não minta, mas sugira educadamente: "De acordo com o contexto em ecrã, os valores consolidados constam como 0%. Sugiro avaliar a granularidade do SKU."
+    8. Lembre-se do contexto da tela ativa: {contexto.tela_ativa} e do status do ciclo: {contexto.ciclo_status}. Isso pode influenciar quais dados são mais relevantes para a resposta.
+    9. Use no máximo 2048 tokens para a resposta, focando na clareza e objetividade do dossiê executivo.
+    10. Responda em Português do Brasil, usando uma linguagem acessível para diretores e gerentes, evitando jargões técnicos complexos.
+    11. Se a pergunta for muito ampla, tente identificar o foco principal e responda com base nisso, sempre buscando entregar insights acionáveis.
+    12. Se a pergunta envolver comparação entre categorias ou clientes, destaque os vencedores e os números exatos, sem rodeios.
+    13. Se a pergunta for sobre projeções futuras, concentre-se nos dados da tabela fato_ibp_granular e destaque as diferenças entre as projeções da IA e do Top-Down.
+    14. Se a pergunta for sobre o histórico, concentre-se nos dados da tabela fato_vendas e destaque os números consolidados.
+    15. Se a pergunta envolver análise de risco ou oportunidade, destaque os fatores mais críticos identificados nos dados e sugira ações concretas.
     """
 
 @router.post("/perguntar")
