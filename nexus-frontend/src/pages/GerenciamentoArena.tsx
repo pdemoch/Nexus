@@ -171,12 +171,16 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     try {
       const params = { nivel_filtro: nivelHierarquia, valor_filtro: nomeResponsavel || '' };
       const res = await axios.get('/api/v1/consensus/micro', { params });
+      
+      // LOG DE DIAGNÓSTICO PROFUNDO
+      console.log("DADOS RECEBIDOS DA API:", res.data.dados);
+      
       setDadosBrutos(res.data.dados || []);
       setCelulasEditadas({});
       setExpanded({});
       setChartExpanded(null);
     } catch (e) {
-      console.error(e);
+      console.error("ERRO NA API DE MICRO:", e);
       setDadosBrutos([]);
     } finally {
       setIsLoading(false);
@@ -187,12 +191,16 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     if (isTopDownFechado) fetchData(); 
   }, [fetchData, isTopDownFechado]);
 
-  // Motor de Busca Super Blindado
+  // =====================================================================
+  // FILTRO SEGURO: Devolve os dados originais se não houver busca
+  // =====================================================================
   const dadosFiltrados = useMemo(() => {
-    if (!busca) return dadosBrutos || [];
+    if (!dadosBrutos || dadosBrutos.length === 0) return [];
+    if (!busca || busca.trim() === '') return dadosBrutos; // Se a busca está vazia, retorna a árvore intocada!
+    
     const term = busca.toLowerCase();
     
-    return (dadosBrutos || []).map(coord => {
+    return dadosBrutos.map(coord => {
       if (coord?.nome?.toLowerCase().includes(term)) return coord;
       
       const vendedoresFiltrados = (coord?.subRows || []).map((vendedor: any) => {
@@ -234,7 +242,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
             const pmvBase = (prod?.meses && prod.meses.length > 0) ? (prod.meses[0]?.pmv || 0) : 0;
             
             (prod?.meses || []).forEach((mes: any) => {
-              const chaveEdicao = celulasEditadas[prod.chave_matriz]?.[mes.mes_banco];
+              const chaveEdicao = celulasEditadas[prod?.chave_matriz]?.[mes.mes_banco];
               const isPendente = chaveEdicao !== undefined;
               
               const volCru = isPendente ? chaveEdicao.novo_volume : mes.vol_ajustado;
@@ -466,10 +474,16 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   }, [dadosFiltrados, chartExpanded, celulasEditadas]);
 
   const table = useReactTable({
-    data: dadosFiltrados, columns, state: { expanded, sorting },
-    onExpandedChange: setExpanded, onSortingChange: setSorting,
-    getSubRows: row => row?.subRows,
-    getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel(), getSortedRowModel: getSortedRowModel(),
+    data: dadosFiltrados, 
+    columns, 
+    state: { expanded, sorting },
+    onExpandedChange: setExpanded, 
+    onSortingChange: setSorting,
+    // A correção mestra da expansão das linhas (Não renderiza nós nulos)
+    getSubRows: row => row?.subRows && row.subRows.length > 0 ? row.subRows : undefined,
+    getCoreRowModel: getCoreRowModel(), 
+    getExpandedRowModel: getExpandedRowModel(), 
+    getSortedRowModel: getSortedRowModel(),
     meta: {
       celulasEditadas,
       updateCell: (chave: string, mes: string, val: string) => {
