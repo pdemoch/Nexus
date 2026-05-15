@@ -14,7 +14,7 @@ const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: '
 const formatVolume = (val: number) => Math.round(val).toLocaleString('pt-BR');
 
 // =====================================================================
-// NOVO COMPONENTE: GERADOR DE INSIGHTS COM IA SOB DEMANDA (TEMA ESCURO)
+// COMPONENTE: GERADOR DE INSIGHTS COM IA SOB DEMANDA (TEMA ESCURO)
 // =====================================================================
 const AiInsightBox = ({ alvo, tipo, pmv }: { alvo: string, tipo: string, pmv: number }) => {
   const [insight, setInsight] = useState('');
@@ -69,7 +69,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   const [sorting, setSorting] = useState<SortingState>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   
-  // STATUS DAS FASES
   const [isTopDownFechado, setIsTopDownFechado] = useState<boolean | null>(null);
   
   const [chartExpanded, setChartExpanded] = useState<string | null>(null);
@@ -118,16 +117,17 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     if (dadosBrutos.length === 0) return alert("Não há dados na tela para exportar.");
     const dadosExcel: any[] = [];
     
-    dadosBrutos.forEach(coord => {
-      coord.subRows.forEach((vendedor: any) => {
-        vendedor.subRows.forEach((cliente: any) => {
-          cliente.subRows.forEach((prod: any) => {
+    // Proteção com Optional Chaining no Exportar
+    dadosBrutos?.forEach(coord => {
+      coord.subRows?.forEach((vendedor: any) => {
+        vendedor.subRows?.forEach((cliente: any) => {
+          cliente.subRows?.forEach((prod: any) => {
             const linha: any = {
               "COORDENADOR": coord.nome, "VENDEDOR": vendedor.nome,
               "RAZÃO SOCIAL": cliente.nome, "CÓDIGO SKU": prod.produto, "DESCRIÇÃO": prod.nome, 
-              "CATEGORIA": prod.categoria, "SEGMENTO": prod.segmento, "PMV PONDERADO (R$)": prod.meses[0]?.pmv || 0
+              "CATEGORIA": prod.categoria, "SEGMENTO": prod.segmento, "PMV PONDERADO (R$)": prod.meses?.[0]?.pmv || 0
             };
-            prod.meses.forEach((m: any) => {
+            prod.meses?.forEach((m: any) => {
               const edicao = celulasEditadas[prod.chave_matriz]?.[m.mes_banco];
               const volFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : m.vol_ajustado));
               linha[`${m.mes_str} (Base IA)`] = Math.round(Number(m.vol_ia));
@@ -196,13 +196,13 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     return dadosBrutos.map(coord => {
       if (coord.nome.toLowerCase().includes(term)) return coord;
       
-      const vendedoresFiltrados = coord.subRows.map((vendedor: any) => {
+      const vendedoresFiltrados = (coord.subRows || []).map((vendedor: any) => {
         if (vendedor.nome.toLowerCase().includes(term)) return vendedor;
         
-        const clientesFiltrados = vendedor.subRows.map((cliente: any) => {
+        const clientesFiltrados = (vendedor.subRows || []).map((cliente: any) => {
           if (cliente.nome.toLowerCase().includes(term)) return cliente;
           
-          const prodsFiltrados = cliente.subRows.filter((p: any) => 
+          const prodsFiltrados = (cliente.subRows || []).filter((p: any) => 
             (p.nome.toLowerCase().includes(term) || (p.produto && p.produto.toLowerCase().includes(term)))
           );
           
@@ -221,22 +221,27 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
 
   const totaisGerais = useMemo(() => {
     const totais: Record<string, {vol: number, fat: number}> = {};
-    dadosFiltrados.forEach(coord => {
-      coord.meses.forEach((m: any) => totais[m.mes_banco] = {vol: 0, fat: 0});
+    
+    // Blindagem de Inicialização Segura
+    dadosFiltrados?.forEach(coord => {
+      coord.meses?.forEach((m: any) => totais[m.mes_banco] = {vol: 0, fat: 0});
     });
     
-    dadosFiltrados.forEach(coord => {
-      coord.subRows.forEach((vendedor: any) => {
-        vendedor.subRows.forEach((cliente: any) => {
-          cliente.subRows.forEach((prod: any) => {
-            const pmvBase = prod.meses[0]?.pmv || 0;
-            prod.meses.forEach((mes: any) => {
+    // Blindagem com Optional Chaining (?.) em todos os laços
+    dadosFiltrados?.forEach(coord => {
+      coord.subRows?.forEach((vendedor: any) => {
+        vendedor.subRows?.forEach((cliente: any) => {
+          cliente.subRows?.forEach((prod: any) => {
+            const pmvBase = prod.meses?.[0]?.pmv || 0;
+            prod.meses?.forEach((mes: any) => {
               const edicaoProd = celulasEditadas[prod.chave_matriz]?.[mes.mes_banco];
               const isPendente = edicaoProd !== undefined;
               const volumeFinal = Math.round(Number(isPendente ? edicaoProd.novo_volume : mes.vol_ajustado));
               
-              totais[mes.mes_banco].vol += volumeFinal;
-              totais[mes.mes_banco].fat += isPendente ? (volumeFinal * pmvBase) : (mes.receita || 0);
+              if(totais[mes.mes_banco]) {
+                totais[mes.mes_banco].vol += volumeFinal;
+                totais[mes.mes_banco].fat += isPendente ? (volumeFinal * pmvBase) : (mes.receita || 0);
+              }
             });
           });
         });
@@ -266,7 +271,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   };
 
   const qtdEdicoes = Object.keys(celulasEditadas).length;
-  // A Regional como um todo está fechada se o primeiro coordenador estiver fechado (Lógica simplificada de gestão visual)
   const isAllFechado = dadosBrutos.length > 0 && dadosBrutos[0].status === 'Fechado';
 
   const columns = useMemo(() => {
@@ -328,19 +332,19 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     ];
 
     const mesesMap = new Map();
-    dadosFiltrados.forEach(v => v.meses.forEach((m: any) => mesesMap.set(m.mes_banco, m)));
+    dadosFiltrados.forEach(v => v.meses?.forEach((m: any) => mesesMap.set(m.mes_banco, m)));
     
     Array.from(mesesMap.values()).sort((a: any, b: any) => a.mes_banco.localeCompare(b.mes_banco)).forEach((m: any) => {
       baseCols.push({
         id: `mes_${m.mes_banco}`, header: m.mes_str,
-        accessorFn: (row: any) => row.meses.find((rm: any) => rm.mes_banco === m.mes_banco)?.vol_ajustado || 0,
+        accessorFn: (row: any) => row.meses?.find((rm: any) => rm.mes_banco === m.mes_banco)?.vol_ajustado || 0,
         cell: (info: any) => {
           const row = info.row.original;
           const isCoordenador = row.tipo === 'coordenador';
           const isVendedor = row.tipo === 'vendedor';
           const isCliente = row.tipo === 'cliente';
           
-          const dadosMes = row.meses.find((rm: any) => rm.mes_banco === m.mes_banco);
+          const dadosMes = row.meses?.find((rm: any) => rm.mes_banco === m.mes_banco);
           const meta = info.table.options.meta as any;
           const edicao = meta.celulasEditadas[row.chave_matriz]?.[m.mes_banco];
           
@@ -354,7 +358,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           const faturamentoPrevisto = isPendente ? (valorInteiro * (dadosMes?.pmv || 0)) : (dadosMes?.receita || 0);
           const temPressao = baseTopDown > valorInteiro;
           
-          const bloqueadoPelaEquipa = isCoordenador ? false : row.status === 'Fechado'; // Gerente pode editar tudo, menos se ele mesmo não quiser.
+          const bloqueadoPelaEquipa = isCoordenador ? false : row.status === 'Fechado';
           
           if (isCoordenador || isVendedor) {
             return (
@@ -407,7 +411,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     }
   });
 
-  // TELA DE BLOQUEIO DE FASE
   if (isTopDownFechado === null) {
     return (
       <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
@@ -562,15 +565,14 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                       ))}
                     </tr>
                     
+                    {/* GRÁFICO EXPANDIDO E DINÂMICO */}
                     {chartExpanded === row.original.chave_matriz && (
                       <tr>
                         <td colSpan={table.getAllColumns().length} className="bg-slate-900 p-8 border-b border-slate-800">
                           <div className="bg-slate-950 rounded-[32px] p-8 shadow-inner border border-slate-800 animate-in fade-in duration-500">
                             
-                            {/* LAYOUT EM GRADE PARA GRÁFICO + IA INSIGHT */}
                             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                                
-                               {/* COLUNA ESQUERDA: GRÁFICO */}
                                <div className="lg:col-span-2">
                                  <div className="flex justify-between items-start mb-6 px-2">
                                     <div className="flex flex-col gap-1">
@@ -591,7 +593,8 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                                        <LineChart 
                                          data={
                                            (dadosGraficoCache[row.original.chave_matriz] || []).map((p: any) => {
-                                               const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
+                                               // O GRÁFICO AGORA "DANÇA" COM O QUE VOCÊ DIGITA EM TELA
+                                               const mesNaTab = row.original.meses?.find((m: any) => m.mes_banco === p.data_iso);
                                                const edicao = celulasEditadas[row.original.chave_matriz]?.[p.data_iso];
                                                const valComercial = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
                                                return { ...p, Consenso: valComercial !== null ? valComercial : p.Consenso };
@@ -605,22 +608,21 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                                          <Tooltip contentStyle={{borderRadius: '20px', backgroundColor: '#0f172a', border: '1px solid #1e293b', color: '#fff', boxShadow: '0 10px 30px rgba(0,0,0,0.5)'}} />
                                          <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900', color: '#cbd5e1'}} />
                                          
-                                         <Line type="monotone" dataKey="CicloAnterior" name="Mês Passado" stroke="#f59e0b" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
+                                         <Line type="monotone" dataKey="CicloAnterior" name="Ciclo Anterior (Lag)" stroke="#f59e0b" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
                                          <Line type="monotone" dataKey="Realizado" name="Venda Real" stroke="#f8fafc" strokeWidth={4} dot={{r: 3, fill: '#f8fafc'}} connectNulls={false} />
                                          <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#475569" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
-                                         <Line type="monotone" dataKey="Consenso" name="Proposta Atual" stroke="#3b82f6" strokeWidth={5} dot={{r: 6, fill: '#3b82f6', strokeWidth: 2, stroke: '#0f172a'}} connectNulls={false} />
+                                         <Line type="monotone" dataKey="Consenso" name="Proposta Comercial" stroke="#3b82f6" strokeWidth={5} dot={{r: 6, fill: '#3b82f6', strokeWidth: 2, stroke: '#0f172a'}} connectNulls={false} />
                                        </LineChart>
                                      </ResponsiveContainer>
                                    )}
                                  </div>
                                </div>
 
-                               {/* COLUNA DIREITA: BOTÃO IA 360° */}
                                <div className="flex flex-col justify-start">
                                  <AiInsightBox 
                                     alvo={row.original.nome} 
                                     tipo={row.original.tipo === 'coordenador' ? 'Coordenador' : row.original.tipo === 'vendedor' ? 'Vendedor' : row.original.tipo === 'cliente' ? 'Cliente' : 'SKU'} 
-                                    pmv={row.original.meses[0]?.pmv || 0}
+                                    pmv={row.original.meses?.[0]?.pmv || 0}
                                  />
                                </div>
                             </div>

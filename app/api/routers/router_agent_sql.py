@@ -28,59 +28,46 @@ os.environ["GOOGLE_API_KEY"] = "AIzaSyAmNP1mhQAcN-afbSibO8m-0VibJ22nNSw"
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash", 
     temperature=0.0, 
-    max_output_tokens=2048 # Aumentado para dar espaço ao "raciocínio" da IA sem cortar a meio
+    max_output_tokens=2048 
 )
 
 DATABASE_URL_RO = "postgresql+psycopg2://nexus_ai_readonly:SenhaForteIA2026@nexus-db:5432/nexus_db"
 engine = create_engine(DATABASE_URL_RO)
 
-# LIMITAR PARA NUNCA LER MAIS DE 5 LINHAS
 db_langchain = SQLDatabase(engine, sample_rows_in_table_info=1)
 toolkit = SQLDatabaseToolkit(db=db_langchain, llm=llm)
 
 # =====================================================================
-# CÉREBRO: PROMPT COM "TRELA CURTA" PARA EVITAR ERROS DE PARSING
+# CÉREBRO: MAPA DE DADOS E DIRETIVAS CLARAS
 # =====================================================================
 def get_executive_prefix(contexto: ContextoUI):
     return f"""
-    Você é o Nexus AI - Consultor Executivo de S&OP. Responda SEMPRE em Português do Brasil.
-    Você tem acesso às tabelas: fato_vendas, fato_ibp_granular, dim_produtos, dim_clientes.
+    Você é o Nexus AI - Consultor Executivo de S&OP. Responda SEMPRE em Português do Brasil de forma pragmática e focada em negócios.
     
-    🚨 [REGRAS DE FORMATAÇÃO REACT - LEIA COM ATENÇÃO] 🚨
-    Para usar as ferramentas, você DEVE usar o formato exato abaixo. 
-    MUITO IMPORTANTE: O seu 'Thought:' deve ter NO MÁXIMO 1 linha. Não planeje tudo de uma vez, aja rápido!
-
-    Thought: [apenas 1 frase curta sobre o que vai fazer agora]
-    Action: [nome da ferramenta]
-    Action Input: [query SQL limpa, SEM blocos de código ```]
-    Observation: [resultado retornado]
+    🚨 [DICIONÁRIO DE DADOS - USE ISTO PARA CRIAR SUAS QUERIES SQL] 🚨
+    Para não perder tempo procurando, aqui está a localização exata das métricas que você precisa:
+    - fato_vendas: Contém o Histórico Real. Use `SUM(qt_pedido)` para Volume e `SUM(vl_pedido)` para Receita. A data é `data_pedido`.
+    - fato_ibp_granular: Contém as Projeções Futuras S&OP. A data é `mes_projetado`. O preço é `pmv_aplicado`. Volumes: `vol_ia` (Inteligência Artificial), `vol_topdown` (Marketing/Diretoria), `vol_final`.
+    - dim_produtos: Contém a hierarquia `categoria`, `segmento`, `descricao` e `sku`. Use a coluna `sku` para fazer JOIN com as tabelas de fatos.
     
-    Quando tiver a resposta final pronta, feche EXATAMENTE assim:
-    Thought: Eu já tenho todos os dados necessários.
-    Final Answer: [O seu dossiê executivo estruturado, usando <br/> para quebras de linha e texto focado em Risco e Faturamento]
-    
-    🚨 [REGRAS DE SQL] 🚨
-    1. Nunca faça SELECT * sem LIMIT.
-    2. Use SUM() e GROUP BY para consolidar caixas e receitas (R$).
+    🚨 [REGRAS DE EXECUÇÃO] 🚨
+    1. Não faça "SELECT *". Selecione apenas as colunas que precisa.
+    2. Quando tiver os dados consolidados, gere um dossiê executivo analisando a cascata de volumes, a aderência da IA e o diagnóstico financeiro.
+    3. Finalize a sua análise usando EXATAMENTE o texto "Final Answer: " seguido do seu dossiê final. O dossiê deve usar tags <br/> para quebras de linha e **negrito** para destacar valores (ex: **R$ 150.000**).
     """
 
 @router.post("/perguntar")
 def consultoria_360(payload: PerguntaAgente, usuario: dict = Depends(get_current_user)):
     try:
-        # Mensagem que será injetada automaticamente se o Gemini errar a formatação
-        msg_autocorrecao = (
-            "ALERTA: Você esqueceu-se de usar 'Action:' ou escreveu um 'Thought:' muito longo. "
-            "Corrija a formatação imediatamente. Pare de pensar e execute a Action, ou dê a Final Answer."
-        )
-
+        # Simplificamos o tratamento de erro do LangChain para permitir que o modelo se corrija naturalmente
         agent_executor = create_sql_agent(
             llm=llm,
             toolkit=toolkit,
             agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
             verbose=True,
-            handle_parsing_errors=msg_autocorrecao, # Ensina a IA a consertar-se sozinha
+            handle_parsing_errors=True, # Devolvemos a gestão nativa de erros
             prefix=get_executive_prefix(payload.contexto),
-            max_iterations=8 # Limite de tentativas para não ficar em loop
+            max_iterations=10 
         )
 
         resultado = agent_executor.invoke({"input": payload.pergunta})
@@ -92,20 +79,28 @@ def consultoria_360(payload: PerguntaAgente, usuario: dict = Depends(get_current
         erro_str = str(e)
         
         if "429" in erro_str or "Quota exceeded" in erro_str:
-            return {"status": "success", "resposta": "⚡ *A IA está a processar muitos cálculos. Aguarde alguns segundos e tente novamente.*"}
+            return {"status": "success", "resposta": "⚡ *A IA está processando muitos cálculos. Aguarde alguns segundos e tente novamente.*"}
         
-        # Última linha de defesa: Limpa o erro sujo se o LangChain desistir
+        # Última tentativa de extração caso o Gemini termine a resposta mas sem a tag exata
         if "Could not parse LLM output:" in erro_str:
             try:
-                # Tenta extrair qualquer pedaço de inteligência que a IA já tinha começado a escrever
-                resposta_parcial = erro_str.split("Could not parse LLM output:")[1].strip().strip('`').replace("Thought:", "").strip()
-                # Se for muito curto, foi só um pensamento inútil. Se for longo, pode ser a resposta que não ganhou a tag Final Answer.
-                if len(resposta_parcial) > 100:
-                    return {"status": "success", "resposta": resposta_parcial}
+                resposta_parcial = erro_str.split("Could not parse LLM output:")[1].strip().strip('`')
+                # Removemos "Thought:" residual caso exista no início
+                if resposta_parcial.startswith("Thought:"):
+                    # Pega a última parte que geralmente é onde a resposta final está sendo construída
+                    partes = resposta_parcial.split("Final Answer:")
+                    if len(partes) > 1:
+                        return {"status": "success", "resposta": partes[-1].strip()}
+                    else:
+                        # Se não achar o Final Answer, remove apenas o prefixo "Thought: " para não sujar a tela
+                        texto_limpo = resposta_parcial[8:].strip()
+                        # Se o texto for apenas um raciocínio interno (como "I need to..."), devolve o erro amigável.
+                        if "I need to" not in texto_limpo and len(texto_limpo) > 100:
+                             return {"status": "success", "resposta": texto_limpo}
             except:
                 pass
             
         return {
             "status": "error", 
-            "resposta": "⚠️ **Aviso de Timeout Analítico**<br/><br/>O Nexus AI analisou as tabelas, mas a formatação dos dados falhou. Por favor, seja mais específico na sua pergunta (ex: 'Qual o faturamento do SKU X nos últimos 3 meses?')."
+            "resposta": "⚠️ **Ocorreu uma inconsistência no cruzamento de dados.**<br/><br/>A base de dados retornou informações complexas e o assistente não conseguiu formatá-las a tempo. Tente ser mais específico na solicitação, como 'Qual o faturamento do último semestre para a categoria X?'"
         }
