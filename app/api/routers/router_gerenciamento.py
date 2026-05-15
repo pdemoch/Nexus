@@ -93,14 +93,12 @@ async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = Non
         
         if usuario['funcao'] == 'Gerente':
             g_nome = usuario['gerente_nome'].strip().upper()
-            query_base = query_base.filter(or_(func.upper(func.trim(DimCliente.gerente_nome)) == g_nome, DimCliente.gerente_nome == None))
+            query_base = query_base.filter(func.upper(func.trim(DimCliente.gerente_nome)) == g_nome)
             
         if nivel_filtro == 'coordenador' and valor_filtro:
-            if valor_filtro == "SEM COORDENADOR": query_base = query_base.filter(or_(DimCliente.supervisor_nome == None, DimCliente.supervisor_nome == ''))
-            else: query_base = query_base.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == valor_filtro.strip().upper())
+            query_base = query_base.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == valor_filtro.strip().upper())
         elif nivel_filtro == 'vendedor' and valor_filtro:
-            if valor_filtro == "SEM VENDEDOR": query_base = query_base.filter(or_(DimCliente.vendedor_nome == None, DimCliente.vendedor_nome == ''))
-            else: query_base = query_base.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == valor_filtro.strip().upper())
+            query_base = query_base.filter(func.upper(func.trim(DimCliente.vendedor_nome)) == valor_filtro.strip().upper())
         elif nivel_filtro == 'regional' and valor_filtro:
             query_base = query_base.filter(func.upper(func.trim(DimCliente.regional)) == valor_filtro.strip().upper())
 
@@ -118,6 +116,7 @@ async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = Non
 
         status_dict = {c.origem.strip().upper(): c.status for c in db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo).all() if c.origem}
         
+        # Árvore reconstruída de forma estrita
         arvore = defaultdict(lambda: {
             "nome": "", "tipo": "coordenador", "status": "Aberto", "meses": defaultdict(lambda: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0, "pmv":0}),
             "vendedores": defaultdict(lambda: {
@@ -132,12 +131,18 @@ async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = Non
         })
 
         for r in resultados:
-            c = str(r.supervisor_nome or "SEM COORDENADOR").strip()
-            v = str(r.vendedor_nome or "SEM VENDEDOR").strip()
-            rz = str(r.razaosocial or "CLIENTE NÃO IDENTIFICADO").strip()
-            sku, ms = str(r.sku or "SEM SKU").strip(), str(r.mes_projetado)
+            # Usando os nomes reais que vieram do banco de dados (que sabemos que estão preenchidos)
+            c = str(r.supervisor_nome).strip() if r.supervisor_nome else "COORDENADOR INDEFINIDO"
+            v = str(r.vendedor_nome).strip() if r.vendedor_nome else "VENDEDOR INDEFINIDO"
+            rz = str(r.razaosocial).strip() if r.razaosocial else "CLIENTE INDEFINIDO"
+            sku = str(r.sku).strip() if r.sku else "SKU INDEFINIDO"
+            desc = str(r.descricao).strip() if r.descricao else "PRODUTO SEM CADASTRO"
+            ms = str(r.mes_projetado)
             
-            v_ia, v_td, v_bu, pmv_base = int(r.v_ia or 0), int(r.v_td or 0), int(r.v_bu or 0), float(r.pmv or 0)
+            v_ia = int(r.v_ia or 0)
+            v_td = int(r.v_td or 0)
+            v_bu = int(r.v_bu or 0)
+            pmv_base = float(r.pmv or 0)
             rec = v_bu * pmv_base
 
             arvore[c]["nome"] = c
@@ -145,7 +150,7 @@ async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = Non
             arvore[c]["vendedores"][v]["nome"] = v
             arvore[c]["vendedores"][v]["status"] = status_dict.get(v.upper(), "Aberto")
             arvore[c]["vendedores"][v]["clientes"][rz]["nome"] = rz
-            arvore[c]["vendedores"][v]["clientes"][rz]["produtos"][sku]["nome"] = r.descricao or "PRODUTO SEM CADASTRO"
+            arvore[c]["vendedores"][v]["clientes"][rz]["produtos"][sku]["nome"] = desc
             arvore[c]["vendedores"][v]["clientes"][rz]["produtos"][sku]["sku"] = sku
             
             for n in [arvore[c]["meses"][ms], arvore[c]["vendedores"][v]["meses"][ms], arvore[c]["vendedores"][v]["clientes"][rz]["meses"][ms], arvore[c]["vendedores"][v]["clientes"][rz]["produtos"][sku]["meses"][ms]]:
@@ -153,7 +158,6 @@ async def listar_gerenciamento(nivel_filtro: str = None, valor_filtro: str = Non
                 n["vol_td"] += v_td
                 n["vol_ajustado"] += v_bu
                 n["receita"] += rec
-                # PMV Ponderado: Receita Total / Volume Ajustado Total
                 n["pmv"] = (n["receita"] / n["vol_ajustado"]) if n["vol_ajustado"] > 0 else pmv_base
 
         dados_finais = []
