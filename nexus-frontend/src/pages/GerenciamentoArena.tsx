@@ -4,17 +4,17 @@ import {
 } from '@tanstack/react-table';
 import { 
   Check, Filter, Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
-  Lock, Unlock, Search, X, Store, Package, Users, Download, BarChart2, Activity, Shield, Wand2
+  Lock, Unlock, Search, X, Store, Package, Users, Download, BarChart2, Activity, Shield, Wand2, Target, AlertTriangle, TrendingUp, TrendingDown
 } from 'lucide-react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import * as XLSX from 'xlsx';
 
-const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor));
-const formatVolume = (val: number) => Math.round(val).toLocaleString('pt-BR');
+const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor || 0));
+const formatVolume = (val: number) => Math.round(val || 0).toLocaleString('pt-BR');
 
 // =====================================================================
-// COMPONENTE: GERADOR DE INSIGHTS COM IA SOB DEMANDA (TEMA ESCURO)
+// COMPONENTE: NEXUS AI INSIGHT 360°
 // =====================================================================
 const AiInsightBox = ({ alvo, tipo, pmv }: { alvo: string, tipo: string, pmv: number }) => {
   const [insight, setInsight] = useState('');
@@ -24,19 +24,19 @@ const AiInsightBox = ({ alvo, tipo, pmv }: { alvo: string, tipo: string, pmv: nu
     setLoading(true);
     try {
       const res = await axios.post('/api/v1/ai-sql/perguntar', {
-        pergunta: `Faça o dossiê executivo 360° para o ${tipo} "${alvo}". Extraia a cascata de volumes, o histórico de vendas e o pmv_aplicado. Apresente o diagnóstico financeiro (R$) e estratégico utilizando a metodologia dos 4 pilares.`,
-        contexto: { tela_ativa: 'Bottom-Up Gerencial', ciclo_status: 'Aberto/Em Ajuste' }
+        pergunta: `Faça o dossiê de saudabilidade e risco para o ${tipo} "${alvo}". Avalie o faturamento, volume de caixas e PMV. O PMV base é ${pmv}. Apresente o diagnóstico financeiro (R$) e estratégico utilizando a metodologia dos 4 pilares.`,
+        contexto: { tela_ativa: 'Bottom-Up Gerencial', ciclo_status: 'Em Ajuste' }
       });
       setInsight(res.data.resposta);
     } catch (e) {
-      setInsight('Erro ao gerar insight.');
+      setInsight('Erro ao gerar insight. Verifique a conexão com o Agente SQL.');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="bg-slate-900/50 rounded-2xl p-6 border border-slate-700 flex flex-col gap-4 h-full">
+    <div className="bg-slate-900/50 rounded-3xl p-6 border border-slate-700 flex flex-col gap-4 h-full shadow-inner">
       <div className="flex items-center gap-3">
          <div className="p-2.5 bg-blue-500/20 text-blue-400 rounded-xl">
            <Wand2 className="w-5 h-5" />
@@ -45,12 +45,14 @@ const AiInsightBox = ({ alvo, tipo, pmv }: { alvo: string, tipo: string, pmv: nu
       </div>
       
       {insight ? (
-        <div className="text-sm font-medium text-slate-300 leading-relaxed whitespace-pre-wrap overflow-y-auto custom-scrollbar pr-2" dangerouslySetInnerHTML={{ __html: insight.replace(/\*\*(.*?)\*\*/g, '<strong class="font-black text-white">$1</strong>') }} />
+        <div className="text-sm font-medium text-slate-300 leading-relaxed whitespace-pre-wrap overflow-y-auto custom-scrollbar pr-2 max-h-[250px]" dangerouslySetInnerHTML={{ __html: insight.replace(/\*\*(.*?)\*\*/g, '<strong class="font-black text-white">$1</strong>').replace(/\n/g, '<br/>') }} />
       ) : (
-        <div className="flex flex-col items-start gap-3 mt-2">
-           <p className="text-xs text-slate-500 font-medium">Acione o consultor executivo para cruzar dados de S&OP, Faturamento Histórico e metas do ciclo.</p>
-           <button onClick={getInsight} disabled={loading} className="mt-2 text-xs font-bold bg-blue-600 text-white px-4 py-3 rounded-xl hover:bg-blue-700 transition flex items-center gap-2 disabled:opacity-50 w-full justify-center shadow-lg shadow-blue-900/20">
-             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Gerar Parecer Estratégico 360°'}
+        <div className="flex flex-col items-start gap-4 mt-2 h-full justify-center">
+           <p className="text-xs text-slate-400 font-medium leading-relaxed">
+             Acione o assistente executivo para cruzar o histórico de vendas com as metas atuais e gerar um diagnóstico automático de risco e rentabilidade para este {tipo.toLowerCase()}.
+           </p>
+           <button onClick={getInsight} disabled={loading} className="mt-2 text-xs font-black bg-blue-600 text-white px-4 py-3 rounded-xl hover:bg-blue-500 transition flex items-center gap-2 disabled:opacity-50 w-full justify-center shadow-lg shadow-blue-900/20">
+             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Analisar Saudabilidade (IA)'}
            </button>
         </div>
       )}
@@ -58,6 +60,84 @@ const AiInsightBox = ({ alvo, tipo, pmv }: { alvo: string, tipo: string, pmv: nu
   );
 };
 
+// =====================================================================
+// COMPONENTE: DOSSIÊ DE SAUDABILIDADE (NÚMEROS EXECUTIVOS)
+// =====================================================================
+const PainelSaudabilidade = ({ rowData, celulasEditadas }: { rowData: any, celulasEditadas: any }) => {
+    // Calcula os totais dinamicamente com base nas edições pendentes em tela
+    const kpis = useMemo(() => {
+        let volBU = 0; let volTD = 0; let rec = 0; let pmvMedio = 0; let count = 0;
+
+        rowData.meses?.forEach((m: any) => {
+            const edicao = celulasEditadas[rowData.chave_matriz]?.[m.mes_banco];
+            const vFinal = edicao !== undefined ? parseInt(edicao.novo_volume || 0) : (m.vol_ajustado || 0);
+            
+            volBU += vFinal;
+            volTD += (m.vol_td || 0);
+            rec += (vFinal * (m.pmv || 0));
+            if (m.pmv > 0) { pmvMedio += m.pmv; count++; }
+        });
+
+        return {
+            volumeComercial: volBU,
+            volumeTopDown: volTD,
+            gapTopDown: volBU - volTD,
+            receitaProjetada: rec,
+            pmvMedio: count > 0 ? pmvMedio / count : 0
+        };
+    }, [rowData, celulasEditadas]);
+
+    return (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            <div className="bg-slate-900 p-5 rounded-2xl border border-slate-700 shadow-sm flex flex-col justify-between">
+                <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 flex items-center gap-2"><Activity className="w-3 h-3"/> Receita Projetada (M2-M4)</h4>
+                <p className="text-2xl font-black text-emerald-400 mt-2">{formatMoeda(kpis.receitaProjetada)}</p>
+                <div className="mt-3 pt-3 border-t border-slate-800 flex justify-between items-center">
+                    <span className="text-[9px] text-slate-500 font-bold uppercase">PMV Médio</span>
+                    <span className="text-[11px] text-slate-300 font-black">{formatMoeda(kpis.pmvMedio)}/cx</span>
+                </div>
+            </div>
+
+            <div className="bg-slate-900 p-5 rounded-2xl border border-slate-700 shadow-sm flex flex-col justify-between">
+                <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 flex items-center gap-2"><Package className="w-3 h-3"/> Força de Vendas</h4>
+                <div className="flex items-end gap-2 mt-2">
+                    <p className="text-2xl font-black text-white">{formatVolume(kpis.volumeComercial)}</p>
+                    <span className="text-xs text-slate-500 font-bold mb-1">Caixas</span>
+                </div>
+                <div className="mt-3 pt-3 border-t border-slate-800 flex justify-between items-center">
+                    <span className="text-[9px] text-slate-500 font-bold uppercase">Base IA (Sinal)</span>
+                    <span className="text-[11px] text-slate-300 font-black">{formatVolume(rowData.meses?.reduce((a:any,b:any)=>a+(b.vol_ia||0),0))} cx</span>
+                </div>
+            </div>
+
+            <div className={`p-5 rounded-2xl border shadow-sm flex flex-col justify-between ${kpis.gapTopDown < 0 ? 'bg-rose-950/30 border-rose-900/50' : kpis.gapTopDown > 0 ? 'bg-emerald-950/30 border-emerald-900/50' : 'bg-slate-900 border-slate-700'}`}>
+                <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 flex items-center gap-2"><Target className="w-3 h-3"/> Aderência à Diretoria (Top-Down)</h4>
+                <div className="flex items-center gap-3 mt-2">
+                    <p className="text-2xl font-black text-white">{formatVolume(kpis.volumeTopDown)}</p>
+                    {kpis.gapTopDown !== 0 && (
+                        <span className={`flex items-center gap-1 text-[10px] font-black px-2 py-1 rounded ${kpis.gapTopDown < 0 ? 'bg-rose-500/20 text-rose-400' : 'bg-emerald-500/20 text-emerald-400'}`}>
+                            {kpis.gapTopDown < 0 ? <TrendingDown className="w-3 h-3"/> : <TrendingUp className="w-3 h-3"/>}
+                            {formatVolume(Math.abs(kpis.gapTopDown))} cx
+                        </span>
+                    )}
+                </div>
+                <div className="mt-3 pt-3 border-t border-slate-800/50 flex justify-start items-center">
+                    {kpis.gapTopDown < 0 ? (
+                        <span className="text-[10px] font-bold text-rose-400 flex items-center gap-1"><AlertTriangle className="w-3 h-3"/> Risco de Quebra de Meta</span>
+                    ) : kpis.gapTopDown > 0 ? (
+                        <span className="text-[10px] font-bold text-emerald-400 flex items-center gap-1"><Check className="w-3 h-3"/> Cobertura Excedente</span>
+                    ) : (
+                        <span className="text-[10px] font-bold text-slate-400 flex items-center gap-1"><Check className="w-3 h-3"/> Meta Alinhada</span>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// =====================================================================
+// MAIN COMPONENT: GERENCIAMENTO ARENA
+// =====================================================================
 export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: any }) {
   const [nivelHierarquia, setNivelHierarquia] = useState('regional');
   const [nomeResponsavel, setNomeResponsavel] = useState('');
@@ -90,14 +170,9 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const params = { nivel_hierarquia: nivelHierarquia, nome_responsavel: nomeResponsavel || '' };
-      
-      const [dadosRes] = await Promise.all([
-        axios.get('/api/v1/consensus/micro', { params })
-      ]);
-      
-      setDadosBrutos(dadosRes.data.dados || []);
-      
+      const params = { nivel_filtro: nivelHierarquia, valor_filtro: nomeResponsavel || '' };
+      const res = await axios.get('/api/v1/consensus/micro', { params });
+      setDadosBrutos(res.data.dados || []);
       setCelulasEditadas({});
       setExpanded({});
       setChartExpanded(null);
@@ -113,21 +188,80 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     if (isTopDownFechado) fetchData(); 
   }, [fetchData, isTopDownFechado]);
 
+  // A MÁGICA: Programação Defensiva com Optional Chaining (?.)
+  const dadosFiltrados = useMemo(() => {
+    if (!busca) return dadosBrutos;
+    const term = busca.toLowerCase();
+    
+    return (dadosBrutos || []).map(coord => {
+      if (coord?.nome?.toLowerCase().includes(term)) return coord;
+      
+      const vendedoresFiltrados = (coord?.subRows || []).map((vendedor: any) => {
+        if (vendedor?.nome?.toLowerCase().includes(term)) return vendedor;
+        
+        const clientesFiltrados = (vendedor?.subRows || []).map((cliente: any) => {
+          if (cliente?.nome?.toLowerCase().includes(term)) return cliente;
+          
+          const prodsFiltrados = (cliente?.subRows || []).filter((p: any) => 
+            (p?.nome?.toLowerCase().includes(term) || (p?.produto && p.produto.toLowerCase().includes(term)))
+          );
+          
+          if (prodsFiltrados.length > 0) return { ...cliente, subRows: prodsFiltrados };
+          return null;
+        }).filter(Boolean);
+
+        if (clientesFiltrados.length > 0) return { ...vendedor, subRows: clientesFiltrados };
+        return null;
+      }).filter(Boolean);
+
+      if (vendedoresFiltrados.length > 0) return { ...coord, subRows: vendedoresFiltrados };
+      return null;
+    }).filter(Boolean);
+  }, [dadosBrutos, busca]);
+
+  const totaisGerais = useMemo(() => {
+    const totais: Record<string, {vol: number, fat: number}> = {};
+    
+    dadosFiltrados?.forEach(coord => {
+      coord?.meses?.forEach((m: any) => totais[m.mes_banco] = {vol: 0, fat: 0});
+    });
+    
+    dadosFiltrados?.forEach(coord => {
+      coord?.subRows?.forEach((vendedor: any) => {
+        vendedor?.subRows?.forEach((cliente: any) => {
+          cliente?.subRows?.forEach((prod: any) => {
+            const pmvBase = prod?.meses?.[0]?.pmv || 0;
+            prod?.meses?.forEach((mes: any) => {
+              const edicaoProd = celulasEditadas[prod.chave_matriz]?.[mes.mes_banco];
+              const isPendente = edicaoProd !== undefined;
+              const volumeFinal = Math.round(Number(isPendente ? edicaoProd.novo_volume : mes.vol_ajustado));
+              
+              if(totais[mes.mes_banco]) {
+                totais[mes.mes_banco].vol += volumeFinal;
+                totais[mes.mes_banco].fat += isPendente ? (volumeFinal * pmvBase) : (mes.receita || 0);
+              }
+            });
+          });
+        });
+      });
+    });
+    return totais;
+  }, [dadosFiltrados, celulasEditadas]);
+
   const handleExportExcel = () => {
-    if (dadosBrutos.length === 0) return alert("Não há dados na tela para exportar.");
+    if (!dadosBrutos || dadosBrutos.length === 0) return alert("Não há dados na tela para exportar.");
     const dadosExcel: any[] = [];
     
-    // Proteção com Optional Chaining no Exportar
     dadosBrutos?.forEach(coord => {
-      coord.subRows?.forEach((vendedor: any) => {
-        vendedor.subRows?.forEach((cliente: any) => {
-          cliente.subRows?.forEach((prod: any) => {
+      coord?.subRows?.forEach((vendedor: any) => {
+        vendedor?.subRows?.forEach((cliente: any) => {
+          cliente?.subRows?.forEach((prod: any) => {
             const linha: any = {
               "COORDENADOR": coord.nome, "VENDEDOR": vendedor.nome,
               "RAZÃO SOCIAL": cliente.nome, "CÓDIGO SKU": prod.produto, "DESCRIÇÃO": prod.nome, 
-              "CATEGORIA": prod.categoria, "SEGMENTO": prod.segmento, "PMV PONDERADO (R$)": prod.meses?.[0]?.pmv || 0
+              "PMV PONDERADO (R$)": prod.meses?.[0]?.pmv || 0
             };
-            prod.meses?.forEach((m: any) => {
+            prod?.meses?.forEach((m: any) => {
               const edicao = celulasEditadas[prod.chave_matriz]?.[m.mes_banco];
               const volFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : m.vol_ajustado));
               linha[`${m.mes_str} (Base IA)`] = Math.round(Number(m.vol_ia));
@@ -143,7 +277,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     const worksheet = XLSX.utils.json_to_sheet(dadosExcel);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Gerencial_Consenso");
-    worksheet['!cols'] = [{ wch: 25 }, { wch: 25 }, { wch: 30 }, { wch: 15 }, { wch: 40 }, { wch: 20 }, { wch: 20 }, { wch: 18 }];
     XLSX.writeFile(workbook, `SOP_Nexus_Gerencial_${new Date().toISOString().split('T')[0]}.xlsx`);
   };
 
@@ -167,6 +300,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     try {
       await axios.post(`/api/v1/consensus/micro/congelar`, { origem_ajuste: "Comercial", ajustes });
       alert("✅ Ajustes Gerenciais salvos e consolidados!");
+      setCelulasEditadas({});
       fetchData(); 
     } catch (e: any) {
       alert(e.response?.data?.detail || "Erro ao guardar.");
@@ -182,88 +316,19 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
       await axios.post(`/api/v1/consensus/micro/destrancar`, { regional: nomeResponsavel || "TODAS" });
       alert("🔓 Regional(is) destrancada(s) para ajustes da base.");
       fetchData();
-    } catch(e) {
-      alert("Erro ao destrancar regional.");
-    } finally {
-      setIsProcessing(false);
-    }
+    } catch(e) { alert("Erro ao destrancar regional."); } 
+    finally { setIsProcessing(false); }
   };
-
-  const dadosFiltrados = useMemo(() => {
-    if (!busca) return dadosBrutos;
-    const term = busca.toLowerCase();
-    
-    return dadosBrutos.map(coord => {
-      if (coord.nome.toLowerCase().includes(term)) return coord;
-      
-      const vendedoresFiltrados = (coord.subRows || []).map((vendedor: any) => {
-        if (vendedor.nome.toLowerCase().includes(term)) return vendedor;
-        
-        const clientesFiltrados = (vendedor.subRows || []).map((cliente: any) => {
-          if (cliente.nome.toLowerCase().includes(term)) return cliente;
-          
-          const prodsFiltrados = (cliente.subRows || []).filter((p: any) => 
-            (p.nome.toLowerCase().includes(term) || (p.produto && p.produto.toLowerCase().includes(term)))
-          );
-          
-          if (prodsFiltrados.length > 0) return { ...cliente, subRows: prodsFiltrados };
-          return null;
-        }).filter(Boolean);
-
-        if (clientesFiltrados.length > 0) return { ...vendedor, subRows: clientesFiltrados };
-        return null;
-      }).filter(Boolean);
-
-      if (vendedoresFiltrados.length > 0) return { ...coord, subRows: vendedoresFiltrados };
-      return null;
-    }).filter(Boolean);
-  }, [dadosBrutos, busca]);
-
-  const totaisGerais = useMemo(() => {
-    const totais: Record<string, {vol: number, fat: number}> = {};
-    
-    // Blindagem de Inicialização Segura
-    dadosFiltrados?.forEach(coord => {
-      coord.meses?.forEach((m: any) => totais[m.mes_banco] = {vol: 0, fat: 0});
-    });
-    
-    // Blindagem com Optional Chaining (?.) em todos os laços
-    dadosFiltrados?.forEach(coord => {
-      coord.subRows?.forEach((vendedor: any) => {
-        vendedor.subRows?.forEach((cliente: any) => {
-          cliente.subRows?.forEach((prod: any) => {
-            const pmvBase = prod.meses?.[0]?.pmv || 0;
-            prod.meses?.forEach((mes: any) => {
-              const edicaoProd = celulasEditadas[prod.chave_matriz]?.[mes.mes_banco];
-              const isPendente = edicaoProd !== undefined;
-              const volumeFinal = Math.round(Number(isPendente ? edicaoProd.novo_volume : mes.vol_ajustado));
-              
-              if(totais[mes.mes_banco]) {
-                totais[mes.mes_banco].vol += volumeFinal;
-                totais[mes.mes_banco].fat += isPendente ? (volumeFinal * pmvBase) : (mes.receita || 0);
-              }
-            });
-          });
-        });
-      });
-    });
-    return totais;
-  }, [dadosFiltrados, celulasEditadas]);
 
   const toggleChart = async (row: any) => {
     const chave = row.original.chave_matriz;
-    if (chartExpanded === chave) {
-      setChartExpanded(null); 
-      return;
-    }
+    if (chartExpanded === chave) { setChartExpanded(null); return; }
     
     setChartExpanded(chave);
     if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
-        const res = await axios.get('/api/v1/consensus/micro/grafico', { 
-            params: { chave_matriz: chave } 
-        });
+        const res = await axios.get('/api/v1/consensus/micro/grafico', { params: { chave_matriz: chave } });
         setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
       } catch (e) { console.error(e); }
       finally { setLoadingGrafico(null); }
@@ -274,7 +339,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
   const isAllFechado = dadosBrutos.length > 0 && dadosBrutos[0].status === 'Fechado';
 
   const columns = useMemo(() => {
-    if (dadosFiltrados.length === 0) return [];
+    if (!dadosFiltrados || dadosFiltrados.length === 0) return [];
     
     const baseCols: any[] = [
       {
@@ -297,7 +362,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                 <div className="w-8"></div>
               )}
               
-              <button onClick={() => toggleChart(row)} className={`p-1.5 rounded-lg transition-colors border ${chartExpanded === row.original.chave_matriz ? 'bg-blue-100 border-blue-200 text-blue-600 shadow-sm' : 'hover:bg-slate-100 border-transparent text-slate-400 hover:text-slate-600'}`} title="Ver Gráfico S&OE">
+              <button onClick={() => toggleChart(row)} className={`p-1.5 rounded-lg transition-colors border ${chartExpanded === row.original.chave_matriz ? 'bg-blue-100 border-blue-200 text-blue-600 shadow-sm' : 'hover:bg-slate-100 border-transparent text-slate-400 hover:text-slate-600'}`} title="Ver Dossiê Analítico">
                 <BarChart2 className="w-4 h-4" />
               </button>
 
@@ -332,12 +397,12 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
     ];
 
     const mesesMap = new Map();
-    dadosFiltrados.forEach(v => v.meses?.forEach((m: any) => mesesMap.set(m.mes_banco, m)));
+    dadosFiltrados.forEach(v => v?.meses?.forEach((m: any) => mesesMap.set(m.mes_banco, m)));
     
     Array.from(mesesMap.values()).sort((a: any, b: any) => a.mes_banco.localeCompare(b.mes_banco)).forEach((m: any) => {
       baseCols.push({
         id: `mes_${m.mes_banco}`, header: m.mes_str,
-        accessorFn: (row: any) => row.meses?.find((rm: any) => rm.mes_banco === m.mes_banco)?.vol_ajustado || 0,
+        accessorFn: (row: any) => row?.meses?.find((rm: any) => rm.mes_banco === m.mes_banco)?.vol_ajustado || 0,
         cell: (info: any) => {
           const row = info.row.original;
           const isCoordenador = row.tipo === 'coordenador';
@@ -356,6 +421,8 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           const isChanged = valorInteiro !== baseIA;
           
           const faturamentoPrevisto = isPendente ? (valorInteiro * (dadosMes?.pmv || 0)) : (dadosMes?.receita || 0);
+          
+          // PRESSÃO DA DIRETORIA: O Badge Vermelho surge se o Bottom-Up for menor que o Top-Down
           const temPressao = baseTopDown > valorInteiro;
           
           const bloqueadoPelaEquipa = isCoordenador ? false : row.status === 'Fechado';
@@ -363,7 +430,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           if (isCoordenador || isVendedor) {
             return (
               <div className="flex flex-col items-center justify-center py-2 w-28 relative">
-                 {temPressao && <span className="absolute -top-1 text-[8px] text-rose-500 font-black uppercase tracking-widest bg-rose-50 px-1 rounded border border-rose-100" title="Meta da Diretoria">TD: {baseTopDown}</span>}
+                 {temPressao && <span className="absolute -top-1 text-[8px] text-rose-500 font-black uppercase tracking-widest bg-rose-50 px-1 rounded border border-rose-100" title="Meta da Diretoria (Top-Down)">TD: {baseTopDown}</span>}
                  <span className="text-sm font-black text-slate-800">{formatVolume(valorInteiro)}</span>
                  <span className="text-[10px] font-black text-emerald-600 mt-1">{formatMoeda(dadosMes?.receita || 0)}</span>
               </div>
@@ -385,8 +452,8 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                   ${isChanged && !isCliente ? 'bg-blue-600 border-blue-700 text-white shadow-md' : !isCliente ? 'bg-slate-50 border-transparent text-slate-800 focus:bg-white focus:border-slate-300' : ''}`}
                 title={bloqueadoPelaEquipa ? "Equipa Trancada! Edição Gerencial Forçada" : isCliente ? "Editar Matriz (Rateia por todos os SKUs)" : "Editar SKU"}
               />
-              <span className={`text-[10px] font-black text-center tracking-tight ${isCliente ? 'text-blue-500' : 'text-emerald-600'}`}>
-                {formatMoeda(faturamentoPrevisto)}
+              <span className={`text-[10px] font-black text-center tracking-tight ${isPendente ? 'text-indigo-500 animate-pulse' : isCliente ? 'text-blue-500' : 'text-emerald-600'}`}>
+                {isPendente ? 'Calculando...' : formatMoeda(faturamentoPrevisto)}
               </span>
             </div>
           );
@@ -394,7 +461,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
       });
     });
     return baseCols;
-  }, [dadosFiltrados, chartExpanded]);
+  }, [dadosFiltrados, chartExpanded, celulasEditadas]);
 
   const table = useReactTable({
     data: dadosFiltrados, columns, state: { expanded, sorting },
@@ -442,7 +509,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
         
         {/* CABEÇALHO */}
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 relative overflow-hidden">
-          
           <div>
             <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
               <Activity className="w-8 h-8 text-blue-600" /> Cockpit Gerencial
@@ -454,15 +520,12 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
           
           <div className="flex items-center gap-4">
               <div className="flex items-center gap-3 h-full">
-                
                 {isAllFechado && (
                    <button onClick={alternarTrancaRegional} disabled={isProcessing} className="flex items-center gap-2 bg-rose-50 hover:bg-rose-100 text-rose-600 px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase transition-all border border-rose-200 shadow-sm disabled:opacity-50">
                       <Unlock className="w-5 h-5" /> Destrancar Bases
                    </button>
                 )}
-
                 {qtdEdicoes > 0 && (<button onClick={() => setCelulasEditadas({})} className="flex items-center gap-1 text-xs font-black text-rose-500 hover:text-rose-700 transition tracking-widest uppercase px-4 py-3 rounded-2xl hover:bg-rose-50"><X className="w-4 h-4" /> Descartar</button>)}
-                
                 <button onClick={handleSalvar} disabled={isProcessing} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase transition-all shadow-lg shadow-blue-600/30">
                     {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : <Check className="w-5 h-5" />}
                     {qtdEdicoes > 0 ? 'Gravar Alterações' : 'Aprovar Ciclo'}
@@ -476,33 +539,27 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
             <div className="flex items-center gap-4 bg-white p-3 rounded-[24px] shadow-sm border border-slate-100 flex-shrink-0 px-6">
                 <span className="text-xs font-black text-slate-500 uppercase tracking-widest">Visualizar Base:</span>
                 <select 
-                    value={nivelHierarquia} 
-                    onChange={e => { setNivelHierarquia(e.target.value); setNomeResponsavel(''); }} 
+                    value={nivelHierarquia} onChange={e => { setNivelHierarquia(e.target.value); setNomeResponsavel(''); }} 
                     className="bg-slate-50 border border-slate-200 p-2.5 rounded-xl text-sm font-bold text-slate-700 outline-none cursor-pointer"
                 >
                     <option value="regional">Por Regionais</option>
                     <option value="coordenador">Por Coordenações</option>
                     <option value="vendedor">Por Vendedores</option>
                 </select>
-
                 <select 
-                    value={nomeResponsavel} 
-                    onChange={e => { setNomeResponsavel(e.target.value); }} 
-                    className="bg-slate-50 border border-slate-200 p-2.5 rounded-xl text-sm font-bold text-slate-700 outline-none cursor-pointer"
+                    value={nomeResponsavel} onChange={e => { setNomeResponsavel(e.target.value); }} 
+                    className="bg-slate-50 border border-slate-200 p-2.5 rounded-xl text-sm font-bold text-slate-700 outline-none cursor-pointer max-w-[200px] truncate"
                 >
                     <option value="">-- Todos --</option>
                     {nivelHierarquia === 'regional' && opcoesBusca.regionais.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                     {nivelHierarquia === 'coordenador' && opcoesBusca.coordenadores.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                     {nivelHierarquia === 'vendedor' && opcoesBusca.vendedores.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                 </select>
-
                 <button 
-                  onClick={fetchData} 
-                  disabled={isLoading} 
+                  onClick={fetchData} disabled={isLoading} 
                   className="bg-blue-50 text-blue-600 px-6 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-blue-100 transition disabled:opacity-50 flex items-center gap-2"
                 >
-                   {isLoading ? <Loader2 className="w-4 h-4 animate-spin"/> : <Filter className="w-4 h-4"/>} 
-                   Filtrar
+                   {isLoading ? <Loader2 className="w-4 h-4 animate-spin"/> : <Filter className="w-4 h-4"/>} Filtrar
                 </button>
             </div>
 
@@ -527,7 +584,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                  <Loader2 className="w-8 h-8 animate-spin text-blue-500 mb-4" />
                  <span className="text-slate-400 font-black text-xs tracking-widest uppercase">Processando Sumário Gerencial...</span>
              </div>
-          ) : dadosFiltrados.length === 0 ? (
+          ) : !dadosFiltrados || dadosFiltrados.length === 0 ? (
              <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
                  <Filter className="w-12 h-12 mb-4 opacity-20" />
                  <span className="font-black text-sm tracking-widest uppercase">Nenhum dado encontrado</span>
@@ -565,26 +622,30 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                       ))}
                     </tr>
                     
-                    {/* GRÁFICO EXPANDIDO E DINÂMICO */}
+                    {/* AQUI COMEÇA O DOSSIÊ DE SAUDABILIDADE EXPANDIDO */}
                     {chartExpanded === row.original.chave_matriz && (
                       <tr>
                         <td colSpan={table.getAllColumns().length} className="bg-slate-900 p-8 border-b border-slate-800">
                           <div className="bg-slate-950 rounded-[32px] p-8 shadow-inner border border-slate-800 animate-in fade-in duration-500">
                             
+                            <div className="flex justify-between items-start mb-6 px-2">
+                                <div className="flex flex-col gap-1">
+                                    <h3 className="text-lg font-black text-white uppercase tracking-tighter flex items-center gap-2">
+                                    <Activity className="w-5 h-5 text-blue-400" /> Dossiê de Saudabilidade ({row.original.tipo === 'coordenador' ? 'Visão Supervisão' : row.original.tipo === 'vendedor' ? 'Visão Carteira de Vendas' : row.original.tipo === 'cliente' ? 'Visão Conta Global' : 'Visão Produto'})
+                                    </h3>
+                                    <p className="text-xs font-bold text-slate-400 tracking-widest uppercase">
+                                    {row.original.nome}
+                                    </p>
+                                </div>
+                            </div>
+
+                            {/* Os Cards Executivos de Performance */}
+                            <PainelSaudabilidade rowData={row.original} celulasEditadas={celulasEditadas} />
+                            
                             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                                
                                <div className="lg:col-span-2">
-                                 <div className="flex justify-between items-start mb-6 px-2">
-                                    <div className="flex flex-col gap-1">
-                                      <h3 className="text-lg font-black text-white uppercase tracking-tighter flex items-center gap-2">
-                                        <Activity className="w-5 h-5 text-blue-400" /> Curva S&OE ({row.original.tipo === 'coordenador' ? 'Visão Supervisão' : row.original.tipo === 'vendedor' ? 'Visão Carteira de Vendas' : row.original.tipo === 'cliente' ? 'Visão Conta Global' : 'Visão Produto'})
-                                      </h3>
-                                      <p className="text-xs font-bold text-slate-400 tracking-widest uppercase">
-                                        {row.original.nome}
-                                      </p>
-                                    </div>
-                                 </div>
-
+                                 <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2"><BarChart2 className="w-3 h-3"/> Timeline S&OE (Lag Forecast)</h4>
                                  <div className="h-[250px] w-full">
                                    {loadingGrafico === row.original.chave_matriz ? (
                                      <div className="h-full flex items-center justify-center text-slate-600"><Loader2 className="animate-spin w-8 h-8" /></div>
@@ -593,7 +654,6 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                                        <LineChart 
                                          data={
                                            (dadosGraficoCache[row.original.chave_matriz] || []).map((p: any) => {
-                                               // O GRÁFICO AGORA "DANÇA" COM O QUE VOCÊ DIGITA EM TELA
                                                const mesNaTab = row.original.meses?.find((m: any) => m.mes_banco === p.data_iso);
                                                const edicao = celulasEditadas[row.original.chave_matriz]?.[p.data_iso];
                                                const valComercial = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
@@ -618,6 +678,7 @@ export default function GerenciamentoArena({ usuarioSessao }: { usuarioSessao?: 
                                  </div>
                                </div>
 
+                               {/* O Painel da IA injetado na visão lateral */}
                                <div className="flex flex-col justify-start">
                                  <AiInsightBox 
                                     alvo={row.original.nome} 
