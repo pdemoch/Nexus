@@ -311,8 +311,8 @@ export default function TopDownArena() {
                   <Tooltip content={<CustomTooltip />} />
                   <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} />
                   
-                  <Line type="monotone" dataKey="Realizado" name="Histórico Faturado" stroke="#0f172a" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} connectNulls={false} />
-                  <Line type="monotone" dataKey="IA" name="Projeção IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="Realizado" name="Histórico Faturado" stroke="#f8fafc" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} connectNulls={false} />
+                  <Line type="monotone" dataKey="IA" name="Projeção IA" stroke="#64748b" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
                   <Line type="monotone" dataKey="CicloAnterior" name="Ciclo Anterior (Lag 1)" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
                   <Line type="monotone" dataKey="TopDown" name="Proposta Atual" stroke="#3b82f6" strokeWidth={3} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
                 </LineChart>
@@ -350,8 +350,8 @@ export default function TopDownArena() {
     return (
       <React.Fragment key={row.chave_matriz}>
         <tr className={`border-b transition-colors hover:bg-slate-50 ${depth === 0 ? 'bg-white' : depth === 1 ? 'bg-slate-50/50' : 'bg-white'}`}>
-          <td className="p-0">
-            <div style={{ paddingLeft: `${depth * 2 + 1}rem` }} className="flex items-center gap-3 py-3 min-w-[320px]">
+          <td className="p-0 align-middle">
+            <div style={{ paddingLeft: `${depth * 2 + 1}rem` }} className="flex items-center gap-3 py-3 min-w-[320px] h-full">
               {hasChildren ? (
                 <button onClick={() => setExpanded(p => ({ ...p, [row.chave_matriz]: !p[row.chave_matriz] }))} className="p-1.5 hover:bg-slate-200 text-slate-500 rounded-lg transition-colors">
                   {isExpanded ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
@@ -362,11 +362,11 @@ export default function TopDownArena() {
                 <BarChart2 className="w-4 h-4" />
               </button>
 
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center border ${depth === 0 ? 'bg-slate-800 text-white' : depth === 1 ? 'bg-slate-100 text-slate-600' : 'bg-blue-50 text-blue-600'}`}>
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center border shrink-0 ${depth === 0 ? 'bg-slate-800 text-white' : depth === 1 ? 'bg-slate-100 text-slate-600' : 'bg-blue-50 text-blue-600'}`}>
                 {depth === 0 ? <LayoutGrid className="w-4 h-4" /> : depth === 1 ? <Boxes className="w-4 h-4" /> : <Package className="w-4 h-4" />}
               </div>
               
-              <span className={`text-sm ${!isProduto ? 'font-black text-slate-800 uppercase tracking-tight' : 'font-semibold text-slate-600'}`}>
+              <span className={`text-sm pr-4 ${!isProduto ? 'font-black text-slate-800 uppercase tracking-tight' : 'font-semibold text-slate-600'}`}>
                 {row.nome || "INDEFINIDO"}
               </span>
             </div>
@@ -378,19 +378,21 @@ export default function TopDownArena() {
             const valorExibicao = isEdited ? edicao.novo_volume : (m.vol_ajustado || 0);
 
             return (
-              <td key={idx} className="p-0 border-l border-slate-100">
-                <div className={`flex flex-col h-full ${isFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50' : 'hover:bg-slate-50'}`}>
-                  {/* CABEÇALHO DA CÉLULA: IA vs LAG 1 */}
-                  <div className="px-3 py-1.5 border-b border-slate-100/50 flex justify-between items-center bg-slate-50/80">
-                    <span className="text-[10px] font-bold text-slate-500 bg-slate-200/50 px-1.5 py-0.5 rounded" title="Projeção IA Original">
+              <td key={idx} className="p-0 border-l border-slate-100 align-top">
+                <div className={`flex flex-col h-full min-h-[76px] ${isFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/40' : 'hover:bg-slate-50'}`}>
+                  
+                  {/* CABEÇALHO DA CÉLULA: IA vs LAG 1 CENTRALIZADOS */}
+                  <div className="px-2 py-1.5 border-b border-slate-100/50 flex justify-center gap-3 items-center bg-slate-50/80">
+                    <span className="text-[10px] font-bold text-slate-500 bg-slate-200/50 px-2 py-0.5 rounded whitespace-nowrap" title="Projeção IA Original">
                       IA: {formatVolume(m.vol_ia)}
                     </span>
-                    <span className="text-[10px] font-bold text-purple-600 bg-purple-100/50 border border-purple-200/50 px-1.5 py-0.5 rounded" title="Aprovado no Ciclo Anterior">
+                    <span className="text-[10px] font-bold text-purple-600 bg-purple-100/50 border border-purple-200/50 px-2 py-0.5 rounded whitespace-nowrap" title="Aprovado no Ciclo Anterior">
                       Lag 1: {formatVolume(m.vol_anterior)}
                     </span>
                   </div>
                   
-                  <div className="px-4 py-3 flex items-center justify-end group">
+                  {/* CORPO DA CÉLULA: VOLUME + RECEITA DINÂMICA */}
+                  <div className="px-4 py-2 flex flex-col items-end justify-center flex-1">
                     <div className="w-24">
                       {isProduto ? (
                         <SmartInput value={valorExibicao} disabled={isFechado} onChange={(novoVol) => handleEditCell(row.chave_matriz, m.mes_banco, novoVol)} />
@@ -398,7 +400,12 @@ export default function TopDownArena() {
                         <div className="w-full text-right font-bold text-slate-800 pr-1">{formatVolume(valorExibicao)}</div>
                       )}
                     </div>
+                    {/* Faturamento Previsto Dinâmico */}
+                    <span className="text-[10px] font-bold text-emerald-500 tracking-tight pr-1 mt-0.5" title="Receita (R$) Prevista">
+                      {formatMoeda(valorExibicao * (m.pmv || 0))}
+                    </span>
                   </div>
+
                 </div>
               </td>
             );
