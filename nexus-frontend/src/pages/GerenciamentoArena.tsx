@@ -143,33 +143,101 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
       const payload = {
         origem_ajuste: "Gerência Comercial",
         ajustes: Object.entries(celulasEditadas).flatMap(([chave, meses]: any) => 
-          Object.entries(meses).map(([mes_projetado, val]: any) => ({
-            nivel: chave.split('|').length === 4 ? 'produto' : 'agrupamento',
-            chave,
-            mes_projetado,
-            novo_volume: parseInt(val.novo_volume, 10)
-          }))
+          Object.entries(meses)
+            .filter(() => chave.split('|').length === 4)
+            .map(([mes_projetado, val]: any) => ({
+              nivel: 'produto',
+              chave,
+              mes_projetado,
+              novo_volume: parseInt(val.novo_volume, 10)
+            }))
         )
       };
 
       await axios.post(`/api/v1/consensus/gerenciamento/congelar`, payload);
-      alert("Gestão Comercial Congelada com Sucesso!");
+      alert("Gestão Comercial Salva com Sucesso!");
       fetchData();
     } catch (e: any) {
-      alert("Erro ao congelar: " + (e.response?.data?.detail || e.message));
+      alert("Erro ao salvar: " + (e.response?.data?.detail || e.message));
     }
   };
 
+  // =====================================================================
+  // MOTOR DE CASCATA EM TEMPO REAL (PAI -> FILHO / FILHO -> PAI)
+  // =====================================================================
   const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
-    // Busca o status do coordenador dono desta célula
     const coordRoot = chaveStr.split('|')[0];
     const nodeCoord = dadosBrutos.find(c => c.nome === coordRoot);
-    if (nodeCoord && nodeCoord.status === 'Fechado') return; // Bloqueia edição se regional fechada
+    if (nodeCoord && nodeCoord.status === 'Fechado') return;
 
-    setCelulasEditadas((prev: any) => ({
-      ...prev,
-      [chaveStr]: { ...(prev[chaveStr] || {}), [mesBanco]: { novo_volume: novoValor } }
-    }));
+    setCelulasEditadas((currentEdits: any) => {
+      const nextEdits = { ...currentEdits };
+
+      const getVolActual = (chave: string, originalVol: number) => {
+        if (nextEdits[chave]?.[mesBanco] !== undefined) return nextEdits[chave][mesBanco].novo_volume;
+        return originalVol;
+      };
+
+      const distributeDown = (node: any, targetVolume: number) => {
+        if (!nextEdits[node.chave_matriz]) nextEdits[node.chave_matriz] = {};
+        nextEdits[node.chave_matriz][mesBanco] = { novo_volume: targetVolume };
+
+        if (node.subRows && node.subRows.length > 0) {
+          const currentTotalChildren = node.subRows.reduce((acc: number, child: any) => {
+            const childMes = child.meses.find((m: any) => m.mes_banco === mesBanco);
+            return acc + getVolActual(child.chave_matriz, childMes ? childMes.vol_ajustado : 0);
+          }, 0);
+
+          node.subRows.forEach((child: any, idx: number) => {
+            const childMes = child.meses.find((m: any) => m.mes_banco === mesBanco);
+            const childCurrent = getVolActual(child.chave_matriz, childMes ? childMes.vol_ajustado : 0);
+            
+            let childTarget = 0;
+            if (currentTotalChildren > 0) {
+              if (idx === node.subRows.length - 1) {
+                const allocatedSoFar = node.subRows.slice(0, idx).reduce((sum: number, c: any) => sum + (nextEdits[c.chave_matriz]?.[mesBanco]?.novo_volume || 0), 0);
+                childTarget = targetVolume - allocatedSoFar;
+              } else {
+                childTarget = Math.round((childCurrent / currentTotalChildren) * targetVolume);
+              }
+            } else {
+              if (idx === node.subRows.length - 1) {
+                const allocatedSoFar = Math.round(targetVolume / node.subRows.length) * idx;
+                childTarget = targetVolume - allocatedSoFar;
+              } else {
+                childTarget = Math.round(targetVolume / node.subRows.length);
+              }
+            }
+            distributeDown(child, Math.max(0, childTarget));
+          });
+        }
+      };
+
+      const rollupUp = (treeNodes: any[]): boolean => {
+        for (const node of treeNodes) {
+          if (node.chave_matriz === chaveStr) {
+            distributeDown(node, novoValor);
+            return true;
+          }
+          if (node.subRows && node.subRows.length > 0) {
+            const foundInChild = rollupUp(node.subRows);
+            if (foundInChild) {
+              const newTotal = node.subRows.reduce((acc: number, child: any) => {
+                const childMes = child.meses.find((m: any) => m.mes_banco === mesBanco);
+                return acc + getVolActual(child.chave_matriz, childMes ? childMes.vol_ajustado : 0);
+              }, 0);
+              if (!nextEdits[node.chave_matriz]) nextEdits[node.chave_matriz] = {};
+              nextEdits[node.chave_matriz][mesBanco] = { novo_volume: newTotal };
+              return true;
+            }
+          }
+        }
+        return false;
+      };
+
+      rollupUp(dadosBrutos);
+      return nextEdits;
+    });
   };
 
   const toggleChart = async (node: any) => {
@@ -374,10 +442,10 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                   {/* CORPO DA CÉLULA: VOLUME + RECEITA DINÂMICA */}
                   <div className="px-4 py-2 flex flex-col items-end justify-center flex-1">
                     <div className="w-24">
-                      {/* Permite editar em TODOS os níveis se estiver aberto */}
+                      {/* Permite editar se estiver aberto, mas BLOQUEIA no Coordenador */}
                       <SmartInput 
                          value={valorExibicao} 
-                         disabled={isRowFechado} 
+                         disabled={isRowFechado || row.tipo === "coordenador"} 
                          onChange={(novoVol) => handleEditCell(row.chave_matriz, m.mes_banco, novoVol)} 
                       />
                     </div>

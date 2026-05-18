@@ -43,7 +43,7 @@ class PayloadToggleLock(BaseModel):
     status: str
 
 # =====================================================================
-# EXPRESSÕES DE HIERARQUIA BLINDADAS
+# EXPRESSÕES DE HIERARQUIA COALESCE (AGRUPAMENTO POR RAZÃO SOCIAL)
 # =====================================================================
 def get_coord_expr():
     return func.coalesce(func.nullif(func.trim(DimCliente.supervisor_nome), ''), func.nullif(func.trim(DimCliente.gerente_nome), ''), 'SEM COORDENADOR')
@@ -52,7 +52,7 @@ def get_vend_expr():
     return func.coalesce(func.nullif(func.trim(DimCliente.vendedor_nome), ''), 'SEM VENDEDOR')
 
 def get_cli_expr():
-    return func.concat(DimCliente.cgc, ' - ', func.coalesce(func.nullif(func.trim(DimCliente.loja), ''), 'CONTA PRINCIPAL'))
+    return func.coalesce(func.nullif(func.trim(DimCliente.razaosocial), ''), DimCliente.cgc)
 
 # =====================================================================
 # GOVERNANÇA E SEGURANÇA DE ESCOPO
@@ -71,7 +71,7 @@ def verificar_concorrencia(db: Session, supervisor_alvo: str):
         raise HTTPException(status_code=423, detail=f"Base de {supervisor_alvo} está travada por outra operação de aprovação.")
 
 # =====================================================================
-# ENDPOINT PRINCIPAL: ÁRVORE COMERCIAL (M2, M3 e M4)
+# ENDPOINT PRINCIPAL: ÁRVORE COMERCIAL CONSOLIDADA POR RAZÃO SOCIAL
 # =====================================================================
 @router.get("")
 async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
@@ -80,7 +80,6 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         ciclo_anterior = get_previous_cycle(db)
         
         hoje = datetime.date.today().replace(day=1)
-        # S&OP Comercial Foca Estritamente no Horizonte Planejável: M2, M3 e M4
         data_ini = hoje + relativedelta(months=2)
         data_fim = hoje + relativedelta(months=4)
         meses_alvo = [(hoje + relativedelta(months=i)).strftime("%Y-%m-%d") for i in range(2, 5)]
@@ -88,11 +87,9 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         cx, vx, clx = get_coord_expr(), get_vend_expr(), get_cli_expr()
         q = get_truth_query(db, ciclo, data_ini, data_fim)
 
-        # Regras de Segurança de Escopo Regional / Carteira
         if usuario['funcao'] == 'Coordenador Comercial':
             q = q.filter(func.upper(cx) == usuario['nome'].strip().upper())
         elif usuario['funcao'] == 'Gerente Comercial':
-            # Filtro por filiais vinculadas ao Gerente
             user_db = db.query(Usuario).filter(Usuario.id == usuario['id']).first()
             filiais = [f.strip().upper() for f in (user_db.filiais_permissao or "").split(",") if f.strip()]
             if filiais:
@@ -102,30 +99,29 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             cx.label('coord'),
             vx.label('vend'),
             clx.label('cli'),
-            FatoIbpGranular.cgc,
             FatoIbpGranular.sku,
             DimProduto.descricao.label('prod_desc'),
             FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
             func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'),
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
-        ).group_by(cx, vx, clx, FatoIbpGranular.cgc, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all()
+        ).group_by(cx, vx, clx, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all()
 
-        # Resgata o Lag 1 (Ciclo Anterior) para exibição direta nas células
-        skus_encontrados = list({r.sku for r in resultados if r.sku})
-        cgcs_encontrados = list({r.cgc for r in resultados if r.cgc})
         ant_dict = defaultdict(lambda: defaultdict(int))
-
-        if skus_encontrados and cgcs_encontrados:
-            q_ant = get_truth_query(db, ciclo_anterior, data_ini, data_fim)
-            res_ant = q_ant.filter(FatoIbpGranular.sku.in_(skus_encontrados), FatoIbpGranular.cgc.in_(cgcs_encontrados)).with_entities(
-                FatoIbpGranular.cgc, FatoIbpGranular.sku, FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_final).label('v_ant')
-            ).group_by(FatoIbpGranular.cgc, FatoIbpGranular.sku, FatoIbpGranular.mes_projetado).all()
+        skus_encontrados = list({r.sku for r in resultados if r.sku})
+        
+        if skus_encontrados:
+            q_ant = get_truth_query(db, ciclo_anterior, data_ini, data_fim).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)
+            res_ant = q_ant.filter(FatoIbpGranular.sku.in_(skus_encontrados)).with_entities(
+                clx.label('cli'),
+                FatoIbpGranular.sku,
+                FatoIbpGranular.mes_projetado,
+                func.sum(FatoIbpGranular.vol_final).label('v_ant')
+            ).group_by(clx, FatoIbpGranular.sku, FatoIbpGranular.mes_projetado).all()
             
             for ra in res_ant:
-                ant_dict[(ra.cgc, ra.sku)][str(ra.mes_projetado)] = int(ra.v_ant or 0)
+                ant_dict[(str(ra.cli).strip(), str(ra.sku).strip())][str(ra.mes_projetado)] = int(ra.v_ant or 0)
 
-        # Mapa de Trancas Regionais por Supervisor/Coordenador
         trancas_reg = {c.origem: c.status for c in db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo).all()}
 
         arvore = {}
@@ -148,7 +144,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             if ms in meses_alvo:
                 v_bu = int(r.v_bu or 0)
                 pmv_b = float(r.pmv or 0)
-                v_ant = ant_dict[(r.cgc, r.sku)][ms]
+                v_ant = ant_dict[(cl, sk)][ms]
 
                 for nivel in [arvore[co]["meses"][ms], arvore[co]["vendedores"][ve]["meses"][ms], arvore[co]["vendedores"][ve]["clientes"][cl]["meses"][ms], arvore[co]["vendedores"][ve]["clientes"][cl]["produtos"][sk]["meses"][ms]]:
                     nivel["vol_ia"] += int(r.v_ia or 0)
@@ -158,7 +154,6 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
                     nivel["vol_anterior"] += v_ant
                     nivel["pmv"] = (nivel["receita"] / nivel["vol_ajustado"]) if nivel["vol_ajustado"] > 0 else pmv_b
 
-        # Estrutura Recursiva Limpa para o React Table
         final = []
         for co_k, co_v in arvore.items():
             vends = []
@@ -176,6 +171,9 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
     except Exception as e:
         raise HTTPException(500, repr(e))
 
+# =====================================================================
+# MOTOR DE RATEIO E GRAVAÇÃO ATÔMICA MULTI-CNPJ
+# =====================================================================
 @router.post("/congelar")
 async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
@@ -183,11 +181,10 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
         check_global_lock(db, ciclo)
 
         hoje = datetime.date.today().replace(day=1)
-        data_hist = hoje - relativedelta(months=12) # Janela de 12 meses de vendas reais para o perfil
+        data_hist = hoje - relativedelta(months=12)
 
         cx, vx, clx = get_coord_expr(), get_vend_expr(), get_cli_expr()
 
-        # Trava Concorrente por segurança
         for ajuste in payload.ajustes:
             alvo_supervisor = ajuste.chave.split('|')[0]
             verificar_concorrencia(db, alvo_supervisor)
@@ -196,7 +193,6 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
             dt = parse_date_safe(ajuste.mes_projetado)
             p = ajuste.chave.split('|')
             
-            # Constrói o filtro exato baseado na ramificação alterada
             q = get_truth_query(db, ciclo, dt, dt)
             if len(p) >= 1: q = q.filter(func.upper(cx) == p[0].upper())
             if len(p) >= 2: q = q.filter(func.upper(vx) == p[1].upper())
@@ -206,7 +202,6 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
             linhas = q.all()
             if not list(linhas): continue
 
-            # Extração dos perfis granulares sob esse nó específico
             skus_alvo = list({l.sku for l in linhas if l.sku})
             cgcs_alvo = list({l.cgc for l in linhas if l.cgc})
 
@@ -230,12 +225,11 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
                 r_h = float(r.rec_hist or 0)
                 if v_h > 0:
                     peso_map[(r.cgc, r.sku)] = v_h / total_hist_no
-                    pmv_map[(r.cgc, r.sku)] = r_h / v_h # Fixa o preço atômico Cliente/Produto
+                    pmv_map[(r.cgc, r.sku)] = r_h / v_h
 
             total_bu_atual = sum(l.vol_bottomup for l in linhas)
             delta = ajuste.novo_volume - total_bu_atual
 
-            # Ordena do maior para o menor peso para absorção segura do arredondamento
             linhas.sort(key=lambda x: peso_map.get((x.cgc, x.sku), 0), reverse=True)
 
             if delta != 0:
@@ -244,6 +238,7 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
                     inc = int(round(delta * peso))
                     
                     if i == len(linhas) - 1:
+                        # Corrido: lines -> linhas
                         inc = delta - sum(int(round(delta * peso_map.get((x.cgc, x.sku), 1/len(linhas) if total_hist_no == 0 else 0))) for x in linhas[:-1])
                     
                     novo_v = max(0, l.vol_bottomup + inc)
@@ -251,13 +246,12 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
                     l.vol_supply = novo_v
                     l.vol_final = novo_v
 
-            # Garante ancoramento cirúrgico de preços no Fato IBP Granular
+            # Corrigido: lines -> linhas
             for l in linhas:
                 chave_par = (l.cgc, l.sku)
                 if chave_par in pmv_map and pmv_map[chave_par] > 0:
                     l.pmv_aplicado = pmv_map[chave_par]
 
-            # Grava a trava individual da carteira do Coordenador envolvido
             sup_nome = p[0]
             reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == sup_nome).first()
             if reg: reg.status = 'Fechado'
@@ -270,7 +264,7 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
         raise HTTPException(500, repr(e))
 
 # =====================================================================
-# ENDPOINT DO DOSSIÊ: GRÁFICO TÁTICO UNIFICADO (4 LINHAS)
+# ENDPOINT DO DOSSIÊ GRÁFICO (CONSOLIDADO POR RAZÃO SOCIAL)
 # =====================================================================
 @router.get("/grafico")
 async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)):
@@ -279,7 +273,7 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
         ciclo_anterior = get_previous_cycle(db)
         hoje = datetime.date.today().replace(day=1)
         inicio_hist = hoje - relativedelta(months=24)
-        m2_comercial = hoje + relativedelta(months=2) # Linha Azul nasce no M2
+        m2_comercial = hoje + relativedelta(months=2)
 
         calendario = {}
         curr = inicio_hist
@@ -290,7 +284,7 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
 
         cx, vx, clx = get_coord_expr(), get_vend_expr(), get_cli_expr()
 
-        def apply_branch_filter(query, model_dim, model_fact):
+        def apply_branch_filter(query, model_fact):
             p = chave_matriz.split('|')
             if len(p) >= 1 and p[0]: query = query.filter(func.upper(cx) == p[0].upper())
             if len(p) >= 2 and p[1]: query = query.filter(func.upper(vx) == p[1].upper())
@@ -298,19 +292,16 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
             if len(p) >= 4 and p[3]: query = query.filter(model_fact.sku == p[3].strip())
             return query
 
-        # 1. LINHA PRETA: REALIZADO
         q_hist = db.query(
             func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'),
             func.sum(FatoVendas.qt_pedido).label('realizado')
         ).outerjoin(DimCliente, FatoVendas.cgc == DimCliente.cgc).filter(FatoVendas.data_pedido >= inicio_hist)
-        
-        q_hist = apply_branch_filter(q_hist, DimCliente, FatoVendas)
+        q_hist = apply_branch_filter(q_hist, FatoVendas)
 
         for row in q_hist.group_by('mes_ano').all():
             if row.mes_ano in calendario:
                 calendario[row.mes_ano]["Realizado"] = int(row.realizado or 0)
 
-        # 2. PROJEÇÕES (IA, CICLO ANTERIOR E COMERCIAL ATUAL)
         q_proj = db.query(
             func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes_ano'),
             FatoIbpGranular.ciclo_sop,
@@ -318,8 +309,7 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
             func.sum(FatoIbpGranular.vol_final).label('final'),
             func.sum(FatoIbpGranular.vol_bottomup).label('bu')
         ).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)
-        
-        q_proj = apply_branch_filter(q_proj, DimCliente, FatoIbpGranular)
+        q_proj = apply_branch_filter(q_proj, FatoIbpGranular)
 
         proj_por_mes = defaultdict(dict)
         for row in q_proj.group_by('mes_ano', FatoIbpGranular.ciclo_sop).all():
@@ -332,7 +322,6 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
             mes_dt = datetime.datetime.strptime(mes_str, '%Y-%m').date()
             if mes_str not in proj_por_mes: continue
 
-            # IA (A Escadinha Temporal Lag 2)
             alvo_ia_dt = mes_dt - relativedelta(months=2)
             if alvo_ia_dt < ciclo_base_zero: alvo_ia_dt = ciclo_base_zero
             if alvo_ia_dt > ciclo_atual_dt: alvo_ia_dt = ciclo_atual_dt
@@ -340,12 +329,8 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
             
             if ciclo_ia_str in proj_por_mes[mes_str]:
                 calendario[mes_str]["IA"] = proj_por_mes[mes_str][ciclo_ia_str]["ia"]
-
-            # Ciclo Anterior (Roxo)
             if ciclo_anterior in proj_por_mes[mes_str]:
                 calendario[mes_str]["CicloAnterior"] = proj_por_mes[mes_str][ciclo_anterior]["final"]
-
-            # Proposta Comercial (Azul)
             if ciclo_atual in proj_por_mes[mes_str]:
                 calendario[mes_str]["TopDown"] = proj_por_mes[mes_str][ciclo_atual]["bu"]
 
@@ -367,7 +352,7 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
         raise HTTPException(500, repr(e))
 
 # =====================================================================
-# ROTAS ADICIONAIS DE GOVERNANÇA (CONSERVAÇÃO ABSOLUTA)
+# ROTAS DE CONTROLE (CONSERVAÇÃO INTACTA)
 # =====================================================================
 @router.post("/destrancar")
 async def destrancar_regional(payload: PayloadDestrancar, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
