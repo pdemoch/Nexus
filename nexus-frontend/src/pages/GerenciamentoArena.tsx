@@ -107,7 +107,7 @@ const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo
   );
 };
 
-export default function GerenciamentoArena() {
+export default function GerenciamentoArena({ usuarioSessao }: any) {
   const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
   const [busca, setBusca] = useState("");
   const [celulasEditadas, setCelulasEditadas] = useState<any>({});
