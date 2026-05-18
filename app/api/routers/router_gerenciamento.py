@@ -388,3 +388,32 @@ async def lock_all_regionais(db: Session = Depends(get_db), usuario: dict = Depe
         else: db.add(ControleCiclo(ciclo_sop=ciclo, origem=reg_nome, status='Fechado'))
     db.commit()
     return {"status": "success"}
+
+# =====================================================================
+# ROTA DE FILTROS (SUPORTE A COMPONENTES EXTERNOS/MENUS)
+# =====================================================================
+@router.get("/filtros")
+async def listar_filtros_gerenciamento(db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
+    try:
+        cx = get_coord_expr()
+        
+        # O gestor só vê as regionais a que tem direito
+        q = db.query(cx)
+        if usuario['funcao'] == 'Coordenador Comercial':
+            q = q.filter(func.upper(cx) == usuario['nome'].strip().upper())
+        elif usuario['funcao'] == 'Gerente Comercial':
+            user_db = db.query(Usuario).filter(Usuario.id == usuario['id']).first()
+            filiais = [f.strip().upper() for f in (user_db.filiais_permissao or "").split(",") if f.strip()]
+            if filiais:
+                q = q.filter(func.upper(func.trim(DimCliente.filial)).in_(filiais))
+                
+        regionais = q.distinct().all()
+        
+        return {
+            "status": "success", 
+            "dados": {
+                "regionais": [r[0] for r in regionais if r[0]]
+            }
+        }
+    except Exception as e:
+        raise HTTPException(500, repr(e))
