@@ -107,9 +107,6 @@ const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo
   );
 };
 
-// =====================================================================
-// COMPONENTE PRINCIPAL
-// =====================================================================
 export default function TopDownArena() {
   const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
   const [filtrosDisponiveis, setFiltrosDisponiveis] = useState<{categorias: string[], segmentos: string[]}>({ categorias: [], segmentos: [] });
@@ -125,7 +122,6 @@ export default function TopDownArena() {
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
 
-  // Busca de Dados
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
@@ -133,7 +129,6 @@ export default function TopDownArena() {
       if (filtros.categoria !== "TODAS") { params.categoria_filtro = 'categoria'; params.valor_filtro = filtros.categoria; }
       else if (filtros.segmento !== "TODOS") { params.categoria_filtro = 'segmento'; params.valor_filtro = filtros.segmento; }
 
-      // Assumindo que criaremos a rota de filtros no futuro, simulando as categorias por agora
       const [dadosRes, statusRes] = await Promise.all([
         axios.get('/api/v1/consensus/macro', { params }),
         axios.get('/api/v1/consensus/macro/status')
@@ -143,7 +138,6 @@ export default function TopDownArena() {
       setIsFechado(statusRes.data.is_fechado); 
       setCelulasEditadas({});
       
-      // Monta as listas de filtros caso ainda não existam
       if (filtrosDisponiveis.categorias.length === 0 && dadosRes.data.dados) {
         const cats = Array.from(new Set(dadosRes.data.dados.map((c:any) => c.nome)));
         setFiltrosDisponiveis(p => ({ ...p, categorias: cats as string[] }));
@@ -158,7 +152,6 @@ export default function TopDownArena() {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // Ações Globais
   const handleCongelar = async () => {
     if (!confirm("Aviso Diretoria: Esta ação irá ratear os volumes aos clientes baseado no histórico real de vendas. Deseja prosseguir?")) return;
     try {
@@ -230,14 +223,10 @@ export default function TopDownArena() {
     }
   };
 
-  // =====================================================================
-  // PAINEL DE SAUDABILIDADE (Gráfico + KPIs + IA)
-  // =====================================================================
   const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
     const chave = rowData.chave_matriz;
     const chartData = dadosGraficoCache[chave];
 
-    // Cálculos de KPI em Tempo Real
     const kpis = useMemo(() => {
       let volTD = 0; let volIA = 0; let rec = 0; let pmvAcc = 0; let count = 0;
       (rowData?.meses || []).forEach((m: any) => {
@@ -255,7 +244,7 @@ export default function TopDownArena() {
     const CustomTooltip = ({ active, payload, label }: any) => {
       if (active && payload && payload.length) {
         return (
-          <div className="bg-slate-900 border border-slate-700 p-4 rounded-xl shadow-2xl">
+          <div className="bg-slate-900 border border-slate-700 p-4 rounded-xl shadow-2xl z-50">
             <p className="text-white font-bold mb-3 pb-2 border-b border-slate-700">{label}</p>
             {payload.map((entry: any, idx: number) => (
               <div key={idx} className="flex items-center gap-3 py-1">
@@ -279,7 +268,6 @@ export default function TopDownArena() {
           </h3>
         </div>
 
-        {/* Linha de KPIs */}
         <div className="grid grid-cols-4 gap-4 mb-6">
           <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
             <div className="flex items-center gap-2 text-slate-400 mb-2">
@@ -311,7 +299,6 @@ export default function TopDownArena() {
         </div>
 
         <div className="grid grid-cols-3 gap-6">
-          {/* Gráfico */}
           <div className="col-span-2 bg-slate-800 border border-slate-700 p-4 rounded-xl h-[340px]">
             {loadingGrafico === chave ? (
               <div className="h-full flex items-center justify-center text-slate-500">Extraindo inteligência temporal...</div>
@@ -324,8 +311,8 @@ export default function TopDownArena() {
                   <Tooltip content={<CustomTooltip />} />
                   <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} />
                   
-                  <Line type="monotone" dataKey="Realizado" name="Histórico Faturado" stroke="#f8fafc" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} connectNulls={false} />
-                  <Line type="monotone" dataKey="IA" name="Projeção IA" stroke="#64748b" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="Realizado" name="Histórico Faturado" stroke="#0f172a" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} connectNulls={false} />
+                  <Line type="monotone" dataKey="IA" name="Projeção IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
                   <Line type="monotone" dataKey="CicloAnterior" name="Ciclo Anterior (Lag 1)" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
                   <Line type="monotone" dataKey="TopDown" name="Proposta Atual" stroke="#3b82f6" strokeWidth={3} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
                 </LineChart>
@@ -333,7 +320,6 @@ export default function TopDownArena() {
             ) : null}
           </div>
 
-          {/* AI Insight Box */}
           <div className="col-span-1 h-[340px]">
              <AiInsightBox alvo={rowData.nome} tipo={rowData.tipo} pmv={kpis.pmvMedio} volume={kpis.volTD} receita={kpis.rec} />
           </div>
@@ -342,9 +328,6 @@ export default function TopDownArena() {
     );
   };
 
-  // =====================================================================
-  // TOTALIZADORES
-  // =====================================================================
   const totaisGerais = useMemo(() => {
     const totais: Record<string, { vol: number, fat: number }> = {};
     dadosBrutos.forEach(cat => {
@@ -359,9 +342,6 @@ export default function TopDownArena() {
     return totais;
   }, [dadosBrutos, celulasEditadas]);
 
-  // =====================================================================
-  // RENDER ROW (Árvore)
-  // =====================================================================
   const renderRow = (row: any, depth = 0) => {
     const isExpanded = expanded[row.chave_matriz];
     const hasChildren = row.subRows && row.subRows.length > 0;
@@ -400,9 +380,16 @@ export default function TopDownArena() {
             return (
               <td key={idx} className="p-0 border-l border-slate-100">
                 <div className={`flex flex-col h-full ${isFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50' : 'hover:bg-slate-50'}`}>
-                  <div className="px-4 py-2 border-b border-slate-100/50 flex justify-between items-center bg-white/50">
-                    <span className="text-[10px] font-bold text-slate-400">IA: {formatVolume(m.vol_ia)}</span>
+                  {/* CABEÇALHO DA CÉLULA: IA vs LAG 1 */}
+                  <div className="px-3 py-1.5 border-b border-slate-100/50 flex justify-between items-center bg-slate-50/80">
+                    <span className="text-[10px] font-bold text-slate-500 bg-slate-200/50 px-1.5 py-0.5 rounded" title="Projeção IA Original">
+                      IA: {formatVolume(m.vol_ia)}
+                    </span>
+                    <span className="text-[10px] font-bold text-purple-600 bg-purple-100/50 border border-purple-200/50 px-1.5 py-0.5 rounded" title="Aprovado no Ciclo Anterior">
+                      Lag 1: {formatVolume(m.vol_anterior)}
+                    </span>
                   </div>
+                  
                   <div className="px-4 py-3 flex items-center justify-end group">
                     <div className="w-24">
                       {isProduto ? (
@@ -459,7 +446,6 @@ export default function TopDownArena() {
 
       <div className="max-w-[1600px] mx-auto bg-white rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-200 overflow-hidden">
         
-        {/* BARRA DE FERRAMENTAS E FILTROS */}
         <div className="bg-slate-50 p-4 border-b border-slate-200 flex items-center justify-between">
             <div className="flex gap-4">
                 <select value={filtros.categoria} onChange={(e) => setFiltros({ ...filtros, categoria: e.target.value })} className="px-4 py-2 rounded-lg border border-slate-300 bg-white text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer shadow-sm">

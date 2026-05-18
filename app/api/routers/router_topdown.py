@@ -39,6 +39,8 @@ def require_admin(usuario: dict = Depends(get_current_user)):
 async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None, db: Session = Depends(get_db)):
     try:
         ciclo = get_current_cycle(db)
+        ciclo_anterior = get_previous_cycle(db)
+        
         hoje = datetime.date.today().replace(day=1)
         # S&OP Clássico: M2 a M4 (3 meses) para a Diretoria (Top-Down)
         data_ini = hoje + relativedelta(months=2)
@@ -63,7 +65,23 @@ async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None,
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
         ).group_by(FatoIbpGranular.sku, DimProduto.descricao, DimProduto.categoria, DimProduto.segmento, FatoIbpGranular.mes_projetado).all()
 
+        # Extração Rápida do Ciclo Anterior (Lag 1) para a Tabela
+        skus_encontrados = list({r.sku for r in resultados if r.sku})
+        ant_dict = defaultdict(lambda: defaultdict(int))
+        
+        if skus_encontrados:
+            q_ant = get_truth_query(db, ciclo_anterior, data_ini, data_fim)
+            res_ant = q_ant.filter(FatoIbpGranular.sku.in_(skus_encontrados)).with_entities(
+                FatoIbpGranular.sku, FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_final).label('v_ant')
+            ).group_by(FatoIbpGranular.sku, FatoIbpGranular.mes_projetado).all()
+            
+            for ra in res_ant:
+                ant_dict[ra.sku][str(ra.mes_projetado)] = int(ra.v_ant or 0)
+
         arvore = {}
+        def criar_meses():
+            return {m: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0, "pmv":0.0, "vol_anterior": 0} for m in meses_alvo}
+
         for r in resultados:
             cat = str(r.categoria).strip() if r.categoria else "SEM CATEGORIA"
             seg = str(r.segmento).strip() if r.segmento else "SEM SEGMENTO"
@@ -71,19 +89,21 @@ async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None,
             desc = str(r.descricao).strip()
             ms = str(r.mes_projetado)
 
-            if cat not in arvore: arvore[cat] = {"nome": cat, "tipo": "categoria", "meses": {m: {"vol_ia":0,"vol_td":0,"vol_ajustado":0,"receita":0,"pmv":0.0} for m in meses_alvo}, "segmentos": {}}
-            if seg not in arvore[cat]["segmentos"]: arvore[cat]["segmentos"][seg] = {"nome": seg, "tipo": "segmento", "meses": {m: {"vol_ia":0,"vol_td":0,"vol_ajustado":0,"receita":0,"pmv":0.0} for m in meses_alvo}, "produtos": {}}
-            if sku not in arvore[cat]["segmentos"][seg]["produtos"]: arvore[cat]["segmentos"][seg]["produtos"][sku] = {"nome": desc, "produto": sku, "tipo": "produto", "meses": {m: {"vol_ia":0,"vol_td":0,"vol_ajustado":0,"receita":0,"pmv":0.0} for m in meses_alvo}}
+            if cat not in arvore: arvore[cat] = {"nome": cat, "tipo": "categoria", "meses": criar_meses(), "segmentos": {}}
+            if seg not in arvore[cat]["segmentos"]: arvore[cat]["segmentos"][seg] = {"nome": seg, "tipo": "segmento", "meses": criar_meses(), "produtos": {}}
+            if sku not in arvore[cat]["segmentos"][seg]["produtos"]: arvore[cat]["segmentos"][seg]["produtos"][sku] = {"nome": desc, "produto": sku, "tipo": "produto", "meses": criar_meses()}
 
             if ms in meses_alvo:
                 v_td = int(r.v_td or 0)
                 pmv_item = float(r.pmv or 0)
-                # Propagação Cima-Baixo
+                v_ant = ant_dict[sku][ms]
+
                 for nivel in [arvore[cat]["meses"][ms], arvore[cat]["segmentos"][seg]["meses"][ms], arvore[cat]["segmentos"][seg]["produtos"][sku]["meses"][ms]]:
                     nivel["vol_ia"] += int(r.v_ia or 0)
                     nivel["vol_td"] += v_td
                     nivel["vol_ajustado"] += v_td
                     nivel["receita"] += (v_td * pmv_item)
+                    nivel["vol_anterior"] += v_ant
                     nivel["pmv"] = (nivel["receita"] / nivel["vol_ajustado"]) if nivel["vol_ajustado"] > 0 else pmv_item
 
         final = []
@@ -92,9 +112,9 @@ async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None,
             for seg_k, seg_v in cat_v["segmentos"].items():
                 prods = []
                 for p_k, p_v in seg_v["produtos"].items():
-                    prods.append({"id": f"{cat_k}|{seg_k}|{p_k}", "chave_matriz": p_k, "nome": p_v["nome"], "produto": p_k, "tipo": "produto", "meses": [{"mes_banco": k, **v} for k, v in p_v["meses"].items()]})
-                segs.append({"id": f"{cat_k}|{seg_k}", "chave_matriz": f"{cat_k}|{seg_k}", "nome": seg_k, "tipo": "segmento", "meses": [{"mes_banco": k, **v} for k, v in seg_v["meses"].items()], "subRows": prods})
-            final.append({"id": cat_k, "chave_matriz": cat_k, "nome": cat_k, "tipo": "categoria", "meses": [{"mes_banco": k, **v} for k, v in cat_v["meses"].items()], "subRows": segs})
+                    prods.append({"id": f"{cat_k}|{seg_k}|{p_k}", "chave_matriz": p_k, "nome": p_v["nome"], "produto": p_k, "tipo": "produto", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in p_v["meses"].items()]})
+                segs.append({"id": f"{cat_k}|{seg_k}", "chave_matriz": f"{cat_k}|{seg_k}", "nome": seg_k, "tipo": "segmento", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in seg_v["meses"].items()], "subRows": prods})
+            final.append({"id": cat_k, "chave_matriz": cat_k, "nome": cat_k, "tipo": "categoria", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in cat_v["meses"].items()], "subRows": segs})
 
         return {"status": "success", "dados": sorted(final, key=lambda x: x["nome"])}
     except Exception as e:
@@ -107,13 +127,12 @@ async def aprovar_topdown(payload: PayloadAprovarTopDown, db: Session = Depends(
         check_global_lock(db, ciclo)
 
         hoje = datetime.date.today().replace(day=1)
-        data_hist = hoje - relativedelta(months=12) # Histórico de 1 ano para o Rateio
+        data_hist = hoje - relativedelta(months=12)
 
         for ajuste in payload.ajustes:
             dt_mes = parse_date_safe(ajuste.mes_projetado)
             sku_alvo = ajuste.sku
 
-            # 1. Auditoria Histórica de Vendas (Rateio Inteligente e PMV Exato)
             hist_data = db.query(
                 FatoVendas.cgc,
                 func.sum(FatoVendas.qt_pedido).label('vol_hist'),
@@ -132,9 +151,8 @@ async def aprovar_topdown(payload: PayloadAprovarTopDown, db: Session = Depends(
                 rec = float(r.rec_hist or 0)
                 if vol > 0:
                     peso_cliente[r.cgc] = vol / total_hist
-                    pmv_cliente[r.cgc] = rec / vol # O PMV cirúrgico Cliente/Produto
+                    pmv_cliente[r.cgc] = rec / vol 
 
-            # 2. Resgata a base granular do IBP
             linhas = db.query(FatoIbpGranular).filter(
                 FatoIbpGranular.ciclo_sop == ciclo,
                 FatoIbpGranular.mes_projetado == dt_mes,
@@ -146,22 +164,18 @@ async def aprovar_topdown(payload: PayloadAprovarTopDown, db: Session = Depends(
             total_atual = sum(l.vol_topdown for l in linhas)
             delta = ajuste.novo_volume - total_atual
 
-            # 3. Rateio do Delta e Injeção do PMV Real
             linhas.sort(key=lambda x: peso_cliente.get(x.cgc, 0), reverse=True)
 
             if delta != 0:
                 for i, l in enumerate(linhas):
-                    # Puxa o market-share do cliente. Se não tiver hitórico global, divide igual
                     peso = peso_cliente.get(l.cgc, 1/len(linhas) if total_hist == 0 else 0)
-                    
                     inc = int(round(delta * peso))
-                    # A sobra do arredondamento fica no maior cliente (último da lista de desconto/acréscimo)
                     if i == len(linhas) - 1:
                         inc = delta - sum(int(round(delta * peso_cliente.get(x.cgc, 1/len(linhas) if total_hist == 0 else 0))) for x in linhas[:-1])
                     
                     novo_vol = max(0, l.vol_topdown + inc)
                     l.vol_topdown = novo_vol
-                    l.vol_bottomup = novo_vol # Cascata imediata
+                    l.vol_bottomup = novo_vol 
                     l.vol_supply = novo_vol
                     l.vol_final = novo_vol
 
@@ -169,7 +183,6 @@ async def aprovar_topdown(payload: PayloadAprovarTopDown, db: Session = Depends(
                 if l.cgc in pmv_cliente and pmv_cliente[l.cgc] > 0:
                     l.pmv_aplicado = pmv_cliente[l.cgc]
 
-        # 4. Trava a porta do Top-Down
         reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
         if reg: reg.status = 'Fechado'
         else: db.add(ControleCiclo(ciclo_sop=ciclo, origem='Top-Down', status='Fechado'))
@@ -193,6 +206,7 @@ async def grafico_topdown(chave_matriz: str, db: Session = Depends(get_db)):
         ciclo_anterior = get_previous_cycle(db)
         hoje = datetime.date.today().replace(day=1)
         inicio_hist = hoje - relativedelta(months=24) 
+        m2_topdown = hoje + relativedelta(months=2) # Marco inicial da linha Azul (Top-Down)
 
         calendario = {}
         curr = inicio_hist
@@ -201,7 +215,6 @@ async def grafico_topdown(chave_matriz: str, db: Session = Depends(get_db)):
             calendario[mes_str] = {"Realizado": None, "IA": None, "CicloAnterior": None, "TopDown": None}
             curr += relativedelta(months=1)
 
-        # Filtro Inteligente: Sabe se a chave é Categoria, Segmento ou SKU
         def apply_matrix_filter(query, model_dim, model_fact):
             if "|" in chave_matriz:
                 parts = chave_matriz.split("|")
@@ -211,7 +224,7 @@ async def grafico_topdown(chave_matriz: str, db: Session = Depends(get_db)):
                 if exists: return query.filter(model_fact.sku == chave_matriz)
                 else: return query.filter(func.upper(func.trim(model_dim.categoria)) == chave_matriz.strip().upper())
 
-        # 1. LINHA PRETA: REALIZADO
+        # 1. REALIZADO
         q_hist = db.query(
             func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'),
             func.sum(FatoVendas.qt_pedido).label('realizado')
@@ -223,7 +236,7 @@ async def grafico_topdown(chave_matriz: str, db: Session = Depends(get_db)):
             if row.mes_ano in calendario:
                 calendario[row.mes_ano]["Realizado"] = int(row.realizado or 0)
 
-        # PREPARA BASE IBP
+        # 2. PROJEÇÕES (IA, ANTERIOR E TOPDOWN)
         q_proj = db.query(
             func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes_ano'),
             FatoIbpGranular.ciclo_sop,
@@ -238,7 +251,6 @@ async def grafico_topdown(chave_matriz: str, db: Session = Depends(get_db)):
         for row in q_proj.group_by('mes_ano', FatoIbpGranular.ciclo_sop).all():
             proj_por_mes[row.mes_ano][row.ciclo_sop] = {"ia": int(row.ia or 0), "final": int(row.final or 0), "td": int(row.td or 0)}
 
-        # REGRAS DO GRÁFICO (As 4 Linhas)
         ciclo_base_zero = datetime.datetime.strptime('04/2026', '%m/%Y').date()
         ciclo_atual_dt = datetime.datetime.strptime(ciclo_atual, '%m/%Y').date()
 
@@ -246,7 +258,7 @@ async def grafico_topdown(chave_matriz: str, db: Session = Depends(get_db)):
             mes_dt = datetime.datetime.strptime(mes_str, '%Y-%m').date()
             if mes_str not in proj_por_mes: continue
 
-            # 2. LINHA CINZA: IA (A Escadinha)
+            # IA (A Escadinha: Busca a IA gerada no Ciclo Correspondente a M-2)
             alvo_ia_dt = mes_dt - relativedelta(months=2)
             if alvo_ia_dt < ciclo_base_zero: alvo_ia_dt = ciclo_base_zero
             if alvo_ia_dt > ciclo_atual_dt: alvo_ia_dt = ciclo_atual_dt
@@ -255,26 +267,27 @@ async def grafico_topdown(chave_matriz: str, db: Session = Depends(get_db)):
             if ciclo_ia_str in proj_por_mes[mes_str]:
                 calendario[mes_str]["IA"] = proj_por_mes[mes_str][ciclo_ia_str]["ia"]
 
-            # 3. LINHA ROXA: CICLO ANTERIOR
+            # Ciclo Anterior (Roxo)
             if ciclo_anterior in proj_por_mes[mes_str]:
                 calendario[mes_str]["CicloAnterior"] = proj_por_mes[mes_str][ciclo_anterior]["final"]
 
-            # 4. LINHA AZUL: TOP-DOWN (Proposta Atual)
+            # TopDown (Azul)
             if ciclo_atual in proj_por_mes[mes_str]:
                 calendario[mes_str]["TopDown"] = proj_por_mes[mes_str][ciclo_atual]["td"]
 
         timeline = []
         for ms, v in sorted(calendario.items()):
             mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
-            is_future_or_current = mes_dt >= hoje
             
             timeline.append({
                 "name": ms,
                 "data_iso": f"{ms}-01",
-                "Realizado": None if is_future_or_current else (v["Realizado"] or 0),
+                # Realizado encerra em M0
+                "Realizado": None if mes_dt > hoje else (v["Realizado"] or 0),
                 "IA": v["IA"],
                 "CicloAnterior": v["CicloAnterior"],
-                "TopDown": v["TopDown"] if is_future_or_current else None
+                # TopDown inicia estritamente em M2
+                "TopDown": v["TopDown"] if mes_dt >= m2_topdown else None 
             })
 
         return {"status": "success", "dados": timeline}
