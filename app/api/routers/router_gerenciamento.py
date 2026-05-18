@@ -109,10 +109,15 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
 
         ant_dict = defaultdict(lambda: defaultdict(int))
         skus_encontrados = list({r.sku for r in resultados if r.sku})
+        clientes_encontrados = list({r.cli for r in resultados if r.cli}) # Otimização para segurança e performance
         
-        if skus_encontrados:
-            q_ant = get_truth_query(db, ciclo_anterior, data_ini, data_fim).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)
-            res_ant = q_ant.filter(FatoIbpGranular.sku.in_(skus_encontrados)).with_entities(
+        if skus_encontrados and clientes_encontrados:
+            # Correção do Bug 500: get_truth_query já possui o outerjoin na dim_clientes nativamente.
+            q_ant = get_truth_query(db, ciclo_anterior, data_ini, data_fim)
+            res_ant = q_ant.filter(
+                FatoIbpGranular.sku.in_(skus_encontrados),
+                clx.in_(clientes_encontrados)
+            ).with_entities(
                 clx.label('cli'),
                 FatoIbpGranular.sku,
                 FatoIbpGranular.mes_projetado,
@@ -238,7 +243,6 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
                     inc = int(round(delta * peso))
                     
                     if i == len(linhas) - 1:
-                        # Corrido: lines -> linhas
                         inc = delta - sum(int(round(delta * peso_map.get((x.cgc, x.sku), 1/len(linhas) if total_hist_no == 0 else 0))) for x in linhas[:-1])
                     
                     novo_v = max(0, l.vol_bottomup + inc)
@@ -246,7 +250,6 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
                     l.vol_supply = novo_v
                     l.vol_final = novo_v
 
-            # Corrigido: lines -> linhas
             for l in linhas:
                 chave_par = (l.cgc, l.sku)
                 if chave_par in pmv_map and pmv_map[chave_par] > 0:
