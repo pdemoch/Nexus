@@ -445,7 +445,7 @@ export default function TopDownArena() {
             {isFechado ? 'ESTRATÉGIA FECHADA' : 'ESTRATÉGIA ABERTA'}
           </div>
 
-          <button onClick={handleCongelar} disabled={isFechado || Object.keys(celulasEditadas).length === 0} className="px-6 py-2.5 bg-slate-900 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg shadow-slate-900/20 transition-all disabled:opacity-50 flex items-center gap-2">
+          <button onClick={handleCongelar} disabled={isFechado} className="px-6 py-2.5 bg-slate-900 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg shadow-slate-900/20 transition-all disabled:opacity-50 flex items-center gap-2">
             <Shield className="w-4 h-4" /> Ratificar Top-Down
           </button>
         </div>
