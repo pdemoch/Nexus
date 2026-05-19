@@ -1,560 +1,472 @@
 import React, { useState, useMemo, useEffect, useCallback, Fragment } from 'react';
-import {
-  useReactTable, getCoreRowModel, flexRender, getExpandedRowModel, getSortedRowModel, SortingState
-} from '@tanstack/react-table';
-import { 
-  Loader2, ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, 
-  Activity, Factory, ShieldCheck, Check, Hash, Search, Filter, Download, X, AlertTriangle, Lock, ShieldAlert, Wand2
-} from 'lucide-react';
 import axios from 'axios';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import * as XLSX from 'xlsx';
-
-const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor));
-const formatVolume = (val: number) => Math.round(val).toLocaleString('pt-BR');
+import { 
+  ChevronRight, ChevronDown, Lock, Unlock, Search, X, 
+  Package, Boxes, LayoutGrid, Download, BarChart2, Activity, Shield,
+  Wand2, Factory, Target, TrendingUp, TrendingDown
+} from 'lucide-react';
+import { 
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
+} from 'recharts';
 
 // =====================================================================
-// NOVO COMPONENTE: GERADOR DE INSIGHTS COM IA SOB DEMANDA (TEMA ESCURO)
+// HELPERS DE FORMATAÇÃO
 // =====================================================================
-const AiInsightBox = ({ alvo, pmv }: { alvo: string, pmv: number }) => {
-  const [insight, setInsight] = useState('');
-  const [loading, setLoading] = useState(false);
+const formatVolume = (val: number) => new Intl.NumberFormat('pt-BR').format(Math.round(val || 0));
+const formatMoeda = (val: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
 
-  const getInsight = async () => {
-    setLoading(true);
-    try {
-      const res = await axios.post('/api/v1/ai-sql/perguntar', {
-        pergunta: `Faça o dossiê executivo 360° para o SKU "${alvo}". Extraia a cascata de volumes, valide se o corte da fábrica (Supply) está alinhado com o histórico de vendas, e qual o impacto financeiro (R$) da restrição produtiva.`,
-        contexto: { tela_ativa: 'Supply Review (Fábrica)', ciclo_status: 'Aberto/Em Ajuste' }
-      });
-      setInsight(res.data.resposta);
-    } catch (e) {
-      setInsight('Erro ao gerar insight.');
-    } finally {
-      setLoading(false);
-    }
+// =====================================================================
+// COMPONENTE: SMART INPUT (Sem Perda de Foco)
+// =====================================================================
+const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (val: number) => void, disabled: boolean }) => {
+  const [localVal, setLocalVal] = useState(value ? formatVolume(value) : '0');
+  const [isFocused, setIsFocused] = useState(false);
+
+  useEffect(() => {
+    if (!isFocused) setLocalVal(value ? formatVolume(value) : '0');
+  }, [value, isFocused]);
+
+  const handleFocus = () => { setIsFocused(true); setLocalVal(localVal.replace(/\./g, '')); };
+  const handleBlur = () => {
+    setIsFocused(false);
+    const num = parseInt(localVal.replace(/\D/g, ''), 10) || 0;
+    setLocalVal(formatVolume(num));
+    onChange(num);
+  };
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') e.currentTarget.blur();
   };
 
   return (
-    <div className="bg-slate-900/50 rounded-2xl p-6 border border-slate-700 flex flex-col gap-4 h-full">
-      <div className="flex items-center gap-3">
-         <div className="p-2.5 bg-amber-500/20 text-amber-400 rounded-xl">
-           <Wand2 className="w-5 h-5" />
-         </div>
-         <h4 className="text-sm font-black text-white uppercase tracking-widest">Nexus AI Insight 360°</h4>
+    <input
+      type="text" value={localVal} disabled={disabled} onFocus={handleFocus} onBlur={handleBlur} onKeyDown={handleKeyDown} onChange={(e) => setLocalVal(e.target.value)}
+      className={`w-full bg-transparent border-none text-right focus:outline-none focus:ring-1 focus:ring-blue-500 rounded px-1
+        ${disabled ? 'text-slate-400 font-medium' : 'text-blue-700 font-bold bg-blue-50/50'}`}
+    />
+  );
+};
+
+// =====================================================================
+// COMPONENTE: CAIXA DE INSIGHT IA
+// =====================================================================
+const AiInsightBox = ({ alvo, pmv, volume, demandaComercial }: { alvo: string, pmv: number, volume: number, demandaComercial: number }) => {
+  const [insight, setInsight] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const fetchInsight = async () => {
+    setLoading(true);
+    try {
+      const prompt = `Gere uma análise executiva de Supply Chain (máx 3 parágrafos) para a categoria/produto ${alvo}. Demanda do Comercial: ${demandaComercial} CX. Capacidade aprovada (Supply): ${volume} CX. PMV: R$ ${pmv.toFixed(2)}. Foque em restrições de fábrica, ruptura de estoque e impacto no Fair-Share.`;
+      const res = await axios.post('/api/v1/ai-sql/perguntar', { pergunta: prompt });
+      setInsight(res.data.resposta);
+    } catch (e) { setInsight("Erro ao comunicar com a IA Nexus. Tente novamente."); } finally { setLoading(false); }
+  };
+
+  return (
+    <div className="bg-slate-800 rounded-xl p-5 border border-slate-700 flex flex-col h-full shadow-lg">
+      <div className="flex items-center justify-between mb-4">
+        <h4 className="font-bold text-slate-200 flex items-center gap-2"><Wand2 className="w-4 h-4 text-blue-400" /> Nexus AI Insight 360°</h4>
+        <button onClick={fetchInsight} disabled={loading} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg transition-colors">{loading ? "Processando..." : "Gerar Diagnóstico"}</button>
       </div>
-      
-      {insight ? (
-        <div className="text-sm font-medium text-slate-300 leading-relaxed whitespace-pre-wrap overflow-y-auto custom-scrollbar pr-2" dangerouslySetInnerHTML={{ __html: insight.replace(/\*\*(.*?)\*\*/g, '<strong class="font-black text-white">$1</strong>') }} />
-      ) : (
-        <div className="flex flex-col items-start gap-3 mt-2">
-           <p className="text-xs text-slate-500 font-medium">Acione o consultor executivo para avaliar o risco de ruptura e o impacto da restrição fabril no faturamento projetado.</p>
-           <button onClick={getInsight} disabled={loading} className="mt-2 text-xs font-bold bg-amber-600 text-white px-4 py-3 rounded-xl hover:bg-amber-700 transition flex items-center gap-2 disabled:opacity-50 w-full justify-center shadow-lg shadow-amber-900/20">
-             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Avaliar Impacto Financeiro (R$)'}
-           </button>
-        </div>
-      )}
+      <div className="flex-1 text-sm text-slate-300 leading-relaxed overflow-y-auto pr-2">
+        {loading ? (
+          <div className="animate-pulse flex flex-col gap-2"><div className="h-2 bg-slate-700 rounded w-full"></div><div className="h-2 bg-slate-700 rounded w-5/6"></div></div>
+        ) : insight ? <div className="whitespace-pre-wrap">{insight}</div> : (
+          <div className="flex flex-col items-center justify-center h-full text-slate-500 opacity-50"><Shield className="w-12 h-12 mb-2" /><span>Nenhuma análise gerada.</span></div>
+        )}
+      </div>
     </div>
   );
 };
 
 export default function SupplyReviewArena() {
   const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [busca, setBusca] = useState("");
   const [celulasEditadas, setCelulasEditadas] = useState<any>({});
-  const [expanded, setExpanded] = useState({});
-  const [sorting, setSorting] = useState<SortingState>([]);
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   
-  // STATUS DAS FASES
-  const [isTopDownFechado, setIsTopDownFechado] = useState<boolean | null>(null);
-  const [isBottomUpFechado, setIsBottomUpFechado] = useState<boolean | null>(null);
+  // STATUS E TRAVAS (O RADAR)
+  const [isComercialFechado, setIsComercialFechado] = useState(false);
   const [isSupplyFechado, setIsSupplyFechado] = useState(false);
   
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [chartExpanded, setChartExpanded] = useState<string | null>(null);
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
 
-  const [busca, setBusca] = useState('');
-  const [categoriaSelecionada, setCategoriaSelecionada] = useState('TODAS');
-
-  useEffect(() => {
-    Promise.all([
-        axios.get('/api/v1/consensus/macro/status'),
-        axios.get('/api/v1/consensus/micro/status')
-    ]).then(([resMacro, resMicro]) => {
-        setIsTopDownFechado(resMacro.data.is_topdown_fechado);
-        setIsBottomUpFechado(resMicro.data.is_fechado);
-    }).catch(console.error);
-  }, []);
-
-  const fetchData = useCallback(async () => {
+  const fetchStatusAndData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [resLista, resStatus] = await Promise.all([
-         axios.get('/api/v1/consensus/supply/list'),
-         axios.get('/api/v1/consensus/supply/status')
-      ]);
-      setDadosBrutos(resLista.data.dados || []);
-      setIsSupplyFechado(resStatus.data.is_fechado);
+      const resStatus = await axios.get('/api/v1/consensus/supply/status');
+      const comercialLiberado = resStatus.data.comercial_fechado;
+      setIsComercialFechado(comercialLiberado);
+      setIsSupplyFechado(resStatus.data.fechado);
+
+      // Só carrega a árvore se o Gerenciamento Comercial estiver totalmente fechado
+      if (comercialLiberado) {
+        const resLista = await axios.get('/api/v1/consensus/supply', { params: { nocache: new Date().getTime() } });
+        setDadosBrutos(resLista.data.dados || []);
+        // Expande categorias por padrão
+        const cats: any = {};
+        (resLista.data.dados || []).forEach((c: any) => { cats[c.id] = true; });
+        setExpanded(cats);
+      }
       setCelulasEditadas({});
-      setExpanded({});
-      setChartExpanded(null);
-    } catch (e) {
-      console.error(e);
-      setDadosBrutos([]);
-    } finally {
-      setIsLoading(false);
-    }
+    } catch (e) { console.error("Erro ao carregar supply:", e); setDadosBrutos([]); } finally { setIsLoading(false); }
   }, []);
 
-  useEffect(() => { 
-    if (isTopDownFechado && isBottomUpFechado) fetchData(); 
-  }, [fetchData, isTopDownFechado, isBottomUpFechado]);
+  useEffect(() => { fetchStatusAndData(); }, [fetchStatusAndData]);
 
-  const handleExportExcel = () => {
-    if (dadosBrutos.length === 0) return alert("Não há dados na tela para exportar.");
-    const dadosExcel: any[] = [];
-    
-    dadosFiltrados.forEach(prod => {
-      const linha: any = {
-        "CÓDIGO SKU": prod.produto, "DESCRIÇÃO": prod.nome, 
-        "CATEGORIA": prod.categoria, "SEGMENTO": prod.segmento, 
-        "PMV PONDERADO (R$)": prod.meses[0]?.pmv || 0
+  // =====================================================================
+  // MOTOR DE CASCATA EM TEMPO REAL (PRODUTO -> CATEGORIA)
+  // =====================================================================
+  const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
+    if (isSupplyFechado) return;
+
+    setCelulasEditadas((currentEdits: any) => {
+      const nextEdits = { ...currentEdits };
+
+      const getVolActual = (chave: string, originalVol: number) => {
+        if (nextEdits[chave]?.[mesBanco] !== undefined) return nextEdits[chave][mesBanco].novo_volume;
+        return originalVol;
       };
-      prod.meses.forEach((m: any) => {
-        const edicao = celulasEditadas[prod.produto]?.[m.mes_banco];
-        const volFinal = Math.round(Number(edicao !== undefined ? edicao.novo_volume : m.vol_ajustado));
-        linha[`${m.mes_str} (Base IA)`] = Math.round(Number(m.vol_ia));
-        linha[`${m.mes_str} (Acordo Comercial)`] = Math.round(Number(m.vol_bu || 0));
-        linha[`${m.mes_str} (Capacidade Fábrica)`] = volFinal;
-      });
-      dadosExcel.push(linha);
-    });
 
-    const worksheet = XLSX.utils.json_to_sheet(dadosExcel);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Supply_Review");
-    worksheet['!cols'] = [{ wch: 15 }, { wch: 40 }, { wch: 20 }, { wch: 20 }, { wch: 18 }];
-    XLSX.writeFile(workbook, `SOP_Nexus_Supply_${new Date().toISOString().split('T')[0]}.xlsx`);
+      // Grava no Produto Folha
+      if (!nextEdits[chaveStr]) nextEdits[chaveStr] = {};
+      nextEdits[chaveStr][mesBanco] = { novo_volume: novoValor };
+
+      // Rollup para a Categoria
+      dadosBrutos.forEach(cat => {
+        const hasChildEdited = cat.subRows?.some((p: any) => p.id === chaveStr);
+        if (hasChildEdited) {
+          const newCatTotal = cat.subRows.reduce((acc: number, prod: any) => {
+            const childMes = prod.meses.find((m: any) => m.mes_banco === mesBanco);
+            return acc + getVolActual(prod.id, childMes ? childMes.vol_supply : 0);
+          }, 0);
+          if (!nextEdits[cat.id]) nextEdits[cat.id] = {};
+          nextEdits[cat.id][mesBanco] = { novo_volume: newCatTotal };
+        }
+      });
+
+      return nextEdits;
+    });
   };
 
-  const handleSalvar = async () => {
-    setIsProcessing(true);
-    const ajustes: any[] = [];
-    Object.entries(celulasEditadas).forEach(([sku, meses]: any) => {
-      Object.entries(meses).forEach(([mes, val]: any) => {
-        ajustes.push({ 
-          produto: sku, 
-          mes_projetado: mes, 
-          novo_volume: val.novo_volume === '' ? 0 : val.novo_volume 
+  const handleCongelar = async () => {
+    if (!confirm("Atenção Supply: O sistema aplicará um rateio Fair-Share nos clientes do comercial baseado nas restrições de fábrica aplicadas aqui. Deseja prosseguir?")) return;
+    try {
+      const payload = {
+        origem_ajuste: "Supply Review",
+        ajustes: Object.entries(celulasEditadas).flatMap(([chave, meses]: any) => 
+          Object.entries(meses)
+            // Filtra para enviar apenas SKUs (produtos não têm | no ID nesta tela)
+            .filter(() => !dadosBrutos.some(c => c.id === chave))
+            .map(([mes_projetado, val]: any) => ({
+              produto: chave, mes_projetado, novo_volume: parseInt(val.novo_volume, 10), justificativa: "Ajuste de Capacidade Fabril"
+            }))
+        )
+      };
+      await axios.post(`/api/v1/consensus/supply/congelar`, payload);
+      alert("Supply Review Aprovado e Rateio Fair-Share Concluído!");
+      fetchStatusAndData();
+    } catch (e: any) { alert("Erro ao salvar: " + (e.response?.data?.detail || e.message)); }
+  };
+
+  const handleDestrancar = async () => {
+    if (!confirm("Reabrir Fase de Supply?")) return;
+    try { await axios.post(`/api/v1/consensus/supply/destrancar`); fetchStatusAndData(); } catch (e) { alert("Erro ao destrancar."); }
+  };
+
+  const handleExportCSV = () => {
+    let csv = "CATEGORIA,SKU,DESCRICAO,MES,DEMANDA COMERCIAL (CX),CAPACIDADE SUPPLY (CX),GAP\n";
+    dadosBrutos.forEach(cat => {
+      cat.subRows?.forEach((prod: any) => {
+        prod.meses.forEach((m: any) => {
+          const edicao = celulasEditadas[prod.id]?.[m.mes_banco];
+          const vSup = edicao !== undefined ? edicao.novo_volume : m.vol_supply;
+          csv += `"${cat.nome}","${prod.id}","${prod.nome}","${m.mes_str}",${m.vol_comercial},${vSup},${vSup - m.vol_comercial}\n`;
         });
       });
     });
-
-    try {
-      await axios.post(`/api/v1/consensus/supply/congelar`, { origem_ajuste: "Supply", ajustes });
-      alert("✅ Restrições de fábrica aplicadas! Ciclo de Supply consolidado.");
-      fetchData(); 
-    } catch (e: any) {
-      alert(e.response?.data?.detail || "Erro ao guardar.");
-    } finally {
-      setIsProcessing(false);
-    }
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url; link.setAttribute("download", "Supply_Review_Export.csv");
+    document.body.appendChild(link); link.click(); document.body.removeChild(link);
   };
 
-  const categoriasUnicas = useMemo(() => Array.from(new Set(dadosBrutos.map(d => d.categoria).filter(Boolean))).sort(), [dadosBrutos]);
-
-  const dadosFiltrados = useMemo(() => {
-    return dadosBrutos.filter(d => {
-        const matchBusca = (d.produto + ' ' + d.nome).toLowerCase().includes(busca.toLowerCase());
-        const matchCat = categoriaSelecionada === 'TODAS' || d.categoria === categoriaSelecionada;
-        return matchBusca && matchCat;
-    });
-  }, [dadosBrutos, busca, categoriaSelecionada]);
-
-  const totaisCalculados = useMemo(() => {
-    const totais: Record<string, { faturamento: number, volume: number }> = {};
-    
-    dadosFiltrados.forEach(prod => {
-      const pmvBase = prod.meses[0]?.pmv || 0;
-      prod.meses.forEach((mes: any) => {
-        if (!totais[mes.mes_banco]) totais[mes.mes_banco] = { faturamento: 0, volume: 0 };
-        
-        const edicaoProd = celulasEditadas[prod.produto]?.[mes.mes_banco];
-        const hasNovoVol = edicaoProd !== undefined && edicaoProd.novo_volume !== undefined && edicaoProd.novo_volume !== '';
-        const volumeFinal = Math.round(Number(hasNovoVol ? edicaoProd.novo_volume : mes.vol_ajustado));
-        
-        totais[mes.mes_banco].volume += volumeFinal;
-        totais[mes.mes_banco].faturamento += hasNovoVol ? (volumeFinal * pmvBase) : (mes.receita || (volumeFinal * pmvBase));
-      });
-    });
-    return totais;
-  }, [dadosFiltrados, celulasEditadas]);
-
-  const toggleChart = async (row: any) => {
-    const chave = row.original.produto;
-    if (chartExpanded === chave) {
-      setChartExpanded(null); 
-      return;
-    }
-    
+  const toggleChart = async (node: any) => {
+    const chave = node.id;
+    if (chartExpanded === chave) { setChartExpanded(null); return; }
+    if (node.tipo !== 'produto') { alert("Gráfico disponível apenas no nível de Produto (SKU)."); return; }
     setChartExpanded(chave);
     if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
-        const res = await axios.get('/api/v1/consensus/macro/grafico', { 
-            params: { produto: chave } 
-        });
+        const res = await axios.get('/api/v1/consensus/supply/grafico', { params: { produto_id: chave } });
         setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
-      } catch (e) { console.error(e); }
-      finally { setLoadingGrafico(null); }
+      } catch (e) { console.error(e); } finally { setLoadingGrafico(null); }
     }
   };
 
-  const qtdEdicoes = Object.keys(celulasEditadas).length;
+  const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
+    const chave = rowData.id; const chartData = dadosGraficoCache[chave];
+    const kpis = useMemo(() => {
+      let vComercial = 0; let vSupply = 0; let pmvAcc = 0; let count = 0;
+      (rowData?.meses || []).forEach((m: any) => {
+          const edicao = celulasEditadas[rowData.id]?.[m.mes_banco];
+          const vFinal = edicao !== undefined ? parseInt(edicao.novo_volume) : (m.vol_supply || 0);
+          vComercial += (m.vol_comercial || 0); vSupply += vFinal;
+          if(m.pmv) { pmvAcc += m.pmv; count++; }
+      });
+      const gap = vSupply - vComercial;
+      return { vComercial, vSupply, gap, pmvMedio: count > 0 ? (pmvAcc / count) : 0 };
+    }, [rowData, celulasEditadas]);
 
-  const columns = useMemo(() => {
-    if (dadosFiltrados.length === 0) return [];
-    
-    const baseCols: any[] = [
-      {
-        id: 'nome', header: 'Produto / SKU',
-        accessorFn: (row: any) => row.nome,
-        cell: (info: any) => {
-          const row = info.row;
-          return (
-            <div className="flex items-center gap-3 py-2 min-w-[320px]">
-              <button onClick={() => toggleChart(row)} className={`p-1.5 rounded-lg transition-colors border ${chartExpanded === row.original.produto ? 'bg-amber-100 border-amber-200 text-amber-600 shadow-sm' : 'hover:bg-slate-100 border-transparent text-slate-400 hover:text-slate-600'}`} title="Ver Histórico">
-                <Activity className="w-4 h-4" />
+    return (
+      <div className="w-full bg-slate-900 shadow-inner px-8 py-8 border-y border-slate-800">
+        <div className="flex items-center gap-2 mb-6">
+          <Factory className="w-5 h-5 text-blue-400" />
+          <h3 className="font-bold text-lg text-white">Dossiê de Restrição Fabril <span className="text-slate-500 font-normal">| {rowData.nome}</span></h3>
+        </div>
+        <div className="grid grid-cols-4 gap-4 mb-6">
+          <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
+            <div className="text-slate-400 mb-2"><span className="text-xs font-bold uppercase tracking-wider">Demanda Comercial</span></div>
+            <div className="text-2xl font-black text-white">{formatVolume(kpis.vComercial)} <span className="text-sm font-normal text-slate-500">CX</span></div>
+          </div>
+          <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
+            <div className="text-slate-400 mb-2"><span className="text-xs font-bold uppercase tracking-wider">Capacidade Supply</span></div>
+            <div className="text-2xl font-black text-white">{formatVolume(kpis.vSupply)} <span className="text-sm font-normal text-slate-500">CX</span></div>
+          </div>
+          <div className={`border p-4 rounded-xl ${kpis.gap < 0 ? 'bg-rose-900/20 border-rose-500/30' : 'bg-emerald-900/20 border-emerald-500/30'}`}>
+            <div className="text-slate-400 mb-2"><span className="text-xs font-bold uppercase tracking-wider">Ruptura (GAP)</span></div>
+            <div className={`text-2xl font-black ${kpis.gap < 0 ? 'text-rose-400' : 'text-emerald-400'}`}>{kpis.gap > 0 ? '+' : ''}{formatVolume(kpis.gap)} <span className="text-sm font-normal opacity-70">CX</span></div>
+          </div>
+        </div>
+        <div className="grid grid-cols-3 gap-6">
+          <div className="col-span-2 bg-slate-800 border border-slate-700 p-4 rounded-xl h-[340px]">
+            {loadingGrafico === chave ? <div className="h-full flex items-center justify-center text-slate-500">Mapeando série histórica...</div> : chartData && (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
+                  <XAxis dataKey="name" tick={{fill: '#94a3b8', fontSize: 12}} tickMargin={10} axisLine={false} />
+                  <YAxis tickFormatter={formatVolume} tick={{fill: '#94a3b8', fontSize: 12}} tickLine={false} axisLine={false} />
+                  <Tooltip wrapperStyle={{ zIndex: 100 }} contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', color: '#fff' }} />
+                  <Legend iconType="circle" />
+                  <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} connectNulls={false} />
+                  <Line type="monotone" dataKey="Comercial" name="Demanda Comercial (S&OP)" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="Supply" name="Capacidade Fábrica" stroke="#3b82f6" strokeWidth={3} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+          <div className="col-span-1 h-[340px]">
+             <AiInsightBox alvo={rowData.nome} pmv={kpis.pmvMedio} volume={kpis.vSupply} demandaComercial={kpis.vComercial} />
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const totaisGerais = useMemo(() => {
+    const totais: Record<string, { volSup: number, volCom: number }> = {};
+    dadosBrutos.forEach(cat => {
+      cat.meses?.forEach((m: any) => {
+        if (!totais[m.mes_banco]) totais[m.mes_banco] = { volSup: 0, volCom: 0 };
+        const edicao = celulasEditadas[cat.id]?.[m.mes_banco];
+        const vAtual = edicao !== undefined ? parseInt(edicao.novo_volume) : (m.vol_supply || 0);
+        totais[m.mes_banco].volSup += vAtual;
+        totais[m.mes_banco].volCom += (m.vol_comercial || 0);
+      });
+    });
+    return totais;
+  }, [dadosBrutos, celulasEditadas]);
+
+  const renderRow = (row: any, depth = 0) => {
+    const isExpanded = expanded[row.id];
+    const hasChildren = row.subRows && row.subRows.length > 0;
+    const isProduto = row.tipo === 'produto';
+
+    return (
+      <React.Fragment key={row.id}>
+        <tr className={`border-b transition-colors hover:bg-slate-50 ${depth === 0 ? 'bg-slate-100/50' : 'bg-white'}`}>
+          <td className="p-0 align-middle border-r border-slate-200">
+            <div style={{ paddingLeft: `${depth * 2 + 1}rem` }} className="flex items-center gap-3 py-3 min-w-[320px] h-full">
+              {hasChildren ? (
+                <button onClick={() => setExpanded(p => ({ ...p, [row.id]: !p[row.id] }))} className="p-1.5 hover:bg-slate-300 text-slate-500 rounded-lg transition-colors">
+                  {isExpanded ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
+                </button>
+              ) : <div className="w-8" />}
+              
+              <button onClick={() => toggleChart(row)} className={`p-1.5 rounded-lg border transition-colors ${chartExpanded === row.id ? 'bg-blue-100 text-blue-600 border-blue-200' : 'hover:bg-slate-200 text-slate-400'}`}>
+                <BarChart2 className="w-4 h-4" />
               </button>
 
-              <div className="w-8 h-8 rounded-full flex items-center justify-center border flex-shrink-0 bg-slate-800 border-slate-700 text-slate-300">
-                <Factory className="w-4 h-4" />
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center border shrink-0 ${depth === 0 ? 'bg-slate-800 text-white' : 'bg-blue-50 text-blue-600'}`}>
+                {depth === 0 ? <LayoutGrid className="w-4 h-4" /> : <Package className="w-4 h-4" />}
               </div>
               
               <div className="flex flex-col">
-                 <span className="text-sm font-black text-slate-800 uppercase tracking-tighter truncate max-w-[250px]">
-                   {info.getValue()}
-                 </span>
-                 <div className="flex items-center gap-2 mt-1">
-                     <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">{row.original.produto}</span>
-                     <span className="text-[9px] text-indigo-500 font-black uppercase tracking-widest">{row.original.categoria}</span>
-                     <span className="text-[9px] text-emerald-600 font-black uppercase tracking-widest bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100">PMV: {formatMoeda(row.original.meses[0]?.pmv || 0)}</span>
-                 </div>
+                 <span className={`text-sm pr-4 ${!isProduto ? 'font-black text-slate-800 tracking-tight' : 'font-semibold text-slate-600'}`}>{row.nome}</span>
+                 {isProduto && <span className="text-[10px] text-slate-400 font-mono">SKU: {row.id}</span>}
               </div>
             </div>
-          )
-        }
-      }
-    ];
+          </td>
 
-    const mesesMap = new Map();
-    dadosFiltrados.forEach(v => v.meses.forEach((m: any) => mesesMap.set(m.mes_banco, m)));
-    
-    Array.from(mesesMap.values()).sort((a: any, b: any) => a.mes_banco.localeCompare(b.mes_banco)).forEach((m: any) => {
-      baseCols.push({
-        id: `mes_${m.mes_banco}`, header: m.mes_str,
-        accessorFn: (row: any) => row.meses.find((rm: any) => rm.mes_banco === m.mes_banco)?.vol_ajustado || 0,
-        cell: (info: any) => {
-          const row = info.row.original;
-          const dadosMes = row.meses.find((rm: any) => rm.mes_banco === m.mes_banco);
-          const meta = info.table.options.meta as any;
-          const edicao = meta.celulasEditadas[row.produto]?.[m.mes_banco];
-          
-          const isPendente = edicao !== undefined;
-          const valorReal = isPendente ? edicao.novo_volume : (dadosMes?.vol_ajustado || 0);
-          const valorInteiro = Math.round(Number(valorReal));
-          const baseComercial = Math.round(Number(dadosMes?.vol_bu || 0)); // ACORDO COMERCIAL
-          const isChanged = valorInteiro !== baseComercial;
-          
-          const faturamentoPrevisto = isPendente ? (valorInteiro * (dadosMes?.pmv || 0)) : (dadosMes?.receita || 0);
-          const isCortado = valorInteiro < baseComercial;
-          
-          const bloqueado = meta.isSupplyFechado;
+          {row.meses?.map((m: any, idx: number) => {
+            const edicao = celulasEditadas[row.id]?.[m.mes_banco];
+            const isEdited = edicao !== undefined;
+            const valorExibicao = isEdited ? edicao.novo_volume : (m.vol_supply || 0);
+            const gap = valorExibicao - m.vol_comercial;
 
-          return (
-            <div className="flex flex-col w-28 gap-1.5 relative">
-              <div className="flex justify-between items-center px-1">
-                 <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest" title="Acordo Comercial Consolidado">COMERCIAL: {baseComercial}</span>
-              </div>
-              <input
-                type="number" value={valorInteiro === 0 ? '' : valorInteiro} placeholder="0"
-                disabled={bloqueado}
-                onChange={(e) => meta.updateCell(row.produto, m.mes_banco, e.target.value)}
-                className={`text-sm text-center font-black p-2.5 rounded-xl outline-none border-2 transition-all w-full
-                  ${bloqueado ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed opacity-80' : 'border-solid'} 
-                  ${isChanged && !bloqueado ? 'bg-amber-500 border-amber-600 text-white shadow-md' : !bloqueado ? 'bg-slate-50 border-transparent text-slate-800 focus:bg-white focus:border-slate-300' : ''}`}
-                title={bloqueado ? "Restrições de Fábrica Congeladas" : "Editar Capacidade de Fornecimento"}
-              />
-              <span className={`text-[10px] font-black text-center tracking-tight flex items-center justify-center gap-1 ${bloqueado ? 'text-slate-400' : isCortado ? 'text-rose-500' : 'text-emerald-600'}`}>
-                {isCortado && <AlertTriangle className="w-3 h-3" />}
-                {formatMoeda(faturamentoPrevisto)}
-              </span>
-            </div>
-          );
-        }
-      });
-    });
-    return baseCols;
-  }, [dadosFiltrados, chartExpanded]);
-
-  const table = useReactTable({
-    data: dadosFiltrados, columns, state: { expanded, sorting },
-    onExpandedChange: setExpanded, onSortingChange: setSorting,
-    getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel(), getSortedRowModel: getSortedRowModel(),
-    meta: {
-      celulasEditadas,
-      isSupplyFechado, 
-      updateCell: (chave: string, mes: string, val: string) => {
-        if (isSupplyFechado) return; 
-        const v = val === '' ? '' : Math.round(Number(val));
-        const finalV = Number.isNaN(v as any) && val !== '' ? 0 : v;
-        setCelulasEditadas((prev: any) => ({ ...prev, [chave]: { ...(prev[chave] || {}), [mes]: { novo_volume: finalV } } }));
-      }
-    }
-  });
-
-  // TELA DE BLOQUEIO DE FASE
-  if (isTopDownFechado === null || isBottomUpFechado === null) {
-    return (
-      <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans">
-        <Loader2 className="w-8 h-8 animate-spin text-amber-500 mb-4" />
-        <span className="text-slate-400 font-black text-xs tracking-widest uppercase">Verificando Integração de Fases...</span>
-      </div>
-    );
-  }
-
-  if (isTopDownFechado === false || isBottomUpFechado === false) {
-    return (
-      <div className="h-screen w-full bg-[#f8fafc] flex flex-col items-center justify-center font-sans p-6">
-        <div className="bg-white p-12 rounded-[40px] shadow-xl border border-slate-100 flex flex-col items-center max-w-lg text-center animate-in fade-in zoom-in duration-500">
-          <div className="w-20 h-20 bg-amber-50 rounded-full flex items-center justify-center mb-6 border border-amber-100">
-            <Lock className="w-10 h-10 text-amber-500" />
-          </div>
-          <h2 className="text-2xl font-black text-slate-900 tracking-tighter mb-4">Fase de Supply Trancada</h2>
-          <p className="text-slate-500 font-medium leading-relaxed">
-            A etapa de Supply Review só será liberada após a Diretoria aprovar o plano macro e o Comercial consolidar a carteira nas Fases 1 e 2.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
-      <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative">
-        
-        {/* CABEÇALHO */}
-        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 relative overflow-hidden">
-          {isSupplyFechado && !isLoading && (
-              <div className="absolute top-0 left-0 w-full bg-slate-900 text-white text-[10px] font-black py-1.5 flex justify-center items-center gap-2 tracking-widest uppercase shadow-sm z-10">
-                  <ShieldCheck className="w-3 h-3 text-emerald-400" /> CICLO GERAL ENCERRADO E CONGELADO (PLANO S&OP ASSINADO)
-              </div>
-          )}
-          
-          <div className={isSupplyFechado ? "pt-4" : ""}>
-            <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
-              <Factory className="w-8 h-8 text-slate-800" /> Supply Review
-            </h1>
-            <p className="text-sm font-bold text-slate-400 mt-1 uppercase tracking-widest pl-11">
-              Restrições de Capacidade e Cortes de Produção
-            </p>
-          </div>
-          
-          <div className={`flex items-center gap-4 ${isSupplyFechado ? "pt-4" : ""}`}>
-              <div className="flex items-center gap-3 h-full">
-                {qtdEdicoes > 0 && !isSupplyFechado && (<button onClick={() => setCelulasEditadas({})} className="flex items-center gap-1 text-xs font-black text-rose-500 hover:text-rose-700 transition tracking-widest uppercase px-4 py-3 rounded-2xl hover:bg-rose-50"><X className="w-4 h-4" /> Descartar</button>)}
-                
-                <button onClick={handleSalvar} disabled={isProcessing || isSupplyFechado} className={`flex items-center gap-2 text-white px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase transition-all shadow-lg ${isSupplyFechado ? 'bg-slate-300 cursor-not-allowed shadow-none' : 'bg-slate-900 hover:bg-black shadow-slate-900/30'}`}>
-                    {isProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : isSupplyFechado ? <Lock className="w-5 h-5" /> : <Check className="w-5 h-5" />}
-                    {isSupplyFechado ? 'S&OP Fechado' : qtdEdicoes > 0 ? 'Gravar Cortes e Fechar Ciclo' : 'Assinar Plano sem Cortes'}
-                </button>
-              </div>
-          </div>
-        </div>
-
-        {/* CONTROLES E BUSCA */}
-        <div className="flex flex-col md:flex-row gap-4 mb-6">
-            <div className="flex items-center gap-4 bg-white p-3 rounded-[24px] shadow-sm border border-slate-100 flex-shrink-0 px-6">
-                <span className="text-xs font-black text-slate-500 uppercase tracking-widest">Categoria:</span>
-                <select 
-                    value={categoriaSelecionada} 
-                    onChange={e => { setCategoriaSelecionada(e.target.value); }} 
-                    className="bg-slate-50 border border-slate-200 p-2.5 rounded-xl text-sm font-bold text-slate-700 outline-none cursor-pointer"
-                >
-                    <option value="TODAS">-- Todas as Categorias --</option>
-                    {categoriasUnicas.map(opt => (
-                        <option key={opt as string} value={opt as string}>{opt as string}</option>
-                    ))}
-                </select>
-                <button 
-                  onClick={fetchData} 
-                  disabled={isLoading} 
-                  className="bg-slate-100 text-slate-700 px-6 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-slate-200 transition disabled:opacity-50 flex items-center gap-2"
-                >
-                   {isLoading ? <Loader2 className="w-4 h-4 animate-spin"/> : <Filter className="w-4 h-4"/>} 
-                   Atualizar Base
-                </button>
-            </div>
-
-           <div className="flex-1 bg-white p-3 rounded-[24px] shadow-sm border border-slate-100 flex items-center gap-3">
-             <div className="flex-1 flex items-center gap-3 px-4 bg-slate-50 rounded-xl border border-slate-100 h-full">
-               <Search className="w-5 h-5 text-slate-400" />
-               <input 
-                 type="text" placeholder="Filtrar por SKU ou Descrição do Produto..." value={busca} onChange={e => setBusca(e.target.value)}
-                 className="w-full bg-transparent py-2 text-sm font-bold text-slate-800 outline-none placeholder:text-slate-400"
-               />
-             </div>
-             <button onClick={handleExportExcel} className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-6 py-3 rounded-xl text-xs font-black tracking-widest uppercase transition-all border border-slate-200 h-full whitespace-nowrap">
-                <Download className="w-4 h-4" /> Exportar Planilha
-             </button>
-           </div>
-        </div>
-
-        {/* TABELA DE DADOS */}
-        <div className="bg-white rounded-[40px] shadow-2xl border border-slate-100 overflow-hidden relative min-h-[400px]">
-          {isLoading ? (
-             <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 backdrop-blur-sm z-10">
-                 <Loader2 className="w-8 h-8 animate-spin text-slate-500 mb-4" />
-                 <span className="text-slate-400 font-black text-xs tracking-widest uppercase">Carregando volumes comerciais...</span>
-             </div>
-          ) : dadosFiltrados.length === 0 ? (
-             <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
-                 <Filter className="w-12 h-12 mb-4 opacity-20" />
-                 <span className="font-black text-sm tracking-widest uppercase">Nenhum produto listado</span>
-             </div>
-          ) : (
-          <div className="overflow-x-auto pb-4">
-            <table className="w-full text-left border-collapse">
-              <thead className="bg-white border-b-2 border-slate-100 shadow-sm">
-                {table.getHeaderGroups().map(hg => (
-                  <tr key={hg.id}>
-                    {hg.headers.map(header => (
-                      <th key={header.id} className={`px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest ${header.column.getCanSort() ? 'cursor-pointer hover:bg-slate-50 transition-colors' : ''}`} onClick={header.column.getToggleSortingHandler()}>
-                        <div className="flex items-center gap-2">
-                          {flexRender(header.column.columnDef.header, header.getContext())}
-                          {header.column.getCanSort() && (
-                            <span className="text-slate-300">
-                              {{ asc: <ArrowUp className="w-4 h-4 text-slate-500" />, desc: <ArrowDown className="w-4 h-4 text-slate-500" /> }[header.column.getIsSorted() as string] ?? <ArrowUpDown className="w-4 h-4 opacity-30" />}
-                            </span>
-                          )}
-                        </div>
-                      </th>
-                    ))}
-                  </tr>
-                ))}
-              </thead>
-              
-              <tbody>
-                {table.getRowModel().rows.map(row => (
-                  <Fragment key={row.id}>
-                    <tr className={`border-b border-slate-50 transition-colors bg-white hover:bg-slate-50`}>
-                      {row.getVisibleCells().map(cell => (
-                        <td key={cell.id} className="px-8 py-4">
-                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                        </td>
-                      ))}
-                    </tr>
-                    
-                    {chartExpanded === row.original.produto && (
-                      <tr>
-                        <td colSpan={table.getAllColumns().length} className="bg-slate-900 p-8 border-b border-slate-800">
-                          <div className="bg-slate-950 rounded-[32px] p-8 shadow-inner border border-slate-800 animate-in fade-in duration-500">
-                            
-                            {/* LAYOUT EM GRADE PARA GRÁFICO + IA INSIGHT */}
-                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                               
-                               {/* COLUNA ESQUERDA: GRÁFICO */}
-                               <div className="lg:col-span-2">
-                                 <div className="flex justify-between items-start mb-6 px-2">
-                                    <div className="flex flex-col gap-1">
-                                      <h3 className="text-lg font-black text-white uppercase tracking-tighter flex items-center gap-2">
-                                        <Activity className="w-5 h-5 text-emerald-400" /> Histórico e Tendência
-                                      </h3>
-                                      <p className="text-xs font-bold text-slate-400 tracking-widest uppercase">
-                                        {row.original.nome}
-                                      </p>
-                                    </div>
-                                 </div>
-
-                                 <div className="h-[250px] w-full">
-                                   {loadingGrafico === row.original.produto ? (
-                                     <div className="h-full flex items-center justify-center text-slate-600"><Loader2 className="animate-spin w-8 h-8" /></div>
-                                   ) : (
-                                     <ResponsiveContainer width="100%" height="100%">
-                                       <LineChart 
-                                         data={
-                                           (dadosGraficoCache[row.original.produto] || []).map((p: any) => {
-                                               const mesNaTab = row.original.meses.find((m: any) => m.mes_banco === p.data_iso);
-                                               const edicao = celulasEditadas[row.original.produto]?.[p.data_iso];
-                                               const valAtual = mesNaTab ? Math.round(Number(edicao !== undefined ? edicao.novo_volume : mesNaTab.vol_ajustado)) : null;
-                                               return { ...p, Consenso: valAtual !== null ? valAtual : p.Consenso };
-                                           })
-                                         }
-                                         margin={{ top: 20, right: 30, left: 20, bottom: 10 }}
-                                       >
-                                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
-                                         <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                                         <YAxis tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                                         <Tooltip contentStyle={{borderRadius: '20px', backgroundColor: '#0f172a', border: '1px solid #1e293b', color: '#fff', boxShadow: '0 10px 30px rgba(0,0,0,0.5)'}} />
-                                         <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900', color: '#cbd5e1'}} />
-                                         
-                                         <Line type="monotone" dataKey="Realizado" name="Venda Real" stroke="#f8fafc" strokeWidth={4} dot={{r: 3, fill: '#f8fafc'}} connectNulls={false} />
-                                         <Line type="monotone" dataKey="IA" name="Sinal IA (Base)" stroke="#475569" strokeWidth={2} strokeDasharray="10 6" dot={false} connectNulls={false} />
-                                         <Line type="monotone" dataKey="Consenso" name="Capacidade Fábrica (Atual)" stroke="#10b981" strokeWidth={5} dot={{r: 6, fill: '#10b981', strokeWidth: 2, stroke: '#0f172a'}} connectNulls={false} />
-                                       </LineChart>
-                                     </ResponsiveContainer>
-                                   )}
-                                 </div>
-                               </div>
-
-                               {/* COLUNA DIREITA: BOTÃO IA 360° */}
-                               <div className="flex flex-col justify-start">
-                                 <AiInsightBox 
-                                    alvo={row.original.produto} 
-                                    pmv={row.original.meses[0]?.pmv || 0}
-                                 />
-                               </div>
-                            </div>
-
-                          </div>
-                        </td>
-                      </tr>
+            return (
+              <td key={idx} className="p-0 border-l border-slate-200 align-top">
+                <div className={`flex flex-col h-full min-h-[76px] ${isSupplyFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/40' : 'hover:bg-slate-50'}`}>
+                  
+                  {/* CABEÇALHO DA CÉLULA: DEMANDA COMERCIAL */}
+                  <div className="px-2 py-1.5 border-b border-slate-200/50 flex justify-center items-center bg-slate-100/80">
+                    <span className="text-[10px] font-bold text-slate-600 bg-white border border-slate-200 px-3 py-0.5 rounded shadow-sm whitespace-nowrap" title="Demanda Aprovada pelo Comercial">
+                      COMERCIAL: {formatVolume(m.vol_comercial)}
+                    </span>
+                  </div>
+                  
+                  {/* CORPO: SUPPLY INPUT */}
+                  <div className="px-4 py-2 flex flex-col items-end justify-center flex-1">
+                    <div className="w-24">
+                      {/* O SmartInput é travado se o Supply estiver fechado OU se for a linha de Categoria (nível 0) */}
+                      <SmartInput 
+                         value={valorExibicao} 
+                         disabled={isSupplyFechado || depth === 0} 
+                         onChange={(novoVol) => handleEditCell(row.id, m.mes_banco, novoVol)} 
+                      />
+                    </div>
+                    {/* Alerta de Ruptura (Corte de Fair-Share) */}
+                    {gap !== 0 && (
+                      <span className={`text-[10px] font-bold mt-1 px-1.5 py-0.5 rounded ${gap < 0 ? 'bg-rose-100 text-rose-600' : 'bg-emerald-100 text-emerald-600'}`} title="GAP versus Demanda Comercial">
+                        {gap > 0 ? '+' : ''}{formatVolume(gap)} cx
+                      </span>
                     )}
-                  </Fragment>
+                  </div>
+
+                </div>
+              </td>
+            );
+          })}
+        </tr>
+        
+        {chartExpanded === row.id && <tr><td colSpan={(row.meses?.length || 0) + 1} className="p-0"><PainelSaudabilidade rowData={row} /></td></tr>}
+        {isExpanded && hasChildren && row.subRows.map((child: any) => renderRow(child, depth + 1))}
+      </React.Fragment>
+    );
+  };
+
+  const colunasData = dadosBrutos.length > 0 ? dadosBrutos[0].meses : [];
+
+  // =====================================================================
+  // TELA DE BLOQUEIO (AGUARDANDO COMERCIAL)
+  // =====================================================================
+  if (isLoading) return <div className="min-h-screen flex items-center justify-center bg-slate-50 text-slate-400 font-bold">Processando Fábrica...</div>;
+
+  if (!isComercialFechado) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-8">
+        <div className="bg-white max-w-2xl w-full p-12 rounded-3xl shadow-2xl text-center border border-slate-100">
+          <div className="w-24 h-24 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-6">
+            <Lock className="w-10 h-10 text-slate-400" />
+          </div>
+          <h2 className="text-3xl font-black text-slate-800 mb-4">Aguardando Gerência Comercial</h2>
+          <p className="text-slate-500 text-lg mb-8 leading-relaxed">
+            A fase de <strong>Supply Review</strong> só pode ser iniciada quando todas as regionais de vendas estiverem oficialmente trancadas no Gerenciamento Comercial.
+          </p>
+          <button onClick={fetchStatusAndData} className="px-8 py-3 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl shadow-lg transition-colors flex items-center gap-2 mx-auto">
+            <Search className="w-5 h-5" /> Verificar Status Novamente
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // =====================================================================
+  // TELA PRINCIPAL (SUPPLY ABERTO)
+  // =====================================================================
+  return (
+    <div className="min-h-screen bg-slate-50 p-8 pb-32">
+      <div className="max-w-[1600px] mx-auto mb-8 flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-black text-slate-800 tracking-tight flex items-center gap-3">
+            <Factory className="w-8 h-8 text-blue-600" /> Supply <span className="text-blue-600">Review</span>
+          </h1>
+          <p className="text-slate-500 mt-1 font-medium">Gestão de Restrições Fabris e Alocação de SKU</p>
+        </div>
+
+        <div className="flex items-center gap-4">
+          <button onClick={handleExportCSV} className="px-4 py-2.5 bg-white border hover:bg-slate-50 text-slate-700 font-bold rounded-xl shadow-sm transition-colors flex items-center gap-2">
+            <Download className="w-4 h-4" /> Exportar Base
+          </button>
+
+          {isSupplyFechado ? (
+            <button onClick={handleDestrancar} className="px-6 py-2.5 bg-rose-50 text-rose-600 border border-rose-200 hover:bg-rose-100 font-bold rounded-xl shadow-sm transition-colors flex items-center gap-2">
+              <Unlock className="w-4 h-4" /> Reabrir Restrições (Supply Fechado)
+            </button>
+          ) : (
+            <button onClick={handleCongelar} className="px-6 py-2.5 bg-slate-900 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg transition-all flex items-center gap-2">
+              <Shield className="w-4 h-4" /> Aplicar Restrições Fabris (Fair-Share)
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="max-w-[1600px] mx-auto bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr>
+                <th className="bg-slate-900 p-0 border-b border-slate-800 w-[400px]">
+                  <div className="flex items-center gap-3 px-6 py-5">
+                    <Search className="w-5 h-5 text-slate-400" />
+                    <input type="text" placeholder="Procurar categoria ou SKU..." value={busca} onChange={(e) => setBusca(e.target.value)} className="bg-transparent border-none text-white focus:outline-none placeholder-slate-500 text-sm font-medium w-full" />
+                    {busca && <button onClick={() => setBusca("")}><X className="w-4 h-4 text-slate-400 hover:text-white" /></button>}
+                  </div>
+                </th>
+                {colunasData?.map((m: any, i: number) => (
+                  <th key={i} className="bg-slate-900 p-0 border-b border-slate-800 border-l border-slate-800/50 min-w-[180px]">
+                    <div className="px-6 py-5 flex flex-col items-center justify-center">
+                      <span className="text-white font-bold text-sm tracking-widest">{m.mes_str}</span>
+                      <span className="text-blue-400 text-[10px] font-black tracking-widest uppercase mt-0.5">S&OP Supply</span>
+                    </div>
+                  </th>
                 ))}
-              </tbody>
-              <tfoot className="bg-slate-900 text-white">
+              </tr>
+            </thead>
+            <tbody>
+              {dadosBrutos.filter(d => d.nome?.toLowerCase().includes(busca.toLowerCase()) || d.subRows?.some((s:any)=>s.nome.toLowerCase().includes(busca.toLowerCase()))).map(row => renderRow(row))}
+            </tbody>
+            
+            {dadosBrutos.length > 0 && (
+              <tfoot className="bg-slate-900 sticky bottom-0 z-20 shadow-[0_-10px_40px_rgba(0,0,0,0.1)]">
                 <tr>
-                  {table.getHeaderGroups()[0].headers.map(header => {
-                    if (header.id === 'nome') return (
-                      <td key={header.id} className="px-8 py-5 text-right">
-                        <div className="flex flex-col">
-                          <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Receita Consolidada</span>
-                          <span className="font-bold text-sm text-white">TOTAL NA TELA</span>
-                        </div>
-                      </td>
-                    );
-                    if (header.id.startsWith('mes_')) {
-                      const mesBanco = header.id.replace('mes_', '');
-                      const tot = totaisCalculados[mesBanco] || { volume: 0, faturamento: 0 };
-                      return (
-                        <td key={header.id} className="px-8 py-5">
-                          <div className="flex flex-col items-center justify-center min-w-[100px]">
-                            <span className="font-black text-white text-[11px] tracking-tight">{formatVolume(tot.volume)} cx</span>
-                            <span className="font-black text-emerald-400 text-[13px] tracking-tight mt-0.5">{formatMoeda(tot.faturamento)}</span>
-                          </div>
-                        </td>
-                      );
-                    }
-                    return <td key={header.id} className="px-8 py-5"></td>;
-                  })}
+                  <td className="px-6 py-5 border-r border-slate-800/50">
+                    <div className="flex flex-col">
+                      <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Restrição Global</span>
+                      <span className="font-bold text-sm text-white">CAPACIDADE DA FÁBRICA</span>
+                    </div>
+                  </td>
+                  {colunasData?.map((m: any, i: number) => (
+                    <td key={i} className="px-6 py-5 border-l border-slate-800/50 text-right">
+                      <div className="flex flex-col items-center justify-center">
+                        <span className="font-black text-white text-base">
+                          {formatVolume(totaisGerais[m.mes_banco]?.volSup || 0)} <span className="text-[10px] text-slate-400 font-medium ml-1">CX</span>
+                        </span>
+                        <span className="font-bold text-slate-400 text-xs tracking-tight mt-1 px-2 py-0.5 rounded border border-slate-700 bg-slate-800" title="Demanda Comercial Total">
+                          Comercial: {formatVolume(totaisGerais[m.mes_banco]?.volCom || 0)}
+                        </span>
+                      </div>
+                    </td>
+                  ))}
                 </tr>
               </tfoot>
-            </table>
-          </div>
-          )}
+            )}
+          </table>
         </div>
       </div>
     </div>

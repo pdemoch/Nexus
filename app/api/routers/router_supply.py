@@ -1,21 +1,28 @@
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
-from typing import List, Optional
-from sqlalchemy.orm import Session
-from sqlalchemy import func
 import datetime
+from typing import List, Optional
 from dateutil.relativedelta import relativedelta
 from collections import defaultdict
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.core.database import get_db
-from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, ControleCiclo
+from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, ControleCiclo, FatoVendas
 from app.api.routers.router_auth import get_current_user
 from app.api.routers.shared_ibp import (
-    get_current_cycle, get_projection_window, get_truth_query, check_global_lock, parse_date_safe
+    get_current_cycle,
+    get_previous_cycle,
+    get_truth_query,
+    check_global_lock,
+    parse_date_safe
 )
 
 router = APIRouter(prefix="/api/v1/consensus/supply", tags=["Consenso Supply Review"])
 
+# =====================================================================
+# GOVERNANÇA E MODELOS
+# =====================================================================
 def require_supply_or_admin(usuario: dict = Depends(get_current_user)):
     if usuario['funcao'] not in ['Administrador', 'Supply Chain']:
         raise HTTPException(status_code=403, detail="Acesso Restrito ao time de Supply Chain.")
@@ -31,127 +38,145 @@ class PayloadCongelarSupply(BaseModel):
     origem_ajuste: str
     ajustes: List[AjusteSupply]
 
+# =====================================================================
+# RADAR DE STATUS DA FASE (INTEGRAÇÃO COMERCIAL -> SUPPLY)
+# =====================================================================
 @router.get("/status")
 async def checar_status_supply(db: Session = Depends(get_db)):
-    # ATUALIZAÇÃO: Passando 'db'
-    ciclo = get_current_cycle(db)
-    m2, m4 = get_projection_window(db)
-    
-    reg_td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down').first()
-    is_td_fechado = reg_td.status == 'Fechado' if reg_td else False
-
-    query_base = get_truth_query(db, ciclo, m2, m4)
-    vendedores_ativos = query_base.with_entities(FatoIbpGranular.vendedor_nome).filter(FatoIbpGranular.vendedor_nome.isnot(None)).distinct().all()
-    v_ativos = [v[0].strip() for v in vendedores_ativos if v[0] and v[0].strip()]
-    
-    vendedores_fechados = db.query(ControleCiclo.origem).filter(
-        ControleCiclo.ciclo_sop == ciclo, ControleCiclo.status == 'Fechado', ControleCiclo.origem.notin_(['Top-Down', 'Supply Review', 'S&OP-Final'])
-    ).all()
-    v_fechados = [v[0].strip() for v in vendedores_fechados if v[0]]
-    
-    pendentes = [v for v in v_ativos if v not in v_fechados]
-    is_fase2_fechada = len(pendentes) == 0
-
-    reg_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
-    
-    return {
-        "is_topdown_fechado": is_td_fechado,
-        "is_fase2_fechada": is_fase2_fechada,
-        "qtd_pendentes": len(pendentes),
-        "is_supply_fechado": reg_sp.status == 'Fechado' if reg_sp else False
-    }
-
-@router.get("") 
-async def listar_supply(db: Session = Depends(get_db), usuario: dict = Depends(require_supply_or_admin)):
     try:
-        # ATUALIZAÇÃO: Passando 'db'
-        m2, m4 = get_projection_window(db)
         ciclo = get_current_cycle(db)
         
-        reg_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
-        is_supply_fechado = reg_sp.status == 'Fechado' if reg_sp else False
+        # 1. Checa o status da própria fase de Supply
+        tranca_sup = db.query(ControleCiclo).filter(
+            ControleCiclo.ciclo_sop == ciclo, 
+            ControleCiclo.origem == 'Supply Review'
+        ).first()
+        supply_fechado = tranca_sup.status == 'Fechado' if tranca_sup else False
 
-        query_base = get_truth_query(db, ciclo, m2, m4)
-        
-        projecoes = query_base.with_entities(
-            FatoIbpGranular.sku, FatoIbpGranular.mes_projetado, 
-            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), 
-            func.sum(FatoIbpGranular.vol_supply).label('v_sp'), 
-            func.max(FatoIbpGranular.justificativa_supply).label('justificativa'),
-            func.avg(FatoIbpGranular.pmv_aplicado).label('pmv_avg'), 
-            func.sum(FatoIbpGranular.vol_supply * FatoIbpGranular.pmv_aplicado).label('rec_sp'), 
-            func.sum(FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('rec_bu'), 
-            DimProduto.descricao, DimProduto.categoria, DimProduto.segmento
-        ).group_by(
-            FatoIbpGranular.sku, FatoIbpGranular.mes_projetado, 
-            DimProduto.descricao, DimProduto.categoria, DimProduto.segmento
-        ).all()
+        # 2. RADAR: Checa se TODAS as Regionais (Coordenadores) já trancaram o Gerenciamento
+        cx = func.coalesce(func.nullif(func.trim(DimCliente.supervisor_nome), ''), func.nullif(func.trim(DimCliente.gerente_nome), ''), 'SEM COORDENADOR')
+        regionais_banco = db.query(cx).distinct().all()
+        regionais_ativas = [r[0] for r in regionais_banco if r[0]]
 
-        prod_map = defaultdict(lambda: {"meses": []})
-        for r in projecoes:
-            p = prod_map[r.sku]
-            if not p.get('produto'): 
-                p.update({
-                    "produto": r.sku, "descricao": r.descricao, "categoria": r.categoria, "segmento": r.segmento
-                })
+        if not regionais_ativas:
+            comercial_fechado = False
+        else:
+            travas = db.query(ControleCiclo).filter(
+                ControleCiclo.ciclo_sop == ciclo,
+                ControleCiclo.origem.in_(regionais_ativas)
+            ).all()
+            status_map = {t.origem: t.status for t in travas}
             
-            v_bu = int(r.v_bu or 0)
-            v_sp_banco = int(r.v_sp or 0)
-            
-            v_exibido = v_sp_banco if is_supply_fechado else v_bu
-            
-            rec_sp_banco = float(r.rec_sp or 0)
-            rec_bu_banco = float(r.rec_bu or 0)
-            rec_exibida = rec_sp_banco if is_supply_fechado else rec_bu_banco
-            
-            pmv_real = (rec_exibida / v_exibido) if v_exibido > 0 else float(r.pmv_avg or 0)
-            
-            p["meses"].append({
-                "mes_banco": str(r.mes_projetado), 
-                "mes_str": r.mes_projetado.strftime("%b/%y").capitalize(), 
-                "vol_ref": v_bu, 
-                "vol_ajustado": v_exibido, 
-                "justificativa": r.justificativa or "",
-                "pmv": pmv_real, 
-                "receita": rec_exibida  
-            })
-            
-        return {"status": "success", "dados": list(prod_map.values())}
+            # A fase comercial só está fechada se TODAS as regionais ativas existirem no mapa e estiverem 'Fechado'
+            comercial_fechado = all(status_map.get(reg) == 'Fechado' for reg in regionais_ativas)
+
+        return {
+            "status": "success", 
+            "fechado": supply_fechado,
+            "comercial_fechado": comercial_fechado
+        }
     except Exception as e:
         raise HTTPException(500, repr(e))
 
-@router.post("/congelar")
-async def congelar_supply(payload: PayloadCongelarSupply, db: Session = Depends(get_db), usuario: dict = Depends(require_supply_or_admin)):
+# =====================================================================
+# ENDPOINT PRINCIPAL: ÁRVORE DA FÁBRICA (AGRUPADO POR SKU)
+# =====================================================================
+@router.get("")
+async def listar_supply_review(db: Session = Depends(get_db), usuario: dict = Depends(require_supply_or_admin)):
     try:
-        # ATUALIZAÇÃO: Passando 'db'
+        ciclo = get_current_cycle(db)
+        
+        # Foco do S&OP Supply no Horizonte Tático (M2, M3, M4)
+        hoje = datetime.date.today().replace(day=1)
+        data_ini = hoje + relativedelta(months=2)
+        data_fim = hoje + relativedelta(months=4)
+        meses_alvo = [(hoje + relativedelta(months=i)).strftime("%Y-%m-%d") for i in range(2, 5)]
+
+        q = get_truth_query(db, ciclo, data_ini, data_fim)
+
+        resultados = q.with_entities(
+            FatoIbpGranular.sku,
+            DimProduto.descricao.label('prod_desc'),
+            DimProduto.categoria.label('prod_cat'),
+            FatoIbpGranular.mes_projetado,
+            func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
+            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'),
+            func.sum(FatoIbpGranular.vol_supply).label('v_sup'),
+            func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
+        ).group_by(
+            FatoIbpGranular.sku, DimProduto.descricao, DimProduto.categoria, FatoIbpGranular.mes_projetado
+        ).all()
+
+        arvore = {}
+        def criar_meses():
+            return {m: {"vol_ia":0, "vol_comercial":0, "vol_supply":0, "receita_comercial":0, "pmv":0.0} for m in meses_alvo}
+
+        for r in resultados:
+            sk = str(r.sku).strip()
+            de = str(r.prod_desc).strip()
+            cat = str(r.prod_cat).strip()
+            ms = str(r.mes_projetado)
+
+            if cat not in arvore:
+                arvore[cat] = {"nome": cat, "tipo": "categoria", "meses": criar_meses(), "produtos": {}}
+            
+            if sk not in arvore[cat]["produtos"]:
+                arvore[cat]["produtos"][sk] = {"id": sk, "nome": de, "tipo": "produto", "meses": criar_meses()}
+
+            if ms in meses_alvo:
+                v_ia = int(r.v_ia or 0)
+                v_bu = int(r.v_bu or 0)
+                v_sup = int(r.v_sup or 0)
+                pmv_b = float(r.pmv or 0)
+
+                # Se o Supply ainda não interveio, herda a promessa Comercial na tela
+                vol_exibicao_supply = v_sup if v_sup > 0 else v_bu
+
+                for nivel in [arvore[cat]["meses"][ms], arvore[cat]["produtos"][sk]["meses"][ms]]:
+                    nivel["vol_ia"] += v_ia
+                    nivel["vol_comercial"] += v_bu
+                    nivel["vol_supply"] += vol_exibicao_supply
+                    nivel["receita_comercial"] += (vol_exibicao_supply * pmv_b)
+                    
+                    if nivel["vol_supply"] > 0:
+                        nivel["pmv"] = nivel["receita_comercial"] / nivel["vol_supply"]
+                    else:
+                        nivel["pmv"] = pmv_b
+
+        final = []
+        for cat_k, cat_v in arvore.items():
+            prods = []
+            for sk_k, sk_v in cat_v["produtos"].items():
+                prods.append({
+                    "id": sk_k, 
+                    "nome": sk_v["nome"], 
+                    "tipo": "produto", 
+                    "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in sk_v["meses"].items()]
+                })
+            final.append({
+                "id": cat_k, 
+                "nome": cat_k, 
+                "tipo": "categoria", 
+                "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in cat_v["meses"].items()], 
+                "subRows": sorted(prods, key=lambda x: x["nome"])
+            })
+
+        return {"status": "success", "dados": sorted(final, key=lambda x: x["nome"])}
+    except Exception as e:
+        raise HTTPException(500, repr(e))
+
+# =====================================================================
+# MOTOR DE RATEIO FAIR-SHARE (CORTE OU INJEÇÃO JUSTA)
+# =====================================================================
+@router.post("/congelar")
+async def aprovar_supply(payload: PayloadCongelarSupply, db: Session = Depends(get_db), usuario: dict = Depends(require_supply_or_admin)):
+    try:
         ciclo = get_current_cycle(db)
         check_global_lock(db, ciclo)
-        
-        m2, m4 = get_projection_window(db)
-        v_ativos_tuples = get_truth_query(db, ciclo, m2, m4).with_entities(FatoIbpGranular.vendedor_nome).filter(FatoIbpGranular.vendedor_nome.isnot(None)).distinct().all()
-        v_ativos = [v[0].strip() for v in v_ativos_tuples if v[0]]
-        
-        v_fechados_tuples = db.query(ControleCiclo.origem).filter(
-            ControleCiclo.ciclo_sop == ciclo, 
-            ControleCiclo.status == 'Fechado', 
-            ControleCiclo.origem.notin_(['Top-Down', 'Supply Review', 'S&OP-Final'])
-        ).all()
-        v_fechados = [v[0].strip() for v in v_fechados_tuples if v[0]]
-        
-        pendentes = [v for v in v_ativos if v not in v_fechados]
-        if pendentes:
-            raise HTTPException(status_code=403, detail=f"A Fase Comercial ainda não foi concluída. Faltam {len(pendentes)} equipes trancarem as carteiras.")
 
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
-        
-        if not registro: 
-            # A CASCATA INICIAL DO PULO DO GATO ATUALIZADA
-            db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo).update({
-                FatoIbpGranular.vol_supply: FatoIbpGranular.vol_bottomup,
-                FatoIbpGranular.vol_final: FatoIbpGranular.vol_bottomup,
-                FatoIbpGranular.vol_meta: FatoIbpGranular.vol_bottomup
-            }, synchronize_session=False)
-            db.commit()
+        if registro and registro.status == 'Fechado':
+            raise HTTPException(423, "Fase de Supply já está fechada.")
 
         for ajuste in payload.ajustes:
             data_alvo = parse_date_safe(ajuste.mes_projetado)
@@ -159,6 +184,7 @@ async def congelar_supply(payload: PayloadCongelarSupply, db: Session = Depends(
 
             if not linhas: continue
 
+            # Inteligência Fair-Share
             soma_bu_total = sum([float(l.vol_bottomup or 0) for l in linhas])
             soma_dist = 0
             volume_total = int(ajuste.novo_volume)
@@ -177,8 +203,6 @@ async def congelar_supply(payload: PayloadCongelarSupply, db: Session = Depends(
                     
                 l.vol_supply = rateado
                 l.justificativa_supply = ajuste.justificativa
-                
-                # A CASCATA DE HERANÇA CORRIGIDA:
                 l.vol_final = rateado 
                 l.vol_meta = rateado
 
@@ -186,10 +210,100 @@ async def congelar_supply(payload: PayloadCongelarSupply, db: Session = Depends(
             db.add(ControleCiclo(ciclo_sop=ciclo, origem='Supply Review', status='Fechado'))
         else: 
             registro.status = 'Fechado'
-            
+
         db.commit()
         return {"status": "success"}
-    except HTTPException as he: raise he
-    except Exception as e: 
+    except Exception as e:
         db.rollback()
+        raise HTTPException(500, repr(e))
+
+# =====================================================================
+# ROTA DE DESTRANCAR (REABRIR FASE)
+# =====================================================================
+@router.post("/destrancar")
+async def destrancar_supply(db: Session = Depends(get_db), usuario: dict = Depends(require_supply_or_admin)):
+    ciclo = get_current_cycle(db)
+    registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Supply Review').first()
+    if registro:
+        registro.status = 'Aberto'
+        db.commit()
+    return {"status": "success"}
+
+# =====================================================================
+# ENDPOINT DO DOSSIÊ GRÁFICO TÁTICO
+# =====================================================================
+@router.get("/grafico")
+async def grafico_supply(produto_id: str, db: Session = Depends(get_db)):
+    try:
+        ciclo_atual = get_current_cycle(db)
+        ciclo_anterior = get_previous_cycle(db)
+        hoje = datetime.date.today().replace(day=1)
+        inicio_hist = hoje - relativedelta(months=24)
+        m2_comercial = hoje + relativedelta(months=2)
+
+        calendario = {}
+        curr = inicio_hist
+        while curr <= hoje + relativedelta(months=4):
+            mes_str = curr.strftime('%Y-%m')
+            calendario[mes_str] = {"Realizado": None, "IA": None, "Comercial": None, "Supply": None}
+            curr += relativedelta(months=1)
+
+        q_hist = db.query(
+            func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'),
+            func.sum(FatoVendas.qt_pedido).label('realizado')
+        ).filter(FatoVendas.data_pedido >= inicio_hist, FatoVendas.sku == produto_id)
+
+        for row in q_hist.group_by('mes_ano').all():
+            if row.mes_ano in calendario:
+                calendario[row.mes_ano]["Realizado"] = int(row.realizado or 0)
+
+        q_proj = db.query(
+            func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes_ano'),
+            FatoIbpGranular.ciclo_sop,
+            func.sum(FatoIbpGranular.vol_ia).label('ia'),
+            func.sum(FatoIbpGranular.vol_bottomup).label('bu'),
+            func.sum(FatoIbpGranular.vol_supply).label('sup')
+        ).filter(FatoIbpGranular.sku == produto_id)
+
+        proj_por_mes = defaultdict(dict)
+        for row in q_proj.group_by('mes_ano', FatoIbpGranular.ciclo_sop).all():
+            proj_por_mes[row.mes_ano][row.ciclo_sop] = {
+                "ia": int(row.ia or 0), 
+                "bu": int(row.bu or 0),
+                "sup": int(row.sup or 0)
+            }
+
+        ciclo_base_zero = datetime.datetime.strptime('04/2026', '%m/%Y').date()
+        ciclo_atual_dt = datetime.datetime.strptime(ciclo_atual, '%m/%Y').date()
+
+        for mes_str in calendario.keys():
+            mes_dt = datetime.datetime.strptime(mes_str, '%Y-%m').date()
+            if mes_str not in proj_por_mes: continue
+
+            alvo_ia_dt = mes_dt - relativedelta(months=2)
+            if alvo_ia_dt < ciclo_base_zero: alvo_ia_dt = ciclo_base_zero
+            if alvo_ia_dt > ciclo_atual_dt: alvo_ia_dt = ciclo_atual_dt
+            ciclo_ia_str = alvo_ia_dt.strftime('%m/%Y')
+            
+            if ciclo_ia_str in proj_por_mes[mes_str]:
+                calendario[mes_str]["IA"] = proj_por_mes[mes_str][ciclo_ia_str]["ia"]
+            if ciclo_atual in proj_por_mes[mes_str]:
+                calendario[mes_str]["Comercial"] = proj_por_mes[mes_str][ciclo_atual]["bu"]
+                sup_val = proj_por_mes[mes_str][ciclo_atual]["sup"]
+                calendario[mes_str]["Supply"] = sup_val if sup_val > 0 else proj_por_mes[mes_str][ciclo_atual]["bu"]
+
+        timeline = []
+        for ms, v in sorted(calendario.items()):
+            mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
+            timeline.append({
+                "name": ms,
+                "data_iso": f"{ms}-01",
+                "Realizado": None if mes_dt > hoje else (v["Realizado"] or 0),
+                "IA": v["IA"],
+                "Comercial": v["Comercial"] if mes_dt >= m2_comercial else None,
+                "Supply": v["Supply"] if mes_dt >= m2_comercial else None
+            })
+
+        return {"status": "success", "dados": timeline}
+    except Exception as e:
         raise HTTPException(500, repr(e))
