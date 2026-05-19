@@ -3,7 +3,7 @@ import axios from 'axios';
 import { 
   ChevronRight, ChevronDown, Lock, Unlock, Search, X, 
   Package, Boxes, LayoutGrid, Download, BarChart2, Activity, Shield,
-  Wand2, Factory, Target, TrendingUp, TrendingDown
+  Wand2, Factory, Target, TrendingUp, TrendingDown, MessageSquare
 } from 'lucide-react';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
@@ -83,6 +83,7 @@ export default function SupplyReviewArena() {
   const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
   const [busca, setBusca] = useState("");
   const [celulasEditadas, setCelulasEditadas] = useState<any>({});
+  const [justificativaGlobal, setJustificativaGlobal] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   
   // STATUS E TRAVAS (O RADAR)
@@ -112,6 +113,7 @@ export default function SupplyReviewArena() {
         setExpanded(cats);
       }
       setCelulasEditadas({});
+      setJustificativaGlobal("");
     } catch (e) { console.error("Erro ao carregar supply:", e); setDadosBrutos([]); } finally { setIsLoading(false); }
   }, []);
 
@@ -153,16 +155,19 @@ export default function SupplyReviewArena() {
   };
 
   const handleCongelar = async () => {
-    if (!confirm("Atenção Supply: O sistema aplicará um rateio Fair-Share nos clientes do comercial baseado nas restrições de fábrica aplicadas aqui. Deseja prosseguir?")) return;
+    if (!confirm("Atenção Supply: O sistema aplicará um rateio Fair-Share nos clientes do comercial baseado nas restrições de fábrica. Deseja prosseguir?")) return;
     try {
       const payload = {
         origem_ajuste: "Supply Review",
         ajustes: Object.entries(celulasEditadas).flatMap(([chave, meses]: any) => 
           Object.entries(meses)
-            // Filtra para enviar apenas SKUs (produtos não têm | no ID nesta tela)
+            // Filtra para enviar apenas SKUs
             .filter(() => !dadosBrutos.some(c => c.id === chave))
             .map(([mes_projetado, val]: any) => ({
-              produto: chave, mes_projetado, novo_volume: parseInt(val.novo_volume, 10), justificativa: "Ajuste de Capacidade Fabril"
+              produto: chave, 
+              mes_projetado, 
+              novo_volume: parseInt(val.novo_volume, 10), 
+              justificativa: justificativaGlobal || "Ajuste de Capacidade Fabril"
             }))
         )
       };
@@ -173,7 +178,7 @@ export default function SupplyReviewArena() {
   };
 
   const handleDestrancar = async () => {
-    if (!confirm("Reabrir Fase de Supply?")) return;
+    if (!confirm("Reabrir Fase de Supply? As aprovações de fábrica serão liberadas para nova edição.")) return;
     try { await axios.post(`/api/v1/consensus/supply/destrancar`); fetchStatusAndData(); } catch (e) { alert("Erro ao destrancar."); }
   };
 
@@ -323,14 +328,17 @@ export default function SupplyReviewArena() {
               <td key={idx} className="p-0 border-l border-slate-200 align-top">
                 <div className={`flex flex-col h-full min-h-[76px] ${isSupplyFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/40' : 'hover:bg-slate-50'}`}>
                   
-                  {/* CABEÇALHO DA CÉLULA: DEMANDA COMERCIAL */}
-                  <div className="px-2 py-1.5 border-b border-slate-200/50 flex justify-center items-center bg-slate-100/80">
-                    <span className="text-[10px] font-bold text-slate-600 bg-white border border-slate-200 px-3 py-0.5 rounded shadow-sm whitespace-nowrap" title="Demanda Aprovada pelo Comercial">
-                      COMERCIAL: {formatVolume(m.vol_comercial)}
+                  {/* CABEÇALHO DA CÉLULA: DEMANDA COMERCIAL E IA */}
+                  <div className="px-2 py-1.5 border-b border-slate-200/50 flex justify-center gap-2 items-center bg-slate-100/80">
+                    <span className="text-[10px] font-bold text-slate-500 bg-white border border-slate-200 px-2 py-0.5 rounded shadow-sm whitespace-nowrap" title="Projeção IA">
+                      IA: {formatVolume(m.vol_ia)}
+                    </span>
+                    <span className="text-[10px] font-bold text-blue-700 bg-blue-100/50 border border-blue-200 px-2 py-0.5 rounded shadow-sm whitespace-nowrap" title="Demanda Aprovada pelo Comercial">
+                      COM: {formatVolume(m.vol_comercial)}
                     </span>
                   </div>
                   
-                  {/* CORPO: SUPPLY INPUT */}
+                  {/* CORPO: SUPPLY INPUT E DADOS FINANCEIROS */}
                   <div className="px-4 py-2 flex flex-col items-end justify-center flex-1">
                     <div className="w-24">
                       {/* O SmartInput é travado se o Supply estiver fechado OU se for a linha de Categoria (nível 0) */}
@@ -340,6 +348,10 @@ export default function SupplyReviewArena() {
                          onChange={(novoVol) => handleEditCell(row.id, m.mes_banco, novoVol)} 
                       />
                     </div>
+                    {/* Faturamento Previsto Dinâmico */}
+                    <span className="text-[10px] font-bold text-emerald-500 tracking-tight pr-1 mt-0.5" title="Receita (R$) Prevista">
+                      {formatMoeda(valorExibicao * (m.pmv || 0))}
+                    </span>
                     {/* Alerta de Ruptura (Corte de Fair-Share) */}
                     {gap !== 0 && (
                       <span className={`text-[10px] font-bold mt-1 px-1.5 py-0.5 rounded ${gap < 0 ? 'bg-rose-100 text-rose-600' : 'bg-emerald-100 text-emerald-600'}`} title="GAP versus Demanda Comercial">
@@ -409,9 +421,25 @@ export default function SupplyReviewArena() {
               <Unlock className="w-4 h-4" /> Reabrir Restrições (Supply Fechado)
             </button>
           ) : (
-            <button onClick={handleCongelar} className="px-6 py-2.5 bg-slate-900 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg transition-all flex items-center gap-2">
-              <Shield className="w-4 h-4" /> Aplicar Restrições Fabris (Fair-Share)
-            </button>
+            <>
+              {/* CAMPO DE JUSTIFICATIVA GLOBAL */}
+              <div className="relative">
+                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                  <MessageSquare className="h-4 w-4 text-slate-400" />
+                </div>
+                <input 
+                  type="text" 
+                  placeholder="Justificar ajustes (Opcional)..."
+                  value={justificativaGlobal}
+                  onChange={(e) => setJustificativaGlobal(e.target.value)}
+                  className="block w-64 pl-10 pr-3 py-2.5 border border-slate-200 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                />
+              </div>
+
+              <button onClick={handleCongelar} className="px-6 py-2.5 bg-slate-900 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg transition-all flex items-center gap-2">
+                <Shield className="w-4 h-4" /> Aplicar Restrições Fabris (Fair-Share)
+              </button>
+            </>
           )}
         </div>
       </div>
