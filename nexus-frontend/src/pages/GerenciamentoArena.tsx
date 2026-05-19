@@ -134,8 +134,34 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // Checa se as bases da tela estão trancadas
+  // Checa se todas as bases regionais estão trancadas
   const isAllClosed = dadosBrutos.length > 0 && dadosBrutos.every(coord => coord.status === 'Fechado');
+
+  // Action: Travar todas as regionais em lote
+  const handleLockAll = async () => {
+    if (!confirm("Atenção: Deseja trancar comercialmente TODAS as regionais de uma vez só?")) return;
+    try {
+      await axios.post('/api/v1/consensus/gerenciamento/lock-all');
+      alert("Todas as regionais foram trancadas com sucesso!");
+      fetchData();
+    } catch (e: any) {
+      alert("Erro ao executar trava global: " + e.message);
+    }
+  };
+
+  // Action: Alternar trava individual de uma regional específica
+  const handleToggleLock = async (regionalNome: string, statusAtual: string) => {
+    const nextStatus = statusAtual === 'Fechado' ? 'Aberto' : 'Fechado';
+    try {
+      await axios.post('/api/v1/consensus/gerenciamento/toggle-lock', {
+        regional: regionalNome,
+        status: nextStatus
+      });
+      fetchData();
+    } catch (e: any) {
+      alert("Erro ao alterar trava da regional: " + e.message);
+    }
+  };
 
   const handleCongelar = async () => {
     if (!confirm("Atenção Gerência: Isso rateará o volume pelos clientes baseado no histórico real de pedidos e trancará as regionais editadas. Deseja prosseguir?")) return;
@@ -410,11 +436,18 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                  <span className={`text-sm pr-4 ${!isProduto ? 'font-black text-slate-800 tracking-tight' : 'font-semibold text-slate-600'}`}>
                    {row.nome || "INDEFINIDO"}
                  </span>
+                 {/* INTERATIVIDADE REINTEGRADA: Clique no botão altera o status de trava da Regional */}
                  {depth === 0 && (
-                   <span className={`text-[10px] font-bold mt-0.5 flex items-center gap-1 ${isRowFechado ? 'text-rose-500' : 'text-emerald-500'}`}>
+                   <button 
+                     onClick={(e) => { e.stopPropagation(); handleToggleLock(row.nome, rowStatus); }}
+                     className={`text-[10px] font-bold mt-1 flex items-center gap-1 px-2 py-0.5 rounded border transition-colors max-w-max
+                       ${isRowFechado 
+                         ? 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100' 
+                         : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'}`}
+                   >
                       {isRowFechado ? <Lock className="w-3 h-3"/> : <Unlock className="w-3 h-3"/>}
-                      {isRowFechado ? 'BASE TRANCADA' : 'LIVRE PARA EDIÇÃO'}
-                   </span>
+                      {isRowFechado ? 'TRANCADA (Clique p/ Abrir)' : 'ABERTA (Clique p/ Trancar)'}
+                   </button>
                  )}
               </div>
             </div>
@@ -442,7 +475,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                   {/* CORPO DA CÉLULA: VOLUME + RECEITA DINÂMICA */}
                   <div className="px-4 py-2 flex flex-col items-end justify-center flex-1">
                     <div className="w-24">
-                      {/* Permite editar se estiver aberto, mas BLOQUEIA no Coordenador */}
+                      {/* Bloqueio absoluto para a linha do Coordenador (tipo === 'coordenador') */}
                       <SmartInput 
                          value={valorExibicao} 
                          disabled={isRowFechado || row.tipo === "coordenador"} 
@@ -491,8 +524,17 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             {isAllClosed ? 'REGIONAIS FECHADAS' : 'REGIONAIS ABERTAS'}
           </div>
 
+          {/* CONTROLE GLOBAL REINTEGRADO: Permite trancar todas as regionais em um clique */}
+          <button 
+            onClick={handleLockAll} 
+            disabled={isAllClosed}
+            className="px-4 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl shadow-lg transition-colors disabled:opacity-50 flex items-center gap-2"
+          >
+            <Lock className="w-4 h-4" /> Travar Todos
+          </button>
+
           <button onClick={handleCongelar} disabled={isAllClosed && Object.keys(celulasEditadas).length === 0} className="px-6 py-2.5 bg-slate-900 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg shadow-slate-900/20 transition-all disabled:opacity-50 flex items-center gap-2">
-            <Shield className="w-4 h-4" /> Aprovar Carteira Comercial
+            <Shield className="w-4 h-4" /> slots.length === 0 || Aprovar Carteira Comercial
           </button>
         </div>
       </div>
