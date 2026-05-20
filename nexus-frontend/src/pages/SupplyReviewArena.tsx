@@ -202,7 +202,7 @@ export default function SupplyReviewArena() {
   };
 
   const handleDestrancar = async () => {
-    if (!confirm("Reabrir Fase de Supply?")) return;
+    if (!confirm("Reabrir Fase de Supply? As aprovações de fábrica serão liberadas para nova edição.")) return;
     try { await axios.post(`/api/v1/consensus/supply/destrancar`); fetchStatusAndData(); } catch (e) { alert("Erro ao destrancar."); }
   };
 
@@ -243,7 +243,7 @@ export default function SupplyReviewArena() {
     const chartData = dadosGraficoCache[chave];
 
     // =====================================================================
-    // O SEGREDO DO GRÁFICO DINÂMICO (REATIVIDADE EM TEMPO REAL)
+    // O SEGREDO DO GRÁFICO DINÂMICO (REATIVIDADE EM TEMPO REAL) E IA
     // =====================================================================
     const chartDataDinamico = useMemo(() => {
       if (!chartData) return [];
@@ -283,11 +283,32 @@ export default function SupplyReviewArena() {
       return { vComercial, vSupply, gap, pmvMedio: count > 0 ? (pmvAcc / count) : 0 };
     }, [rowData, celulasEditadas]);
 
+    // =====================================================================
+    // CUSTOM TOOLTIP (CORRIGE O BUG DO HOVER INVISÍVEL NO RECHARTS)
+    // =====================================================================
+    const CustomTooltip = ({ active, payload, label }: any) => {
+      if (active && payload && payload.length) {
+        return (
+          <div className="bg-slate-900 border border-slate-700 p-4 rounded-xl shadow-2xl z-50 relative">
+            <p className="text-white font-bold mb-3 pb-2 border-b border-slate-700">{label}</p>
+            {payload.map((entry: any, idx: number) => (
+              <div key={idx} className="flex items-center gap-3 py-1">
+                <div className="w-3 h-3 rounded-full" style={{ backgroundColor: entry.color }} />
+                <span className="text-slate-300 text-sm w-44">{entry.name}:</span>
+                <span className="text-white font-bold text-sm">{formatVolume(entry.value)} cx</span>
+              </div>
+            ))}
+          </div>
+        );
+      }
+      return null;
+    };
+
     return (
       <div className="w-full bg-slate-900 shadow-inner px-8 py-8 border-y border-slate-800">
         <div className="flex items-center gap-2 mb-6">
           <Factory className="w-5 h-5 text-blue-400" />
-          <h3 className="font-bold text-lg text-white">Dossiê de Restrição Fabril <span className="text-slate-500 font-normal">| {rowData.nome}</span></h3>
+          <h3 className="font-bold text-lg text-white">Dossiê de Analise SKU <span className="text-slate-500 font-normal">| {rowData.nome}</span></h3>
         </div>
         <div className="grid grid-cols-4 gap-4 mb-6">
           <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
@@ -307,13 +328,13 @@ export default function SupplyReviewArena() {
           <div className="col-span-2 bg-slate-800 border border-slate-700 p-4 rounded-xl h-[340px]">
             {loadingGrafico === chave ? <div className="h-full flex items-center justify-center text-slate-500">Mapeando série histórica...</div> : chartDataDinamico && (
               <ResponsiveContainer width="100%" height="100%">
-                {/* Agora o LineChart está plugado no chartDataDinamico, reagindo ao teclado */}
+                {/* Agora o LineChart está plugado no chartDataDinamico, reagindo ao teclado e com Tooltip Visível */}
                 <LineChart data={chartDataDinamico} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
                   <XAxis dataKey="name" tick={{fill: '#94a3b8', fontSize: 12}} tickMargin={10} axisLine={false} />
                   <YAxis tickFormatter={formatVolume} tick={{fill: '#94a3b8', fontSize: 12}} tickLine={false} axisLine={false} />
-                  <Tooltip wrapperStyle={{ zIndex: 100 }} contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', color: '#fff' }} />
-                  <Legend iconType="circle" />
+                  <Tooltip content={<CustomTooltip />} cursor={{ stroke: '#475569', strokeWidth: 1, strokeDasharray: '3 3' }} />
+                  <Legend iconType="circle" wrapperStyle={{ paddingTop: '10px' }} />
                   <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} connectNulls={false} />
                   <Line type="monotone" dataKey="IA" name="Projeção IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
                   <Line type="monotone" dataKey="Comercial" name="Demanda Comercial (S&OP)" stroke="#eab308" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
@@ -421,7 +442,7 @@ export default function SupplyReviewArena() {
                       <div className="w-full mt-2">
                         <input 
                           type="text"
-                          placeholder="Justificar ajuste..."
+                          placeholder="Justificar Alteração..."
                           value={edicao?.justificativa || ""}
                           onChange={(e) => handleEditJustificativa(row.id, m.mes_banco, e.target.value)}
                           className="w-full bg-white border border-slate-200 text-[10px] px-2 py-1 rounded shadow-sm focus:outline-none focus:border-blue-400 placeholder-slate-300 text-slate-600"
@@ -529,7 +550,7 @@ export default function SupplyReviewArena() {
                 <tr>
                   <td className="px-6 py-5 border-r border-slate-800/50">
                     <div className="flex flex-col">
-                      <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Restrição Global</span>
+                      <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Delta Global</span>
                       <span className="font-bold text-sm text-white">CAPACIDADE DA FÁBRICA</span>
                     </div>
                   </td>
