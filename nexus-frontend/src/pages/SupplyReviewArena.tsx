@@ -3,7 +3,7 @@ import axios from 'axios';
 import { 
   ChevronRight, ChevronDown, Lock, Unlock, Search, X, 
   Package, Boxes, LayoutGrid, Download, BarChart2, Activity, Shield,
-  Wand2, Factory, Target, TrendingUp, TrendingDown, MessageSquare
+  Wand2, Factory, Target, TrendingUp, TrendingDown
 } from 'lucide-react';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
@@ -83,7 +83,6 @@ export default function SupplyReviewArena() {
   const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
   const [busca, setBusca] = useState("");
   const [celulasEditadas, setCelulasEditadas] = useState<any>({});
-  const [justificativaGlobal, setJustificativaGlobal] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   
   // STATUS E TRAVAS (O RADAR)
@@ -113,14 +112,13 @@ export default function SupplyReviewArena() {
         setExpanded(cats);
       }
       setCelulasEditadas({});
-      setJustificativaGlobal("");
     } catch (e) { console.error("Erro ao carregar supply:", e); setDadosBrutos([]); } finally { setIsLoading(false); }
   }, []);
 
   useEffect(() => { fetchStatusAndData(); }, [fetchStatusAndData]);
 
   // =====================================================================
-  // MOTOR DE CASCATA EM TEMPO REAL (PRODUTO -> CATEGORIA)
+  // MOTOR DE CASCATA EM TEMPO REAL (PRODUTO -> CATEGORIA) E JUSTIFICATIVA
   // =====================================================================
   const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
     if (isSupplyFechado) return;
@@ -133,9 +131,10 @@ export default function SupplyReviewArena() {
         return originalVol;
       };
 
-      // Grava no Produto Folha
+      // Grava no Produto Folha, mantendo a justificativa se já houver
       if (!nextEdits[chaveStr]) nextEdits[chaveStr] = {};
-      nextEdits[chaveStr][mesBanco] = { novo_volume: novoValor };
+      const prevJustificativa = nextEdits[chaveStr][mesBanco]?.justificativa || "";
+      nextEdits[chaveStr][mesBanco] = { novo_volume: novoValor, justificativa: prevJustificativa };
 
       // Rollup para a Categoria
       dadosBrutos.forEach(cat => {
@@ -154,20 +153,45 @@ export default function SupplyReviewArena() {
     });
   };
 
+  const handleEditJustificativa = (chaveStr: string, mesBanco: string, novaJustificativa: string) => {
+    if (isSupplyFechado) return;
+
+    setCelulasEditadas((currentEdits: any) => {
+      const nextEdits = { ...currentEdits };
+      if (!nextEdits[chaveStr]) nextEdits[chaveStr] = {};
+      
+      let currentVol = nextEdits[chaveStr][mesBanco]?.novo_volume;
+      if (currentVol === undefined) {
+         let origVol = 0;
+         dadosBrutos.forEach(cat => {
+            const prod = cat.subRows?.find((p: any) => p.id === chaveStr);
+            if (prod) {
+               const m = prod.meses.find((x: any) => x.mes_banco === mesBanco);
+               if (m) origVol = m.vol_supply || 0;
+            }
+         });
+         currentVol = origVol;
+      }
+
+      nextEdits[chaveStr][mesBanco] = { novo_volume: currentVol, justificativa: novaJustificativa };
+      return nextEdits;
+    });
+  };
+
   const handleCongelar = async () => {
-    if (!confirm("Atenção Supply: O sistema aplicará um rateio Fair-Share nos clientes do comercial baseado nas restrições de fábrica. Deseja prosseguir?")) return;
+    if (!confirm("Atenção Supply: O sistema aplicará um rateio Fair-Share nos clientes do comercial baseado nas restrições de fábrica aplicadas aqui. Deseja prosseguir?")) return;
     try {
       const payload = {
         origem_ajuste: "Supply Review",
         ajustes: Object.entries(celulasEditadas).flatMap(([chave, meses]: any) => 
           Object.entries(meses)
-            // Filtra para enviar apenas SKUs
+            // Filtra para enviar apenas SKUs (produtos não têm | no ID nesta tela)
             .filter(() => !dadosBrutos.some(c => c.id === chave))
             .map(([mes_projetado, val]: any) => ({
               produto: chave, 
               mes_projetado, 
               novo_volume: parseInt(val.novo_volume, 10), 
-              justificativa: justificativaGlobal || "Ajuste de Capacidade Fabril"
+              justificativa: val.justificativa || "Ajuste de Capacidade Fabril" // Grava a justificativa atômica
             }))
         )
       };
@@ -178,7 +202,7 @@ export default function SupplyReviewArena() {
   };
 
   const handleDestrancar = async () => {
-    if (!confirm("Reabrir Fase de Supply? As aprovações de fábrica serão liberadas para nova edição.")) return;
+    if (!confirm("Reabrir Fase de Supply?")) return;
     try { await axios.post(`/api/v1/consensus/supply/destrancar`); fetchStatusAndData(); } catch (e) { alert("Erro ao destrancar."); }
   };
 
@@ -215,7 +239,38 @@ export default function SupplyReviewArena() {
   };
 
   const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
-    const chave = rowData.id; const chartData = dadosGraficoCache[chave];
+    const chave = rowData.id; 
+    const chartData = dadosGraficoCache[chave];
+
+    // =====================================================================
+    // O SEGREDO DO GRÁFICO DINÂMICO (REATIVIDADE EM TEMPO REAL)
+    // =====================================================================
+    const chartDataDinamico = useMemo(() => {
+      if (!chartData) return [];
+      return chartData.map((d: any) => {
+        const mesBanco = `${d.name}-01`;
+        const edicao = celulasEditadas[rowData.id]?.[mesBanco];
+        
+        let dynamicSupply = d.Supply;
+        if (edicao !== undefined) {
+          dynamicSupply = parseInt(edicao.novo_volume);
+        }
+
+        const mesRow = (rowData?.meses || []).find((m: any) => m.mes_banco === mesBanco);
+        let iaVal = d.IA;
+        // Puxa a IA do renderizador da tela caso o gráfico venha com ponto cego do backend
+        if (mesRow && mesRow.vol_ia !== undefined && mesRow.vol_ia > 0) {
+           iaVal = mesRow.vol_ia;
+        }
+
+        return {
+          ...d,
+          Supply: dynamicSupply,
+          IA: iaVal
+        };
+      });
+    }, [chartData, celulasEditadas, rowData]);
+
     const kpis = useMemo(() => {
       let vComercial = 0; let vSupply = 0; let pmvAcc = 0; let count = 0;
       (rowData?.meses || []).forEach((m: any) => {
@@ -250,16 +305,18 @@ export default function SupplyReviewArena() {
         </div>
         <div className="grid grid-cols-3 gap-6">
           <div className="col-span-2 bg-slate-800 border border-slate-700 p-4 rounded-xl h-[340px]">
-            {loadingGrafico === chave ? <div className="h-full flex items-center justify-center text-slate-500">Mapeando série histórica...</div> : chartData && (
+            {loadingGrafico === chave ? <div className="h-full flex items-center justify-center text-slate-500">Mapeando série histórica...</div> : chartDataDinamico && (
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                {/* Agora o LineChart está plugado no chartDataDinamico, reagindo ao teclado */}
+                <LineChart data={chartDataDinamico} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
                   <XAxis dataKey="name" tick={{fill: '#94a3b8', fontSize: 12}} tickMargin={10} axisLine={false} />
                   <YAxis tickFormatter={formatVolume} tick={{fill: '#94a3b8', fontSize: 12}} tickLine={false} axisLine={false} />
                   <Tooltip wrapperStyle={{ zIndex: 100 }} contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', color: '#fff' }} />
                   <Legend iconType="circle" />
                   <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} connectNulls={false} />
-                  <Line type="monotone" dataKey="Comercial" name="Demanda Comercial (S&OP)" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="IA" name="Projeção IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="Comercial" name="Demanda Comercial (S&OP)" stroke="#eab308" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
                   <Line type="monotone" dataKey="Supply" name="Capacidade Fábrica" stroke="#3b82f6" strokeWidth={3} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
                 </LineChart>
               </ResponsiveContainer>
@@ -326,7 +383,7 @@ export default function SupplyReviewArena() {
 
             return (
               <td key={idx} className="p-0 border-l border-slate-200 align-top">
-                <div className={`flex flex-col h-full min-h-[76px] ${isSupplyFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/40' : 'hover:bg-slate-50'}`}>
+                <div className={`flex flex-col h-full min-h-[90px] ${isSupplyFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/40' : 'hover:bg-slate-50'}`}>
                   
                   {/* CABEÇALHO DA CÉLULA: DEMANDA COMERCIAL E IA */}
                   <div className="px-2 py-1.5 border-b border-slate-200/50 flex justify-center gap-2 items-center bg-slate-100/80">
@@ -357,6 +414,19 @@ export default function SupplyReviewArena() {
                       <span className={`text-[10px] font-bold mt-1 px-1.5 py-0.5 rounded ${gap < 0 ? 'bg-rose-100 text-rose-600' : 'bg-emerald-100 text-emerald-600'}`} title="GAP versus Demanda Comercial">
                         {gap > 0 ? '+' : ''}{formatVolume(gap)} cx
                       </span>
+                    )}
+
+                    {/* CAMPO DE JUSTIFICATIVA INDIVIDUAL (Apenas Produto) */}
+                    {depth > 0 && !isSupplyFechado && (
+                      <div className="w-full mt-2">
+                        <input 
+                          type="text"
+                          placeholder="Justificar ajuste..."
+                          value={edicao?.justificativa || ""}
+                          onChange={(e) => handleEditJustificativa(row.id, m.mes_banco, e.target.value)}
+                          className="w-full bg-white border border-slate-200 text-[10px] px-2 py-1 rounded shadow-sm focus:outline-none focus:border-blue-400 placeholder-slate-300 text-slate-600"
+                        />
+                      </div>
                     )}
                   </div>
 
@@ -421,25 +491,9 @@ export default function SupplyReviewArena() {
               <Unlock className="w-4 h-4" /> Reabrir Restrições (Supply Fechado)
             </button>
           ) : (
-            <>
-              {/* CAMPO DE JUSTIFICATIVA GLOBAL */}
-              <div className="relative">
-                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                  <MessageSquare className="h-4 w-4 text-slate-400" />
-                </div>
-                <input 
-                  type="text" 
-                  placeholder="Justificar ajustes (Opcional)..."
-                  value={justificativaGlobal}
-                  onChange={(e) => setJustificativaGlobal(e.target.value)}
-                  className="block w-64 pl-10 pr-3 py-2.5 border border-slate-200 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-                />
-              </div>
-
-              <button onClick={handleCongelar} className="px-6 py-2.5 bg-slate-900 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg transition-all flex items-center gap-2">
-                <Shield className="w-4 h-4" /> Aplicar Restrições Fabris (Fair-Share)
-              </button>
-            </>
+            <button onClick={handleCongelar} className="px-6 py-2.5 bg-slate-900 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg transition-all flex items-center gap-2">
+              <Shield className="w-4 h-4" /> Aplicar Restrições Fabris (Fair-Share)
+            </button>
           )}
         </div>
       </div>
