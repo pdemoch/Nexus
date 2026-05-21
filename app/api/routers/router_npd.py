@@ -51,6 +51,7 @@ async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db),
         raise HTTPException(status_code=403, detail="Acesso restrito.")
         
     try:
+        # 1. TRATA A DIMENSÃO DO PRODUTO (Garante que o cadastro existe)
         produto_existente = db.query(DimProduto).filter(DimProduto.sku == payload.codigo_lancamento).first()
         if not produto_existente:
             novo_produto = DimProduto(
@@ -61,16 +62,25 @@ async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db),
                 curva="LANÇAMENTO"
             )
             db.add(novo_produto)
-            # O Flush força o Banco a validar a criação na hora. Se faltar campo obrigatório, ele avisa agora.
             db.flush() 
 
-        # Blindagem Matemática: O Coalesce garante que clientes sem histórico entrem como "0" e não quebrem o rateio
+        ciclo_oficial = get_current_cycle(db)
+
+        # 2. LIMPEZA PRÉVIA TÁTICA (O FIM DO ERRO DE CHAVE DUPLICADA)
+        # Se você re-injetar o SKU, o sistema limpa a projeção anterior deste ciclo e aplica a nova por cima.
+        db.query(FatoIbpGranular).filter(
+            FatoIbpGranular.ciclo_sop == ciclo_oficial,
+            FatoIbpGranular.sku == payload.codigo_lancamento
+        ).delete()
+        db.flush()
+
+        # 3. BLINDAGEM DO AGRUPAMENTO (RATEIO EXATO POR CNPJ)
         clientes_espelho = db.query(
             FatoIbpGranular.cgc, 
-            FatoIbpGranular.vendedor_nome, 
+            func.max(FatoIbpGranular.vendedor_nome).label('vendedor_nome'), 
             func.sum(func.coalesce(FatoIbpGranular.vol_ia, 0)).label('peso_hist')
         ).filter(FatoIbpGranular.sku == payload.sku_espelho)\
-         .group_by(FatoIbpGranular.cgc, FatoIbpGranular.vendedor_nome).all()
+         .group_by(FatoIbpGranular.cgc).all()
             
         if not clientes_espelho:
             raise HTTPException(status_code=400, detail="O SKU Espelho selecionado não possui clientes com histórico no banco.")
@@ -79,7 +89,6 @@ async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db),
         
         hoje = datetime.date.today()
         mes_base_dinamico = hoje.replace(day=1) + relativedelta(months=2) 
-        ciclo_oficial = get_current_cycle(db)
         
         novas_linhas = []
         for i, proj in enumerate(payload.projecao):
@@ -93,6 +102,8 @@ async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db),
                 volume_cliente = int(round(volume_mes_nacional * peso_cliente))
                 if volume_cliente == 0: continue
                     
+                # Insere o dado em TODAS as camadas simultaneamente (IA, Comercial e Supply) 
+                # para que o NPD flua na árvore como um produto consolidado.
                 nova_fato = FatoIbpGranular(
                     ciclo_sop=ciclo_oficial, 
                     mes_projetado=mes_alvo,
@@ -110,7 +121,7 @@ async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db),
                 novas_linhas.append(nova_fato)
 
         if not novas_linhas:
-            raise HTTPException(status_code=400, detail="O volume é tão baixo que não gerou caixas para nenhum cliente ao ratear.")
+            raise HTTPException(status_code=400, detail="O volume é tão baixo que não gerou caixas inteiras para ratear.")
 
         db.bulk_save_objects(novas_linhas)
         db.commit()
@@ -119,5 +130,4 @@ async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db),
     
     except Exception as e:
         db.rollback()
-        # Retorna a "cicatriz" exata do erro (repr) para o seu Front-End
         raise HTTPException(status_code=500, detail=f"Erro Crítico NPD: {repr(e)}")
