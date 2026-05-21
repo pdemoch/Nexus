@@ -1,16 +1,14 @@
+import datetime
+from typing import List
+from dateutil.relativedelta import relativedelta
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from typing import List
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from datetime import date
-from dateutil.relativedelta import relativedelta
 
 from app.core.database import get_db
 from app.models.domain_models import DimProduto, FatoIbpGranular
 from app.api.routers.router_auth import get_current_user
-
-# IMPORT DA FUNÇÃO OFICIAL DO CICLO (A VACINA)
 from app.api.routers.shared_ibp import get_current_cycle
 
 router = APIRouter(prefix="/api/v1/npd", tags=["New Product Development"])
@@ -63,20 +61,24 @@ async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db),
                 curva="LANÇAMENTO"
             )
             db.add(novo_produto)
-            db.commit()
+            # O Flush força o Banco a validar a criação na hora. Se faltar campo obrigatório, ele avisa agora.
+            db.flush() 
 
-        clientes_espelho = db.query(FatoIbpGranular.cgc, FatoIbpGranular.vendedor_nome, func.sum(FatoIbpGranular.vol_ia).label('peso_hist'))\
-            .filter(FatoIbpGranular.sku == payload.sku_espelho)\
-            .group_by(FatoIbpGranular.cgc, FatoIbpGranular.vendedor_nome).all()
+        # Blindagem Matemática: O Coalesce garante que clientes sem histórico entrem como "0" e não quebrem o rateio
+        clientes_espelho = db.query(
+            FatoIbpGranular.cgc, 
+            FatoIbpGranular.vendedor_nome, 
+            func.sum(func.coalesce(FatoIbpGranular.vol_ia, 0)).label('peso_hist')
+        ).filter(FatoIbpGranular.sku == payload.sku_espelho)\
+         .group_by(FatoIbpGranular.cgc, FatoIbpGranular.vendedor_nome).all()
             
         if not clientes_espelho:
-            raise HTTPException(status_code=400, detail="O SKU Espelho selecionado não possui clientes ativos para clonagem.")
+            raise HTTPException(status_code=400, detail="O SKU Espelho selecionado não possui clientes com histórico no banco.")
 
-        total_peso_espelho = sum([c.peso_hist for c in clientes_espelho])
-        hoje = date.today()
-        mes_base_dinamico = hoje.replace(day=1) + relativedelta(months=2) 
+        total_peso_espelho = sum([float(c.peso_hist or 0) for c in clientes_espelho])
         
-        # DECLARAÇÃO DA VARIÁVEL: Pega o ciclo ativo oficial no banco
+        hoje = datetime.date.today()
+        mes_base_dinamico = hoje.replace(day=1) + relativedelta(months=2) 
         ciclo_oficial = get_current_cycle(db)
         
         novas_linhas = []
@@ -85,12 +87,14 @@ async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db),
             volume_mes_nacional = proj.volume
             
             for cliente in clientes_espelho:
-                peso_cliente = cliente.peso_hist / total_peso_espelho if total_peso_espelho > 0 else 1 / len(clientes_espelho)
+                peso_atual = float(cliente.peso_hist or 0)
+                peso_cliente = (peso_atual / total_peso_espelho) if total_peso_espelho > 0 else (1.0 / len(clientes_espelho))
+                
                 volume_cliente = int(round(volume_mes_nacional * peso_cliente))
                 if volume_cliente == 0: continue
                     
                 nova_fato = FatoIbpGranular(
-                    ciclo_sop=ciclo_oficial, # AQUI ENTRA A VARIÁVEL CORRIGIDA
+                    ciclo_sop=ciclo_oficial, 
                     mes_projetado=mes_alvo,
                     sku=payload.codigo_lancamento,
                     cgc=cliente.cgc,
@@ -98,14 +102,22 @@ async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db),
                     vol_ia=volume_cliente, 
                     vol_topdown=volume_cliente,
                     vol_bottomup=volume_cliente,
+                    vol_supply=volume_cliente,
+                    vol_meta=volume_cliente,
                     vol_final=volume_cliente,
                     pmv_aplicado=payload.pmv
                 )
                 novas_linhas.append(nova_fato)
 
+        if not novas_linhas:
+            raise HTTPException(status_code=400, detail="O volume é tão baixo que não gerou caixas para nenhum cliente ao ratear.")
+
         db.bulk_save_objects(novas_linhas)
         db.commit()
+        
         return {"status": "success", "message": "NPD injetado com sucesso na janela de S&OP."}
+    
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        # Retorna a "cicatriz" exata do erro (repr) para o seu Front-End
+        raise HTTPException(status_code=500, detail=f"Erro Crítico NPD: {repr(e)}")
