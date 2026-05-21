@@ -30,15 +30,24 @@ except ImportError:
 
 warnings.filterwarnings("ignore")
 
-def calcular_acuracia(y_true, y_pred):
-    """Calcula a Acurácia (0 a 100%) baseada no WMAPE."""
-    soma_real = np.sum(y_true)
+def calcular_acuracia(y_true, y_pred, pesos=None):
+    """Calcula a Acurácia (0 a 100%) baseada no WMAPE com suporte a Pesos Táticos."""
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    
+    if pesos is None:
+        pesos = np.ones(len(y_true))
+    else:
+        pesos = np.array(pesos)[:len(y_true)]
+
+    soma_real = np.sum(y_true * pesos)
     if soma_real == 0:
-        return 0.0 if np.sum(y_pred) > 0 else 100.0
+        return 0.0 if np.sum(y_pred * pesos) > 0 else 100.0
         
-    wmape = np.sum(np.abs(y_true - y_pred)) / soma_real
+    wmape = np.sum(np.abs(y_true - y_pred) * pesos) / soma_real
     acuracia = max(0.0, (1.0 - wmape) * 100)
     return round(acuracia, 2)
+
 
 class ProphetModel:
     def fit_predict(self, train_series: pd.Series, steps_ahead: int):
@@ -63,6 +72,7 @@ class ProphetModel:
         except Exception:
             return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
 
+
 class AutoArimaModel:
     def fit_predict(self, train_series: pd.Series, steps_ahead: int):
         try:
@@ -73,6 +83,7 @@ class AutoArimaModel:
         except Exception:
             return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
 
+
 class HoltWintersModel:
     def fit_predict(self, train_series: pd.Series, steps_ahead: int):
         try:
@@ -81,6 +92,7 @@ class HoltWintersModel:
             return np.maximum(0, model.forecast(steps_ahead))
         except Exception:
             return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
+
 
 class HoltModel:
     def fit_predict(self, train_series: pd.Series, steps_ahead: int):
@@ -91,6 +103,7 @@ class HoltModel:
         except Exception:
             return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
 
+
 class ThetaModelWrapper:
     def fit_predict(self, train_series: pd.Series, steps_ahead: int):
         try:
@@ -99,6 +112,7 @@ class ThetaModelWrapper:
             return np.maximum(0, model.forecast(steps_ahead))
         except Exception:
             return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
+
 
 class CrostonModel:
     def fit_predict(self, train_series: pd.Series, steps_ahead: int, alpha=0.1):
@@ -122,6 +136,7 @@ class CrostonModel:
         p_hat = np.maximum(p_hat, 1.0) 
         return np.full(steps_ahead, max(0, z_hat[-1] / p_hat[-1]))
 
+
 class MovingAverageModel:
     def __init__(self, window=3):
         self.window = window
@@ -135,11 +150,10 @@ class MovingAverageModel:
             hist_y.append(pred) 
         return np.array(preds)
 
+
 class LocalMLAutoregressive:
     """
-    MOTOR DIRECT MULTI-STEP APRIMORADO
-    Abandona a recursividade. Treina um modelo independente para cada horizonte de tempo (h).
-    Injeta o conhecimento de Picos e Vales via Z-Score.
+    MOTOR DIRECT MULTI-STEP COM ENGENHARIA DE SINAIS (SERROTE) E PERDA ASSIMÉTRICA
     """
     def __init__(self, model_type='xgb'):
         self.model_type = model_type
@@ -148,27 +162,44 @@ class LocalMLAutoregressive:
         if len(train_series) < 15: 
             return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
 
-        # 1. Feature Engineering com Memória de Picos
-        df = pd.DataFrame({'y': train_series.values})
-        for lag in [1, 2, 3, 6, 12]:
+        # 1. Feature Engineering: O Fim da Caixa Preta
+        df = pd.DataFrame({'y': train_series.values}, index=train_series.index)
+        
+        # Calendário
+        df['mes'] = df.index.month
+        df['mes_sin'] = np.sin(2 * np.pi * df['mes'] / 12)
+        df['mes_cos'] = np.cos(2 * np.pi * df['mes'] / 12)
+
+        # Lags Críticos
+        for lag in [1, 2, 3, 4, 6, 12]:
             df[f'lag_{lag}'] = df['y'].shift(lag)
             
         df['media_movel_3'] = df['y'].shift(1).rolling(3).mean()
         df['media_movel_6'] = df['y'].shift(1).rolling(6).mean()
         
-        # Detector de Ressaca / Trade Loading (Z-Score)
+        # Sinais Cíclicos (Capturando Inversão de Tendência)
+        df['diff_1'] = df['lag_1'] - df['lag_2']
+        df['diff_2'] = df['lag_2'] - df['lag_3']
+        
+        # Detector de Esgotamento (Trade Loading)
+        df['esgotamento_60d'] = (df['lag_1'] + df['lag_2']) / (df['media_movel_6'] * 2 + 0.1)
+        
+        # Detector de Picos Anômalos (Z-Score)
         std_6m = df['y'].shift(1).rolling(6).std().replace(0, 1)
-        df['z_score'] = (df['y'].shift(1) - df['media_movel_6']) / std_6m
-        df['is_pico'] = (df['z_score'] > 1.5).astype(int)
+        df['z_score'] = (df['lag_1'] - df['media_movel_6']) / std_6m
+        df['is_pico'] = (df['z_score'] > 1.2).astype(int)
         df['picos_ultimos_3m'] = df['is_pico'].rolling(3).sum().fillna(0)
 
         preds = []
-        X_current = df.iloc[[-1]].drop(columns=['y', 'target'], errors='ignore')
+        # X_current é o extrato exato de hoje, para prever o futuro.
+        X_current = df.iloc[[-1]].drop(columns=['y'], errors='ignore')
 
-        # 2. Estratégia DIRECT: Um modelo para cada horizonte
+        # 2. Estratégia DIRECT MULTI-STEP: Um Especilista para cada Mês
         for h in range(1, steps_ahead + 1):
             df_h = df.copy()
-            df_h['target'] = df_h['y'].shift(-h)
+            # A Magia: Deslocamos o Y alvo (h) passos para trás. 
+            # O modelo aprende a olhar para os dados de HOJE e adivinhar daqui a (h) meses.
+            df_h['target'] = df_h['y'].shift(-h) 
             df_train = df_h.dropna()
             
             if len(df_train) < 5:
@@ -179,15 +210,16 @@ class LocalMLAutoregressive:
             X_train = df_train.drop(columns=['y', 'target'])
             y_train = df_train['target']
 
-            # Instancia o especialista daquele horizonte
+            # 3. Funções de Perda Assimétrica (Tweedie/Poisson) 
+            # Elas evitam o "achatamento" da média e são agressivas na deteção de picos de demanda
             if self.model_type == 'xgb':
-                model = xgboost.XGBRegressor(n_estimators=50, max_depth=3, learning_rate=0.05, random_state=42)
+                model = xgboost.XGBRegressor(n_estimators=75, max_depth=3, learning_rate=0.05, objective='reg:tweedie', random_state=42)
             elif self.model_type == 'lgb':
-                model = lightgbm.LGBMRegressor(n_estimators=50, max_depth=3, learning_rate=0.05, random_state=42, verbose=-1)
+                model = lightgbm.LGBMRegressor(n_estimators=75, max_depth=3, learning_rate=0.05, objective='tweedie', random_state=42, verbose=-1)
             elif self.model_type == 'cat':
-                model = CatBoostRegressor(iterations=50, depth=4, learning_rate=0.05, random_seed=42, verbose=0)
+                model = CatBoostRegressor(iterations=75, depth=4, learning_rate=0.05, loss_function='Poisson', random_seed=42, verbose=0)
             else:
-                model = RandomForestRegressor(n_estimators=50, max_depth=5, random_state=42)
+                model = RandomForestRegressor(n_estimators=75, max_depth=4, random_state=42)
 
             model.fit(X_train, y_train)
             pred_h = max(0, model.predict(X_current)[0])
@@ -195,11 +227,10 @@ class LocalMLAutoregressive:
 
         return np.array(preds)
 
+
 class DeepLearningForecaster:
     """
-    MOTOR DE REDES NEURAIS (ZERO-SHOT & DEEP LEARNING)
-    Implementação nativa para TiDE (Time-series Dense Encoder) e TFT (Temporal Fusion Transformer).
-    Requer: pip install neuralforecast
+    MOTOR DE REDES NEURAIS (ZERO-SHOT)
     """
     def __init__(self, model_type='tide'):
         self.model_type = model_type
@@ -231,14 +262,14 @@ class DeepLearningForecaster:
 
         except NameError:
             return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
-        except Exception as e:
+        except Exception:
             return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
 
 
 class GlobalMLTrainer:
-    """Construtor Avançado de Features Globais (Anti-Ressaca)"""
+    """Construtor Avançado de Features Globais"""
     @staticmethod
-    def gerar_features_globais(df_historico_completo: pd.DataFrame, lags=[1, 2, 3, 6, 12]):
+    def gerar_features_globais(df_historico_completo: pd.DataFrame, lags=[1, 2, 3, 4, 6, 12]):
         dfs_processados = []
         for sku, group in df_historico_completo.groupby('produto'):
             g = group.copy().sort_values('mes_ano_dt')
@@ -252,14 +283,16 @@ class GlobalMLTrainer:
             g['media_movel_6'] = g['total_qtpedido'].shift(1).rolling(window=6).mean()
             g['volatilidade_3m'] = g['total_qtpedido'].shift(1).rolling(window=3).std().fillna(0)
             
-            # Cálculo Global de Z-Score e Picos
-            std_6 = g['total_qtpedido'].shift(1).rolling(window=6).std().replace(0, 1)
-            g['z_score'] = (g['total_qtpedido'].shift(1) - g['media_movel_6']) / std_6
-            g['is_pico'] = (g['z_score'] > 1.5).astype(int)
-            g['picos_ultimos_3m'] = g['is_pico'].rolling(window=3).sum().fillna(0)
-            
+            # Sinais Cíclicos
             g['diff_1'] = g['lag_1'] - g['lag_2']
             g['diff_2'] = g['lag_2'] - g['lag_3']
+            g['esgotamento_60d'] = (g['lag_1'] + g['lag_2']) / (g['media_movel_6'] * 2 + 0.1)
+            
+            std_6 = g['total_qtpedido'].shift(1).rolling(window=6).std().replace(0, 1)
+            g['z_score'] = (g['total_qtpedido'].shift(1) - g['media_movel_6']) / std_6
+            g['is_pico'] = (g['z_score'] > 1.2).astype(int)
+            g['picos_ultimos_3m'] = g['is_pico'].rolling(window=3).sum().fillna(0)
+            
             dfs_processados.append(g)
             
         df_feat = pd.concat(dfs_processados).dropna(subset=[f'lag_{lags[-1]}']).copy()
