@@ -121,19 +121,23 @@ async def exportar_base_granular(db: Session = Depends(get_db), usuario_logado: 
 
         dados = []
         for r in resultados:
+            # Multiplicamos o volume final pelo PMV para já exportar o valor financeiro (Opcional, mas muito útil)
+            receita_projetada = float(r.vol_final or 0) * float(r.pmv_aplicado or 0)
+
             dados.append({
                 "Ciclo S&OP": ciclo,
+                "Regional": r.regional,
                 "Gerente": r.gerente_nome,
                 "Vendedor": r.vendedor_nome,
+                "CGC": r.cgc,
                 "Razão Social": r.razaosocial,
                 "Categoria": r.categoria,
+                "SKU": r.sku,
                 "Produto": r.descricao,
                 "Mês Projetado": str(r.mes_projetado),
-                "Sinal IA (CX)": int(r.vol_ia or 0),
-                "Top-Down (CX)": int(r.vol_topdown or 0),
-                "Comercial (CX)": int(r.vol_bottomup or 0),
-                "Supply (CX)": int(r.vol_supply or 0),
-                "Final S&OP (CX)": int(r.vol_final or 0)
+                "PMV Unitário (R$)": float(r.pmv_aplicado or 0),
+                "Final S&OP (CX)": int(r.vol_final or 0),
+                "Receita S&OP (R$)": round(receita_projetada, 2)
             })
 
         df = pd.DataFrame(dados)
