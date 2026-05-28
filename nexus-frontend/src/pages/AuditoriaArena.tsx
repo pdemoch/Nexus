@@ -1,215 +1,200 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Loader2, Package, DollarSign, Activity, AlertTriangle, ShieldCheck, TrendingUp, TrendingDown, Crosshair } from 'lucide-react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { 
+  TrendingUp, TrendingDown, Target, Activity, CheckCircle, AlertTriangle, Cpu, Users, Loader2
+} from 'lucide-react';
+import { 
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
+} from 'recharts';
 
-const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor || 0));
-const formatVolume = (val: number) => Math.round(val || 0).toLocaleString('pt-BR');
+const formatVolume = (val: number) => new Intl.NumberFormat('pt-BR').format(Math.round(val || 0));
+const formatPct = (val: number) => new Intl.NumberFormat('pt-BR', { style: 'percent', minimumFractionDigits: 1 }).format(val || 0);
+
+// Componente visual para diagnosticar o comportamento da previsão
+const BiasBadge = ({ bias }: { bias: number }) => {
+  if (bias > 0.05) return <span className="flex items-center gap-1 bg-rose-100 text-rose-700 px-2 py-1 rounded text-[10px] font-black uppercase tracking-widest"><TrendingUp className="w-3 h-3"/> Superestimado</span>;
+  if (bias < -0.05) return <span className="flex items-center gap-1 bg-amber-100 text-amber-700 px-2 py-1 rounded text-[10px] font-black uppercase tracking-widest"><TrendingDown className="w-3 h-3"/> Subestimado</span>;
+  return <span className="flex items-center gap-1 bg-emerald-100 text-emerald-700 px-2 py-1 rounded text-[10px] font-black uppercase tracking-widest"><CheckCircle className="w-3 h-3"/> Preciso</span>;
+};
 
 export default function AuditoriaArena() {
-  const [cicloSelecionado, setCicloSelecionado] = useState('04/2026');
-  const [visaoFinanceira, setVisaoFinanceira] = useState(false);
-  
+  const [dados, setDados] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [dadosMacro, setDadosMacro] = useState<any>({});
-  const [dadosCurva, setDadosCurva] = useState<any[]>([]);
-  const [dadosOfensores, setDadosOfensores] = useState<any[]>([]);
-
-  // Dispara as 3 chamadas para o FastAPI (Backend Gordo) simultaneamente
-  const fetchData = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      const [resMacro, resCurva, resOfensores] = await Promise.all([
-        axios.get('/api/v1/kpis/macro', { params: { ciclo: cicloSelecionado } }),
-        axios.get('/api/v1/kpis/curva', { params: { ciclo: cicloSelecionado } }),
-        axios.get('/api/v1/kpis/ofensores', { params: { ciclo: cicloSelecionado, visao: visaoFinanceira ? 'financeiro' : 'caixas' } })
-      ]);
-      
-      setDadosMacro(resMacro.data);
-      setDadosCurva(resCurva.data.dados);
-      setDadosOfensores(resOfensores.data.ofensores);
-    } catch (error) {
-      console.error("Erro ao buscar KPIs:", error);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [cicloSelecionado, visaoFinanceira]);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    axios.get('/api/v1/kpis/auditoria')
+      .then(res => setDados(res.data.dados))
+      .catch(console.error)
+      .finally(() => setIsLoading(false));
+  }, []);
+
+  if (isLoading) return (
+    <div className="h-screen flex flex-col items-center justify-center bg-slate-50">
+      <Loader2 className="w-10 h-10 animate-spin text-indigo-600 mb-4" />
+      <p className="text-slate-400 font-black text-xs tracking-widest uppercase">Consolidando Rolling Forecast...</p>
+    </div>
+  );
+
+  if (!dados || Object.keys(dados.macro).length === 0) return (
+    <div className="h-screen flex flex-col items-center justify-center bg-slate-50">
+      <AlertTriangle className="w-10 h-10 text-amber-500 mb-4" />
+      <p className="text-slate-400 font-black text-xs tracking-widest uppercase">Sem dados de auditoria disponíveis.</p>
+    </div>
+  );
 
   return (
-    <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
-      <div className="max-w-[1600px] mx-auto p-6 lg:p-10">
+    <div className="min-h-screen bg-slate-50 p-8 pb-32">
+      <div className="max-w-[1600px] mx-auto">
         
-        {/* CABEÇALHO E FILTROS */}
-        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-6 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100">
+        {/* CABEÇALHO */}
+        <div className="mb-8 flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
-              <Crosshair className="w-8 h-8 text-indigo-600" /> Auditoria de IA & S&OP
+            <h1 className="text-3xl font-black text-slate-800 tracking-tight flex items-center gap-3">
+              <Target className="w-8 h-8 text-indigo-600" /> Auditoria de Demanda
             </h1>
-            <p className="text-sm font-bold text-slate-400 mt-1 uppercase tracking-widest pl-11">
-              Forecast Value Added (FVA) e Assertividade
-            </p>
-          </div>
-
-          <div className="flex items-center gap-6">
-            <div className="flex flex-col">
-              <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Ciclo S&OP</label>
-              <select 
-                value={cicloSelecionado} 
-                onChange={e => setCicloSelecionado(e.target.value)} 
-                className="bg-slate-50 border border-slate-200 text-sm font-black px-4 py-2.5 rounded-xl outline-none text-slate-700 cursor-pointer transition-colors focus:border-indigo-500"
-              >
-                <option value="04/2026">Abril / 2026</option>
-                <option value="05/2026">Maio / 2026</option>
-              </select>
-            </div>
-
-            <div className="flex flex-col">
-              <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Visão de Erro</label>
-              <div className="flex bg-slate-100 rounded-xl p-1">
-                <button 
-                  onClick={() => setVisaoFinanceira(false)}
-                  className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-black uppercase tracking-widest transition-all ${!visaoFinanceira ? 'bg-white shadow text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}
-                >
-                  <Package className="w-4 h-4" /> Caixas
-                </button>
-                <button 
-                  onClick={() => setVisaoFinanceira(true)}
-                  className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-black uppercase tracking-widest transition-all ${visaoFinanceira ? 'bg-white shadow text-emerald-600' : 'text-slate-400 hover:text-slate-600'}`}
-                >
-                  <DollarSign className="w-4 h-4" /> Capital
-                </button>
-              </div>
-            </div>
+            <p className="text-slate-500 mt-1 font-medium">Acurácia Contínua e Rolling Forecast</p>
           </div>
         </div>
 
-        {isLoading ? (
-          <div className="flex flex-col items-center justify-center h-64 bg-white rounded-[32px] shadow-sm border border-slate-100">
-            <Loader2 className="w-8 h-8 animate-spin text-indigo-500 mb-4" />
-            <span className="text-slate-400 font-black text-xs tracking-widest uppercase">Processando Motor de Auditoria...</span>
+        {/* CARDS DE PERFORMANCE MACRO */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+          
+          {/* Card IA */}
+          <div className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-100 flex flex-col justify-between transition-shadow hover:shadow-md">
+             <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3 text-slate-400">
+                   <div className="p-3 bg-slate-100 rounded-xl"><Cpu className="w-6 h-6 text-slate-600" /></div>
+                   <span className="font-black uppercase tracking-widest text-sm">Sinal IA</span>
+                </div>
+                <div className="text-right">
+                   <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Acurácia (1-WMAPE)</p>
+                   <p className="text-3xl font-black text-slate-800">{formatPct(dados.macro.acc_ia)}</p>
+                </div>
+             </div>
+             <div className="grid grid-cols-2 gap-4 border-t border-slate-100 pt-6">
+                <div>
+                   <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Volume Projetado</p>
+                   <p className="text-xl font-black text-slate-800">{formatVolume(dados.macro.vol_ia)} <span className="text-xs opacity-50">CX</span></p>
+                </div>
+                <div>
+                   <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Comportamento (BIAS)</p>
+                   <div className="flex items-center gap-2 mt-1">
+                     <span className="text-xl font-black text-slate-800">{formatPct(dados.macro.bias_ia)}</span>
+                     <BiasBadge bias={dados.macro.bias_ia} />
+                   </div>
+                </div>
+             </div>
           </div>
-        ) : (
-          <>
-            {/* CARDS SUPERIORES: A BATALHA (FVA) */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
-              {/* Card IA */}
-              <div className="bg-white p-6 rounded-[24px] shadow-sm border border-slate-100 relative overflow-hidden">
-                <div className="absolute top-0 left-0 w-1.5 h-full bg-slate-300"></div>
-                <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">Acurácia Motor de IA</h3>
-                <div className="flex items-end justify-between">
-                  <span className="text-4xl font-black text-slate-900">{dadosMacro?.acuracia_ia || 0}%</span>
-                  <span className="text-xs font-bold text-slate-400 flex items-center bg-slate-100 px-2 py-1 rounded">Baseline Neutra</span>
-                </div>
-              </div>
 
-              {/* Card Bottom-up (Vendas) */}
-              <div className="bg-white p-6 rounded-[24px] shadow-sm border border-slate-100 relative overflow-hidden">
-                <div className="absolute top-0 left-0 w-1.5 h-full bg-indigo-400"></div>
-                <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">Acurácia Vendas (Bottom-Up)</h3>
-                <div className="flex items-end justify-between">
-                  <span className="text-4xl font-black text-slate-900">{dadosMacro?.acuracia_bu || 0}%</span>
-                  <div className={`flex items-center gap-1 text-xs font-black px-2 py-1 rounded ${(dadosMacro?.fva_bu || 0) >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
-                    {(dadosMacro?.fva_bu || 0) >= 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-                    FVA: {dadosMacro?.fva_bu > 0 ? '+' : ''}{dadosMacro?.fva_bu || 0}%
-                  </div>
+          {/* Card Comercial */}
+          <div className="bg-indigo-600 p-8 rounded-[32px] shadow-lg shadow-indigo-900/20 flex flex-col justify-between text-white transition-transform hover:-translate-y-1">
+             <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3 text-indigo-200">
+                   <div className="p-3 bg-indigo-500/50 rounded-xl"><Users className="w-6 h-6 text-white" /></div>
+                   <span className="font-black uppercase tracking-widest text-sm">Consenso S&OP</span>
                 </div>
-              </div>
-
-              {/* Card Consenso S&OP */}
-              <div className="bg-white p-6 rounded-[24px] shadow-sm border border-slate-100 relative overflow-hidden">
-                <div className="absolute top-0 left-0 w-1.5 h-full bg-emerald-500"></div>
-                <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">Acurácia Consenso (Final)</h3>
-                <div className="flex items-end justify-between">
-                  <span className="text-4xl font-black text-slate-900">{dadosMacro?.acuracia_final || 0}%</span>
-                  <div className={`flex items-center gap-1 text-xs font-black px-2 py-1 rounded ${(dadosMacro?.fva_final || 0) >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
-                    {(dadosMacro?.fva_final || 0) >= 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-                    FVA: {dadosMacro?.fva_final > 0 ? '+' : ''}{dadosMacro?.fva_final || 0}%
-                  </div>
+                <div className="text-right">
+                   <p className="text-[10px] font-bold text-indigo-300 uppercase tracking-widest">Acurácia (1-WMAPE)</p>
+                   <p className="text-3xl font-black">{formatPct(dados.macro.acc_comercial)}</p>
                 </div>
-              </div>
-            </div>
-
-            {/* ÁREA PRINCIPAL: GRÁFICO E TABELA */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              
-              {/* GRÁFICO DE HORIZONTE */}
-              <div className="lg:col-span-2 bg-white rounded-[32px] p-6 shadow-sm border border-slate-100 flex flex-col min-h-[400px]">
-                <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-6 flex items-center gap-2">
-                  <Activity className="w-4 h-4 text-indigo-500" /> Curva de Previsão vs Realizado
-                </h3>
-                <div className="flex-1 w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={dadosCurva} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                      <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} />
-                      <YAxis tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
-                      <Tooltip 
-                        contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)', fontWeight: 900}} 
-                        formatter={(val: any) => formatVolume(val)}
-                      />
-                      <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: 900}} />
-                      
-                      <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#94a3b8" strokeWidth={4} dot={{r: 5}} connectNulls />
-                      <Line type="monotone" dataKey="IA" name="Motor IA" stroke="#cbd5e1" strokeWidth={3} strokeDasharray="5 5" dot={false} connectNulls />
-                      <Line type="monotone" dataKey="Comercial" name="Proposta Vendas" stroke="#818cf8" strokeWidth={3} dot={{r: 4}} connectNulls />
-                      <Line type="monotone" dataKey="Final" name="Consenso Oficial" stroke="#10b981" strokeWidth={4} dot={{r: 5}} connectNulls />
-                    </LineChart>
-                  </ResponsiveContainer>
+             </div>
+             <div className="grid grid-cols-2 gap-4 border-t border-indigo-500/30 pt-6">
+                <div>
+                   <p className="text-[10px] font-bold text-indigo-300 uppercase tracking-widest mb-1">Volume Fechado</p>
+                   <p className="text-xl font-black">{formatVolume(dados.macro.vol_comercial)} <span className="text-xs opacity-50">CX</span></p>
                 </div>
-              </div>
-
-              {/* RANKING TOP 10 OFENSORES */}
-              <div className="bg-white rounded-[32px] p-6 shadow-sm border border-slate-100 flex flex-col min-h-[400px]">
-                <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-6 flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4 text-rose-500" /> Top 10 Ofensores
-                </h3>
-                
-                <div className="overflow-x-auto custom-scrollbar pr-2 flex-1">
-                  <table className="w-full text-left">
-                    <thead>
-                      <tr className="border-b border-slate-100">
-                        <th className="pb-3 text-[10px] font-black text-slate-400 uppercase tracking-widest">SKU / Responsável</th>
-                        <th className="pb-3 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">
-                          Erro Absoluto {visaoFinanceira ? '(R$)' : '(CX)'}
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-50">
-                      {dadosOfensores.length === 0 ? (
-                        <tr>
-                          <td colSpan={2} className="py-8 text-center text-xs font-bold text-slate-400">
-                            Nenhum ofensor encontrado neste ciclo.
-                          </td>
-                        </tr>
-                      ) : (
-                        dadosOfensores.map((item, idx) => (
-                          <tr key={idx} className="hover:bg-slate-50/50 transition-colors">
-                            <td className="py-3">
-                              <div className="flex flex-col">
-                                <span className="font-bold text-sm text-slate-800">{item.sku}</span>
-                                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{item.responsavel || 'Não Atribuído'}</span>
-                              </div>
-                            </td>
-                            <td className="py-3 text-right">
-                              <span className="font-black text-rose-500">
-                                {visaoFinanceira ? formatMoeda(item.erro) : formatVolume(item.erro)}
-                              </span>
-                            </td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
+                <div>
+                   <p className="text-[10px] font-bold text-indigo-300 uppercase tracking-widest mb-1">Comportamento (BIAS)</p>
+                   <div className="flex items-center gap-2 mt-1">
+                     <span className="text-xl font-black">{formatPct(dados.macro.bias_comercial)}</span>
+                     <BiasBadge bias={dados.macro.bias_comercial} />
+                   </div>
                 </div>
-              </div>
+             </div>
+          </div>
 
-            </div>
-          </>
-        )}
+        </div>
+
+        {/* GRÁFICO DE SOBREPOSIÇÃO (ROLLING FORECAST) */}
+        <div className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-100 mb-8">
+           <div className="flex items-center justify-between mb-8">
+             <div className="flex items-center gap-2">
+               <Activity className="w-5 h-5 text-indigo-500" />
+               <h3 className="text-lg font-black text-slate-800 uppercase tracking-tighter">Evolução de Assertividade: Projeção vs Real</h3>
+             </div>
+           </div>
+           
+           <div className="h-[400px] w-full">
+             <ResponsiveContainer width="100%" height="100%">
+               <LineChart data={dados.grafico} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                 <XAxis dataKey="name" tick={{fontSize: 12, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} dy={10} />
+                 <YAxis tick={{fontSize: 12, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} tickFormatter={(v) => formatVolume(v)} />
+                 
+                 {/* Tipagem corrigida no formatter (name: any) e conversão para String */}
+                 <Tooltip 
+                   contentStyle={{backgroundColor: '#0f172a', border: 'none', borderRadius: '16px', color: '#fff', boxShadow: '0 10px 30px rgba(0,0,0,0.2)'}}
+                   formatter={(val: any, name: any) => [formatVolume(val), String(name).replace('_', ' ')]}
+                 />
+                 <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '12px', fontWeight: 900}} />
+                 
+                 <Line type="monotone" dataKey="Realizado" name="Venda Realizada" stroke="#0f172a" strokeWidth={4} dot={{r: 4}} connectNulls={false} />
+                 <Line type="monotone" dataKey="Projecao_IA" name="Projeção IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
+                 <Line type="monotone" dataKey="Proposta_Comercial" name="Consenso S&OP" stroke="#6366f1" strokeWidth={3} dot={{r: 5, strokeWidth: 2}} connectNulls={false} />
+               </LineChart>
+             </ResponsiveContainer>
+           </div>
+        </div>
+
+        {/* MATRIZ DE OFENSORES (DIAGNÓSTICO GRANULAR) */}
+        <div className="bg-white rounded-[32px] shadow-sm border border-slate-100 overflow-hidden">
+           <div className="p-8 border-b border-slate-100 flex items-center gap-2">
+             <AlertTriangle className="w-5 h-5 text-amber-500" />
+             <h3 className="text-lg font-black text-slate-800 uppercase tracking-tighter">Matriz de Ofensores (Top 50 SKUs)</h3>
+           </div>
+           <div className="overflow-x-auto custom-scrollbar">
+             <table className="w-full text-left border-collapse">
+               <thead>
+                 <tr className="bg-slate-50/50">
+                   <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-100">SKU / Descrição</th>
+                   <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 text-right">Venda Real</th>
+                   <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 text-right bg-slate-50">Acurácia IA</th>
+                   <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 text-right bg-slate-50">BIAS IA</th>
+                   <th className="px-6 py-4 text-[10px] font-black text-indigo-400 uppercase tracking-widest border-b border-slate-100 text-right bg-indigo-50/30">Acurácia S&OP</th>
+                   <th className="px-6 py-4 text-[10px] font-black text-indigo-400 uppercase tracking-widest border-b border-slate-100 text-right bg-indigo-50/30">BIAS S&OP</th>
+                 </tr>
+               </thead>
+               <tbody>
+                 {dados.tabela.map((row: any, idx: number) => (
+                   <tr key={idx} className="border-b border-slate-50 hover:bg-slate-50/80 transition-colors">
+                     <td className="px-6 py-4">
+                       <div className="flex flex-col">
+                         <span className="text-sm font-black text-slate-800 tracking-tight">{row.descricao || 'N/A'}</span>
+                         <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{row.sku}</span>
+                       </div>
+                     </td>
+                     <td className="px-6 py-4 text-right font-black text-slate-800">{formatVolume(row.vol_real)}</td>
+                     
+                     {/* Colunas IA */}
+                     <td className="px-6 py-4 text-right font-bold text-slate-500 bg-slate-50/50">{formatPct(row.acc_ia)}</td>
+                     <td className="px-6 py-4 text-right bg-slate-50/50">
+                        <div className="flex justify-end"><BiasBadge bias={row.bias_ia} /></div>
+                     </td>
+
+                     {/* Colunas S&OP */}
+                     <td className={`px-6 py-4 text-right font-bold ${row.acc_comercial > row.acc_ia ? 'text-emerald-600' : 'text-rose-600'} bg-indigo-50/10`}>
+                       {formatPct(row.acc_comercial)}
+                     </td>
+                     <td className="px-6 py-4 text-right bg-indigo-50/10">
+                        <div className="flex justify-end"><BiasBadge bias={row.bias_comercial} /></div>
+                     </td>
+                   </tr>
+                 ))}
+               </tbody>
+             </table>
+           </div>
+        </div>
+
       </div>
     </div>
   );
