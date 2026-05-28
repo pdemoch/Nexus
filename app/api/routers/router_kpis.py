@@ -12,7 +12,7 @@ router = APIRouter(prefix="/api/v1/kpis", tags=["Auditoria e KPIs"])
 @router.get("/auditoria")
 async def carregar_auditoria(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
-        # 1. Busca Vendas Reais (Ponto de partida do projeto S&OP)
+        # 1. Busca Vendas Reais 
         query_real = text("""
             SELECT 
                 sku, 
@@ -25,10 +25,9 @@ async def carregar_auditoria(db: Session = Depends(get_db), usuario: dict = Depe
         """)
         df_real = pd.read_sql(query_real, db.bind)
 
-        # 2. Rolling Forecast Corrigido: Agrupamento Granular pelo Último Ciclo
+        # 2. Rolling Forecast: Pegando a última fotografia projetada para cada mês
         query_prev = text("""
             WITH ciclos_ranqueados AS (
-                -- A. Descobre qual é o ciclo mais recente para cada combinação de SKU e Mês
                 SELECT 
                     sku, 
                     TO_CHAR(mes_projetado, 'YYYY-MM') AS mes, 
@@ -41,7 +40,6 @@ async def carregar_auditoria(db: Session = Depends(get_db), usuario: dict = Depe
                 WHERE mes_projetado >= '2026-04-01'
                 GROUP BY sku, TO_CHAR(mes_projetado, 'YYYY-MM'), ciclo_sop
             )
-            -- B. Soma o volume de TODOS os clientes (cgc) que pertencem a esse ciclo vencedor
             SELECT 
                 g.sku, 
                 TO_CHAR(g.mes_projetado, 'YYYY-MM') AS mes, 
@@ -57,39 +55,46 @@ async def carregar_auditoria(db: Session = Depends(get_db), usuario: dict = Depe
         """)
         df_prev = pd.read_sql(query_prev, db.bind)
 
-        if df_prev.empty:
+        if df_prev.empty and df_real.empty:
             return {"status": "success", "dados": {"macro": {}, "grafico": [], "tabela": []}}
 
-        # 3. Consolidação dos Mundos (Previsão vs Realizado)+
-        df = pd.merge(df_prev, df_real, on=['sku', 'mes'], how='left')
-        df['vol_real'] = df['vol_real'].fillna(0)
-        df['rec_real'] = df['rec_real'].fillna(0)
+        # 3. Consolidação FULL OUTER JOIN (Garante que quem tem venda mas não tem projeção, e vice-versa, não escape do cálculo)
+        df = pd.merge(df_prev, df_real, on=['sku', 'mes'], how='outer')
 
-        # 4. Motor Matemático: WMAPE e BIAS
+        # Limpeza severa: Tratar nulos, converter tipos e IMPEDIR previsões ou vendas negativas
+        df['vol_real'] = pd.to_numeric(df['vol_real'], errors='coerce').fillna(0).clip(lower=0)
+        df['vol_ia'] = pd.to_numeric(df['vol_ia'], errors='coerce').fillna(0).clip(lower=0)
+        df['vol_comercial'] = pd.to_numeric(df['vol_comercial'], errors='coerce').fillna(0).clip(lower=0)
+
+        # 4. Motor Matemático: Padrão APICS de IBP
         def calcular_metricas(df_group):
-            soma_real = df_group['vol_real'].sum()
-            soma_ia = df_group['vol_ia'].sum()
-            soma_com = df_group['vol_comercial'].sum()
+            soma_real = float(df_group['vol_real'].sum())
+            soma_ia = float(df_group['vol_ia'].sum())
+            soma_com = float(df_group['vol_comercial'].sum())
             
-            # WMAPE = Soma dos Erros Absolutos / Soma do Real
-            erro_abs_ia = abs(df_group['vol_real'] - df_group['vol_ia']).sum()
-            erro_abs_com = abs(df_group['vol_real'] - df_group['vol_comercial']).sum()
+            # WMAPE (Volume Absoluto de Erro / Venda Real)
+            erro_abs_ia = float(abs(df_group['vol_real'] - df_group['vol_ia']).sum())
+            erro_abs_com = float(abs(df_group['vol_real'] - df_group['vol_comercial']).sum())
             
-            wmape_ia = (erro_abs_ia / soma_real) if soma_real > 0 else 0
-            wmape_com = (erro_abs_com / soma_real) if soma_real > 0 else 0
+            wmape_ia = (erro_abs_ia / soma_real) if soma_real > 0 else (1.0 if soma_ia > 0 else 0.0)
+            wmape_com = (erro_abs_com / soma_real) if soma_real > 0 else (1.0 if soma_com > 0 else 0.0)
             
-            # BIAS = (Previsão - Real) / Real
-            bias_ia = ((soma_ia - soma_real) / soma_real) if soma_real > 0 else 0
-            bias_com = ((soma_com - soma_real) / soma_real) if soma_real > 0 else 0
+            # Acurácia: Piso cravado em 0% (evita percentuais negativos de alucinação)
+            acc_ia = max(0.0, 1.0 - wmape_ia)
+            acc_comercial = max(0.0, 1.0 - wmape_com)
+            
+            # BIAS: Tendência de Superestimação (+) ou Subestimação (-)
+            bias_ia = ((soma_ia - soma_real) / soma_real) if soma_real > 0 else (1.0 if soma_ia > 0 else 0.0)
+            bias_com = ((soma_com - soma_real) / soma_real) if soma_real > 0 else (1.0 if soma_com > 0 else 0.0)
 
             return pd.Series({
                 "vol_real": int(soma_real),
                 "vol_ia": int(soma_ia),
                 "vol_comercial": int(soma_com),
-                "acc_ia": round(max(0, 1 - wmape_ia), 4),
-                "acc_comercial": round(max(0, 1 - wmape_com), 4),
-                "bias_ia": round(bias_ia, 4),
-                "bias_comercial": round(bias_com, 4),
+                "acc_ia": float(acc_ia),
+                "acc_comercial": float(acc_comercial),
+                "bias_ia": float(bias_ia),
+                "bias_comercial": float(bias_com),
                 "gap_absoluto_ia": int(abs(soma_real - soma_ia)),
                 "gap_absoluto_com": int(abs(soma_real - soma_com))
             })
@@ -99,8 +104,8 @@ async def carregar_auditoria(db: Session = Depends(get_db), usuario: dict = Depe
 
         # --- B. GRÁFICO (Evolução Temporal) ---
         df_grafico = df.groupby('mes').apply(calcular_metricas).reset_index()
+        df_grafico = df_grafico.sort_values(by='mes')
         
-        # Descobre qual o último mês com venda real para cortar a linha preta no futuro
         meses_com_venda = df[df['vol_real'] > 0]['mes'].unique()
         ultimo_mes_real = max(meses_com_venda) if len(meses_com_venda) > 0 else '2026-03'
 
@@ -109,14 +114,13 @@ async def carregar_auditoria(db: Session = Depends(get_db), usuario: dict = Depe
             mes_dt = pd.to_datetime(row['mes'])
             mes_str = mes_dt.strftime("%b/%y").capitalize()
             
-            # Máscara para não afundar a linha do Realizado para zero em meses futuros
             is_futuro = row['mes'] > ultimo_mes_real
 
             grafico_dados.append({
                 "name": mes_str,
-                "Realizado": None if is_futuro else row['vol_real'],
-                "Projecao_IA": row['vol_ia'],
-                "Proposta_Comercial": row['vol_comercial'],
+                "Realizado": None if is_futuro else int(row['vol_real']),
+                "Projecao_IA": int(row['vol_ia']),
+                "Proposta_Comercial": int(row['vol_comercial']),
                 "acc_ia": row['acc_ia'],
                 "acc_comercial": row['acc_comercial'],
                 "bias_ia": row['bias_ia'],
@@ -130,7 +134,10 @@ async def carregar_auditoria(db: Session = Depends(get_db), usuario: dict = Depe
         
         df_tabela = df_com_nomes.groupby(['sku', 'descricao']).apply(calcular_metricas).reset_index()
         
-        # Ordenar pelos piores GAPs comerciais absolutos
+        # Filtro de Limpeza: Remove itens mortos que não tiveram venda real E não tiveram projeção (Lixo do OUTER JOIN)
+        df_tabela = df_tabela[(df_tabela['vol_real'] > 0) | (df_tabela['vol_comercial'] > 0) | (df_tabela['vol_ia'] > 0)]
+        
+        # Ordenar pelos piores GAPs absolutos do consenso S&OP
         df_tabela = df_tabela.sort_values(by='gap_absoluto_com', ascending=False).head(50)
         
         tabela_dados = df_tabela.to_dict(orient='records')
@@ -145,4 +152,6 @@ async def carregar_auditoria(db: Session = Depends(get_db), usuario: dict = Depe
         }
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(500, repr(e))
