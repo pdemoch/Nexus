@@ -110,7 +110,8 @@ async def exportar_base_granular(db: Session = Depends(get_db), usuario_logado: 
         
         resultados = get_truth_query(db, ciclo, m2, m4).with_entities(
             DimCliente.vendedor_nome, DimCliente.gerente_nome, DimCliente.regional, DimCliente.cgc, DimCliente.razaosocial,
-            DimProduto.sku, DimProduto.descricao, DimProduto.categoria,
+            DimCliente.cod_cliente, DimCliente.loja, DimCliente.supervisor_nome,
+            DimProduto.sku, DimProduto.descricao, DimProduto.categoria, DimProduto.segmento,
             FatoIbpGranular.mes_projetado, FatoIbpGranular.pmv_aplicado,
             FatoIbpGranular.vol_ia, FatoIbpGranular.vol_topdown, FatoIbpGranular.vol_bottomup, 
             FatoIbpGranular.vol_supply, FatoIbpGranular.vol_final, FatoIbpGranular.vol_meta
@@ -126,12 +127,16 @@ async def exportar_base_granular(db: Session = Depends(get_db), usuario_logado: 
 
             dados.append({
                 "Ciclo S&OP": ciclo,
-                "Regional": r.regional,
-                "Gerente": r.gerente_nome,
-                "Vendedor": r.vendedor_nome,
                 "CGC": r.cgc,
-                "Razão Social": r.razaosocial,
+                "Cliente": r.cod_cliente,
+                "Loja": r.loja,
+                "Razão Social": r.razaosocial,                
+                "Regional": r.regional,                
+                "Gerente": r.gerente_nome,
+                "Coordenador": r.supervisor_nome,
+                "Vendedor": r.vendedor_nome,           
                 "Categoria": r.categoria,
+                "Segmento": r.segmento,
                 "SKU": r.sku,
                 "Produto": r.descricao,
                 "Mês Projetado": str(r.mes_projetado),
