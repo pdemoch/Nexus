@@ -25,8 +25,6 @@ async def carregar_auditoria(db: Session = Depends(get_db), usuario: dict = Depe
         """)
         df_real = pd.read_sql(query_real, db.bind)
 
-        # 2. Rolling Forecast: Busca a versão mais atualizada da previsão de cada mês
-        # O DISTINCT ON garante que se houver previsões em ciclos múltiplos para o mesmo mês, ele pegará a mais recente.
         # 2. Rolling Forecast Corrigido: Agrupamento Granular pelo Último Ciclo
         query_prev = text("""
             WITH ciclos_ranqueados AS (
