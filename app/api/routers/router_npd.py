@@ -103,7 +103,7 @@ async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db),
                 if volume_cliente == 0: continue
                     
                 # Insere o dado em TODAS as camadas simultaneamente (IA, Comercial e Supply) 
-                # para que o NPD flua na árvore como um produto consolidado.
+                # para que o NPD flua na árvore como um produto consolidado.+
                 nova_fato = FatoIbpGranular(
                     ciclo_sop=ciclo_oficial, 
                     mes_projetado=mes_alvo,

@@ -60,7 +60,7 @@ async def carregar_auditoria(db: Session = Depends(get_db), usuario: dict = Depe
         if df_prev.empty:
             return {"status": "success", "dados": {"macro": {}, "grafico": [], "tabela": []}}
 
-        # 3. Consolidação dos Mundos (Previsão vs Realizado)
+        # 3. Consolidação dos Mundos (Previsão vs Realizado)+
         df = pd.merge(df_prev, df_real, on=['sku', 'mes'], how='left')
         df['vol_real'] = df['vol_real'].fillna(0)
         df['rec_real'] = df['rec_real'].fillna(0)
