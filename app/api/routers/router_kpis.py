@@ -27,17 +27,35 @@ async def carregar_auditoria(db: Session = Depends(get_db), usuario: dict = Depe
 
         # 2. Rolling Forecast: Busca a versão mais atualizada da previsão de cada mês
         # O DISTINCT ON garante que se houver previsões em ciclos múltiplos para o mesmo mês, ele pegará a mais recente.
+        # 2. Rolling Forecast Corrigido: Agrupamento Granular pelo Último Ciclo
         query_prev = text("""
-            SELECT DISTINCT ON (sku, TO_CHAR(mes_projetado, 'YYYY-MM'))
-                sku, 
-                TO_CHAR(mes_projetado, 'YYYY-MM') AS mes, 
-                vol_ia, 
-                vol_final AS vol_comercial, 
-                pmv_aplicado, 
-                ciclo_sop
-            FROM fato_ibp_granular
-            WHERE mes_projetado >= '2026-04-01'
-            ORDER BY sku, TO_CHAR(mes_projetado, 'YYYY-MM'), ciclo_sop DESC
+            WITH ciclos_ranqueados AS (
+                -- A. Descobre qual é o ciclo mais recente para cada combinação de SKU e Mês
+                SELECT 
+                    sku, 
+                    TO_CHAR(mes_projetado, 'YYYY-MM') AS mes, 
+                    ciclo_sop,
+                    ROW_NUMBER() OVER(
+                        PARTITION BY sku, TO_CHAR(mes_projetado, 'YYYY-MM')
+                        ORDER BY TO_DATE(ciclo_sop, 'MM/YYYY') DESC
+                    ) as rn
+                FROM fato_ibp_granular
+                WHERE mes_projetado >= '2026-04-01'
+                GROUP BY sku, TO_CHAR(mes_projetado, 'YYYY-MM'), ciclo_sop
+            )
+            -- B. Soma o volume de TODOS os clientes (cgc) que pertencem a esse ciclo vencedor
+            SELECT 
+                g.sku, 
+                TO_CHAR(g.mes_projetado, 'YYYY-MM') AS mes, 
+                SUM(g.vol_ia) AS vol_ia, 
+                SUM(g.vol_final) AS vol_comercial
+            FROM fato_ibp_granular g
+            JOIN ciclos_ranqueados c
+              ON g.sku = c.sku 
+             AND TO_CHAR(g.mes_projetado, 'YYYY-MM') = c.mes
+             AND g.ciclo_sop = c.ciclo_sop
+            WHERE c.rn = 1
+            GROUP BY g.sku, TO_CHAR(g.mes_projetado, 'YYYY-MM')
         """)
         df_prev = pd.read_sql(query_prev, db.bind)
 
