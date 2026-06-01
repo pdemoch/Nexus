@@ -79,7 +79,10 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         ciclo = get_current_cycle(db)
         ciclo_anterior = get_previous_cycle(db)
         
-        hoje = datetime.date.today().replace(day=1)
+        # MÁQUINA DO TEMPO: O "Hoje" respeita o relógio global
+        _mes_str, _ano_str = ciclo.split('/')
+        hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
+
         data_ini = hoje + relativedelta(months=2)
         data_fim = hoje + relativedelta(months=4)
         meses_alvo = [(hoje + relativedelta(months=i)).strftime("%Y-%m-%d") for i in range(2, 5)]
@@ -109,10 +112,9 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
 
         ant_dict = defaultdict(lambda: defaultdict(int))
         skus_encontrados = list({r.sku for r in resultados if r.sku})
-        clientes_encontrados = list({r.cli for r in resultados if r.cli}) # Otimização para segurança e performance
+        clientes_encontrados = list({r.cli for r in resultados if r.cli}) 
         
         if skus_encontrados and clientes_encontrados:
-            # Correção do Bug 500: get_truth_query já possui o outerjoin na dim_clientes nativamente.
             q_ant = get_truth_query(db, ciclo_anterior, data_ini, data_fim)
             res_ant = q_ant.filter(
                 FatoIbpGranular.sku.in_(skus_encontrados),
@@ -141,10 +143,10 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             de = str(r.prod_desc).strip()
             ms = str(r.mes_projetado)
 
-            if co not in arvore: arvore[co] = {"nome": co, "tipo": "coordenador", "status": trancas_reg.get(co, "Aberto"), "meses": criar_meses(), "vendedores": {}}
-            if ve not in arvore[co]["vendedores"]: arvore[co]["vendedores"][ve] = {"nome": ve, "tipo": "vendedor", "meses": criar_meses(), "clientes": {}}
-            if cl not in arvore[co]["vendedores"][ve]["clientes"]: arvore[co]["vendedores"][ve]["clientes"][cl] = {"nome": cl, "tipo": "cliente", "meses": criar_meses(), "produtos": {}}
-            if sk not in arvore[co]["vendedores"][ve]["clientes"][cl]["produtos"]: arvore[co]["vendedores"][ve]["clientes"][cl]["produtos"][sk] = {"nome": de, "produto": sk, "tipo": "produto", "meses": criar_meses()}
+            if co not in arvore: arvore[co] = {"nome": co, "status": trancas_reg.get(co, "Aberto"), "meses": criar_meses(), "vendedores": {}}
+            if ve not in arvore[co]["vendedores"]: arvore[co]["vendedores"][ve] = {"nome": ve, "meses": criar_meses(), "clientes": {}}
+            if cl not in arvore[co]["vendedores"][ve]["clientes"]: arvore[co]["vendedores"][ve]["clientes"][cl] = {"nome": cl, "meses": criar_meses(), "produtos": {}}
+            if sk not in arvore[co]["vendedores"][ve]["clientes"][cl]["produtos"]: arvore[co]["vendedores"][ve]["clientes"][cl]["produtos"][sk] = {"nome": de, "produto": sk, "meses": criar_meses()}
 
             if ms in meses_alvo:
                 v_bu = int(r.v_bu or 0)
@@ -185,7 +187,9 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
         ciclo = get_current_cycle(db)
         check_global_lock(db, ciclo)
 
-        hoje = datetime.date.today().replace(day=1)
+        # MÁQUINA DO TEMPO: O "Hoje" respeita o relógio global
+        _mes_str, _ano_str = ciclo.split('/')
+        hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
         data_hist = hoje - relativedelta(months=12)
 
         cx, vx, clx = get_coord_expr(), get_vend_expr(), get_cli_expr()
@@ -274,7 +278,11 @@ async def grafico_gerenciamento(chave_matriz: str, db: Session = Depends(get_db)
     try:
         ciclo_atual = get_current_cycle(db)
         ciclo_anterior = get_previous_cycle(db)
-        hoje = datetime.date.today().replace(day=1)
+        
+        # MÁQUINA DO TEMPO: O "Hoje" respeita o relógio global
+        _mes_str, _ano_str = ciclo_atual.split('/')
+        hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
+        
         inicio_hist = hoje - relativedelta(months=24)
         m2_comercial = hoje + relativedelta(months=2)
 

@@ -86,8 +86,11 @@ async def listar_supply_review(db: Session = Depends(get_db), usuario: dict = De
     try:
         ciclo = get_current_cycle(db)
         
+        # MÁQUINA DO TEMPO: O "Hoje" respeita o relógio global
+        _mes_str, _ano_str = ciclo.split('/')
+        hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
+        
         # Foco do S&OP Supply no Horizonte Tático (M2, M3, M4)
-        hoje = datetime.date.today().replace(day=1)
         data_ini = hoje + relativedelta(months=2)
         data_fim = hoje + relativedelta(months=4)
         meses_alvo = [(hoje + relativedelta(months=i)).strftime("%Y-%m-%d") for i in range(2, 5)]
@@ -237,7 +240,11 @@ async def grafico_supply(produto_id: str, db: Session = Depends(get_db)):
     try:
         ciclo_atual = get_current_cycle(db)
         ciclo_anterior = get_previous_cycle(db)
-        hoje = datetime.date.today().replace(day=1)
+        
+        # MÁQUINA DO TEMPO: O "Hoje" respeita o relógio global
+        _mes_str, _ano_str = ciclo_atual.split('/')
+        hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
+        
         inicio_hist = hoje - relativedelta(months=24)
         m2_comercial = hoje + relativedelta(months=2)
 

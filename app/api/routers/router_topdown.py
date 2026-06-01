@@ -41,7 +41,10 @@ async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None,
         ciclo = get_current_cycle(db)
         ciclo_anterior = get_previous_cycle(db)
         
-        hoje = datetime.date.today().replace(day=1)
+        # MÁQUINA DO TEMPO: O "Hoje" respeita o relógio global
+        _mes_str, _ano_str = ciclo.split('/')
+        hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
+        
         # S&OP Clássico: M2 a M4 (3 meses) para a Diretoria (Top-Down)
         data_ini = hoje + relativedelta(months=2)
         data_fim = hoje + relativedelta(months=4)
@@ -126,7 +129,9 @@ async def aprovar_topdown(payload: PayloadAprovarTopDown, db: Session = Depends(
         ciclo = get_current_cycle(db)
         check_global_lock(db, ciclo)
 
-        hoje = datetime.date.today().replace(day=1)
+        # MÁQUINA DO TEMPO
+        _mes_str, _ano_str = ciclo.split('/')
+        hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
         data_hist = hoje - relativedelta(months=12)
 
         for ajuste in payload.ajustes:
@@ -204,7 +209,11 @@ async def grafico_topdown(chave_matriz: str, db: Session = Depends(get_db)):
     try:
         ciclo_atual = get_current_cycle(db)
         ciclo_anterior = get_previous_cycle(db)
-        hoje = datetime.date.today().replace(day=1)
+        
+        # MÁQUINA DO TEMPO
+        _mes_str, _ano_str = ciclo_atual.split('/')
+        hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
+        
         inicio_hist = hoje - relativedelta(months=24) 
         m2_topdown = hoje + relativedelta(months=2) # Marco inicial da linha Azul (Top-Down)
 
