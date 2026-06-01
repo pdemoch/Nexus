@@ -94,59 +94,55 @@ class NexusForecaster:
             ultimo_pmv = df_sku.iloc[-1].get('pmv', 0)
             
             tamanho_serie = len(serie)
+            avaliacoes_cv = {nome: [] for nome in self.especialistas.keys()}
             
             # =========================================================================
-            # [AJUSTE CIRÚRGICO]: BLINDAGEM NPI (NEW PRODUCT INTRODUCTION)
+            # A NOVA ARENA: CROSS-VALIDATION TEMPORAL (ROLLING ORIGIN)
             # =========================================================================
-            if len(serie[serie > 0]) < 4:
-                # Usa a média histórica disponível como base simples (Fallback)
-                vol_npi = float(serie.mean()) if len(serie) > 0 else 0.0
-                for i in range(self.forecast_horizon):
-                    data_proj = (data_inicio_previsao + pd.DateOffset(months=i)).to_pydatetime().date()
-                    resultados_forecast.append({
-                        "ciclo_sop": ciclo_atual, "produto": sku, "mes_projetado": data_proj,
-                        "vol_ia_global": round(max(0, vol_npi), 2), "pmv_aplicado": round(ultimo_pmv, 2),
-                        "modelo_vencedor": "NPI_Fallback", "acuracia": 0.0
-                    })
-                contador += 1
-                if contador % 50 == 0: log_callback(f"   ⏳ Arena processou {contador}/{len(skus)} SKUs...")
-                continue # Pula toda a Arena complexa abaixo
-
-            # =========================================================================
-            # ARENA DE MODELOS (Mantida 100% Original)
-            # =========================================================================
-            avaliacoes_cv = {nome: [] for nome in self.especialistas.keys()}
+            # Se o SKU tiver pouco histórico (ex: lançamento), reduzimos as janelas de CV
             folds_aplicaveis = min(self.cv_folds, max(1, tamanho_serie - self.forecast_horizon - 6))
             
             if folds_aplicaveis >= 1:
                 for fold in range(folds_aplicaveis):
+                    # O corte desliza para trás no tempo. Fold 0 = Teste recente. Fold 1 = Teste 1 mês mais antigo.
                     corte_teste = self.forecast_horizon + fold
+                    
                     treino_cv = serie.iloc[:-corte_teste]
                     teste_real_cv = serie.iloc[-corte_teste : -corte_teste + self.forecast_horizon] if fold > 0 else serie.iloc[-corte_teste:]
                     
-                    if len(treino_cv) < 6: continue
+                    # Se o treino ficar muito pequeno, ignora este fold
+                    if len(treino_cv) < 6:
+                        continue
 
+                    # Batalha dos Modelos nesta janela temporal específica
                     for nome, modelo in self.especialistas.items():
                         try:
                             preds_cv = modelo.fit_predict(treino_cv, self.forecast_horizon)
+                            # Acurácia com PESOS TÁTICOS (Força os modelos a acertarem M2, M3 e M4)
                             acc_cv = calcular_acuracia(teste_real_cv.values, preds_cv, pesos=self.pesos_taticos)
                             avaliacoes_cv[nome].append(acc_cv)
                         except Exception:
                             avaliacoes_cv[nome].append(0.0)
             
+            # =========================================================================
+            # CONSOLIDAÇÃO DO RANKING E PREVISÃO REAL DO FUTURO
+            # =========================================================================
             ranking = []
             for nome, acc_lista in avaliacoes_cv.items():
                 if acc_lista:
+                    # A nota final do modelo é a MÉDIA de como ele sobreviveu nas várias viagens no tempo
                     media_acc = np.mean(acc_lista)
                     ranking.append((nome, media_acc))
             
             if not ranking:
                 ranking = [('MediaMovel_Fallback', 0.0)]
                 
+            # Ordena do melhor para o pior
             ranking.sort(key=lambda item: item[1], reverse=True)
             melhor_modelo_nome = ranking[0][0]
             maior_acuracia_media = ranking[0][1]
 
+            # Treina o modelo vencedor com 100% dos dados para prever o futuro real
             modelo_campeao = self.especialistas.get(melhor_modelo_nome, self.especialistas['MediaMovel_Fallback'])
             previsao_futura = modelo_campeao.fit_predict(serie, self.forecast_horizon)
             
