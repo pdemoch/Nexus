@@ -3,7 +3,7 @@ import axios from 'axios';
 import { 
   ChevronRight, ChevronDown, Lock, Unlock, Search, X, 
   Package, Boxes, LayoutGrid, Download, BarChart2, Activity, Shield,
-  Wand2, Target, AlertTriangle, TrendingUp, TrendingDown, Save
+  Wand2, Target, TrendingUp, TrendingDown, Save
 } from 'lucide-react';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
@@ -152,6 +152,57 @@ export default function TopDownArena() {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
+  // Expande a árvore automaticamente quando o usuário faz uma busca
+  useEffect(() => {
+    if (busca.length > 2) {
+      const newExpanded: Record<string, boolean> = {};
+      const term = busca.toLowerCase();
+      dadosBrutos.forEach(cat => {
+        let catMatch = false;
+        cat.subRows?.forEach((seg: any) => {
+          let segMatch = false;
+          seg.subRows?.forEach((prod: any) => {
+             if (prod.nome?.toLowerCase().includes(term) || prod.produto?.toLowerCase().includes(term)) {
+               segMatch = true; catMatch = true;
+             }
+          });
+          if (segMatch || seg.nome?.toLowerCase().includes(term)) {
+             newExpanded[seg.chave_matriz] = true; catMatch = true;
+          }
+        });
+        if (catMatch || cat.nome?.toLowerCase().includes(term)) {
+           newExpanded[cat.chave_matriz] = true;
+        }
+      });
+      setExpanded(prev => ({ ...prev, ...newExpanded }));
+    }
+  }, [busca, dadosBrutos]);
+
+  // Função recursiva para filtro de busca (Nome ou SKU)
+  const filterData = (data: any[], search: string): any[] => {
+    if (!search) return data;
+    const term = search.toLowerCase();
+    
+    return data.map(cat => {
+      const filteredSegs = (cat.subRows || []).map((seg: any) => {
+        const filteredProds = (seg.subRows || []).filter((prod: any) => 
+          prod.nome?.toLowerCase().includes(term) || prod.produto?.toLowerCase().includes(term)
+        );
+        if (filteredProds.length > 0 || seg.nome?.toLowerCase().includes(term)) {
+          return { ...seg, subRows: filteredProds.length > 0 ? filteredProds : seg.subRows };
+        }
+        return null;
+      }).filter(Boolean);
+
+      if (filteredSegs.length > 0 || cat.nome?.toLowerCase().includes(term)) {
+        return { ...cat, subRows: filteredSegs.length > 0 ? filteredSegs : cat.subRows };
+      }
+      return null;
+    }).filter(Boolean);
+  };
+
+  const dadosFiltrados = useMemo(() => filterData(dadosBrutos, busca), [dadosBrutos, busca]);
+
   // Funções recursivas para somar volumes e receitas editadas em tempo real
   const getDynamicVol = useCallback((row: any, mesBanco: string): number => {
     if (row.tipo === 'produto') {
@@ -204,7 +255,6 @@ export default function TopDownArena() {
           }))
         )
       };
-
       await axios.post(`/api/v1/consensus/macro/congelar`, payload);
       alert("Top-Down Congelado e Rateado com Sucesso!");
       fetchData();
@@ -338,7 +388,7 @@ export default function TopDownArena() {
         </div>
 
         <div className="grid grid-cols-3 gap-6">
-          <div className="col-span-2 bg-slate-800 border border-slate-700 p-4 rounded-xl h-[340px]">
+          <div className="col-span-2 bg-slate-800 border border-slate-700 p-4 rounded-xl" style={{ height: '340px' }}>
             {loadingGrafico === chave ? (
               <div className="h-full flex items-center justify-center text-slate-500">Extraindo inteligência temporal...</div>
             ) : chartData ? (
@@ -357,7 +407,7 @@ export default function TopDownArena() {
               </ResponsiveContainer>
             ) : null}
           </div>
-          <div className="col-span-1 h-[340px]">
+          <div className="col-span-1" style={{ height: '340px' }}>
              <AiInsightBox alvo={rowData.nome} tipo={rowData.tipo} pmv={kpis.pmvMedio} volume={kpis.volTD} receita={kpis.rec} />
           </div>
         </div>
@@ -391,23 +441,32 @@ export default function TopDownArena() {
           <td className="p-0 align-top">
             <div className="flex flex-col h-full">
               <div 
-                className={`flex items-center gap-3 px-6 py-4 cursor-pointer hover:bg-slate-50 transition-colors ${depth > 0 ? 'ml-' + (depth * 6) : ''}`}
-                onClick={() => {
-                  if (hasChildren) setExpanded(p => ({ ...p, [row.chave_matriz]: !p[row.chave_matriz] }));
-                  if (isProduto) toggleChart(row);
-                }}
+                className={`flex items-center justify-between px-6 py-4 cursor-pointer hover:bg-slate-50 transition-colors ${depth > 0 ? 'ml-' + (depth * 6) : ''}`}
+                onClick={() => { if (hasChildren) setExpanded(p => ({ ...p, [row.chave_matriz]: !p[row.chave_matriz] })); }}
               >
-                {hasChildren ? (
-                  isExpanded ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />
-                ) : (
-                  <Package className="w-4 h-4 text-slate-300" />
-                )}
-                <div className="flex flex-col">
-                  <span className={`font-bold ${isProduto ? 'text-slate-700 text-sm' : 'text-slate-800'}`}>
-                    {row.nome}
-                  </span>
-                  {isProduto && <span className="text-[10px] font-medium text-slate-400 font-mono tracking-wider">{row.produto}</span>}
+                <div className="flex items-center gap-3">
+                  {hasChildren ? (
+                    isExpanded ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />
+                  ) : (
+                    <Package className="w-4 h-4 text-slate-300" />
+                  )}
+                  <div className="flex flex-col">
+                    <span className={`font-bold ${isProduto ? 'text-slate-700 text-sm' : 'text-slate-800'}`}>
+                      {row.nome}
+                    </span>
+                    {isProduto && <span className="text-[10px] font-medium text-slate-400 font-mono tracking-wider">{row.produto}</span>}
+                  </div>
                 </div>
+
+                {isProduto && (
+                  <button 
+                    onClick={(e) => { e.stopPropagation(); toggleChart(row); }}
+                    className={`p-2 rounded-lg border transition-colors ${chartExpanded === row.chave_matriz ? 'bg-blue-100 text-blue-600 border-blue-200' : 'hover:bg-slate-100 text-slate-400 border-transparent'}`}
+                    title="Ver Gráficos e Insights"
+                  >
+                    <BarChart2 className="w-4 h-4" />
+                  </button>
+                )}
               </div>
             </div>
           </td>
@@ -495,12 +554,13 @@ export default function TopDownArena() {
 
       <div className="flex-1 overflow-auto bg-slate-50/50 p-6">
         <div className="bg-white rounded-2xl shadow-sm border border-slate-200 flex flex-col max-h-[80vh]">
+          
           <div className="p-4 border-b border-slate-100 flex items-center gap-4 bg-slate-50/50 rounded-t-2xl">
             <div className="relative flex-1 max-w-md">
               <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input 
                 type="text" 
-                placeholder="Buscar produto ou categoria..." 
+                placeholder="Buscar produto ou SKU..." 
                 value={busca}
                 onChange={e => setBusca(e.target.value)}
                 className="w-full pl-9 pr-4 py-2 rounded-xl border border-slate-200 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
@@ -537,7 +597,7 @@ export default function TopDownArena() {
                   </tr>
                 </thead>
                 <tbody>
-                  {dadosBrutos.filter(d => d.nome.toLowerCase().includes(busca.toLowerCase())).map(cat => renderRow(cat, 0))}
+                  {dadosFiltrados.map(cat => renderRow(cat, 0))}
                 </tbody>
                 
                 {dadosBrutos.length > 0 && (
