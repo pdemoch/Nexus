@@ -181,6 +181,103 @@ const SKUPerformanceDossier = ({ rowData }: { rowData: any }) => {
   );
 };
 
+// =====================================================================
+// NOVO COMPONENTE: GRÁFICOS DE EVOLUÇÃO DO CICLO (S&OP)
+// =====================================================================
+const GraficosEvolucaoCiclo = ({ table, colunasMeses }: { table: any, colunasMeses: any[] }) => {
+  const chartData = useMemo(() => {
+    if (!colunasMeses || colunasMeses.length === 0) return [];
+    
+    // Filtra apenas a raiz (depth === 0) para não somar a categoria e os SKUs filhos em duplicidade
+    const linhasRaiz = table.getCoreRowModel().rows.filter((r: any) => r.depth === 0);
+
+    return colunasMeses.map((mesBanco) => {
+      let ia = 0, topdown = 0, comercial = 0, supply = 0, final = 0;
+      let r_ia = 0, r_td = 0, r_com = 0, r_sup = 0, r_fin = 0;
+
+      linhasRaiz.forEach((row: any) => {
+        // Busca o mês correspondente no objeto original da linha
+        const val = row.original.meses?.find((m: any) => m.mes_banco === mesBanco.mes_banco || m.mes_banco === mesBanco);
+        
+        if (val) {
+          ia += val.vol_ia || 0;
+          topdown += val.vol_topdown || 0;
+          comercial += val.vol_bottomup || 0;
+          supply += val.vol_supply || 0;
+          final += val.vol_final || 0;
+
+          const pmv = val.pmv_aplicado || val.pmv || 0;
+          r_ia += (val.vol_ia || 0) * pmv;
+          r_td += (val.vol_topdown || 0) * pmv;
+          r_com += (val.vol_bottomup || 0) * pmv;
+          r_sup += (val.vol_supply || 0) * pmv;
+          r_fin += (val.vol_final || 0) * pmv;
+        }
+      });
+
+      return {
+        name: mesBanco.mes_str || mesBanco, // Ex: 07/26 (M2)
+        IA: ia, TopDown: topdown, Comercial: comercial, Supply: supply, Final: final,
+        RevIA: r_ia, RevTopDown: r_td, RevComercial: r_com, RevSupply: r_sup, RevFinal: r_fin
+      };
+    });
+  }, [table, colunasMeses]);
+
+  return (
+    <div className="grid grid-cols-2 gap-6 mb-8 mt-6">
+      {/* GRÁFICO 1: VOLUME */}
+      <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+        <h3 className="text-lg font-black text-slate-800 mb-4 flex items-center gap-2">
+          <Package className="w-5 h-5 text-blue-600" />
+          Evolução de Volume (Etapas S&OP)
+        </h3>
+        <div className="h-[300px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={chartData} margin={{ top: 10, right: 10, left: 10, bottom: 5 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+              <XAxis dataKey="name" tick={{fill: '#64748b', fontSize: 12, fontWeight: 'bold'}} axisLine={false} tickLine={false} />
+              <YAxis tickFormatter={(v) => formatVolume(v)} tick={{fill: '#64748b', fontSize: 12}} axisLine={false} tickLine={false} />
+              <Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)'}} />
+              <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px', fontSize: '12px', fontWeight: 'bold' }} />
+              
+              <Bar dataKey="IA" name="Baseline IA" fill="#94a3b8" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="TopDown" name="Top-Down" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="Comercial" name="Comercial" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="Supply" name="Supply" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="Final" name="Consenso Final" fill="#10b981" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* GRÁFICO 2: FATURAMENTO */}
+      <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+        <h3 className="text-lg font-black text-slate-800 mb-4 flex items-center gap-2">
+          <Target className="w-5 h-5 text-emerald-600" />
+          Projeção de Faturamento (R$)
+        </h3>
+        <div className="h-[300px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={chartData} margin={{ top: 10, right: 10, left: 10, bottom: 5 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+              <XAxis dataKey="name" tick={{fill: '#64748b', fontSize: 12, fontWeight: 'bold'}} axisLine={false} tickLine={false} />
+              <YAxis tickFormatter={(v) => `R$ ${(v/1000000).toFixed(1)}M`} tick={{fill: '#64748b', fontSize: 12}} axisLine={false} tickLine={false} />
+              <Tooltip cursor={{fill: '#f8fafc'}} formatter={(val: number) => [formatMoeda(val), '']} contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)'}} />
+              <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px', fontSize: '12px', fontWeight: 'bold' }} />
+              
+              <Bar dataKey="RevIA" name="Receita IA" fill="#94a3b8" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="RevTopDown" name="Receita Top-Down" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="RevComercial" name="Receita Comercial" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="RevSupply" name="Receita Supply" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="RevFinal" name="Receita Final" fill="#10b981" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export default function GlobalDashboard() {
   const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);

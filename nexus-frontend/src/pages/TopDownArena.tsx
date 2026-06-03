@@ -121,6 +121,23 @@ export default function TopDownArena() {
   const [chartExpanded, setChartExpanded] = useState<string | null>(null);
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
+  
+  const chartDataFinal = useMemo(() => {
+    if (!chartExpanded || !dadosGraficoCache[chartExpanded]) return [];
+    
+    const dadosOriginais = dadosGraficoCache[chartExpanded];
+    const chaveSku = chartExpanded.split('|').pop(); // Pega o SKU do final da chave
+
+    return dadosOriginais.map((ponto: any) => {
+      // Verifica se existe edição para este SKU e este mês
+      const edicao = celulasEditadas[chartExpanded]?.[ponto.data_iso.replace('-01', '')];
+      
+      if (edicao !== undefined) {
+        return { ...ponto, TopDown: parseInt(edicao.novo_volume, 10) };
+      }
+      return ponto;
+    });
+  }, [chartExpanded, dadosGraficoCache, celulasEditadas]);
 
   const fetchData = useCallback(async () => {
     setIsLoading(true);
@@ -250,17 +267,19 @@ export default function TopDownArena() {
 
   const toggleChart = async (node: any) => {
     const chave = node.chave_matriz;
-    if (chartExpanded === chave) { setChartExpanded(null); return; }
-    setChartExpanded(chave);
-
-    if (!dadosGraficoCache[chave]) {
-      setLoadingGrafico(chave);
-      try {
-        const res = await axios.get('/api/v1/consensus/macro/grafico', { params: { chave_matriz: chave } });
-        setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
-      } catch (e) { console.error(e); }
-      finally { setLoadingGrafico(null); }
+    if (chartExpanded === chave) { 
+      setChartExpanded(null); 
+      return; 
     }
+    setChartExpanded(chave);
+    
+    // Sempre busca os dados atualizados ao abrir o gráfico
+    setLoadingGrafico(chave);
+    try {
+      const res = await axios.get('/api/v1/consensus/macro/grafico', { params: { chave_matriz: chave } });
+      setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
+    } catch (e) { console.error(e); }
+    finally { setLoadingGrafico(null); }
   };
 
   const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
@@ -343,7 +362,7 @@ export default function TopDownArena() {
               <div className="h-full flex items-center justify-center text-slate-500">Extraindo inteligência temporal...</div>
             ) : chartData ? (
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                <LineChart data={chartDataFinal} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
                   <XAxis dataKey="name" tick={{fill: '#94a3b8', fontSize: 12}} tickMargin={10} axisLine={false} />
                   <YAxis tickFormatter={(val) => formatVolume(val)} tick={{fill: '#94a3b8', fontSize: 12}} tickLine={false} axisLine={false} />
