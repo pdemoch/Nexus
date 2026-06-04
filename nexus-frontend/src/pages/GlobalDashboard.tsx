@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback, Fragment, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, Fragment } from 'react';
 import { 
   useReactTable, getCoreRowModel, flexRender, getExpandedRowModel, 
   getSortedRowModel, SortingState, ColumnDef 
@@ -11,7 +11,7 @@ import {
 import axios from 'axios';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
-// --- HELPERS DE FORMATAÇÃO (BLINDADOS CONTRA ERROS DE TIPO/NAN) ---
+// --- HELPERS DE FORMATAÇÃO E CÁLCULO ---
 const formatMoeda = (valor: any) => {
   const num = Number(valor);
   if (isNaN(num)) return 'R$ 0';
@@ -35,6 +35,17 @@ const VarBadge = ({ atual = 0, anterior = 0 }: { atual?: number, anterior?: numb
       {isPos ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />} {Math.abs(v).toFixed(1)}%
     </span>
   );
+};
+
+// BUSCA INTELIGENTE DE PREÇO MÉDIO: Garante que o faturamento calcule mesmo se o vol_final for 0
+const getPmvSeguro = (m: any) => {
+  if (!m) return 0;
+  if (m.vol_final > 0 && m.rec_final > 0) return m.rec_final / m.vol_final;
+  if (m.vol_sp > 0 && m.rec_sp > 0) return m.rec_sp / m.vol_sp;
+  if (m.vol_bu > 0 && m.rec_bu > 0) return m.rec_bu / m.vol_bu;
+  if (m.vol_td > 0 && m.rec_td > 0) return m.rec_td / m.vol_td;
+  if (m.vol_ia > 0 && m.rec_ia > 0) return m.rec_ia / m.vol_ia;
+  return 0;
 };
 
 const tooltipSorterRow = (item: any) => {
@@ -140,7 +151,7 @@ export default function GlobalDashboard() {
     return Array.from(new Set(dadosBrutos.map(d => d.mes_projetado))).sort() as string[];
   }, [dadosBrutos]);
 
-  // --- AGRUPAMENTO DA HIERARQUIA 3 NÍVEIS ---
+  // --- AGRUPAMENTO DA HIERARQUIA 3 NÍVEIS (Sem CGC, agrupando por Razão Social) ---
   const { arvoreDados, skuReferencias } = useMemo(() => {
     if (!dadosBrutos.length) return { arvoreDados: [], skuReferencias: { totaisBU: new Map(), basesSupply: new Map(), basesFinal: new Map() } };
     
@@ -154,6 +165,7 @@ export default function GlobalDashboard() {
     
     filtered.forEach(r => {
       const mes = r.mes_projetado;
+      const razaoLimpa = r.razaosocial || 'CLIENTE NÃO IDENTIFICADO';
       
       if (!totaisBU.has(r.sku)) totaisBU.set(r.sku, {});
       if (!basesSupply.has(r.sku)) basesSupply.set(r.sku, {});
@@ -173,9 +185,10 @@ export default function GlobalDashboard() {
       }
       const skuNode = cat.filhos.get(r.sku);
 
-      const clienteKey = `${r.sku}|${r.cgc}`;
+      // Agrupando estritamente pela Razão Social, removendo impacto de múltiplos CGCs
+      const clienteKey = `${r.sku}|${razaoLimpa}`;
       if (!skuNode.filhos.has(clienteKey)) {
-        skuNode.filhos.set(clienteKey, { id: clienteKey, chave_pai: r.sku, chave_matriz: r.cgc, nome: r.razaosocial, cgc: r.cgc, tipo: 'cliente', meses: new Map(), filhos: null });
+        skuNode.filhos.set(clienteKey, { id: clienteKey, chave_pai: r.sku, chave_matriz: razaoLimpa, nome: razaoLimpa, tipo: 'cliente', meses: new Map(), filhos: null });
       }
       const cliNode = skuNode.filhos.get(clienteKey);
 
@@ -215,7 +228,7 @@ export default function GlobalDashboard() {
           const mesData = rowOriginal.meses.find((m:any) => m.mes_banco === mesBanco);
           const baseSupply = mesData?.vol_sp || 0;
           const baseFinal = mesData?.vol_final > 0 ? mesData.vol_final : baseSupply;
-          return editado !== undefined ? Number(editado) : baseFinal; // Correção: Uso de Number em vez de parseInt em uma variável que já era number
+          return editado !== undefined ? Number(editado) : baseFinal;
       }
 
       if (rowOriginal.tipo === 'cliente') {
@@ -239,18 +252,23 @@ export default function GlobalDashboard() {
       return 0;
   }, [celulasEditadas, skuReferencias]);
 
+  // --- CÁLCULO DOS CARDS GERAIS ---
   const stats = useMemo(() => {
     let t_ia = 0, t_td = 0, t_bu = 0, t_sp = 0, t_final = 0, r_ia = 0, r_td = 0, r_bu = 0, r_sp = 0, r_final = 0;
     
     arvoreDados.forEach((cat: any) => {
       cat.meses.forEach((m: any) => { 
           t_ia += (m.vol_ia || 0); t_td += (m.vol_td || 0); t_bu += (m.vol_bu || 0); t_sp += (m.vol_sp || 0); 
-          r_ia += (m.rec_ia || 0); r_td += (m.rec_td || 0); r_bu += (m.rec_bu || 0); r_sp += (m.rec_sp || 0); 
+          const pmvSeguro = getPmvSeguro(m);
+          r_ia += (m.vol_ia || 0) * pmvSeguro; 
+          r_td += (m.vol_td || 0) * pmvSeguro; 
+          r_bu += (m.vol_bu || 0) * pmvSeguro; 
+          r_sp += (m.vol_sp || 0) * pmvSeguro; 
       });
       cat.subRows.forEach((sku: any) => {
         sku.meses.forEach((m: any) => {
             const liveVol = getDynamicRowVol(sku, m.mes_banco);
-            const pmv = m.vol_final > 0 ? (m.rec_final / m.vol_final) : 0;
+            const pmv = getPmvSeguro(m);
             t_final += liveVol; r_final += (liveVol * pmv);
         });
       });
@@ -265,6 +283,7 @@ export default function GlobalDashboard() {
     ];
   }, [arvoreDados, getDynamicRowVol]);
 
+  // --- CÁLCULO DOS GRÁFICOS E RODAPÉ (TOTALIZADOR) ---
   const chartDataBar = useMemo(() => {
     if (!mesesDisponiveis.length) return [];
     return mesesDisponiveis.map((mesBanco) => {
@@ -276,18 +295,22 @@ export default function GlobalDashboard() {
           const m = sku.meses.find((rm: any) => rm.mes_banco === mesBanco);
           if (m) {
             const liveVol = getDynamicRowVol(sku, mesBanco);
+            const pmv = getPmvSeguro(m);
+            
             ia += m.vol_ia || 0; topdown += m.vol_td || 0; comercial += m.vol_bu || 0; supply += m.vol_sp || 0;
             final += liveVol;
 
-            const pmv = (m.vol_final > 0) ? (m.rec_final / m.vol_final) : 0;
-            r_ia += m.rec_ia || 0; r_td += m.rec_td || 0; r_com += m.rec_bu || 0; r_sup += m.rec_sp || 0;
+            r_ia += (m.vol_ia || 0) * pmv; 
+            r_td += (m.vol_td || 0) * pmv; 
+            r_com += (m.vol_bu || 0) * pmv; 
+            r_sup += (m.vol_sp || 0) * pmv;
             r_fin += liveVol * pmv;
           }
         });
       });
 
       const name = mesBanco.split('-').reverse().slice(1).join('/');
-      return { name, IA: ia, TopDown: topdown, Comercial: comercial, Supply: supply, Final: final, RevIA: r_ia, RevTopDown: r_td, RevComercial: r_com, RevSupply: r_sup, RevFinal: r_fin };
+      return { name, mesBanco, IA: ia, TopDown: topdown, Comercial: comercial, Supply: supply, Final: final, RevIA: r_ia, RevTopDown: r_td, RevComercial: r_com, RevSupply: r_sup, RevFinal: r_fin };
     });
   }, [arvoreDados, mesesDisponiveis, getDynamicRowVol]);
 
@@ -336,7 +359,7 @@ export default function GlobalDashboard() {
         accessorFn: (row: any) => row.nome,
         cell: (info: any) => {
           const row = info.row;
-          const { tipo, nome, produto, cgc } = row.original;
+          const { tipo, nome, produto } = row.original;
           return (
             <div style={{ paddingLeft: `${row.depth * 28}px` }} className="flex items-center gap-3 py-2">
                {row.getCanExpand() ? (
@@ -356,7 +379,6 @@ export default function GlobalDashboard() {
                <div className="flex flex-col overflow-hidden">
                   <span className={`text-[13px] truncate ${tipo !== 'produto' ? 'font-black uppercase tracking-tighter' : 'font-bold text-slate-600'}`} title={nome}>{nome}</span>
                   {tipo === 'produto' && <span className="text-[10px] text-slate-400 font-black tracking-widest">{produto}</span>}
-                  {tipo === 'cliente' && <span className="text-[10px] text-indigo-400 font-black tracking-widest">{cgc}</span>}
                </div>
             </div>
           )
@@ -373,23 +395,30 @@ export default function GlobalDashboard() {
           const row = info.row.original;
           const dadosMes = row.meses.find((rm: any) => rm.mes_banco === mBanco);
           const valorInteiro = getDynamicRowVol(row, mBanco);
-          const pmv = (dadosMes?.vol_final > 0) ? (dadosMes.rec_final / dadosMes.vol_final) : 0;
+          const pmv = getPmvSeguro(dadosMes);
           const receitaExibida = valorInteiro * pmv;
 
           return (
-            <div className="flex flex-col items-center justify-center min-w-[120px]">
-              <div className="flex items-center gap-2">
-                 <div className="w-24">
-                    {row.tipo === 'produto' ? (
-                       <SmartInput value={valorInteiro} disabled={isLocked} onChange={(val) => handleEditCell(row.produto, mBanco, val)} />
-                    ) : (
-                       <div className={`font-black text-sm text-center ${row.tipo === 'categoria' ? 'text-slate-900' : 'text-indigo-600'}`}>
-                          {formatVolume(valorInteiro)}
-                       </div>
-                    )}
-                 </div>
+            <div className="flex flex-col items-center justify-center min-w-[140px]">
+              <div className="w-24 mb-1">
+                 {row.tipo === 'produto' ? (
+                    <SmartInput value={valorInteiro} disabled={isLocked} onChange={(val) => handleEditCell(row.produto, mBanco, val)} />
+                 ) : (
+                    <div className={`font-black text-sm text-center ${row.tipo === 'categoria' ? 'text-slate-900' : 'text-indigo-600'}`}>
+                       {formatVolume(valorInteiro)}
+                    </div>
+                 )}
               </div>
-              <div className="text-[10px] font-bold text-emerald-600 mt-0.5">{formatMoeda(receitaExibida)}</div>
+              
+              {/* Caixinhas Embasadoras IA e Top-Down */}
+              {row.tipo !== 'cliente' && (
+                 <div className="flex items-center gap-1.5 mb-1.5">
+                    <span className="text-[9px] font-bold bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded shadow-sm" title="Sinal IA">IA: {formatVolume(dadosMes?.vol_ia)}</span>
+                    <span className="text-[9px] font-bold bg-indigo-50 text-indigo-500 px-1.5 py-0.5 rounded shadow-sm" title="Meta Top-Down">TD: {formatVolume(dadosMes?.vol_td)}</span>
+                 </div>
+              )}
+
+              <div className="text-[10px] font-bold text-emerald-600">{formatMoeda(receitaExibida)}</div>
             </div>
           );
         }
@@ -472,9 +501,7 @@ export default function GlobalDashboard() {
                 <BarChart data={chartDataBar} margin={{ top: 10, right: 10, left: 10, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                   <XAxis dataKey="name" tick={{fill: '#64748b', fontSize: 12, fontWeight: 'bold'}} axisLine={false} tickLine={false} />
-                  {/* Correção tickFormatter */}
                   <YAxis tickFormatter={(v) => formatVolume(v)} tick={{fill: '#64748b', fontSize: 12}} axisLine={false} tickLine={false} />
-                  {/* Correção formatter React/Recharts */}
                   <Tooltip cursor={{fill: '#f8fafc'}} formatter={(value: any, name: any) => [formatVolume(value), name]} contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)'}} />
                   <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px', fontSize: '12px', fontWeight: 'bold' }} />
                   <Bar dataKey="IA" name="Baseline IA" fill="#94a3b8" radius={[4, 4, 0, 0]} />
@@ -492,9 +519,7 @@ export default function GlobalDashboard() {
                 <BarChart data={chartDataBar} margin={{ top: 10, right: 10, left: 10, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                   <XAxis dataKey="name" tick={{fill: '#64748b', fontSize: 12, fontWeight: 'bold'}} axisLine={false} tickLine={false} />
-                  {/* Correção tickFormatter para evitar quebra do .toFixed */}
                   <YAxis tickFormatter={(v) => `R$ ${(Number(v)/1000000).toFixed(1)}M`} tick={{fill: '#64748b', fontSize: 12}} axisLine={false} tickLine={false} />
-                  {/* Correção formatter React/Recharts */}
                   <Tooltip cursor={{fill: '#f8fafc'}} formatter={(value: any, name: any) => [formatMoeda(value), name]} contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)'}} />
                   <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px', fontSize: '12px', fontWeight: 'bold' }} />
                   <Bar dataKey="RevIA" name="Receita IA" fill="#94a3b8" radius={[4, 4, 0, 0]} />
@@ -513,14 +538,14 @@ export default function GlobalDashboard() {
         </div>
 
         {/* --- TABELA PRINCIPAL --- */}
-        <div className="bg-white rounded-[40px] shadow-sm border border-slate-100 overflow-hidden">
-           <div className="overflow-x-auto">
-             <table className="w-full text-left border-collapse">
-               <thead>
+        <div className="bg-white rounded-[40px] shadow-sm border border-slate-100 overflow-hidden relative">
+           <div className="overflow-x-auto relative max-h-[800px] custom-scrollbar">
+             <table className="w-full text-left border-collapse relative">
+               <thead className="sticky top-0 z-20 shadow-sm">
                  {table.getHeaderGroups().map(hg => (
                    <tr key={hg.id}>
                      {hg.headers.map((h, idx) => (
-                       <th key={h.id} className={`bg-slate-900 p-6 ${idx === 0 ? 'w-[450px]' : 'border-l border-slate-800/50'}`}>
+                       <th key={h.id} className={`bg-slate-900 p-6 ${idx === 0 ? 'min-w-[450px]' : 'border-l border-slate-800/50'}`}>
                           <div className={`flex flex-col ${idx === 0 ? 'items-start' : 'items-center justify-center'}`}>
                              <span className="text-white font-black text-sm tracking-widest">{flexRender(h.column.columnDef.header, h.getContext())}</span>
                              {idx > 0 && <span className="text-indigo-400 text-[10px] font-bold tracking-widest uppercase mt-1">S&OP Forecast</span>}
@@ -540,7 +565,7 @@ export default function GlobalDashboard() {
                          </td>
                        ))}
                      </tr>
-                     {/* --- EXPANSAO DO GRÁFICO (LINHAS) --- */}
+                     {/* --- EXPANSAO DO GRÁFICO DE LINHAS (100% Dinâmico) --- */}
                      {chartExpanded === row.original.chave_matriz && (
                        <tr>
                          <td colSpan={mesesDisponiveis.length + 1} className="p-0 border-b-4 border-indigo-500">
@@ -549,12 +574,18 @@ export default function GlobalDashboard() {
                                   <div className="h-[300px] w-full">
                                      {loadingGrafico === row.original.chave_matriz ? <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-4"><Loader2 className="animate-spin w-8 h-8" /></div> : (
                                        <ResponsiveContainer width="100%" height="100%">
-                                          <LineChart data={dadosGraficoCache[row.original.chave_matriz] || []} margin={{ top: 10, right: 30, left: 10, bottom: 0 }}>
+                                          <LineChart 
+                                             data={(dadosGraficoCache[row.original.chave_matriz] || []).map((pt: any) => {
+                                                // Mapeamento em tempo real das suas edições para o gráfico de linhas
+                                                const mesProj = mesesDisponiveis.find((m: string) => m.split('-').reverse().slice(1).join('/') === pt.name || m === pt.name);
+                                                if (mesProj) return { ...pt, Final: getDynamicRowVol(row.original, mesProj) };
+                                                return pt;
+                                             })} 
+                                             margin={{ top: 10, right: 30, left: 10, bottom: 0 }}
+                                          >
                                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" opacity={0.1} />
                                              <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} dy={10} />
-                                             {/* Correção tickFormatter */}
                                              <YAxis tick={{fontSize: 10, fontWeight: 900, fill: '#94a3b8'}} axisLine={false} tickLine={false} tickFormatter={(v) => `${(Number(v)/1000).toFixed(0)}k`} />
-                                             {/* Correção Formatter Tooltip Recharts */}
                                              <Tooltip contentStyle={{backgroundColor: '#fff', border: 'none', borderRadius: '20px', boxShadow: '0 20px 40px rgba(0,0,0,0.1)', fontWeight: 900}} formatter={(value: any, name: any) => [formatVolume(value), name]} itemSorter={tooltipSorterRow} />
                                              <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: 'bold', color: '#fff'}} />
                                              <Line type="monotone" dataKey="Realizado" stroke="#94a3b8" strokeWidth={3} dot={{r:4, strokeWidth:2}} connectNulls={false} />
@@ -577,6 +608,35 @@ export default function GlobalDashboard() {
                    </Fragment>
                  ))}
                </tbody>
+               
+               {/* --- RODAPÉ TOTALIZADOR (Dinâmico) --- */}
+               {arvoreDados.length > 0 && (
+                 <tfoot className="bg-slate-900 sticky bottom-0 z-20 shadow-[0_-10px_40px_rgba(0,0,0,0.1)] border-t-4 border-indigo-500">
+                   <tr>
+                     <td className="px-6 py-5">
+                       <div className="flex flex-col">
+                         <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Total Consolidação</span>
+                         <span className="font-bold text-sm text-white">SUMÁRIO GERENCIAL</span>
+                       </div>
+                     </td>
+                     {mesesDisponiveis.map((mBanco, idx) => {
+                       const mesData = chartDataBar.find(c => c.mesBanco === mBanco);
+                       return (
+                         <td key={idx} className="px-6 py-5 border-l border-slate-800/50 text-center">
+                           <div className="flex flex-col items-center">
+                             <span className="font-black text-white text-base">
+                               {formatVolume(mesData?.Final || 0)} <span className="text-[10px] text-slate-400 font-medium ml-1">CX</span>
+                             </span>
+                             <span className="font-bold text-emerald-400 text-xs tracking-tight mt-1 bg-emerald-400/10 px-2 py-0.5 rounded">
+                               {formatMoeda(mesData?.RevFinal || 0)}
+                             </span>
+                           </div>
+                         </td>
+                       )
+                     })}
+                   </tr>
+                 </tfoot>
+               )}
              </table>
            </div>
         </div>
