@@ -151,7 +151,7 @@ export default function GlobalDashboard() {
     return Array.from(new Set(dadosBrutos.map(d => d.mes_projetado))).sort() as string[];
   }, [dadosBrutos]);
 
-  // --- AGRUPAMENTO DA HIERARQUIA 3 NÍVEIS (Sem CGC, agrupando por Razão Social) ---
+  // --- AGRUPAMENTO DA HIERARQUIA 3 NÍVEIS ---
   const { arvoreDados, skuReferencias } = useMemo(() => {
     if (!dadosBrutos.length) return { arvoreDados: [], skuReferencias: { totaisBU: new Map(), basesSupply: new Map(), basesFinal: new Map() } };
     
@@ -185,7 +185,6 @@ export default function GlobalDashboard() {
       }
       const skuNode = cat.filhos.get(r.sku);
 
-      // Agrupando estritamente pela Razão Social, removendo impacto de múltiplos CGCs
       const clienteKey = `${r.sku}|${razaoLimpa}`;
       if (!skuNode.filhos.has(clienteKey)) {
         skuNode.filhos.set(clienteKey, { id: clienteKey, chave_pai: r.sku, chave_matriz: razaoLimpa, nome: razaoLimpa, tipo: 'cliente', meses: new Map(), filhos: null });
@@ -194,7 +193,10 @@ export default function GlobalDashboard() {
 
       [cat, skuNode, cliNode].forEach(node => {
         if (!node.meses.has(mes)) {
-            node.meses.set(mes, { mes_banco: mes, vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, rec_final:0 });
+            node.meses.set(mes, { 
+              mes_banco: mes, vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, 
+              rec_ia:0, rec_td:0, rec_bu:0, rec_sp:0, rec_final:0 // <--- CORREÇÃO BUG DO PMV ZERO 
+            });
         }
         const mNode = node.meses.get(mes);
         mNode.vol_ia += (r.vol_ia || 0);
@@ -202,6 +204,11 @@ export default function GlobalDashboard() {
         mNode.vol_bu += (r.vol_bottomup || 0);
         mNode.vol_sp += (r.vol_supply || 0);
         mNode.vol_final += (r.vol_final || 0);
+        
+        mNode.rec_ia += (r.rec_ia || 0);
+        mNode.rec_td += (r.rec_td || 0);
+        mNode.rec_bu += (r.rec_bu || 0);
+        mNode.rec_sp += (r.rec_supply || 0);
         mNode.rec_final += (r.rec_final || 0);
       });
     });
@@ -283,7 +290,7 @@ export default function GlobalDashboard() {
     ];
   }, [arvoreDados, getDynamicRowVol]);
 
-  // --- CÁLCULO DOS GRÁFICOS E RODAPÉ (TOTALIZADOR) ---
+  // --- CÁLCULO DOS GRÁFICOS E RODAPÉ (TOTALIZADOR DINÂMICO) ---
   const chartDataBar = useMemo(() => {
     if (!mesesDisponiveis.length) return [];
     return mesesDisponiveis.map((mesBanco) => {
@@ -576,8 +583,8 @@ export default function GlobalDashboard() {
                                        <ResponsiveContainer width="100%" height="100%">
                                           <LineChart 
                                              data={(dadosGraficoCache[row.original.chave_matriz] || []).map((pt: any) => {
-                                                // Mapeamento em tempo real das suas edições para o gráfico de linhas
-                                                const mesProj = mesesDisponiveis.find((m: string) => m.split('-').reverse().slice(1).join('/') === pt.name || m === pt.name);
+                                                // O pulo do gato: Cruzamento via data_iso universal
+                                                const mesProj = mesesDisponiveis.find((m: string) => m === pt.data_iso);
                                                 if (mesProj) return { ...pt, Final: getDynamicRowVol(row.original, mesProj) };
                                                 return pt;
                                              })} 
