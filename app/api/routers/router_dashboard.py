@@ -355,7 +355,7 @@ async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria',
 
 @router.post("/aprovar")
 async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
-    """Aprova o plano S&OP e aplica o Rateio (Top-Down) aos ajustes realizados no dashboard."""
+    """Aprova o plano S&OP e aplica o Rateio (Top-Down) aos clientes na IBP Granular."""
     if usuario.get('funcao') not in ['Administrador', 'Diretoria', 'C-Level']:
         raise HTTPException(status_code=403, detail="Apenas Administradores e C-Level podem publicar o Plano Final.")
 
@@ -364,57 +364,61 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
         
         for ajuste in payload.ajustes:
             data_alvo = parse_date_safe(ajuste.mes_projetado)
-            partes = ajuste.chave.split('|')
             
-            query = get_truth_query(db, ciclo, data_alvo, data_alvo)
-
-            if ajuste.nivel == 'cliente':
-                query = query.filter(FatoIbpGranular.sku == partes[1], DimCliente.razaosocial == partes[2])
-            else:
-                query = query.filter(FatoIbpGranular.sku == partes[1])
+            # A chave que vem do frontend agora é exatamente o SKU puro. Sem split.
+            sku = ajuste.chave 
+            
+            query = get_truth_query(db, ciclo, data_alvo, data_alvo).filter(FatoIbpGranular.sku == sku)
 
             linhas = query.all()
             if not linhas: continue
 
             total_base_antigo = sum([float(l.vol_final or 0) for l in linhas])
-            total_base = total_base_antigo
+            
+            # MOTOR DE RATEIO INTELIGENTE: Proporcional ao Comercial ou Supply
+            base_total_bu = sum([float(l.vol_bottomup or 0) for l in linhas])
+            base_total_sp = sum([float(l.vol_supply or 0) for l in linhas])
+            
+            # Se não tem histórico Comercial, usamos o peso do Supply como fallback
+            usar_base_sp = base_total_bu <= 0
+            total_base = base_total_sp if usar_base_sp else base_total_bu
             
             soma_dist = 0
             volume_alvo = int(ajuste.novo_volume)
+            total_clientes = len(linhas)
             
             for i, l in enumerate(linhas):
-                if i == len(linhas) - 1:
+                # O último cliente da lista "absorve" a dízima matemática para não perder caixas
+                if i == total_clientes - 1:
                     rateado = volume_alvo - soma_dist 
                 else:
-                    peso = float(l.vol_final or 0) / total_base if total_base > 0 else 1.0 / len(linhas)
+                    vol_referencia = float(l.vol_supply or 0) if usar_base_sp else float(l.vol_bottomup or 0)
+                    peso = vol_referencia / total_base if total_base > 0 else 1.0 / total_clientes
                     rateado = int(round(volume_alvo * peso))
                     soma_dist += rateado
                 
+                # Grava a Demanda Irrestrita e promove à Meta Oficial da empresa
                 l.vol_final = rateado
                 l.vol_meta = rateado
 
+            # Log de Auditoria
             nome_user = usuario.get('nome', usuario.get('email', 'Desconhecido'))
-            sku_log = partes[1] if len(partes) > 1 else "MULTIPLOS_SKUS"
-            cliente_log = partes[2] if len(partes) > 2 else "TODOS_OS_CLIENTES"
-
             registrar_log_auditoria(
                 db=db, ciclo=ciclo, origem="S&OP Global (Dashboard Final)",
-                usuario=nome_user, sku=sku_log, cliente=cliente_log,
-                mes=data_alvo, v_antigo=int(total_base_antigo), v_novo=ajuste.novo_volume
+                usuario=nome_user, sku=sku, cliente="TODOS_OS_CLIENTES",
+                mes=data_alvo, v_antigo=int(total_base_antigo), v_novo=volume_alvo
             )
 
+        # FECHAMENTO DO CICLO S&OP
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
         if not registro:
             db.add(ControleCiclo(ciclo_sop=ciclo, origem='S&OP-Final', status='Fechado'))
         else:
             registro.status = 'Fechado'
 
-        db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo).update({
-            FatoIbpGranular.vol_meta: FatoIbpGranular.vol_final
-        }, synchronize_session=False)
-
         db.commit()
-        return {"status": "success"}
+        return {"status": "success", "message": "S&OP Consolidado e Metas travadas com sucesso!"}
+    
     except Exception as e:
         db.rollback()
         raise HTTPException(500, repr(e))
