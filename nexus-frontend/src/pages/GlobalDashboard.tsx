@@ -55,10 +55,14 @@ const tooltipSorterRow = (item: any) => {
 
 // --- COMPONENTES AUXILIARES ---
 const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (val: number) => void, disabled: boolean }) => {
-  const [localVal, setLocalVal] = useState(value ? formatVolume(value) : '0');
+  const [localVal, setLocalVal] = useState((value !== undefined && value !== null) ? formatVolume(value) : '0');
   const [isFocused, setIsFocused] = useState(false);
 
-  useEffect(() => { if (!isFocused) setLocalVal(value ? formatVolume(value) : '0'); }, [value, isFocused]);
+  useEffect(() => { 
+    if (!isFocused) {
+        setLocalVal((value !== undefined && value !== null) ? formatVolume(value) : '0'); 
+    }
+  }, [value, isFocused]);
 
   const handleFocus = () => { setIsFocused(true); setLocalVal(localVal.replace(/\./g, '')); };
   const handleBlur = () => { 
@@ -233,8 +237,8 @@ export default function GlobalDashboard() {
       if (rowOriginal.tipo === 'produto') {
           const editado = celulasEditadas[rowOriginal.produto]?.[mesBanco];
           const mesData = rowOriginal.meses.find((m:any) => m.mes_banco === mesBanco);
-          const baseSupply = mesData?.vol_sp || 0;
-          const baseFinal = mesData?.vol_final > 0 ? mesData.vol_final : baseSupply;
+          const dbValue = mesData?.vol_final;
+          const baseFinal = (dbValue !== undefined && dbValue !== null) ? dbValue : (mesData?.vol_sp || 0);
           return editado !== undefined ? Number(editado) : baseFinal;
       }
 
