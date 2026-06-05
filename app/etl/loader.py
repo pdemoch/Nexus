@@ -157,10 +157,11 @@ class NexusLoader:
                     pl.col("share_cliente").fill_null(1.0)
                 ])
                 
+                # AQUI FOI REMOVIDO O FILTRO ( > 0 ) PARA GARANTIR QUE ZEROS SEJAM GRAVADOS
                 df_final = df_join.with_columns(
                     (pl.col("vol_ia_global") * pl.col("share_cliente")).round(0).cast(pl.Int32).alias("vol_ia_atomico"),
                     pl.col("pmv_aplicado").alias("pmv_ref")
-                ).filter(pl.col("vol_ia_atomico") > 0)
+                )
 
             total_ibp = len(df_final)
             log_callback(f"      • Iniciando injeção Estática S&OP (Chunks de 10k) - Total previsto: {total_ibp} linhas...")
@@ -199,16 +200,12 @@ class NexusLoader:
             log_callback(f"❌ [LOAD] Erro Crítico no Rateio: {str(e)}")
             raise e
 
-    # =========================================================================
-    # NOVA FUNÇÃO: ATUALIZAÇÃO RETROATIVA DE HIERARQUIA NO BANCO
-    # =========================================================================
     def atualizar_hierarquia_historica(self, lf_clientes: pl.LazyFrame, log_callback=print) -> None:
         from app.core.database import SessionLocal
         
         log_callback("      • Sincronizando Histórico de Vendas com a Hierarquia Atual (Retroativo)...")
         db = SessionLocal()
         try:
-            # Pega as colunas vitais e converte para RAM
             df_clientes = lf_clientes.select([
                 "cgc", "vendedor_nome", "gerente_nome", "supervisor_nome"
             ]).unique(subset=["cgc"]).collect()
@@ -217,7 +214,6 @@ class NexusLoader:
                 log_callback("⚠️ [LOADER] Cadastro de clientes vazio. Pulando sincronização histórica.")
                 return
 
-            # Cria temp table
             query_temp = text("""
                 CREATE TEMP TABLE temp_clientes_hierarquia (
                     cgc VARCHAR(255),
@@ -228,20 +224,14 @@ class NexusLoader:
             """)
             db.execute(query_temp)
 
-            # Prepara os dicionários para inserção rápida
             dados_clientes = df_clientes.to_dicts()
             
-            # Insere em massa na tabela temporária usando os parâmetros da engine SQLAlchemy
             query_insert = text("""
                 INSERT INTO temp_clientes_hierarquia (cgc, vendedor_nome, gerente_nome, supervisor_nome)
                 VALUES (:cgc, :vendedor_nome, :gerente_nome, :supervisor_nome)
             """)
-            
             db.execute(query_insert, dados_clientes)
 
-            # O UPDATE MAJESTOSO NA FATO VENDAS (Apenas onde houver divergência)
-            # Como a hierarquia na fato_vendas do seu modelo atual aparentemente mora na fato_vendas
-            # ou deve ser atualizada em cascata através de joins.
             query_update = text("""
                 WITH hierarquia_atualizada AS (
                     UPDATE fato_vendas f
@@ -253,12 +243,9 @@ class NexusLoader:
                 )
                 SELECT count(*) FROM hierarquia_atualizada;
             """)
-            
-            # Executamos o update nas vendas (caso possua a coluna lá como denormalizada)
             res = db.execute(query_update)
             linhas_vendas_atualizadas = res.scalar() or 0
 
-            # Atualiza também a Dimensão Clientes para garantir que o espelho está 100% igual
             query_update_dim = text("""
                 WITH dim_atualizada AS (
                     UPDATE dim_clientes d

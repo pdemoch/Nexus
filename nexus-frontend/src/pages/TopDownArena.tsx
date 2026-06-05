@@ -12,18 +12,30 @@ import {
 // =====================================================================
 // HELPERS DE FORMATAÇÃO
 // =====================================================================
-const formatVolume = (val: number) => new Intl.NumberFormat('pt-BR').format(Math.round(val || 0));
-const formatMoeda = (val: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
+const formatVolume = (val: number) => {
+  const num = Number(val);
+  if (isNaN(num)) return '0';
+  return new Intl.NumberFormat('pt-BR').format(Math.round(num));
+};
+
+const formatMoeda = (val: number) => {
+  const num = Number(val);
+  if (isNaN(num)) return 'R$ 0,00';
+  return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(num);
+};
 
 // =====================================================================
-// COMPONENTE: SMART INPUT (Sem Perda de Foco)
+// COMPONENTE: SMART INPUT (Blindado contra Zero/Falsy)
 // =====================================================================
 const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (val: number) => void, disabled: boolean }) => {
-  const [localVal, setLocalVal] = useState(value ? formatVolume(value) : '0');
+  // CORREÇÃO 1: Trata o 0 explicitamente como valor válido
+  const [localVal, setLocalVal] = useState((value !== undefined && value !== null) ? formatVolume(value) : '0');
   const [isFocused, setIsFocused] = useState(false);
 
   useEffect(() => {
-    if (!isFocused) setLocalVal(value ? formatVolume(value) : '0');
+    if (!isFocused) {
+      setLocalVal((value !== undefined && value !== null) ? formatVolume(value) : '0');
+    }
   }, [value, isFocused]);
 
   const handleFocus = () => {
@@ -33,7 +45,9 @@ const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (v
 
   const handleBlur = () => {
     setIsFocused(false);
-    const num = parseInt(localVal.replace(/\D/g, ''), 10) || 0;
+    // CORREÇÃO 2: Evita o || 0 que poderia anular zeros legítimos se mal interpretado
+    const parsed = parseInt(localVal.replace(/\D/g, ''), 10);
+    const num = isNaN(parsed) ? 0 : parsed;
     setLocalVal(formatVolume(num));
     onChange(num);
   };
@@ -52,7 +66,7 @@ const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (v
       onKeyDown={handleKeyDown}
       onChange={(e) => setLocalVal(e.target.value)}
       className={`w-full bg-transparent border-none text-right focus:outline-none focus:ring-1 focus:ring-blue-500 rounded px-1
-        ${disabled ? 'text-slate-400 font-medium' : 'text-blue-700 font-bold bg-blue-50/50'}`}
+        ${disabled ? 'text-slate-400 font-medium cursor-not-allowed' : 'text-blue-700 font-bold bg-blue-50/50'}`}
     />
   );
 };
@@ -126,14 +140,12 @@ export default function TopDownArena() {
     if (!chartExpanded || !dadosGraficoCache[chartExpanded]) return [];
     
     const dadosOriginais = dadosGraficoCache[chartExpanded];
-    const chaveSku = chartExpanded.split('|').pop(); // Pega o SKU do final da chave
 
     return dadosOriginais.map((ponto: any) => {
-      // Verifica se existe edição para este SKU e este mês
+      // CORREÇÃO 3: Resgate da edição garantindo que o 0 vá para o gráfico
       const edicao = celulasEditadas[chartExpanded]?.[ponto.data_iso.replace('-01', '')];
-      
       if (edicao !== undefined) {
-        return { ...ponto, TopDown: parseInt(edicao.novo_volume, 10) };
+        return { ...ponto, TopDown: Number(edicao.novo_volume) };
       }
       return ponto;
     });
@@ -173,9 +185,12 @@ export default function TopDownArena() {
   const getDynamicVol = useCallback((row: any, mesBanco: string): number => {
     if (row.tipo === 'produto') {
       const edicao = celulasEditadas[row.chave_matriz]?.[mesBanco];
-      if (edicao !== undefined) return parseInt(edicao.novo_volume, 10) || 0;
+      if (edicao !== undefined) {
+          const num = Number(edicao.novo_volume);
+          return isNaN(num) ? 0 : num;
+      }
       const m = row.meses?.find((x: any) => x.mes_banco === mesBanco);
-      return m?.vol_ajustado || 0;
+      return (m?.vol_ajustado !== undefined && m?.vol_ajustado !== null) ? Number(m.vol_ajustado) : 0;
     }
     return (row.subRows || []).reduce((acc: number, child: any) => acc + getDynamicVol(child, mesBanco), 0);
   }, [celulasEditadas]);
@@ -197,7 +212,7 @@ export default function TopDownArena() {
           Object.entries(meses).map(([mes_projetado, val]: any) => ({
             sku: chave.split('|').pop(),
             mes_projetado,
-            novo_volume: parseInt(val.novo_volume, 10)
+            novo_volume: Number(val.novo_volume)
           }))
         )
       };
@@ -217,7 +232,7 @@ export default function TopDownArena() {
           Object.entries(meses).map(([mes_projetado, val]: any) => ({
             sku: chave.split('|').pop(),
             mes_projetado,
-            novo_volume: parseInt(val.novo_volume, 10)
+            novo_volume: Number(val.novo_volume)
           }))
         )
       };
@@ -239,7 +254,7 @@ export default function TopDownArena() {
         seg.subRows?.forEach((prod: any) => {
           prod.meses.forEach((m: any) => {
              const edicao = celulasEditadas[prod.chave_matriz]?.[m.mes_banco];
-             const volFinal = edicao !== undefined ? parseInt(edicao.novo_volume) : (m.vol_ajustado || 0);
+             const volFinal = edicao !== undefined ? Number(edicao.novo_volume) : (m.vol_ajustado || 0);
              const rec = volFinal * (m.pmv || 0);
              csv += `"${cat.nome}","${seg.nome}","${prod.produto}","${prod.nome}","${m.mes_str}",${m.vol_ia},${volFinal},${m.pmv},${rec}\n`;
           });
@@ -273,7 +288,6 @@ export default function TopDownArena() {
     }
     setChartExpanded(chave);
     
-    // Sempre busca os dados atualizados ao abrir o gráfico
     setLoadingGrafico(chave);
     try {
       const res = await axios.get('/api/v1/consensus/macro/grafico', { params: { chave_matriz: chave } });
