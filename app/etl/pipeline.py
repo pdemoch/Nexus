@@ -2,7 +2,7 @@ import traceback
 import time
 import os
 import polars as pl
-import asyncio # <--- IMPORTANTE: Adicionar isto
+import asyncio
 from datetime import date
 from dateutil.relativedelta import relativedelta
 from sqlalchemy import func
@@ -35,19 +35,28 @@ async def executar_pipeline_nexus():
         # FASE 1: O CÉREBRO DA CARGA INCREMENTAL (DELTA LOAD)
         # =================================================================
         extractor = GobiExtractor()
+        # Nota: Data de início pode ser parametrizada se desejar alterar a profundidade do recálculo
         data_inicio = date(2026, 4, 1)
 
         log(f"📥 [EXTRACT] Extraindo dados do Gobi ERP ({data_inicio} a {data_fim})...")
         lf_150, lf_188, df_seg = await extractor.extrair_tudo(data_inicio, data_fim)
         
-        # CORREÇÃO: LazyFrame não tem .is_empty(). Verificamos se ele nasceu sem colunas.
+        # BLINDAGEM DO POLARS: Verifica se os arquivos nasceram vazios (sem colunas)
         if len(lf_150.columns) == 0 or len(lf_188.columns) == 0:
             log("⚠️ [SYSTEM] Arquivos de Vendas ou Faturamento vazios. O pipeline será encerrado por segurança.")
             AppState.pipeline_rodando = False
             return
 
         transformer = NexusTransformer()
-        lf_silver = transformer.processar_camada_silver(lf_150, lf_188, df_seg)
+        
+        # DESEMPACOTAMENTO CORRETO: Separa o fluxo de Vendas (Silver) do fluxo de Clientes
+        lf_silver, lf_clientes = transformer.processar_camada_silver(lf_150, lf_188, df_seg)
+
+        # Proteção extra caso o ficheiro Segmentos.xlsx não seja encontrado
+        if lf_silver is None or lf_clientes is None:
+            log("⚠️ [SYSTEM] Arquivo Segmentos.xlsx ausente ou inválido. Abortando pipeline.")
+            AppState.pipeline_rodando = False
+            return
 
         loader = NexusLoader()
         
@@ -57,11 +66,11 @@ async def executar_pipeline_nexus():
         log(f"📊 [AUDITORIA] ETL Concluído: A camada Silver resultou em {len(df_silver_coletado)} linhas consolidadas prontas para injeção.")
 
         # BLINDAGEM 2: Mandar o Upsert no Banco de Dados para thread secundária
-        log("   -> Iniciando injeção no Banco de Dados...")
+        log("   -> Iniciando injeção no Banco de Dados (Upsert Atômico)...")
         await asyncio.to_thread(loader.executar_carga_silver, df_silver_coletado, log_callback=log)
         
-        # BLINDAGEM 3: Sincronia Histórica para thread secundária
-        await asyncio.to_thread(loader.atualizar_hierarquia_historica, lf_silver, log_callback=log)
+        # BLINDAGEM 3: Sincronia Histórica para thread secundária (Recebendo apenas os Clientes)
+        await asyncio.to_thread(loader.atualizar_hierarquia_historica, lf_clientes, log_callback=log)
 
         # =================================================================
         # GESTÃO DE CICLOS
@@ -86,14 +95,14 @@ async def executar_pipeline_nexus():
             t0 = time.time()
             log("🧠 [ML] Novo Mês Detectado! Acordando a IA (Thread Secundária)...")
             
-            # BLINDAGEM 4: O CORAÇÃO DO PROBLEMA (Mandar a IA para thread secundária)
+            # BLINDAGEM 4: Motor Ensemble na Thread Secundária
             df_forecast = await asyncio.to_thread(forecaster.executar_arena, log_callback=log)
             log(f"✅ [ML] Previsões S&OP concluídas em {time.time() - t0:.2f}s.")
 
             t0 = time.time()
             log("⏳ [LOAD] Rateando e injetando as metas S&OP no Banco...")
             
-            # BLINDAGEM 5: Carga do S&OP no Banco
+            # BLINDAGEM 5: Rateio pelo Método do Maior Resto e Carga na Thread Secundária
             await asyncio.to_thread(loader.executar_carga_forecast, df_forecast, ciclo_atual, log_callback=log) 
             log(f"✅ [LOAD] Metas atomizadas com sucesso em {time.time() - t0:.2f}s.")
 

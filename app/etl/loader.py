@@ -105,7 +105,7 @@ class NexusLoader:
     def executar_carga_forecast(self, df_forecast: pl.DataFrame, ciclo_alvo: str, log_callback=print):
         from app.core.database import SessionLocal
         from app.models.domain_models import FatoIbpGranular
-        import numpy as np
+        from sqlalchemy import text
 
         if df_forecast.is_empty():
             log_callback("❌ [LOAD] O DataFrame do Forecast está vazio.")
@@ -116,7 +116,22 @@ class NexusLoader:
             ciclo_atual = ciclo_alvo 
             log_callback(f"   -> [LOAD] Iniciando construção da matriz FatoIBP para o ciclo {ciclo_atual}...")
             
-            # BLINDAGEM DO RATEIO: Exclui INATIVOS usando o mesmo padrão do shared_ibp
+            # 1. GRAVAÇÃO DA INTELIGÊNCIA NA DIMENSÃO DE PRODUTOS
+            # Para que a Diretoria possa ver a assertividade da IA no histórico!
+            log_callback("      • Registrando performance e vencedores do Ensemble no Banco...")
+            df_modelos = df_forecast.group_by("produto").agg([
+                pl.col("modelo_vencedor").first(),
+                pl.col("acuracia").first()
+            ]).to_dicts()
+            
+            for row in df_modelos:
+                db.execute(text("""
+                    UPDATE dim_produtos 
+                    SET modelo_vencedor = :mod, acuracia_ia = :acc 
+                    WHERE sku = :sku
+                """), {"mod": row["modelo_vencedor"], "acc": row["acuracia"], "sku": row["produto"]})
+
+            # 2. BUSCA DO SHARE HISTÓRICO ATIVO
             query_share = text("""
                 WITH cte_base AS (
                     SELECT v.sku, v.cgc, c.vendedor_nome, SUM(v.qt_pedido) as total_cliente
@@ -138,7 +153,9 @@ class NexusLoader:
             res_share = db.execute(query_share).fetchall()
             df_share = pl.DataFrame([dict(r._mapping) for r in res_share]) if res_share else pl.DataFrame()
 
-            log_callback("      • Aplicando Rateio Atômico (Down-scaling) nos dados da IA...")
+            log_callback("      • Aplicando Rateio Atômico com Método do Maior Resto (Vetorizado)...")
+            
+            df_forecast = df_forecast.rename({"produto": "sku"})
             
             if df_share.is_empty():
                 df_final = df_forecast.with_columns([
@@ -148,31 +165,53 @@ class NexusLoader:
                     pl.col("pmv_aplicado").alias("pmv_ref")
                 ])
             else:
-                df_share = df_share.rename({"sku": "produto"})
-                df_join = df_forecast.join(df_share, on="produto", how="left")
+                df_share = df_share.rename({"sku": "sku_share"})
+                df_join = df_forecast.join(df_share, left_on="sku", right_on="sku_share", how="left")
                 
+                # Preenche NPIs (Produtos sem histórico)
                 df_join = df_join.with_columns([
                     pl.col("cgc").fill_null("00000000000000"),
                     pl.col("vendedor_nome").fill_null("SEM VENDEDOR"),
                     pl.col("share_cliente").fill_null(1.0)
                 ])
                 
-                # AQUI FOI REMOVIDO O FILTRO ( > 0 ) PARA GARANTIR QUE ZEROS SEJAM GRAVADOS
+                # MATEMÁTICA PERFEITA: O Método do Maior Resto em Polars
+                df_join = df_join.with_columns(
+                    (pl.col("vol_ia_global") * pl.col("share_cliente")).alias("vol_exato")
+                ).with_columns([
+                    pl.col("vol_exato").floor().cast(pl.Int32).alias("vol_base"),
+                    (pl.col("vol_exato") - pl.col("vol_exato").floor()).alias("fracao")
+                ])
+                
+                # Calcula quantas caixas "sumiram" no arredondamento por SKU e Mês
+                df_rem = df_join.group_by(["sku", "mes_projetado"]).agg(
+                    (pl.col("vol_ia_global").first() - pl.col("vol_base").sum()).cast(pl.Int32).alias("sobra")
+                )
+                df_join = df_join.join(df_rem, on=["sku", "mes_projetado"])
+                
+                # Ranqueia os clientes pelas maiores frações perdidas e devolve a caixa
+                df_join = df_join.with_columns(
+                    pl.col("fracao").rank(method="ordinal", descending=True).over(["sku", "mes_projetado"]).alias("rank_fracao")
+                )
+                
                 df_final = df_join.with_columns(
-                    (pl.col("vol_ia_global") * pl.col("share_cliente")).round(0).cast(pl.Int32).alias("vol_ia_atomico"),
+                    pl.when(pl.col("rank_fracao") <= pl.col("sobra"))
+                    .then(pl.col("vol_base") + 1)
+                    .otherwise(pl.col("vol_base")).alias("vol_ia_atomico"),
                     pl.col("pmv_aplicado").alias("pmv_ref")
                 )
 
             total_ibp = len(df_final)
-            log_callback(f"      • Iniciando injeção Estática S&OP (Chunks de 10k) - Total previsto: {total_ibp} linhas...")
+            log_callback(f"      • Iniciando injeção Estática S&OP - Total previsto: {total_ibp} linhas...")
             
             ibp_dicts = []
             processados = 0
             for row in df_final.to_dicts():
+                # CASCATA COMPLETA: Todas as gavetas populadas para evitar quebra de painel
                 ibp_dicts.append({
                     'ciclo_sop': ciclo_atual, 
                     'mes_projetado': row['mes_projetado'], 
-                    'sku': row['produto'],
+                    'sku': row['sku'],
                     'cgc': row['cgc'], 
                     'vendedor_nome': row['vendedor_nome'], 
                     'vol_ia': row['vol_ia_atomico'],
@@ -188,20 +227,22 @@ class NexusLoader:
                 if len(ibp_dicts) >= 10000:
                     db.bulk_insert_mappings(FatoIbpGranular, ibp_dicts)
                     ibp_dicts.clear()
-                    log_callback(f"      ⏳ Progresso S&OP: {((processados / total_ibp) * 100):.1f}% ({processados}/{total_ibp})")
             
             if ibp_dicts:
                 db.bulk_insert_mappings(FatoIbpGranular, ibp_dicts)
             
             db.commit()
-            log_callback("✅ [LOAD] S&OP Injetado e Congelado na Base de Dados!")
+            log_callback("✅ [LOAD] S&OP Injetado! Nenhuma caixa perdida no rateio.")
         except Exception as e:
             db.rollback()
             log_callback(f"❌ [LOAD] Erro Crítico no Rateio: {str(e)}")
             raise e
+        finally:
+            db.close()
 
     def atualizar_hierarquia_historica(self, lf_clientes: pl.LazyFrame, log_callback=print) -> None:
         from app.core.database import SessionLocal
+        from sqlalchemy import text
         
         log_callback("      • Sincronizando Histórico de Vendas com a Hierarquia Atual (Retroativo)...")
         db = SessionLocal()
