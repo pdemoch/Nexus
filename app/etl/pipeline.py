@@ -40,8 +40,9 @@ async def executar_pipeline_nexus():
         log(f"📥 [EXTRACT] Extraindo dados do Gobi ERP ({data_inicio} a {data_fim})...")
         lf_150, lf_188, df_seg = await extractor.extrair_tudo(data_inicio, data_fim)
         
-        if lf_150.is_empty() and lf_188.is_empty():
-            log("⚠️ [SYSTEM] Nenhuma venda ou faturamento encontrado. O pipeline será encerrado sem gerar projeções.")
+        # CORREÇÃO: LazyFrame não tem .is_empty(). Verificamos se ele nasceu sem colunas.
+        if len(lf_150.columns) == 0 or len(lf_188.columns) == 0:
+            log("⚠️ [SYSTEM] Arquivos de Vendas ou Faturamento vazios. O pipeline será encerrado por segurança.")
             AppState.pipeline_rodando = False
             return
 
@@ -53,6 +54,7 @@ async def executar_pipeline_nexus():
         # BLINDAGEM 1: Mandar o processamento do Polars para thread secundária
         log("   -> Executando processamento em memória (Polars)...")
         df_silver_coletado = await asyncio.to_thread(lf_silver.collect)
+        log(f"📊 [AUDITORIA] ETL Concluído: A camada Silver resultou em {len(df_silver_coletado)} linhas consolidadas prontas para injeção.")
 
         # BLINDAGEM 2: Mandar o Upsert no Banco de Dados para thread secundária
         log("   -> Iniciando injeção no Banco de Dados...")
