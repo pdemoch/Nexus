@@ -44,6 +44,9 @@ class NexusForecaster:
         
         log_callback("📥 [ENGINE] Extraindo Catálogo Completo e Histórico de Vendas (INCLUINDO NPIs)...")
         
+        # ====================================================================
+        # A NOVA QUERY BLINDADA: Ignora os 'DESCONTINUADO' na raiz!
+        # ====================================================================
         query_historico = text("""
             SELECT 
                 p.sku AS produto,
@@ -56,6 +59,10 @@ class NexusForecaster:
                 END AS pmv
             FROM dim_produtos p
             LEFT JOIN fato_vendas v ON p.sku = v.sku AND TO_CHAR(v.data_pedido, 'YYYY-MM') < :mes_atual
+            
+            /* BLINDAGEM DE PORTFÓLIO: O Lixo é parado aqui */
+            WHERE UPPER(TRIM(p.curva)) != 'DESCONTINUADO'
+            
             GROUP BY 
                 p.sku, p.descricao, TO_CHAR(v.data_pedido, 'YYYY-MM')
             ORDER BY produto, mes_ano;
@@ -64,7 +71,7 @@ class NexusForecaster:
         df = pd.read_sql(query_historico, engine, params={"mes_atual": mes_atual_str})
         
         if df.empty: 
-            log_callback("❌ [ENGINE] Banco vazio. Abortando IA.")
+            log_callback("❌ [ENGINE] Banco vazio ou nenhum SKU ativo encontrado. Abortando IA.")
             return pl.DataFrame()
 
         # =========================================================================

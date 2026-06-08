@@ -116,8 +116,6 @@ class NexusLoader:
             ciclo_atual = ciclo_alvo 
             log_callback(f"   -> [LOAD] Iniciando construção da matriz FatoIBP para o ciclo {ciclo_atual}...")
             
-            # 1. GRAVAÇÃO DA INTELIGÊNCIA NA DIMENSÃO DE PRODUTOS
-            # Para que a Diretoria possa ver a assertividade da IA no histórico!
             log_callback("      • Registrando performance e vencedores do Ensemble no Banco...")
             df_modelos = df_forecast.group_by("produto").agg([
                 pl.col("modelo_vencedor").first(),
@@ -131,7 +129,7 @@ class NexusLoader:
                     WHERE sku = :sku
                 """), {"mod": row["modelo_vencedor"], "acc": row["acuracia"], "sku": row["produto"]})
 
-            # 2. BUSCA DO SHARE HISTÓRICO ATIVO
+            # Busca Share. Apenas clientes ATIVOS nos últimos 6 meses.
             query_share = text("""
                 WITH cte_base AS (
                     SELECT v.sku, v.cgc, c.vendedor_nome, SUM(v.qt_pedido) as total_cliente
@@ -158,24 +156,25 @@ class NexusLoader:
             df_forecast = df_forecast.rename({"produto": "sku"})
             
             if df_share.is_empty():
-                df_final = df_forecast.with_columns([
-                    pl.lit("00000000000000").alias("cgc"),
-                    pl.lit("SEM VENDEDOR").alias("vendedor_nome"),
-                    pl.col("vol_ia_global").alias("vol_ia_atomico"),
-                    pl.col("pmv_aplicado").alias("pmv_ref")
-                ])
+                log_callback("⚠️ [LOAD] Nenhum share encontrado. Abortando injeção para evitar lixo.")
+                return
             else:
                 df_share = df_share.rename({"sku": "sku_share"})
-                df_join = df_forecast.join(df_share, left_on="sku", right_on="sku_share", how="left")
                 
-                # Preenche NPIs (Produtos sem histórico)
-                df_join = df_join.with_columns([
-                    pl.col("cgc").fill_null("00000000000000"),
-                    pl.col("vendedor_nome").fill_null("SEM VENDEDOR"),
-                    pl.col("share_cliente").fill_null(1.0)
-                ])
+                # =========================================================================
+                # BLINDAGEM MÁXIMA: INNER JOIN
+                # Se a IA previu algo, mas não existe Share para o cliente ATIVO, a caixa evapora.
+                # =========================================================================
+                df_join = df_forecast.join(df_share, left_on="sku", right_on="sku_share", how="inner")
                 
-                # MATEMÁTICA PERFEITA: O Método do Maior Resto em Polars
+                # Destrói qualquer share zerado que possa ter passado
+                df_join = df_join.filter(pl.col("share_cliente") > 0)
+
+                if df_join.is_empty():
+                    log_callback("⚠️ [LOAD] Após cruzar com clientes ativos, nenhuma projeção sobreviveu. Injeção abortada.")
+                    return
+
+                # Cálculo de Caixas Perfeitas
                 df_join = df_join.with_columns(
                     (pl.col("vol_ia_global") * pl.col("share_cliente")).alias("vol_exato")
                 ).with_columns([
@@ -183,13 +182,11 @@ class NexusLoader:
                     (pl.col("vol_exato") - pl.col("vol_exato").floor()).alias("fracao")
                 ])
                 
-                # Calcula quantas caixas "sumiram" no arredondamento por SKU e Mês
                 df_rem = df_join.group_by(["sku", "mes_projetado"]).agg(
                     (pl.col("vol_ia_global").first() - pl.col("vol_base").sum()).cast(pl.Int32).alias("sobra")
                 )
                 df_join = df_join.join(df_rem, on=["sku", "mes_projetado"])
                 
-                # Ranqueia os clientes pelas maiores frações perdidas e devolve a caixa
                 df_join = df_join.with_columns(
                     pl.col("fracao").rank(method="ordinal", descending=True).over(["sku", "mes_projetado"]).alias("rank_fracao")
                 )
@@ -202,12 +199,10 @@ class NexusLoader:
                 )
 
             total_ibp = len(df_final)
-            log_callback(f"      • Iniciando injeção Estática S&OP - Total previsto: {total_ibp} linhas...")
+            log_callback(f"      • Iniciando injeção Estática S&OP (Filtro Estrito) - Total previsto: {total_ibp} linhas...")
             
             ibp_dicts = []
-            processados = 0
             for row in df_final.to_dicts():
-                # CASCATA COMPLETA: Todas as gavetas populadas para evitar quebra de painel
                 ibp_dicts.append({
                     'ciclo_sop': ciclo_atual, 
                     'mes_projetado': row['mes_projetado'], 
@@ -222,7 +217,6 @@ class NexusLoader:
                     'vol_final': row['vol_ia_atomico'],      
                     'pmv_aplicado': row['pmv_ref']
                 })
-                processados += 1
 
                 if len(ibp_dicts) >= 10000:
                     db.bulk_insert_mappings(FatoIbpGranular, ibp_dicts)
@@ -232,7 +226,7 @@ class NexusLoader:
                 db.bulk_insert_mappings(FatoIbpGranular, ibp_dicts)
             
             db.commit()
-            log_callback("✅ [LOAD] S&OP Injetado! Nenhuma caixa perdida no rateio.")
+            log_callback("✅ [LOAD] S&OP Injetado! Nenhuma caixa perdida no rateio, apenas Lixo descartado.")
         except Exception as e:
             db.rollback()
             log_callback(f"❌ [LOAD] Erro Crítico no Rateio: {str(e)}")
