@@ -618,8 +618,7 @@ export default function GlobalDashboard() {
                                              <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#64748b" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
                                              <Line type="monotone" dataKey="CicloAnterior" name="Proposta Mês Passado" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
                                              <Line type="monotone" dataKey="Supply" name="Restrição Supply" stroke="#f59e0b" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
-                                             <Line type="monotone" dataKey="Final" name="Global S&OP" stroke="#10b981" strokeWidth={4} dot={{r:5, fill:'#10b981', stroke:'#fff', strokeWidth:2}} connectNulls={false} />
-                                             <Line type="monotone" dataKey="Orcamento" name="Orçamento 2026" stroke="#f43f5e" strokeWidth={2} strokeDasharray="5 5" dot={{r:4, fill:'#f43f5e', strokeWidth:0}} connectNulls={false} />
+                                             <Line type="monotone" dataKey="Final" name="Global S&OP" stroke="#10b981" strokeWidth={4} dot={{r:5, fill:'#10b981', stroke:'#fff', strokeWidth:2}} connectNulls={false} />                                            
                                           </LineChart>
                                        </ResponsiveContainer>
                                      )}

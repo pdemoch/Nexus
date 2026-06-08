@@ -115,12 +115,12 @@ class NexusTransformer:
             pl.col("curva_2026").first().alias("curva_2026")
         ])
 
-        # 5. Transformação do Orçamento (Blindada contra Excel sujo e Polars antigo)
+        # 5. Transformação do Orçamento (Blindada e Agrupada)
         df_orc_final = pl.DataFrame()
         if not df_orc.is_empty():
-            # VACINA 1: Filtra imediatamente qualquer linha fantasma sem SKU
             df_orc = df_orc.filter(pl.col("Produto").is_not_null())
-            df_orc = df_orc.with_columns(pl.col("Produto").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars())
+            # Como já forçamos a leitura como string no extractor, apenas limpamos os espaços
+            df_orc = df_orc.with_columns(pl.col("Produto").str.strip_chars())
             
             meses = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez']
             meses_map = {'jan':'01','fev':'02','mar':'03','abr':'04','mai':'05','jun':'06','jul':'07','ago':'08','set':'09','out':'10','nov':'11','dez':'12'}
@@ -135,7 +135,6 @@ class NexusTransformer:
                     value_name="receita_orcamento"
                 )
                 
-                # VACINA 2: Tenta usar .replace (Polars novo). Se falhar, usa .map_dict (Polars antigo)
                 try:
                     expr_mes = pl.col("mes_str").replace(meses_map).alias("mes_num")
                 except AttributeError:
@@ -146,6 +145,11 @@ class NexusTransformer:
                 ]).with_columns([
                     pl.format("2026-{}-01", pl.col("mes_num")).str.strptime(pl.Date, "%Y-%m-%d").alias("mes_projetado"),
                     pl.col("receita_orcamento").cast(pl.Float64)
-                ]).rename({"Produto": "sku"}).select(["sku", "mes_projetado", "receita_orcamento"])
+                ]).rename({"Produto": "sku"})
+                
+                # CORREÇÃO CRÍTICA: Somatória agrupada para evitar sobrescrita de SKUs repetidos
+                df_orc_final = df_orc_final.group_by(["sku", "mes_projetado"]).agg([
+                    pl.col("receita_orcamento").sum().alias("receita_orcamento")
+                ]).select(["sku", "mes_projetado", "receita_orcamento"])
         
         return lf_final, lf_clientes, df_orc_final

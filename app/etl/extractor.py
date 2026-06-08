@@ -133,12 +133,13 @@ class GobiExtractor:
         try:
             caminho = Path(caminho_arquivo)
             if caminho.exists():
-                df = pl.read_excel(caminho_arquivo)
-                # Garante que o SKU será tratado como string para evitar ".0" e notação científica
-                if "Produto" in df.columns: 
-                    df = df.with_columns(pl.col("Produto").cast(pl.Utf8))
+                import pandas as pd
+                # Blindagem: Lê a coluna Produto estritamente como String (Texto)
+                df_pd = pd.read_excel(caminho_arquivo, dtype={"Produto": str})
+                df = pl.from_pandas(df_pd)
                 return df
-        except Exception as e: print(f"Erro ao ler Orçamento.xlsx: {e}")
+        except Exception as e: 
+            print(f"Erro ao ler Orçamento.xlsx: {e}")
         return pl.DataFrame()
 
     async def extrair_tudo(self, data_inicio: date, data_fim: date):
