@@ -3,7 +3,8 @@ import axios from 'axios';
 import { 
   ChevronRight, ChevronDown, Lock, Unlock, Search, X, 
   Package, Boxes, LayoutGrid, Download, BarChart2, Activity, Shield,
-  Wand2, Target, AlertTriangle, TrendingUp, TrendingDown, Save
+  Wand2, Target, AlertTriangle, TrendingUp, TrendingDown, Save,
+  ArrowUpDown, ArrowUp, ArrowDown
 } from 'lucide-react';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
@@ -96,8 +97,6 @@ const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo
 
 export default function TopDownArena() {
   const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
-  const [filtrosDisponiveis, setFiltrosDisponiveis] = useState<{categorias: string[], segmentos: string[]}>({ categorias: [], segmentos: [] });
-  const [filtros, setFiltros] = useState({ categoria: "TODAS", segmento: "TODOS" });
   const [busca, setBusca] = useState("");
   
   const [isFechado, setIsFechado] = useState(true);
@@ -109,13 +108,13 @@ export default function TopDownArena() {
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
 
+  // NOVO: Estado de Ordenação
+  const [ordenacao, setOrdenacao] = useState<{ coluna: string | null, direcao: 'asc' | 'desc' }>({ coluna: null, direcao: 'asc' });
+
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
       const params: any = { nocache: new Date().getTime() };
-      if (filtros.categoria !== "TODAS") { params.categoria_filtro = 'categoria'; params.valor_filtro = filtros.categoria; }
-      else if (filtros.segmento !== "TODOS") { params.categoria_filtro = 'segmento'; params.valor_filtro = filtros.segmento; }
-
       const [dadosRes, statusRes] = await Promise.all([
         axios.get('/api/v1/consensus/macro', { params }),
         axios.get('/api/v1/consensus/macro/status')
@@ -124,50 +123,112 @@ export default function TopDownArena() {
       setDadosBrutos(dadosRes.data.dados || []);
       setIsFechado(statusRes.data.is_fechado); 
       setCelulasEditadas({});
-      
-      if (filtrosDisponiveis.categorias.length === 0 && dadosRes.data.dados) {
-        const cats = Array.from(new Set(dadosRes.data.dados.map((c:any) => c.nome)));
-        setFiltrosDisponiveis(p => ({ ...p, categorias: cats as string[] }));
-      }
     } catch (e) {
       console.error(e);
       setDadosBrutos([]);
     } finally {
       setIsLoading(false);
     }
-  }, [filtros]);
+  }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // 1º: Declara as Colunas
   const colunasData = useMemo(() => {
     return dadosBrutos.length > 0 && dadosBrutos[0].meses ? dadosBrutos[0].meses : [];
   }, [dadosBrutos]);
 
-  // 2º: Constrói o Gráfico dependendo das Colunas
   const chartDataFinal = useMemo(() => {
     if (!chartExpanded || !dadosGraficoCache[chartExpanded]) return [];
     const dadosOriginais = dadosGraficoCache[chartExpanded];
 
-    // Array com os meses M2, M3 e M4 exatos vindos da tabela
     const mesesTaticos = colunasData?.map((m: any) => m.mes_banco) || [];
 
     return dadosOriginais.map((ponto: any) => {
       const edicao = celulasEditadas[chartExpanded]?.[ponto.data_iso];
       let valorTopDown = ponto.TopDown;
 
-      // BLINDAGEM M0 e M1: Apaga a linha se não estiver na janela tática
       if (!mesesTaticos.includes(ponto.data_iso)) {
           valorTopDown = null;
       } else if (edicao !== undefined) {
-          // Atualiza em tempo real se o usuário digitar algo novo
           valorTopDown = Number(edicao.novo_volume);
       }
-
       return { ...ponto, TopDown: valorTopDown };
     });
   }, [chartExpanded, dadosGraficoCache, celulasEditadas, colunasData]);
 
+  // Função auxiliar estática (sem edições em tela) para ordenar corretamente sem pular a linha
+  const getStaticVol = (row: any, mesBanco: string): number => {
+    if (row.tipo === 'produto') {
+      const m = row.meses?.find((x: any) => x.mes_banco === mesBanco);
+      return (m?.vol_ajustado !== undefined && m?.vol_ajustado !== null) ? Number(m.vol_ajustado) : 0;
+    }
+    return (row.subRows || []).reduce((acc: number, child: any) => acc + getStaticVol(child, mesBanco), 0);
+  };
+
+  // =========================================================================
+  // MOTOR RECURSIVO: PESQUISA E ORDENAÇÃO DE HIERARQUIA
+  // =========================================================================
+  // =========================================================================
+  // MOTOR RECURSIVO: PESQUISA E ORDENAÇÃO DE HIERARQUIA
+  // =========================================================================
+  const dadosProcessados = useMemo(() => {
+    let processados = dadosBrutos;
+
+    // 1. FILTRAGEM (SKU, Produto ou Categoria)
+    if (busca) {
+        const lowerTerm = busca.toLowerCase();
+        const filtrarArvore = (nodes: any[]): any[] => {
+            return nodes.map(node => {
+                const matchSelf = (node.nome && String(node.nome).toLowerCase().includes(lowerTerm)) ||
+                                  (node.produto && String(node.produto).toLowerCase().includes(lowerTerm));
+                
+                // CORREÇÃO TYPESCRIPT: Tipagem explícita para evitar o erro de never[]
+                let childMatches: any[] = []; 
+                
+                if (node.subRows?.length > 0) {
+                    childMatches = filtrarArvore(node.subRows);
+                }
+
+                if (matchSelf || childMatches.length > 0) {
+                    return { ...node, subRows: matchSelf ? node.subRows : childMatches };
+                }
+                return null;
+            }).filter(Boolean);
+        };
+        processados = filtrarArvore(dadosBrutos);
+    }
+
+    // 2. ORDENAÇÃO
+    if (ordenacao.coluna) {
+        const ordenarArvore = (nodes: any[]): any[] => {
+            const ordenados = [...nodes].sort((a, b) => {
+                let valA, valB;
+                if (ordenacao.coluna === 'nome') {
+                    valA = String(a.nome || '').toLowerCase();
+                    valB = String(b.nome || '').toLowerCase();
+                } else {
+                    valA = getStaticVol(a, ordenacao.coluna!);
+                    valB = getStaticVol(b, ordenacao.coluna!);
+                }
+
+                if (valA < valB) return ordenacao.direcao === 'asc' ? -1 : 1;
+                if (valA > valB) return ordenacao.direcao === 'asc' ? 1 : -1;
+                return 0;
+            });
+
+            return ordenados.map(n => ({
+                ...n,
+                subRows: n.subRows?.length > 0 ? ordenarArvore(n.subRows) : []
+            }));
+        };
+        processados = ordenarArvore(processados);
+    }
+
+    return processados;
+  }, [dadosBrutos, busca, ordenacao]);
+
+
+  // Função que busca os dados VIVOS (incluindo edições não salvas do usuário)
   const getDynamicVol = useCallback((row: any, mesBanco: string): number => {
     if (row.tipo === 'produto') {
       const edicao = celulasEditadas[row.chave_matriz]?.[mesBanco];
@@ -189,6 +250,21 @@ export default function TopDownArena() {
     }
     return (row.subRows || []).reduce((acc: number, child: any) => acc + getDynamicRec(child, mesBanco), 0);
   }, [getDynamicVol]);
+
+  const handleSort = (coluna: string) => {
+    setOrdenacao(prev => {
+        if (prev.coluna === coluna) {
+            if (prev.direcao === 'desc') return { coluna, direcao: 'asc' };
+            return { coluna: null, direcao: 'asc' };
+        }
+        return { coluna, direcao: 'desc' }; // Começa ordenando do maior para o menor por padrão
+    });
+  };
+
+  const SortIcon = ({ coluna }: { coluna: string }) => {
+      if (ordenacao.coluna !== coluna) return <ArrowUpDown className="w-4 h-4 text-slate-500 opacity-30 group-hover:opacity-100 transition-opacity" />;
+      return ordenacao.direcao === 'asc' ? <ArrowUp className="w-4 h-4 text-blue-400" /> : <ArrowDown className="w-4 h-4 text-blue-400" />;
+  };
 
   const handleSalvar = async () => {
     if (Object.keys(celulasEditadas).length === 0) return alert("Nenhuma alteração para salvar.");
@@ -273,7 +349,7 @@ export default function TopDownArena() {
 
   const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
     const chave = rowData.chave_matriz;
-    const chartData = chartDataFinal; // Aqui o gráfico usa a variável com as linhas apagadas
+    const chartData = chartDataFinal; 
 
     const kpis = useMemo(() => {
       let volTD = 0; let volIA = 0; let rec = 0;
@@ -360,7 +436,7 @@ export default function TopDownArena() {
                   
                   <Line type="monotone" dataKey="Realizado" name="Histórico Faturado" stroke="#f8fafc" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} connectNulls={false} />
                   <Line type="monotone" dataKey="IA" name="Projeção IA" stroke="#64748b" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
-                  <Line type="monotone" dataKey="CicloAnterior" name="Ciclo Anterior (Lag 1)" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="CicloAnterior" name="Meta S&OP Congelada" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
                   <Line type="monotone" dataKey="TopDown" name="Proposta Atual" stroke="#3b82f6" strokeWidth={3} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
                 </LineChart>
               </ResponsiveContainer>
@@ -379,14 +455,14 @@ export default function TopDownArena() {
     const totais: Record<string, { vol: number, fat: number }> = {};
     colunasData?.forEach((m: any) => {
       let vol = 0; let fat = 0;
-      dadosBrutos.forEach((cat: any) => {
+      dadosProcessados.forEach((cat: any) => {
         vol += getDynamicVol(cat, m.mes_banco);
         fat += getDynamicRec(cat, m.mes_banco);
       });
       totais[m.mes_banco] = { vol, fat };
     });
     return totais;
-  }, [dadosBrutos, getDynamicVol, getDynamicRec, colunasData]);
+  }, [dadosProcessados, getDynamicVol, getDynamicRec, colunasData]);
 
   const renderRow = (row: any, depth = 0) => {
     const isExpanded = expanded[row.chave_matriz];
@@ -500,15 +576,18 @@ export default function TopDownArena() {
 
       <div className="max-w-[1600px] mx-auto bg-white rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-200 overflow-hidden">
         
+        {/* BARRA DE PESQUISA OMNIBOX (Limpa e Funcional) */}
         <div className="bg-slate-50 p-4 border-b border-slate-200 flex items-center justify-between">
-            <div className="flex gap-4">
-                <select value={filtros.categoria} onChange={(e) => setFiltros({ ...filtros, categoria: e.target.value })} className="px-4 py-2 rounded-lg border border-slate-300 bg-white text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer shadow-sm">
-                    <option value="TODAS">Todas as Categorias</option>
-                    {filtrosDisponiveis.categorias.map((c, i) => <option key={i} value={c}>{c}</option>)}
-                </select>
-                <select value={filtros.segmento} onChange={(e) => setFiltros({ ...filtros, segmento: e.target.value })} className="px-4 py-2 rounded-lg border border-slate-300 bg-white text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer shadow-sm">
-                    <option value="TODOS">Todos os Segmentos</option>
-                </select>
+            <div className="flex items-center gap-3 w-full max-w-md px-4 py-2.5 bg-white border border-slate-300 rounded-xl shadow-sm transition-all focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-blue-500">
+                <Search className="w-5 h-5 text-slate-400" />
+                <input 
+                    type="text" 
+                    placeholder="Procurar SKU, Produto ou Categoria..." 
+                    value={busca} 
+                    onChange={(e) => setBusca(e.target.value)} 
+                    className="bg-transparent border-none focus:outline-none text-sm font-medium w-full text-slate-700 placeholder-slate-400" 
+                />
+                {busca && <button onClick={() => setBusca("")}><X className="w-4 h-4 text-slate-400 hover:text-slate-600" /></button>}
             </div>
         </div>
 
@@ -516,18 +595,29 @@ export default function TopDownArena() {
           <table className="w-full text-left border-collapse">
             <thead>
               <tr>
+                {/* CABEÇALHO CLICÁVEL: HIERARQUIA */}
                 <th className="bg-slate-900 p-0 border-b border-slate-800 w-[400px]">
-                  <div className="flex items-center gap-3 px-6 py-5">
-                    <Search className="w-5 h-5 text-slate-400" />
-                    <input type="text" placeholder="Procurar SKUs ou categorias..." value={busca} onChange={(e) => setBusca(e.target.value)} className="bg-transparent border-none text-white focus:outline-none placeholder-slate-500 text-sm font-medium w-full" />
-                    {busca && <button onClick={() => setBusca("")}><X className="w-4 h-4 text-slate-400 hover:text-white" /></button>}
+                  <div 
+                    onClick={() => handleSort('nome')}
+                    className="px-6 py-5 flex items-center justify-between cursor-pointer group hover:bg-slate-800 transition-colors"
+                  >
+                    <span className="text-white font-bold text-sm tracking-widest uppercase group-hover:text-blue-400 transition-colors">Hierarquia do Portfólio</span>
+                    <SortIcon coluna="nome" />
                   </div>
                 </th>
+
+                {/* CABEÇALHOS CLICÁVEIS: MESES */}
                 {colunasData?.map((m: any, i: number) => (
                   <th key={i} className="bg-slate-900 p-0 border-b border-slate-800 border-l border-slate-800/50 min-w-[160px]">
-                    <div className="px-6 py-5 flex flex-col items-center justify-center">
-                      <span className="text-white font-bold text-sm tracking-widest">{m.mes_str}</span>
-                      <span className="text-blue-400 text-[10px] font-black tracking-widest uppercase mt-0.5">S&OP Forecast</span>
+                    <div 
+                        onClick={() => handleSort(m.mes_banco)}
+                        className="px-6 py-5 flex flex-col items-center justify-center relative cursor-pointer group hover:bg-slate-800 transition-colors"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-white font-bold text-sm tracking-widest group-hover:text-blue-400 transition-colors">{m.mes_str}</span>
+                        <SortIcon coluna={m.mes_banco} />
+                      </div>
+                      <span className="text-blue-400/80 text-[10px] font-black tracking-widest uppercase mt-0.5">S&OP Forecast</span>
                     </div>
                   </th>
                 ))}
@@ -536,19 +626,19 @@ export default function TopDownArena() {
             <tbody>
               {isLoading ? (
                 <tr><td colSpan={10} className="p-12 text-center text-slate-400 font-medium">Extraindo Dados de S&OP...</td></tr>
-              ) : dadosBrutos.length === 0 ? (
-                <tr><td colSpan={10} className="p-12 text-center text-slate-400 font-medium">Nenhum dado encontrado para o ciclo atual.</td></tr>
+              ) : dadosProcessados.length === 0 ? (
+                <tr><td colSpan={10} className="p-12 text-center text-slate-400 font-medium">Nenhum dado encontrado.</td></tr>
               ) : (
-                dadosBrutos.filter(d => d.nome?.toLowerCase().includes(busca.toLowerCase()) || busca === "").map(row => renderRow(row))
+                dadosProcessados.map(row => renderRow(row))
               )}
             </tbody>
             
-            {dadosBrutos.length > 0 && (
-              <tfoot className="bg-slate-900 sticky bottom-0 z-20 shadow-[0_-10px_40px_rgba(0,0,0,0.1)]">
+            {dadosProcessados.length > 0 && (
+              <tfoot className="bg-slate-900 sticky bottom-0 z-20 shadow-[0_-10px_40px_rgba(0,0,0,0.1)] border-t border-slate-800">
                 <tr>
                   <td className="px-6 py-5">
                     <div className="flex flex-col">
-                      <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Total Consolidação</span>
+                      <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Total Filtrado</span>
                       <span className="font-bold text-sm text-white">SUMÁRIO GERENCIAL</span>
                     </div>
                   </td>
