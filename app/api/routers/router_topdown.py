@@ -261,7 +261,6 @@ async def congelar_ratear_topdown(payload: PayloadAprovarTopDown, db: Session = 
 
 @router.get("/grafico")
 async def grafico_tatico_topdown(chave_matriz: str, nivel_hierarquia: str = 'produto', db: Session = Depends(get_db)):
-    """Constrói o gráfico tático de 24 meses usando a Meta Congelada (Lag 2) para os meses históricos."""
     try:
         partes = chave_matriz.split('|')
         categoria = None
@@ -279,6 +278,7 @@ async def grafico_tatico_topdown(chave_matriz: str, nivel_hierarquia: str = 'pro
         hoje = datetime.date.today()
         ciclo_atual_dt = hoje.replace(day=1)
         ciclo_atual = ciclo_atual_dt.strftime('%m/%Y')
+        ciclo_anterior = (ciclo_atual_dt - relativedelta(months=1)).strftime('%m/%Y')
         
         # 1. Histórico base (2 Anos)
         q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol'))\
@@ -328,33 +328,32 @@ async def grafico_tatico_topdown(chave_matriz: str, nivel_hierarquia: str = 'pro
             curr += relativedelta(months=1)
 
         # =========================================================================
-        # A MÁQUINA DO TEMPO (CASCATA S&OP)
-        # Para cada mês no gráfico, a API descobre em qual ciclo ele foi congelado.
+        # SEPARAÇÃO DE PASSADO (LAG 2) vs FUTURO/PRESENTE (LAG 1)
         # =========================================================================
         for ms in calendario.keys():
             mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
             
-            # 1. Qual ciclo congelou este mês? (Lag 2 - O Padrão S&OP)
-            # Ex: O mês 06/2026 foi congelado no ciclo 04/2026.
-            ciclo_congelamento_dt = mes_dt - relativedelta(months=2)
-            ciclo_congelamento_str = ciclo_congelamento_dt.strftime('%m/%Y')
-            
-            # Puxa a IA do ciclo do congelamento
-            if ciclo_congelamento_str in proj_por_mes[ms]:
-                calendario[ms]["IA"] = proj_por_mes[ms][ciclo_congelamento_str]["ia"]
-            
-            # Puxa a Meta Final Congelada (Lag 2)
-            if ciclo_congelamento_str in proj_por_mes[ms]:
-                calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_congelamento_str]["final"]
-            else:
-                # Se ainda não existe Lag 2 (ex: meses no futuro), usa o Lag 1 como fallback
-                ciclo_fallback_str = (mes_dt - relativedelta(months=1)).strftime('%m/%Y')
-                if ciclo_fallback_str in proj_por_mes[ms]:
-                    calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_fallback_str]["final"]
-
-            # 2. A Proposta Atual (TopDown) sempre reflete a decisão do ciclo de hoje
+            # --- 1. LINHA IA E TOPDOWN (Referem-se sempre ao que está a acontecer no ciclo ativo)
             if ciclo_atual in proj_por_mes[ms]:
+                calendario[ms]["IA"] = proj_por_mes[ms][ciclo_atual]["ia"]
                 calendario[ms]["TopDown"] = proj_por_mes[ms][ciclo_atual]["td"]
+
+            # --- 2. LINHA CICLO ANTERIOR (O REFERENCIAL DO PASSADO)
+            if mes_dt >= ciclo_atual_dt:
+                # SE O MÊS ESTÁ NO FUTURO (Ex: Ago/2026), queremos saber o que o ciclo imediatamente anterior (05/2026) projetou para ele.
+                if ciclo_anterior in proj_por_mes[ms]:
+                    calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_anterior]["final"]
+            else:
+                # SE O MÊS ESTÁ NO PASSADO (Ex: Março/2026), queremos saber qual foi a meta final que fechou a fábrica. (Lag 2)
+                ciclo_congelamento_dt = mes_dt - relativedelta(months=2)
+                ciclo_congelamento_str = ciclo_congelamento_dt.strftime('%m/%Y')
+                
+                if ciclo_congelamento_str in proj_por_mes[ms]:
+                    calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_congelamento_str]["final"]
+                else:
+                    ciclo_fallback_str = (mes_dt - relativedelta(months=1)).strftime('%m/%Y')
+                    if ciclo_fallback_str in proj_por_mes[ms]:
+                        calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_fallback_str]["final"]
 
         timeline = []
         for ms, v in sorted(calendario.items()):
@@ -365,7 +364,7 @@ async def grafico_tatico_topdown(chave_matriz: str, nivel_hierarquia: str = 'pro
                 "data_iso": f"{ms}-01",
                 "Realizado": None if mes_dt >= ciclo_atual_dt else (v["Realizado"] or 0),
                 "IA": v["IA"],
-                "CicloAnterior": v["CicloAnterior"], # Agora reflete a Meta Congelada
+                "CicloAnterior": v["CicloAnterior"],
                 "TopDown": v["TopDown"]
             })
 
