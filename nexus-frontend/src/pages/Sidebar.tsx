@@ -8,10 +8,10 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
     { id: 'soe-radar', label: 'S&OE', icon: Activity, roles: ['Administrador'] },
     { id: 'inbound', label: 'Mapa Produtivo', icon: Factory, roles: ['Administrador'] },
     { id: 'auditoria', label: 'KPIs', icon: Crosshair, roles: ['Administrador'] },
-    { id: 'topdown', label: 'Plano Irrestrito', icon: BarChart3, roles: ['Administrador', 'Gerente', 'Marketing'] },
+    { id: 'topdown', label: 'Plano Irrestrito', icon: BarChart3, roles: ['Administrador', 'Marketing'] },
     { id: 'npd', label: 'Inovações', icon: Rocket, roles: ['Administrador', 'Marketing'] },
     { id: 'supply', label: 'Supply Review', icon: Factory, roles: ['Administrador', 'Supply Chain'] },
-    { id: 'consenso', label: 'Metas da Equipe', icon: Users, roles: ['Administrador', 'Gerente', 'Coordenador'] },
+    { id: 'consenso', label: 'Metas da Equipe', icon: Users, roles: ['Administrador'] },
     { id: 'gerenciamento', label: 'Gestão de Carteiras', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },    
     { id: 'admin', label: 'Painel de Controle', icon: Settings, roles: ['Administrador'] },
   ];
