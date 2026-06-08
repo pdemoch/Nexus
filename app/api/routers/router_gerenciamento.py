@@ -33,6 +33,7 @@ class AjusteGerente(BaseModel):
 
 class PayloadAprovarGerente(BaseModel):
     origem_ajuste: str
+    visao: str = 'carteira'
     ajustes: List[AjusteGerente]
 
 class PayloadToggleLock(BaseModel):
@@ -57,7 +58,6 @@ def require_manager_or_admin(usuario: dict = Depends(get_current_user)):
     return usuario
 
 def check_topdown_lock(db: Session, ciclo: str):
-    """TRANCA DE FASES: O Bottom-Up (Fase 2) só pode ser editado se o Top-Down (Fase 1) estiver Fechado."""
     td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down Arena').first()
     if not td or td.status != 'Fechado':
         raise HTTPException(status_code=403, detail="Fase Comercial Bloqueada: A Diretoria (Top-Down) ainda não ratificou os volumes do ciclo.")
@@ -71,7 +71,6 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         ciclo = get_current_cycle(db)
         ciclo_anterior = get_previous_cycle(db)
         
-        # Verifica se o Top-Down já foi ratificado (Para bloquear o Frontend)
         td_reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down Arena').first()
         is_topdown_fechado = True if (td_reg and td_reg.status == 'Fechado') else False
         
@@ -85,7 +84,6 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         cx, vx, clx = get_coord_expr(), get_vend_expr(), get_cli_expr()
         q = get_truth_query(db, ciclo, data_ini, data_fim)
 
-        # Filtro de Escopo do Usuário logado
         if usuario['funcao'] == 'Coordenador Comercial':
             q = q.filter(func.upper(cx) == usuario['nome'].strip().upper())
         elif usuario['funcao'] == 'Gerente Comercial':
@@ -94,7 +92,6 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             if filiais:
                 q = q.filter(func.upper(func.trim(DimCliente.filial)).in_(filiais))
 
-        # Adicionamos Categoria e Segmento à query para montar a árvore de Portfólio depois
         resultados = q.with_entities(
             cx.label('coord'), vx.label('vend'), clx.label('cli'),
             FatoIbpGranular.sku, DimProduto.descricao.label('prod_desc'),
@@ -125,9 +122,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         def criar_meses():
             return {m: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0, "pmv":0.0, "vol_anterior": 0} for m in meses_alvo}
 
-        # ---------------------------------------------------------
-        # 1. CONSTRUÇÃO DA ÁRVORE DE CARTEIRA (Coord > Vend > Cli > SKU)
-        # ---------------------------------------------------------
+        # ÁRVORE DE CARTEIRA
         arvore_carteira = {}
         for r in resultados:
             co, ve, cl, sk, de, ms = str(r.coord).strip(), str(r.vend).strip(), str(r.cli).strip(), str(r.sku).strip(), str(r.prod_desc).strip(), str(r.mes_projetado)
@@ -162,13 +157,10 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
                 vends.append({"id": f"{co_k}|{ve_k}", "chave_matriz": f"{co_k}|{ve_k}", "nome": ve_k, "tipo": "vendedor", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in ve_v["meses"].items()], "subRows": clis})
             final_carteira.append({"id": co_k, "chave_matriz": co_k, "nome": co_k, "tipo": "coordenador", "status": co_v["status"], "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in co_v["meses"].items()], "subRows": vends})
 
-        # ---------------------------------------------------------
-        # 2. CONSTRUÇÃO DA ÁRVORE DE PORTFÓLIO (Mostra TODOS os itens da empresa)
-        # ---------------------------------------------------------
+        # ÁRVORE DE PORTFÓLIO
         arvore_port = {}
         todos_produtos = db.query(DimProduto).all()
         
-        # Inicializa a árvore com todos os produtos do sistema
         for p in todos_produtos:
             cat, seg, sk, de = p.categoria or 'SEM CATEGORIA', p.segmento or 'SEM SEGMENTO', p.sku, p.descricao or 'SEM NOME'
             if cat not in arvore_port: arvore_port[cat] = {"nome": cat, "tipo": "categoria", "meses": criar_meses(), "segmentos": {}}
@@ -176,15 +168,12 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             if sk not in arvore_port[cat]["segmentos"][seg]["produtos"]:
                 arvore_port[cat]["segmentos"][seg]["produtos"][sk] = {"nome": de, "produto": sk, "tipo": "produto", "meses": criar_meses()}
 
-        # Popula os volumes baseado no escopo do utilizador logado
         for r in resultados:
             cat, seg, sk, ms = r.cat or 'SEM CATEGORIA', r.seg or 'SEM SEGMENTO', str(r.sku).strip(), str(r.mes_projetado)
             
             if ms in meses_alvo and cat in arvore_port and seg in arvore_port[cat]["segmentos"] and sk in arvore_port[cat]["segmentos"][seg]["produtos"]:
                 v_bu = int(r.v_bu or 0)
                 pmv_b = float(r.pmv or 0)
-                
-                # Aproximação do Lag 1 para a visão agrupada
                 v_ant = sum(ant_dict[(c, sk)][ms] for c in clientes_encontrados if (c, sk) in ant_dict and ms in ant_dict[(c, sk)])
 
                 for nivel in [arvore_port[cat]["meses"][ms], arvore_port[cat]["segmentos"][seg]["meses"][ms], arvore_port[cat]["segmentos"][seg]["produtos"][sk]["meses"][ms]]:
@@ -216,14 +205,14 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         raise HTTPException(500, repr(e))
 
 # =====================================================================
-# ROTA SALVAR RASCUNHO (RATEIO INTELIGENTE SEM CONGELAR)
+# ROTA SALVAR RASCUNHO (BLINDADA)
 # =====================================================================
 @router.post("/salvar")
 async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
         ciclo = get_current_cycle(db)
         check_global_lock(db, ciclo)
-        check_topdown_lock(db, ciclo) # TRANCA DE FASES (Fase 1 deve estar pronta)
+        check_topdown_lock(db, ciclo)
 
         _mes_str, _ano_str = ciclo.split('/')
         hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
@@ -231,17 +220,23 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
 
         cx, vx, clx = get_coord_expr(), get_vend_expr(), get_cli_expr()
 
+        # BLINDAGEM DE RATEIO: Descobre regionais trancadas para ignorá-las matematicamente
+        locked_coords = [c.origem.upper() for c in db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.status == 'Fechado').all()]
+
         for ajuste in payload.ajustes:
             dt = parse_date_safe(ajuste.mes_projetado)
             p = ajuste.chave.split('|')
             q = get_truth_query(db, ciclo, dt, dt)
 
-            # Filtro Escopo do Usuário
             if usuario['funcao'] == 'Coordenador Comercial': q = q.filter(func.upper(cx) == usuario['nome'].strip().upper())
             elif usuario['funcao'] == 'Gerente Comercial':
                 user_db = db.query(Usuario).filter(Usuario.id == usuario['id']).first()
                 filiais = [f.strip().upper() for f in (user_db.filiais_permissao or "").split(",") if f.strip()]
                 if filiais: q = q.filter(func.upper(func.trim(DimCliente.filial)).in_(filiais))
+
+            # Ignora as linhas cuja regional (coordenador) já foi assinada
+            if locked_coords:
+                q = q.filter(~func.upper(cx).in_(locked_coords))
 
             if ajuste.nivel == 'carteira':
                 if len(p) >= 1: q = q.filter(func.upper(cx) == p[0].upper())
@@ -253,7 +248,7 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
                 q = q.filter(FatoIbpGranular.sku == sku_alvo.strip())
 
             linhas = q.all()
-            if not list(linhas): continue # Prevenção contra SKUs NPI sem linhas base
+            if not list(linhas): continue 
 
             skus_alvo = list({l.sku for l in linhas if l.sku})
             cgcs_alvo = list({l.cgc for l in linhas if l.cgc})
@@ -285,7 +280,7 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
                         inc = delta - sum(int(round(delta * peso_map.get((x.cgc, x.sku), 1/len(linhas) if total_hist_no == 0 else 0))) for x in linhas[:-1])
                     
                     novo_v = max(0, l.vol_bottomup + inc)
-                    l.vol_bottomup = novo_v # Atualiza APENAS o vol_bu (Rascunho)
+                    l.vol_bottomup = novo_v
 
         db.commit()
         return {"status": "success", "message": "Rascunho salvo e rateado com sucesso."}
@@ -294,28 +289,34 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
         raise HTTPException(500, repr(e))
 
 # =====================================================================
-# ROTA CONGELAR E PASSAR O BASTÃO (Tranca Fase 2 -> Fase 3)
+# ROTA CONGELAR CARTEIRA GLOBAL
 # =====================================================================
 @router.post("/congelar")
 async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
-        # 1. Salva os dados primeiro usando a mesma lógica do rascunho
-        await salvar_rascunho_gerencia(payload, db, usuario)
+        if payload.ajustes:
+            await salvar_rascunho_gerencia(payload, db, usuario)
         
         ciclo = get_current_cycle(db)
         
-        # 2. Descobre quem são os coordenadores afetados para trancá-los e avançar os volumes
-        coord_afetados = set()
-        for ajuste in payload.ajustes:
-            if ajuste.nivel == 'carteira':
-                coord_afetados.add(ajuste.chave.split('|')[0])
-            elif ajuste.nivel == 'portfolio':
-                # Se aprovou via portfólio, tranca a sua própria regional
-                if usuario['funcao'] == 'Coordenador Comercial': coord_afetados.add(usuario['nome'].strip().upper())
-                
-        # 3. Transforma o Rascunho (vol_bu) na Meta Temporária (vol_supply e vol_final)
-        for coord in coord_afetados:
-            cx = get_coord_expr()
+        _mes_str, _ano_str = ciclo.split('/')
+        hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
+        data_ini = hoje + relativedelta(months=2)
+
+        cx = get_coord_expr()
+        q_coords = get_truth_query(db, ciclo, data_ini, data_ini)
+        
+        if usuario['funcao'] == 'Coordenador Comercial':
+            q_coords = q_coords.filter(func.upper(cx) == usuario['nome'].strip().upper())
+        elif usuario['funcao'] == 'Gerente Comercial':
+            user_db = db.query(Usuario).filter(Usuario.id == usuario['id']).first()
+            filiais = [f.strip().upper() for f in (user_db.filiais_permissao or "").split(",") if f.strip()]
+            if filiais: q_coords = q_coords.filter(func.upper(func.trim(DimCliente.filial)).in_(filiais))
+
+        # Descobre as regionais sob a gestão deste utilizador que ainda estão abertas
+        coords_acessiveis = [r[0] for r in q_coords.with_entities(cx).distinct().all() if r[0]]
+
+        for coord in coords_acessiveis:
             db.query(FatoIbpGranular).filter(
                 FatoIbpGranular.ciclo_sop == ciclo,
                 func.upper(cx) == coord.upper()
@@ -324,7 +325,6 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
                 FatoIbpGranular.vol_final: FatoIbpGranular.vol_bottomup
             }, synchronize_session=False)
             
-            # Tranca a Regional
             reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == coord).first()
             if reg: reg.status = 'Fechado'
             else: db.add(ControleCiclo(ciclo_sop=ciclo, origem=coord, status='Fechado'))
@@ -336,7 +336,7 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
         raise HTTPException(500, repr(e))
 
 # =====================================================================
-# ROTA GRAFICOS (Adaptado para entender chaves de Portfolio)
+# GRAFICOS, TRAVAS E FILTROS (MANTIDOS INTACTOS)
 # =====================================================================
 @router.get("/grafico")
 async def grafico_gerenciamento(chave_matriz: str, nivel_hierarquia: str = 'produto', visao: str = 'carteira', db: Session = Depends(get_db)):
@@ -407,9 +407,6 @@ async def grafico_gerenciamento(chave_matriz: str, nivel_hierarquia: str = 'prod
     except Exception as e:
         raise HTTPException(500, repr(e))
 
-# =====================================================================
-# ROTAS DE ADMINISTRAÇÃO E BLOQUEIOS
-# =====================================================================
 @router.post("/toggle-lock")
 async def toggle_lock_regional(payload: PayloadToggleLock, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     ciclo = get_current_cycle(db)

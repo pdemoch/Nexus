@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect, useCallback, Fragment } from 'reac
 import axios from 'axios';
 import { 
   ChevronRight, ChevronDown, Lock, Unlock, Search, X, 
-  Package, Boxes, LayoutGrid, Download, BarChart2, Activity, Shield,
+  Package, Boxes, LayoutGrid, BarChart2, Activity, Shield,
   Wand2, Target, TrendingUp, TrendingDown, Users, ShieldAlert, Save, Layers
 } from 'lucide-react';
 import { 
@@ -107,7 +107,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // Limpa as edições locais ao alternar de aba para garantir a consistência
   const handleToggleVisao = (novaVisao: 'carteira' | 'portfolio') => {
       if (Object.keys(celulasEditadas).length > 0) {
           if (!confirm("Ao alternar de aba, os rascunhos não salvos serão perdidos. Deseja continuar ou prefere clicar em 'Salvar Rascunho' antes?")) return;
@@ -115,19 +114,11 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
       setCelulasEditadas({});
       setExpanded({});
       setChartExpanded(null);
+      setBusca(""); // Limpa a busca ao trocar de visão
       setVisaoAtiva(novaVisao);
   };
 
   const isAllClosed = dadosBase.carteira.length > 0 && dadosBase.carteira.every(coord => coord.status === 'Fechado');
-
-  const handleLockAll = async () => {
-    if (!confirm("Atenção: Deseja trancar comercialmente TODAS as regionais de uma vez só?")) return;
-    try {
-      await axios.post('/api/v1/consensus/gerenciamento/lock-all');
-      alert("Todas as regionais foram trancadas com sucesso!");
-      fetchData();
-    } catch (e: any) { alert("Erro ao executar trava global: " + e.message); }
-  };
 
   const handleToggleLock = async (regionalNome: string, statusAtual: string) => {
     const nextStatus = statusAtual === 'Fechado' ? 'Aberto' : 'Fechado';
@@ -137,12 +128,12 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     } catch (e: any) { alert("Erro ao alterar trava da regional: " + e.message); }
   };
 
-  // AÇÃO 1: SALVAR RASCUNHO (Não tranca a regional, faz o rateio Backend e atualiza a tela)
   const handleSalvarRascunho = async () => {
     if (Object.keys(celulasEditadas).length === 0) return alert("Nenhuma alteração para salvar.");
     try {
       const payload = {
         origem_ajuste: "Gerência Comercial (Rascunho)",
+        visao: visaoAtiva,
         ajustes: Object.entries(celulasEditadas).flatMap(([chave, meses]: any) => 
           Object.entries(meses).map(([mes_projetado, val]: any) => ({
               nivel: visaoAtiva,
@@ -158,12 +149,12 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     } catch (e: any) { alert("Erro ao salvar: " + (e.response?.data?.detail || e.message)); }
   };
 
-  // AÇÃO 2: APROVAR CARTEIRA (Transforma o Rascunho em Meta Final e Tranca)
   const handleCongelar = async () => {
-    if (!confirm("Atenção Gerência: Esta ação salvará as edições, trancará as regionais editadas e passará a meta para a Fábrica (Supply). Deseja prosseguir?")) return;
+    if (!confirm("Atenção Gerência: Esta ação salvará as edições, trancará as regionais visíveis na tela e passará a meta para a Fábrica (Supply). Deseja prosseguir?")) return;
     try {
       const payload = {
         origem_ajuste: "Gerência Comercial (Final)",
+        visao: visaoAtiva,
         ajustes: Object.entries(celulasEditadas).flatMap(([chave, meses]: any) => 
           Object.entries(meses).map(([mes_projetado, val]: any) => ({
               nivel: visaoAtiva,
@@ -179,14 +170,73 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     } catch (e: any) { alert("Erro ao aprovar: " + (e.response?.data?.detail || e.message)); }
   };
 
+  // =========================================================================
+  // MOTOR RECURSIVO: PESQUISA NAS CAMADAS (FILTRAGEM PROFUNDA)
+  // =========================================================================
+  const dadosProcessados = useMemo(() => {
+    let processados = dadosBrutos;
+
+    if (busca) {
+        const lowerTerm = busca.toLowerCase();
+        const filtrarArvore = (nodes: any[]): any[] => {
+            return nodes.map(node => {
+                const matchSelf = (node.nome && String(node.nome).toLowerCase().includes(lowerTerm)) ||
+                                  (node.produto && String(node.produto).toLowerCase().includes(lowerTerm));
+                
+                let childMatches: any[] = []; 
+                if (node.subRows?.length > 0) {
+                    childMatches = filtrarArvore(node.subRows);
+                }
+
+                // Se bater no nome do Pai, retorna o Pai com todos os Filhos originais. 
+                // Se não bater no Pai, mas bater num Filho, retorna o Pai contendo APENAS o filho que bateu.
+                if (matchSelf || childMatches.length > 0) {
+                    return { ...node, subRows: matchSelf ? node.subRows : childMatches };
+                }
+                return null;
+            }).filter(Boolean);
+        };
+        processados = filtrarArvore(dadosBrutos);
+    }
+    return processados;
+  }, [dadosBrutos, busca]);
+
+  // =========================================================================
+  // MATEMÁTICA VIVA: LEITURA DE VOLUMES E RECEITA (REFLETE EDIÇÕES E FILTROS)
+  // =========================================================================
+  const getDynamicVol = useCallback((row: any, mesBanco: string): number => {
+    if (row.tipo === 'produto') {
+      const edicao = celulasEditadas[row.chave_matriz]?.[mesBanco];
+      if (edicao !== undefined) {
+          const num = Number(edicao.novo_volume);
+          return isNaN(num) ? 0 : num;
+      }
+      const m = row.meses?.find((x: any) => x.mes_banco === mesBanco);
+      return (m?.vol_ajustado !== undefined && m?.vol_ajustado !== null) ? Number(m.vol_ajustado) : 0;
+    }
+    return (row.subRows || []).reduce((acc: number, child: any) => acc + getDynamicVol(child, mesBanco), 0);
+  }, [celulasEditadas]);
+
+  const getDynamicRec = useCallback((row: any, mesBanco: string): number => {
+    if (row.tipo === 'produto') {
+      const vol = getDynamicVol(row, mesBanco);
+      const m = row.meses?.find((x: any) => x.mes_banco === mesBanco);
+      return vol * (m?.pmv || 0);
+    }
+    return (row.subRows || []).reduce((acc: number, child: any) => acc + getDynamicRec(child, mesBanco), 0);
+  }, [getDynamicVol]);
+
+
   const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
     if (!isTopDownFechado) return;
     
-    // Bloqueia edição se a regional estiver fechada (Somente aplicável na visão de carteira)
+    // BLINDAGEM DE EDIÇÃO (Seja em Carteira ou em Portfólio)
     if (visaoAtiva === 'carteira') {
         const coordRoot = chaveStr.split('|')[0];
-        const nodeCoord = dadosBrutos.find(c => c.nome === coordRoot);
+        const nodeCoord = dadosBase.carteira.find(c => c.nome === coordRoot);
         if (nodeCoord && nodeCoord.status === 'Fechado') return;
+    } else {
+        if (isAllClosed) return;
     }
 
     setCelulasEditadas((currentEdits: any) => {
@@ -283,8 +333,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     const kpis = useMemo(() => {
       let volAtual = 0; let volIA = 0; let rec = 0; let pmvAcc = 0; let count = 0;
       (rowData?.meses || []).forEach((m: any) => {
-          const edicao = celulasEditadas[rowData.chave_matriz]?.[m.mes_banco];
-          const vFinal = edicao !== undefined ? parseInt(edicao.novo_volume) : (m.vol_ajustado || 0);
+          const vFinal = getDynamicVol(rowData, m.mes_banco);
           volAtual += vFinal;
           volIA += (m.vol_ia || 0);
           rec += vFinal * (m.pmv || 0);
@@ -378,37 +427,40 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     );
   };
 
+  const colunasData = dadosBrutos.length > 0 ? dadosBrutos[0].meses : [];
+
   const totaisGerais = useMemo(() => {
     const totais: Record<string, { vol: number, fat: number }> = {};
-    dadosBrutos.forEach(coord => {
-      coord.meses?.forEach((m: any) => {
-        if (!totais[m.mes_banco]) totais[m.mes_banco] = { vol: 0, fat: 0 };
-        const edicao = celulasEditadas[coord.chave_matriz]?.[m.mes_banco];
-        const vAtual = edicao !== undefined ? parseInt(edicao.novo_volume) : (m.vol_ajustado || 0);
-        totais[m.mes_banco].vol += vAtual;
-        totais[m.mes_banco].fat += (vAtual * (m.pmv || 0));
+    colunasData?.forEach((m: any) => {
+      let vol = 0; let fat = 0;
+      // Usando os dadosProcessados para refletir a filtragem exata no rodapé!
+      dadosProcessados.forEach((rootNode: any) => {
+        vol += getDynamicVol(rootNode, m.mes_banco);
+        fat += getDynamicRec(rootNode, m.mes_banco);
       });
+      totais[m.mes_banco] = { vol, fat };
     });
     return totais;
-  }, [dadosBrutos, celulasEditadas]);
+  }, [dadosProcessados, getDynamicVol, getDynamicRec, colunasData]);
 
   const renderRow = (row: any, depth = 0) => {
     const isExpanded = expanded[row.chave_matriz];
     const hasChildren = row.subRows && row.subRows.length > 0;
     const isProduto = row.tipo === 'produto';
     
-    // Herdando o status da Regional apenas se for a visão de Carteira
+    // BLINDAGEM VISUAL DE TRANCA
     let rowStatus = 'Aberto';
     let isRowFechado = false;
     
     if (visaoAtiva === 'carteira') {
         const coordRoot = row.chave_matriz.split('|')[0];
-        const nodeCoord = dadosBrutos.find(c => c.nome === coordRoot);
+        const nodeCoord = dadosBase.carteira.find(c => c.nome === coordRoot);
         rowStatus = nodeCoord ? nodeCoord.status : 'Aberto';
         isRowFechado = rowStatus === 'Fechado';
+    } else {
+        isRowFechado = isAllClosed;
     }
 
-    // Ícones Dinâmicos por Visão
     const renderIcon = () => {
         if (visaoAtiva === 'carteira') {
             return depth === 0 ? <Users className="w-4 h-4" /> : depth === 1 ? <LayoutGrid className="w-4 h-4" /> : depth === 2 ? <Boxes className="w-4 h-4" /> : <Package className="w-4 h-4" />;
@@ -457,7 +509,8 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
           {row.meses?.map((m: any, idx: number) => {
             const edicao = celulasEditadas[row.chave_matriz]?.[m.mes_banco];
             const isEdited = edicao !== undefined;
-            const valorExibicao = isEdited ? edicao.novo_volume : (m.vol_ajustado || 0);
+            const valorExibicao = getDynamicVol(row, m.mes_banco);
+            const receitaExibicao = getDynamicRec(row, m.mes_banco);
 
             return (
               <td key={idx} className="p-0 border-l border-slate-100 align-top">
@@ -474,7 +527,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                   
                   <div className="px-4 py-2 flex flex-col items-end justify-center flex-1">
                     <div className="w-24">
-                      {/* Bloqueio Absoluto se a Fase 1 não estiver Fechada */}
+                      {/* BLINDAGEM DE INPUT */}
                       <SmartInput 
                          value={valorExibicao} 
                          disabled={!isTopDownFechado || isRowFechado || (visaoAtiva === 'carteira' && row.tipo === "coordenador")} 
@@ -482,7 +535,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                       />
                     </div>
                     <span className="text-[10px] font-bold text-emerald-500 tracking-tight pr-1 mt-0.5" title="Receita (R$) Prevista">
-                      {formatMoeda(valorExibicao * (m.pmv || 0))}
+                      {formatMoeda(receitaExibicao)}
                     </span>
                   </div>
 
@@ -504,8 +557,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     );
   };
 
-  const colunasData = dadosBrutos.length > 0 ? dadosBrutos[0].meses : [];
-
   return (
     <div className="min-h-screen bg-slate-50 p-8 pb-32">
       <div className="max-w-[1600px] mx-auto mb-8 flex flex-col gap-6">
@@ -520,7 +571,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
             <div className="flex items-center gap-4">
             
-            {/* TOGGLE DE VISÃO CARTEIRA/PORTFÓLIO */}
             <div className="flex items-center bg-slate-200/50 p-1 rounded-xl">
                 <button onClick={() => handleToggleVisao('carteira')} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${visaoAtiva === 'carteira' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
                     <Users className="w-4 h-4" /> Carteira de Clientes
@@ -537,17 +587,17 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                 </div>
             )}
 
-            <button onClick={handleSalvarRascunho} disabled={!isTopDownFechado || (isAllClosed && visaoAtiva === 'carteira')} className="px-4 py-2.5 bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold border border-blue-200 rounded-xl transition-all disabled:opacity-50 flex items-center gap-2">
+            {/* BOTÕES DESLIGAM SE TUDO ESTIVER TRANCADO */}
+            <button onClick={handleSalvarRascunho} disabled={!isTopDownFechado || isAllClosed} className="px-4 py-2.5 bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold border border-blue-200 rounded-xl transition-all disabled:opacity-50 flex items-center gap-2">
                 <Save className="w-4 h-4" /> Salvar Rascunho
             </button>
 
-            <button onClick={handleCongelar} disabled={!isTopDownFechado || (isAllClosed && visaoAtiva === 'carteira')} className="px-6 py-2.5 bg-slate-900 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg shadow-slate-900/20 transition-all disabled:opacity-50 flex items-center gap-2">
+            <button onClick={handleCongelar} disabled={!isTopDownFechado || isAllClosed} className="px-6 py-2.5 bg-slate-900 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg shadow-slate-900/20 transition-all disabled:opacity-50 flex items-center gap-2">
                 <Shield className="w-4 h-4" /> Aprovar Carteira Comercial
             </button>
             </div>
         </div>
 
-        {/* ALERTA DE BLOQUEIO FASE 1 (TOP-DOWN ABERTO) */}
         {!isTopDownFechado && !isLoading && (
             <div className="bg-amber-50 border border-amber-200 text-amber-800 p-5 rounded-2xl flex items-center gap-4 shadow-sm animate-in fade-in slide-in-from-top-4">
                 <ShieldAlert className="w-8 h-8 text-amber-500" />
@@ -585,19 +635,19 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             <tbody>
               {isLoading ? (
                 <tr><td colSpan={10} className="p-12 text-center text-slate-400 font-medium">Mapeando Árvore Comercial e Portfólio...</td></tr>
-              ) : dadosBrutos.length === 0 ? (
-                <tr><td colSpan={10} className="p-12 text-center text-slate-400 font-medium">Nenhum dado encontrado para a sua gestão.</td></tr>
+              ) : dadosProcessados.length === 0 ? (
+                <tr><td colSpan={10} className="p-12 text-center text-slate-400 font-medium">Nenhum dado encontrado para a sua busca.</td></tr>
               ) : (
-                dadosBrutos.filter(d => d.nome?.toLowerCase().includes(busca.toLowerCase()) || busca === "").map(row => renderRow(row))
+                dadosProcessados.map(row => renderRow(row))
               )}
             </tbody>
             
-            {dadosBrutos.length > 0 && (
+            {dadosProcessados.length > 0 && (
               <tfoot className="bg-slate-900 sticky bottom-0 z-20 shadow-[0_-10px_40px_rgba(0,0,0,0.1)]">
                 <tr>
                   <td className="px-6 py-5 border-r border-slate-800/50">
                     <div className="flex flex-col">
-                      <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Total Consolidação</span>
+                      <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Total Filtrado</span>
                       <span className="font-bold text-sm text-white">SUMÁRIO GERENCIAL</span>
                     </div>
                   </td>
