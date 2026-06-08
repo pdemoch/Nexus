@@ -41,13 +41,14 @@ async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None,
     """Constrói a árvore de decisão macro: Categoria -> Segmento -> SKU"""
     try:
         ciclo = get_current_cycle(db)
+        ciclo_ant = get_previous_cycle(db)
         
+        # 1. Busca os dados do ciclo atual (CORREÇÃO: Removido o vol_anterior inexistente)
         query = db.query(
             DimProduto.categoria, DimProduto.segmento, FatoIbpGranular.sku, DimProduto.descricao,
             FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('ia'),
             func.sum(FatoIbpGranular.vol_topdown).label('td'),
-            func.sum(FatoIbpGranular.vol_anterior).label('ant'),
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
         ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)\
          .filter(FatoIbpGranular.ciclo_sop == ciclo)
@@ -60,6 +61,27 @@ async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None,
             DimProduto.categoria, DimProduto.segmento, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado
         ).all()
 
+        # 2. Busca a Sombra do Ciclo Anterior (Lag 1) de forma segura
+        query_ant = db.query(
+            FatoIbpGranular.sku, FatoIbpGranular.mes_projetado,
+            func.sum(FatoIbpGranular.vol_final).label('ant')
+        ).filter(FatoIbpGranular.ciclo_sop == ciclo_ant)
+        
+        if categoria_filtro and valor_filtro:
+            query_ant = query_ant.join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)
+            if categoria_filtro == 'categoria': query_ant = query_ant.filter(DimProduto.categoria == valor_filtro)
+            elif categoria_filtro == 'segmento': query_ant = query_ant.filter(DimProduto.segmento == valor_filtro)
+            
+        resultados_ant = query_ant.group_by(FatoIbpGranular.sku, FatoIbpGranular.mes_projetado).all()
+        
+        mapa_ant = {}
+        for r in resultados_ant:
+            ms_iso = str(r.mes_projetado).split()[0]
+            # Padroniza para cruzar perfeitamente (dia 01)
+            ms_padrao = ms_iso[:-2] + "01"
+            mapa_ant[f"{r.sku}|{ms_padrao}"] = int(r.ant or 0)
+
+        # 3. Constrói a árvore de Agrupamentos com as Matrizes preenchidas
         arvore = {}
         for r in resultados:
             cat = r.categoria or 'SEM CATEGORIA'
@@ -67,28 +89,61 @@ async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None,
             sku = r.sku
             
             if cat not in arvore:
-                arvore[cat] = {"id": cat, "chave_matriz": cat, "nome": cat, "tipo": "categoria", "subRows": {}}
+                arvore[cat] = {"id": cat, "chave_matriz": cat, "nome": cat, "tipo": "categoria", "subRows": {}, "meses_map": {}}
             
             if seg not in arvore[cat]["subRows"]:
-                arvore[cat]["subRows"][seg] = {"id": f"{cat}|{seg}", "chave_matriz": f"{cat}|{seg}", "nome": seg, "tipo": "segmento", "subRows": {}}
+                arvore[cat]["subRows"][seg] = {"id": f"{cat}|{seg}", "chave_matriz": f"{cat}|{seg}", "nome": seg, "tipo": "segmento", "subRows": {}, "meses_map": {}}
                 
             if sku not in arvore[cat]["subRows"][seg]["subRows"]:
                 arvore[cat]["subRows"][seg]["subRows"][sku] = {
-                    "id": f"{cat}|{seg}|{sku}", "chave_matriz": f"{cat}|{seg}|{sku}", "nome": r.descricao, "produto": sku, "tipo": "produto", "meses": []
+                    "id": f"{cat}|{seg}|{sku}", "chave_matriz": f"{cat}|{seg}|{sku}", "nome": r.descricao, "produto": sku, "tipo": "produto", "meses_map": {}
                 }
             
-            # Nota: a lógica do "if r.td is not None" garante que o ZERO será lido como ZERO legítimo, e não falso
-            arvore[cat]["subRows"][seg]["subRows"][sku]["meses"].append({
-                "mes_banco": r.mes_projetado.strftime('%Y-%m-01') if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado),
-                "mes_str": r.mes_projetado.strftime('%m/%Y') if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado),
-                "vol_ia": int(r.ia or 0),
-                "vol_anterior": int(r.ant or 0),
-                "vol_ajustado": int(r.td) if r.td is not None else int(r.ia or 0),
-                "pmv": float(r.pmv or 0)
-            })
+            mes_str_iso = str(r.mes_projetado).split()[0]
+            mes_banco_str = mes_str_iso[:-2] + "01"
+            mes_pt_str = r.mes_projetado.strftime('%m/%Y') if isinstance(r.mes_projetado, datetime.date) else mes_str_iso
+            
+            vol_ant_val = mapa_ant.get(f"{sku}|{mes_banco_str}", 0)
+            vol_ia = int(r.ia or 0)
+            vol_td = int(r.td) if r.td is not None else vol_ia
+            pmv = float(r.pmv or 0)
 
+            # Preenche o Nível SKU
+            arvore[cat]["subRows"][seg]["subRows"][sku]["meses_map"][mes_banco_str] = {
+                "mes_banco": mes_banco_str, "mes_str": mes_pt_str, "vol_ia": vol_ia, 
+                "vol_anterior": vol_ant_val, "vol_ajustado": vol_td, "pmv": pmv
+            }
+
+            # Agrega no Nível Segmento
+            s_map = arvore[cat]["subRows"][seg]["meses_map"]
+            if mes_banco_str not in s_map:
+                s_map[mes_banco_str] = {"mes_banco": mes_banco_str, "mes_str": mes_pt_str, "vol_ia": 0, "vol_anterior": 0, "vol_ajustado": 0, "receita": 0}
+            s_map[mes_banco_str]["vol_ia"] += vol_ia
+            s_map[mes_banco_str]["vol_anterior"] += vol_ant_val
+            s_map[mes_banco_str]["vol_ajustado"] += vol_td
+            s_map[mes_banco_str]["receita"] += (vol_td * pmv)
+            s_map[mes_banco_str]["pmv"] = s_map[mes_banco_str]["receita"] / s_map[mes_banco_str]["vol_ajustado"] if s_map[mes_banco_str]["vol_ajustado"] > 0 else 0
+
+            # Agrega no Nível Categoria
+            c_map = arvore[cat]["meses_map"]
+            if mes_banco_str not in c_map:
+                c_map[mes_banco_str] = {"mes_banco": mes_banco_str, "mes_str": mes_pt_str, "vol_ia": 0, "vol_anterior": 0, "vol_ajustado": 0, "receita": 0}
+            c_map[mes_banco_str]["vol_ia"] += vol_ia
+            c_map[mes_banco_str]["vol_anterior"] += vol_ant_val
+            c_map[mes_banco_str]["vol_ajustado"] += vol_td
+            c_map[mes_banco_str]["receita"] += (vol_td * pmv)
+            c_map[mes_banco_str]["pmv"] = c_map[mes_banco_str]["receita"] / c_map[mes_banco_str]["vol_ajustado"] if c_map[mes_banco_str]["vol_ajustado"] > 0 else 0
+
+        # Converte mapas para arrays garantindo ordenação correta do calendário
         for c in arvore.values():
+            c["meses"] = sorted(list(c["meses_map"].values()), key=lambda x: x["mes_banco"])
+            del c["meses_map"]
             for s in c["subRows"].values():
+                s["meses"] = sorted(list(s["meses_map"].values()), key=lambda x: x["mes_banco"])
+                del s["meses_map"]
+                for sk in s["subRows"].values():
+                    sk["meses"] = sorted(list(sk["meses_map"].values()), key=lambda x: x["mes_banco"])
+                    del sk["meses_map"]
                 s["subRows"] = list(s["subRows"].values())
             c["subRows"] = list(c["subRows"].values())
 
@@ -106,7 +161,7 @@ async def topdown_status(db: Session = Depends(get_db)):
 @router.post("/salvar")
 async def salvar_rascunho_topdown(payload: PayloadAprovarTopDown, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     """Salva as decisões executivas apenas na coluna vol_topdown, com Rateio Inteligente para não multiplicar volumes."""
-    check_global_lock(db)
+    check_global_lock(db, get_current_cycle(db))
     try:
         ciclo = get_current_cycle(db)
         
@@ -118,7 +173,6 @@ async def salvar_rascunho_topdown(payload: PayloadAprovarTopDown, db: Session = 
             linhas = query.all()
             if not linhas: continue
 
-            # MOTOR DE RATEIO INTELIGENTE APLICADO AO RASCUNHO (Fim do Bug de Multiplicação Fantasma)
             base_total_bu = sum([float(l.vol_bottomup or 0) for l in linhas])
             base_total_sp = sum([float(l.vol_supply or 0) for l in linhas])
             
@@ -137,7 +191,6 @@ async def salvar_rascunho_topdown(payload: PayloadAprovarTopDown, db: Session = 
                     rateado = int(round(volume_alvo * peso))
                     soma_dist += rateado
                 
-                # RASCUNHO: Atualiza APENAS a coluna vol_topdown, preservando o Rateio oficial intacto até a aprovação final
                 l.vol_topdown = rateado
 
         db.commit()
@@ -149,11 +202,10 @@ async def salvar_rascunho_topdown(payload: PayloadAprovarTopDown, db: Session = 
 @router.post("/congelar")
 async def congelar_ratear_topdown(payload: PayloadAprovarTopDown, db: Session = Depends(get_db), usuario: dict = Depends(require_admin)):
     """Publica a estratégia Macro, rateia os volumes aprovados pela Diretoria e tranca a fase."""
-    check_global_lock(db)
+    ciclo = get_current_cycle(db)
+    check_global_lock(db, ciclo)
     
     try:
-        ciclo = get_current_cycle(db)
-        
         for ajuste in payload.ajustes:
             data_alvo = parse_date_safe(ajuste.mes_projetado)
             volume_alvo = int(ajuste.novo_volume)
@@ -164,7 +216,6 @@ async def congelar_ratear_topdown(payload: PayloadAprovarTopDown, db: Session = 
 
             total_base_antigo = sum([float(l.vol_final or 0) for l in linhas])
 
-            # MOTOR DE RATEIO INTELIGENTE (Proporcional ao Comercial ou Supply)
             base_total_bu = sum([float(l.vol_bottomup or 0) for l in linhas])
             base_total_sp = sum([float(l.vol_supply or 0) for l in linhas])
             
@@ -183,7 +234,6 @@ async def congelar_ratear_topdown(payload: PayloadAprovarTopDown, db: Session = 
                     rateado = int(round(volume_alvo * peso))
                     soma_dist += rateado
                 
-                # Efeito Cascata Estratégico: O Top-Down sobrepõe as intenções de todas as áreas a partir de agora
                 l.vol_topdown = rateado
                 l.vol_bottomup = rateado
                 l.vol_supply = rateado
