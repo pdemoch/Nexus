@@ -304,7 +304,7 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
                             </p>
                             <select value={isGlobalSelected ? origemDesbloqueio : ''} onChange={(e) => setOrigemDesbloqueio(e.target.value)} className="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-xl focus:ring-amber-500 focus:border-amber-500 block w-full p-3 font-bold outline-none cursor-pointer">
                                 <option value="">Selecione um nível global...</option>
-                                <option value="Top-Down">Visão Gerencial (Top-Down)</option>
+                                <option value="Top-Down Arena">Visão Gerencial (Top-Down)</option>
                                 <option value="Supply Review">Fábrica (Supply Review)</option>
                                 <option value="S&OP-Final">S&OP Global (Dashboard Final)</option>
                             </select>
