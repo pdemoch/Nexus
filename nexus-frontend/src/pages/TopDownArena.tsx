@@ -9,9 +9,6 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
 } from 'recharts';
 
-// =====================================================================
-// HELPERS DE FORMATAÇÃO
-// =====================================================================
 const formatVolume = (val: number) => {
   const num = Number(val);
   if (isNaN(num)) return '0';
@@ -24,11 +21,7 @@ const formatMoeda = (val: number) => {
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(num);
 };
 
-// =====================================================================
-// COMPONENTE: SMART INPUT (Blindado contra Zero/Falsy)
-// =====================================================================
 const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (val: number) => void, disabled: boolean }) => {
-  // CORREÇÃO 1: Trata o 0 explicitamente como valor válido
   const [localVal, setLocalVal] = useState((value !== undefined && value !== null) ? formatVolume(value) : '0');
   const [isFocused, setIsFocused] = useState(false);
 
@@ -38,42 +31,25 @@ const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (v
     }
   }, [value, isFocused]);
 
-  const handleFocus = () => {
-    setIsFocused(true);
-    setLocalVal(localVal.replace(/\./g, ''));
+  const handleFocus = () => { setIsFocused(true); setLocalVal(localVal.replace(/\./g, '')); };
+  const handleBlur = () => { 
+      setIsFocused(false); 
+      const parsed = parseInt(localVal.replace(/\D/g, ''), 10);
+      const num = isNaN(parsed) ? 0 : parsed;
+      setLocalVal(formatVolume(num));
+      onChange(num);
   };
-
-  const handleBlur = () => {
-    setIsFocused(false);
-    // CORREÇÃO 2: Evita o || 0 que poderia anular zeros legítimos se mal interpretado
-    const parsed = parseInt(localVal.replace(/\D/g, ''), 10);
-    const num = isNaN(parsed) ? 0 : parsed;
-    setLocalVal(formatVolume(num));
-    onChange(num);
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') e.currentTarget.blur();
-  };
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') e.currentTarget.blur(); };
 
   return (
     <input
-      type="text"
-      value={localVal}
-      disabled={disabled}
-      onFocus={handleFocus}
-      onBlur={handleBlur}
-      onKeyDown={handleKeyDown}
-      onChange={(e) => setLocalVal(e.target.value)}
+      type="text" value={localVal} disabled={disabled} onFocus={handleFocus} onBlur={handleBlur} onKeyDown={handleKeyDown} onChange={(e) => setLocalVal(e.target.value)}
       className={`w-full bg-transparent border-none text-right focus:outline-none focus:ring-1 focus:ring-blue-500 rounded px-1
         ${disabled ? 'text-slate-400 font-medium cursor-not-allowed' : 'text-blue-700 font-bold bg-blue-50/50'}`}
     />
   );
 };
 
-// =====================================================================
-// COMPONENTE: CAIXA DE INSIGHT IA
-// =====================================================================
 const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo: string, pmv: number, volume: number, receita: number }) => {
   const [insight, setInsight] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -84,11 +60,8 @@ const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo
       const prompt = `Gere uma análise executiva de S&OP (máx 3 parágrafos) para o alvo ${alvo} do tipo ${tipo}. O volume top-down planeado é ${volume} CX, com PMV médio de R$ ${pmv.toFixed(2)} e Receita de R$ ${receita.toFixed(2)}. Fale sobre sazonalidade e riscos.`;
       const res = await axios.post('/api/v1/ai-sql/perguntar', { pergunta: prompt });
       setInsight(res.data.resposta);
-    } catch (e) {
-      setInsight("Erro ao comunicar com a IA Nexus. Tente novamente.");
-    } finally {
-      setLoading(false);
-    }
+    } catch (e) { setInsight("Erro ao comunicar com a IA Nexus. Tente novamente."); } 
+    finally { setLoading(false); }
   };
 
   return (
@@ -138,11 +111,9 @@ export default function TopDownArena() {
   
   const chartDataFinal = useMemo(() => {
     if (!chartExpanded || !dadosGraficoCache[chartExpanded]) return [];
-    
     const dadosOriginais = dadosGraficoCache[chartExpanded];
 
     return dadosOriginais.map((ponto: any) => {
-      // CORREÇÃO 3: Resgate da edição garantindo que o 0 vá para o gráfico
       const edicao = celulasEditadas[chartExpanded]?.[ponto.data_iso.replace('-01', '')];
       if (edicao !== undefined) {
         return { ...ponto, TopDown: Number(edicao.novo_volume) };
@@ -181,7 +152,11 @@ export default function TopDownArena() {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // === FUNÇÕES RECURSIVAS DE SOMA ===
+  // CORREÇÃO FRONTEND: Garante que as colunas apareçam independente da árvore
+  const colunasData = useMemo(() => {
+    return dadosBrutos.length > 0 && dadosBrutos[0].meses ? dadosBrutos[0].meses : [];
+  }, [dadosBrutos]);
+
   const getDynamicVol = useCallback((row: any, mesBanco: string): number => {
     if (row.tipo === 'produto') {
       const edicao = celulasEditadas[row.chave_matriz]?.[mesBanco];
@@ -219,9 +194,7 @@ export default function TopDownArena() {
       await axios.post(`/api/v1/consensus/macro/salvar`, payload);
       alert("Alterações salvas no rascunho com sucesso!");
       fetchData();
-    } catch (e: any) {
-      alert("Erro ao salvar: " + (e.response?.data?.detail || e.message));
-    }
+    } catch (e: any) { alert("Erro ao salvar: " + (e.response?.data?.detail || e.message)); }
   };
 
   const handleCongelar = async () => {
@@ -236,13 +209,10 @@ export default function TopDownArena() {
           }))
         )
       };
-
       await axios.post(`/api/v1/consensus/macro/congelar`, payload);
       alert("Top-Down Congelado e Rateado com Sucesso!");
       fetchData();
-    } catch (e: any) {
-      alert("Erro ao congelar: " + (e.response?.data?.detail || e.message));
-    }
+    } catch (e: any) { alert("Erro ao congelar: " + (e.response?.data?.detail || e.message)); }
   };
 
   const handleExportExcel = () => {
@@ -252,7 +222,7 @@ export default function TopDownArena() {
     dadosBrutos.forEach(cat => {
       cat.subRows?.forEach((seg: any) => {
         seg.subRows?.forEach((prod: any) => {
-          prod.meses.forEach((m: any) => {
+          prod.meses?.forEach((m: any) => {
              const edicao = celulasEditadas[prod.chave_matriz]?.[m.mes_banco];
              const volFinal = edicao !== undefined ? Number(edicao.novo_volume) : (m.vol_ajustado || 0);
              const rec = volFinal * (m.pmv || 0);
@@ -267,33 +237,25 @@ export default function TopDownArena() {
     const link = document.createElement("a");
     link.setAttribute("href", url);
     link.setAttribute("download", `Exportacao_TopDown_${new Date().getTime()}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    document.body.appendChild(link); link.click(); document.body.removeChild(link);
   };
 
   const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
     if (isFechado) return;
     setCelulasEditadas((prev: any) => ({
-      ...prev,
-      [chaveStr]: { ...(prev[chaveStr] || {}), [mesBanco]: { novo_volume: novoValor } }
+      ...prev, [chaveStr]: { ...(prev[chaveStr] || {}), [mesBanco]: { novo_volume: novoValor } }
     }));
   };
 
   const toggleChart = async (node: any) => {
     const chave = node.chave_matriz;
-    if (chartExpanded === chave) { 
-      setChartExpanded(null); 
-      return; 
-    }
+    if (chartExpanded === chave) { setChartExpanded(null); return; }
     setChartExpanded(chave);
-    
     setLoadingGrafico(chave);
     try {
       const res = await axios.get('/api/v1/consensus/macro/grafico', { params: { chave_matriz: chave } });
       setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
-    } catch (e) { console.error(e); }
-    finally { setLoadingGrafico(null); }
+    } catch (e) { console.error(e); } finally { setLoadingGrafico(null); }
   };
 
   const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
@@ -400,8 +362,6 @@ export default function TopDownArena() {
     );
   };
 
-  const colunasData = dadosBrutos.length > 0 ? dadosBrutos[0].meses : [];
-
   const totaisGerais = useMemo(() => {
     const totais: Record<string, { vol: number, fat: number }> = {};
     colunasData?.forEach((m: any) => {
@@ -445,26 +405,27 @@ export default function TopDownArena() {
             </div>
           </td>
 
-          {row.meses?.map((m: any, idx: number) => {
+          {colunasData?.map((m: any, idx: number) => {
             const isEdited = isProduto && celulasEditadas[row.chave_matriz]?.[m.mes_banco] !== undefined;
             const valorExibicao = getDynamicVol(row, m.mes_banco);
             const receitaExibicao = getDynamicRec(row, m.mes_banco);
+            
+            // Graças ao Backend Corrigido, row.meses AGORA SEMPRE EXISTE (Até nas Categorias)
+            const mData = row.meses?.find((x: any) => x.mes_banco === m.mes_banco) || {};
 
             return (
               <td key={idx} className="p-0 border-l border-slate-100 align-top">
                 <div className={`flex flex-col h-full min-h-[76px] ${isFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/40' : 'hover:bg-slate-50'}`}>
                   
-                  {/* CABEÇALHO DA CÉLULA: IA vs LAG 1 CENTRALIZADOS */}
                   <div className="px-2 py-1.5 border-b border-slate-100/50 flex justify-center gap-3 items-center bg-slate-50/80">
                     <span className="text-[10px] font-bold text-slate-500 bg-slate-200/50 px-2 py-0.5 rounded whitespace-nowrap" title="Projeção IA Original">
-                      IA: {formatVolume(m.vol_ia)}
+                      IA: {formatVolume(mData.vol_ia || 0)}
                     </span>
                     <span className="text-[10px] font-bold text-purple-600 bg-purple-100/50 border border-purple-200/50 px-2 py-0.5 rounded whitespace-nowrap" title="Aprovado no Ciclo Anterior">
-                      Lag 1: {formatVolume(m.vol_anterior)}
+                      Lag 1: {formatVolume(mData.vol_anterior || 0)}
                     </span>
                   </div>
                   
-                  {/* CORPO DA CÉLULA: VOLUME + RECEITA DINÂMICA */}
                   <div className="px-4 py-2 flex flex-col items-end justify-center flex-1">
                     <div className="w-24">
                       {isProduto ? (
@@ -473,7 +434,6 @@ export default function TopDownArena() {
                         <div className="w-full text-right font-bold text-slate-800 pr-1">{formatVolume(valorExibicao)}</div>
                       )}
                     </div>
-                    {/* Faturamento Previsto Dinâmico */}
                     <span className="text-[10px] font-bold text-emerald-500 tracking-tight pr-1 mt-0.5" title="Receita (R$) Prevista">
                       {formatMoeda(receitaExibicao)}
                     </span>
@@ -487,7 +447,7 @@ export default function TopDownArena() {
         
         {chartExpanded === row.chave_matriz && (
           <tr>
-            <td colSpan={(row.meses?.length || 0) + 1} className="p-0">
+            <td colSpan={(colunasData?.length || 0) + 1} className="p-0">
               <PainelSaudabilidade rowData={row} />
             </td>
           </tr>
