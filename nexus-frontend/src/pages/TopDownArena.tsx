@@ -108,19 +108,6 @@ export default function TopDownArena() {
   const [chartExpanded, setChartExpanded] = useState<string | null>(null);
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
-  
-  const chartDataFinal = useMemo(() => {
-    if (!chartExpanded || !dadosGraficoCache[chartExpanded]) return [];
-    const dadosOriginais = dadosGraficoCache[chartExpanded];
-
-    return dadosOriginais.map((ponto: any) => {
-      const edicao = celulasEditadas[chartExpanded]?.[ponto.data_iso.replace('-01', '')];
-      if (edicao !== undefined) {
-        return { ...ponto, TopDown: Number(edicao.novo_volume) };
-      }
-      return ponto;
-    });
-  }, [chartExpanded, dadosGraficoCache, celulasEditadas]);
 
   const fetchData = useCallback(async () => {
     setIsLoading(true);
@@ -152,10 +139,34 @@ export default function TopDownArena() {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // CORREÇÃO FRONTEND: Garante que as colunas apareçam independente da árvore
+  // 1º: Declara as Colunas
   const colunasData = useMemo(() => {
     return dadosBrutos.length > 0 && dadosBrutos[0].meses ? dadosBrutos[0].meses : [];
   }, [dadosBrutos]);
+
+  // 2º: Constrói o Gráfico dependendo das Colunas
+  const chartDataFinal = useMemo(() => {
+    if (!chartExpanded || !dadosGraficoCache[chartExpanded]) return [];
+    const dadosOriginais = dadosGraficoCache[chartExpanded];
+
+    // Array com os meses M2, M3 e M4 exatos vindos da tabela
+    const mesesTaticos = colunasData?.map((m: any) => m.mes_banco) || [];
+
+    return dadosOriginais.map((ponto: any) => {
+      const edicao = celulasEditadas[chartExpanded]?.[ponto.data_iso];
+      let valorTopDown = ponto.TopDown;
+
+      // BLINDAGEM M0 e M1: Apaga a linha se não estiver na janela tática
+      if (!mesesTaticos.includes(ponto.data_iso)) {
+          valorTopDown = null;
+      } else if (edicao !== undefined) {
+          // Atualiza em tempo real se o usuário digitar algo novo
+          valorTopDown = Number(edicao.novo_volume);
+      }
+
+      return { ...ponto, TopDown: valorTopDown };
+    });
+  }, [chartExpanded, dadosGraficoCache, celulasEditadas, colunasData]);
 
   const getDynamicVol = useCallback((row: any, mesBanco: string): number => {
     if (row.tipo === 'produto') {
@@ -253,7 +264,6 @@ export default function TopDownArena() {
     setChartExpanded(chave);
     setLoadingGrafico(chave);
     try {
-      // INCLUSÃO DA HIERARQUIA: Agora o backend sabe se o clique foi na Categoria ou no SKU
       const res = await axios.get('/api/v1/consensus/macro/grafico', { 
          params: { chave_matriz: chave, nivel_hierarquia: node.tipo } 
       });
@@ -263,7 +273,7 @@ export default function TopDownArena() {
 
   const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
     const chave = rowData.chave_matriz;
-    const chartData = dadosGraficoCache[chave];
+    const chartData = chartDataFinal; // Aqui o gráfico usa a variável com as linhas apagadas
 
     const kpis = useMemo(() => {
       let volTD = 0; let volIA = 0; let rec = 0;
@@ -341,7 +351,7 @@ export default function TopDownArena() {
               <div className="h-full flex items-center justify-center text-slate-500">Extraindo inteligência temporal...</div>
             ) : chartData ? (
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartDataFinal} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
                   <XAxis dataKey="name" tick={{fill: '#94a3b8', fontSize: 12}} tickMargin={10} axisLine={false} />
                   <YAxis tickFormatter={(val) => formatVolume(val)} tick={{fill: '#94a3b8', fontSize: 12}} tickLine={false} axisLine={false} />
@@ -413,7 +423,6 @@ export default function TopDownArena() {
             const valorExibicao = getDynamicVol(row, m.mes_banco);
             const receitaExibicao = getDynamicRec(row, m.mes_banco);
             
-            // Graças ao Backend Corrigido, row.meses AGORA SEMPRE EXISTE (Até nas Categorias)
             const mData = row.meses?.find((x: any) => x.mes_banco === m.mes_banco) || {};
 
             return (

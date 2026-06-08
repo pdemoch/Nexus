@@ -15,7 +15,6 @@ from app.api.routers.router_auth import get_current_user
 from app.api.routers.shared_ibp import (
     get_current_cycle,
     get_previous_cycle,
-    get_projection_window, # <-- Adicionado o delimitador tático
     get_truth_query,
     check_global_lock,
     parse_date_safe,
@@ -39,11 +38,20 @@ def require_admin(usuario: dict = Depends(get_current_user)):
 
 @router.get("")
 async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None, db: Session = Depends(get_db)):
-    """Constrói a árvore de decisão macro: Categoria -> Segmento -> SKU limitando a M2-M4"""
+    """Constrói a árvore de decisão macro limitando estritamente aos meses M2, M3 e M4."""
     try:
         ciclo = get_current_cycle(db)
         ciclo_ant = get_previous_cycle(db)
-        data_ini, data_fim = get_projection_window(db) # Bloqueia M0, M1 e M5
+        
+        # Descobre a data base do ciclo atual
+        mes_c, ano_c = map(int, ciclo.split('/'))
+        ciclo_atual_dt = datetime.date(ano_c, mes_c, 1)
+        
+        # =========================================================================
+        # BLINDAGEM DE HORIZONTE: Apenas M2, M3 e M4
+        # =========================================================================
+        data_ini = ciclo_atual_dt + relativedelta(months=2) # Inicia no M2
+        data_fim = ciclo_atual_dt + relativedelta(months=4) # Termina no M4
         
         query = db.query(
             DimProduto.categoria, DimProduto.segmento, FatoIbpGranular.sku, DimProduto.descricao,
@@ -256,32 +264,41 @@ async def congelar_ratear_topdown(payload: PayloadAprovarTopDown, db: Session = 
         raise HTTPException(500, repr(e))
 
 @router.get("/grafico")
-async def grafico_tatico_topdown(chave_matriz: str, nivel_hierarquia: str = 'produto', db: Session = Depends(get_db)):
-    """Constrói o gráfico respeitando se é Produto, Segmento ou Categoria (24 Meses)"""
+async def grafico_tatico_topdown(chave_matriz: str, db: Session = Depends(get_db)):
+    """
+    Constrói a visualização tática de 24 meses!
+    O backend descobre sozinho se você clicou em Categoria, Segmento ou SKU.
+    """
     try:
+        # =========================================================================
+        # INTELIGÊNCIA DE HIERARQUIA AUTOMÁTICA
+        # =========================================================================
         partes = chave_matriz.split('|')
         categoria = None
         segmento = None
         sku_alvo = None
 
-        # Resolve a Hierarquia
-        if nivel_hierarquia == 'categoria':
+        if len(partes) == 1:
             categoria = partes[0]
-        elif nivel_hierarquia == 'segmento':
+        elif len(partes) == 2:
             categoria = partes[0]
-            segmento = partes[1] if len(partes) > 1 else None
+            segmento = partes[1]
         else:
-            sku_alvo = partes[-1]
+            categoria = partes[0]
+            segmento = partes[1]
+            sku_alvo = partes[2]
+            
+        ciclo = get_current_cycle(db)
+        mes_c, ano_c = map(int, ciclo.split('/'))
+        ciclo_atual_dt = datetime.date(ano_c, mes_c, 1)
         
-        hoje = datetime.date.today()
-        ciclo_atual_dt = hoje.replace(day=1)
         ciclo_atual = ciclo_atual_dt.strftime('%m/%Y')
         ciclo_anterior = (ciclo_atual_dt - relativedelta(months=1)).strftime('%m/%Y')
         
-        # 1. Histórico base (Ajustado para 2 Anos de Histórico)
+        # 1. Histórico: 2 Anos de passado
         q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol'))\
                    .join(DimProduto, FatoVendas.sku == DimProduto.sku)\
-                   .filter(FatoVendas.data_pedido >= hoje - relativedelta(years=2))
+                   .filter(FatoVendas.data_pedido >= ciclo_atual_dt - relativedelta(years=2))
         
         # 2. IBP (S&OP e IA)
         q_ibp = db.query(
@@ -289,16 +306,16 @@ async def grafico_tatico_topdown(chave_matriz: str, nivel_hierarquia: str = 'pro
             func.sum(FatoIbpGranular.vol_ia).label('ia'), func.sum(FatoIbpGranular.vol_topdown).label('td'), func.sum(FatoIbpGranular.vol_final).label('final')
         ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)
 
-        # Filtros Dinâmicos de Hierarquia
-        if categoria:
-            q_hist = q_hist.filter(DimProduto.categoria == categoria)
-            q_ibp = q_ibp.filter(DimProduto.categoria == categoria)
-        if segmento:
-            q_hist = q_hist.filter(DimProduto.segmento == segmento)
-            q_ibp = q_ibp.filter(DimProduto.segmento == segmento)
+        # Filtros Acumulativos
         if sku_alvo:
             q_hist = q_hist.filter(FatoVendas.sku == sku_alvo)
             q_ibp = q_ibp.filter(FatoIbpGranular.sku == sku_alvo)
+        elif segmento:
+            q_hist = q_hist.filter(DimProduto.categoria == categoria, DimProduto.segmento == segmento)
+            q_ibp = q_ibp.filter(DimProduto.categoria == categoria, DimProduto.segmento == segmento)
+        elif categoria:
+            q_hist = q_hist.filter(DimProduto.categoria == categoria)
+            q_ibp = q_ibp.filter(DimProduto.categoria == categoria)
 
         hist_dict = {h.mes_ano: int(h.vol or 0) for h in q_hist.group_by('mes_ano').all()}
         ibp_res = q_ibp.group_by(FatoIbpGranular.ciclo_sop, FatoIbpGranular.mes_projetado).all()
@@ -312,7 +329,6 @@ async def grafico_tatico_topdown(chave_matriz: str, nivel_hierarquia: str = 'pro
 
         meses_pt = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
         
-        # Expandimos a janela temporal para suportar os 2 anos reais do banco
         inicio_grafico = ciclo_atual_dt - relativedelta(months=24)
         fim_grafico = ciclo_atual_dt + relativedelta(months=5)
         
@@ -323,24 +339,18 @@ async def grafico_tatico_topdown(chave_matriz: str, nivel_hierarquia: str = 'pro
             calendario[mes_str] = {"Realizado": hist_dict.get(mes_str, 0), "IA": None, "CicloAnterior": None, "TopDown": None}
             curr += relativedelta(months=1)
 
-        ciclo_base_zero = datetime.date(2026, 4, 1)
-
+        # =========================================================================
+        # LÓGICA EXATA DAS 4 LINHAS (IA, Lag 1, TopDown e Histórico)
+        # =========================================================================
         for ms in calendario.keys():
-            mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
-            
-            alvo_ia_dt = mes_dt - relativedelta(months=2)
-            if alvo_ia_dt < ciclo_base_zero: alvo_ia_dt = ciclo_base_zero
-            if alvo_ia_dt > ciclo_atual_dt: alvo_ia_dt = ciclo_atual_dt
-            ciclo_ia_str = alvo_ia_dt.strftime('%m/%Y')
-            
-            if ciclo_ia_str in proj_por_mes[ms]:
-                calendario[ms]["IA"] = proj_por_mes[ms][ciclo_ia_str]["ia"]
+            # A IA e o TopDown de hoje pertencem ao Ciclo Atual
+            if ciclo_atual in proj_por_mes[ms]:
+                calendario[ms]["IA"] = proj_por_mes[ms][ciclo_atual]["ia"]
+                calendario[ms]["TopDown"] = proj_por_mes[ms][ciclo_atual]["td"]
 
+            # O Lag 1 é a herança congelada do Ciclo Anterior
             if ciclo_anterior in proj_por_mes[ms]:
                 calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_anterior]["final"]
-
-            if ciclo_atual in proj_por_mes[ms]:
-                calendario[ms]["TopDown"] = proj_por_mes[ms][ciclo_atual]["td"]
 
         timeline = []
         for ms, v in sorted(calendario.items()):
@@ -349,10 +359,11 @@ async def grafico_tatico_topdown(chave_matriz: str, nivel_hierarquia: str = 'pro
             timeline.append({
                 "name": f"{meses_pt[mes_dt.month - 1]}/{mes_dt.strftime('%y')}",
                 "data_iso": f"{ms}-01",
-                "Realizado": None if mes_dt > hoje else (v["Realizado"] or 0),
+                # O Realizado é cortado assim que entra no mês fechado atual
+                "Realizado": None if mes_dt >= ciclo_atual_dt else (v["Realizado"] or 0),
                 "IA": v["IA"],
                 "CicloAnterior": v["CicloAnterior"],
-                "TopDown": v["TopDown"] if mes_dt >= ciclo_atual_dt else None
+                "TopDown": v["TopDown"]
             })
 
         return {"status": "success", "dados": timeline}
