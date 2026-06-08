@@ -15,7 +15,6 @@ class NexusForecaster:
         self.forecast_horizon = 5
         self.cv_folds = 3 
         
-        # Pesos Táticos Corporativos: Errar o longo prazo (M2 a M4) pune o algoritmo severamente.
         self.pesos_taticos = np.array([0.5, 2.0, 2.0, 2.0, 0.5])
         
         self.especialistas = {
@@ -44,9 +43,6 @@ class NexusForecaster:
         
         log_callback("📥 [ENGINE] Extraindo Catálogo Completo e Histórico de Vendas (INCLUINDO NPIs)...")
         
-        # ====================================================================
-        # A NOVA QUERY BLINDADA: Ignora os 'DESCONTINUADO' na raiz!
-        # ====================================================================
         query_historico = text("""
             SELECT 
                 p.sku AS produto,
@@ -59,10 +55,7 @@ class NexusForecaster:
                 END AS pmv
             FROM dim_produtos p
             LEFT JOIN fato_vendas v ON p.sku = v.sku AND TO_CHAR(v.data_pedido, 'YYYY-MM') < :mes_atual
-            
-            /* BLINDAGEM DE PORTFÓLIO: O Lixo é parado aqui */
             WHERE UPPER(TRIM(p.curva)) != 'DESCONTINUADO'
-            
             GROUP BY 
                 p.sku, p.descricao, TO_CHAR(v.data_pedido, 'YYYY-MM')
             ORDER BY produto, mes_ano;
@@ -74,9 +67,6 @@ class NexusForecaster:
             log_callback("❌ [ENGINE] Banco vazio ou nenhum SKU ativo encontrado. Abortando IA.")
             return pl.DataFrame()
 
-        # =========================================================================
-        # PROXY HUMANO: Resgate da inteligência do mês passado
-        # =========================================================================
         log_callback(f"🧠 [ENGINE] Resgatando Proxy Humano (Ciclo {ciclo_anterior}) para proteção anti-falhas...")
         query_human = text("""
             SELECT sku, mes_projetado, SUM(vol_final) as vol_humano
@@ -137,7 +127,6 @@ class NexusForecaster:
             melhor_modelo_nome = "Proxy_Humano_Herdado"
             maior_acuracia_media = 100.0
 
-            # REGRA MESTRA: Tenta aplicar o ML se houver histórico de vendas
             if serie.sum() > 0:
                 folds_aplicaveis = min(self.cv_folds, max(1, tamanho_serie - self.forecast_horizon - 2))
                 
@@ -147,11 +136,9 @@ class NexusForecaster:
                         treino_cv = serie.iloc[:-corte_teste]
                         teste_real_cv = serie.iloc[-corte_teste : -corte_teste + self.forecast_horizon] if fold > 0 else serie.iloc[-corte_teste:]
                         
-                        # BLINDAGEM C++ (LightGBM): Ignora o treino se o passado não tiver volume absoluto
                         if len(treino_cv) < 3 or treino_cv.sum() == 0: 
                             continue
 
-                        # Batalha Universal
                         for nome, modelo in self.especialistas.items():
                             try:
                                 preds_cv = modelo.fit_predict(treino_cv, self.forecast_horizon)
@@ -163,7 +150,6 @@ class NexusForecaster:
                     for nome in self.especialistas.keys():
                         avaliacoes_cv[nome] = [1.0]
 
-                # CONSOLIDANDO O RANKING DA ARENA
                 ranking = []
                 for nome, acc_lista in avaliacoes_cv.items():
                     if acc_lista:
@@ -171,10 +157,6 @@ class NexusForecaster:
                 
                 ranking.sort(key=lambda item: item[1], reverse=True)
 
-                # =========================================================================
-                # NOVIDADE: A FUSÃO DE MODELOS (ENSEMBLE FORECASTING)
-                # O motor agora usa os 3 melhores algoritmos em simultâneo
-                # =========================================================================
                 top_n = 3
                 modelos_sucesso = []
                 previsoes_sucesso = []
@@ -194,7 +176,6 @@ class NexusForecaster:
                     except Exception:
                         continue 
                 
-                # CÁLCULO DOS PESOS PONDERADOS
                 if modelos_sucesso:
                     sucesso_ml = True
                     soma_acc = sum(acuracias_sucesso)
@@ -207,16 +188,12 @@ class NexusForecaster:
                     for idx_mod, preds in enumerate(previsoes_sucesso):
                         previsao_final += np.array(preds) * pesos[idx_mod]
                     
-                    # Nomeamos o vencedor como um Ensemble dos modelos usados
                     nomes_curtos = [n.split('_')[0] for n in modelos_sucesso]
                     melhor_modelo_nome = f"Ensemble ({'+'.join(nomes_curtos)})"
                     maior_acuracia_media = np.average(acuracias_sucesso, weights=pesos) if soma_acc > 0 else 0.0
                 else:
                     sucesso_ml = False
 
-            # =========================================================================
-            # INJEÇÃO DA VERDADE (ENSEMBLE ML OU PROXY HUMANO BLINDADO)
-            # =========================================================================
             for i in range(self.forecast_horizon):
                 data_proj = (data_inicio_previsao + pd.DateOffset(months=i)).to_pydatetime().date()
                 

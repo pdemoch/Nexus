@@ -1,11 +1,13 @@
 import numpy as np
 import pandas as pd
-import xgboost 
-import lightgbm
+import xgboost as xgb
+import lightgbm as lgb
 from sklearn.ensemble import RandomForestRegressor
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.forecasting.theta import ThetaModel
 import warnings
+
+warnings.filterwarnings("ignore")
 
 try:
     from prophet import Prophet
@@ -22,16 +24,9 @@ try:
 except ImportError:
     pass
 
-try:
-    from neuralforecast import NeuralForecast
-    from neuralforecast.models import TiDE, TFT
-except ImportError:
-    pass
-
-warnings.filterwarnings("ignore")
 
 def calcular_acuracia(y_true, y_pred, pesos=None):
-    """Calcula a Acurácia (0 a 100%) baseada no WMAPE com suporte a Pesos Táticos."""
+    """Calcula a Acurácia baseada no WMAPE ponderado taticamente."""
     y_true = np.array(y_true)
     y_pred = np.array(y_pred)
     
@@ -44,261 +39,156 @@ def calcular_acuracia(y_true, y_pred, pesos=None):
     if soma_real == 0:
         return 0.0 if np.sum(y_pred * pesos) > 0 else 100.0
         
-    wmape = np.sum(np.abs(y_true - y_pred) * pesos) / soma_real
-    acuracia = max(0.0, (1.0 - wmape) * 100)
-    return round(acuracia, 2)
+    erro_abs = np.abs(y_true - y_pred) * pesos
+    wmape = np.sum(erro_abs) / soma_real
+    return max(0.0, 100.0 * (1 - wmape))
 
 
-class ProphetModel:
-    def fit_predict(self, train_series: pd.Series, steps_ahead: int):
-        try:
-            if len(train_series) < 6: return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
-            df_p = pd.DataFrame({'ds': train_series.index, 'y': train_series.values})
-            import logging
-            logging.getLogger('prophet').setLevel(logging.ERROR)
-            
-            m = Prophet(
-                yearly_seasonality=True, 
-                weekly_seasonality=False, 
-                daily_seasonality=False,
-                changepoint_prior_scale=0.1,  
-                seasonality_prior_scale=10.0  
-            )
-            m.fit(df_p)
-            future = m.make_future_dataframe(periods=steps_ahead, freq='MS')
-            forecast = m.predict(future)
-            preds = forecast['yhat'].iloc[-steps_ahead:].values
-            return np.maximum(0, preds)
-        except Exception:
-            return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
-
-
-class AutoArimaModel:
-    def fit_predict(self, train_series: pd.Series, steps_ahead: int):
-        try:
-            if len(train_series) < 12: return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
-            model = pm.auto_arima(train_series.values, seasonal=True, m=12, stepwise=True, suppress_warnings=True, error_action="ignore")
-            preds = model.predict(n_periods=steps_ahead)
-            return np.maximum(0, preds)
-        except Exception:
-            return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
-
-
-class HoltWintersModel:
-    def fit_predict(self, train_series: pd.Series, steps_ahead: int):
-        try:
-            if len(train_series) < 12: return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
-            model = ExponentialSmoothing(train_series.values, trend='add', seasonal='add', seasonal_periods=12, initialization_method="estimated").fit()
-            return np.maximum(0, model.forecast(steps_ahead))
-        except Exception:
-            return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
-
-
-class HoltModel:
-    def fit_predict(self, train_series: pd.Series, steps_ahead: int):
-        try:
-            if len(train_series) < 3: return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
-            model = ExponentialSmoothing(train_series.values, trend='add', seasonal=None, initialization_method="estimated").fit()
-            return np.maximum(0, model.forecast(steps_ahead))
-        except Exception:
-            return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
-
-
-class ThetaModelWrapper:
-    def fit_predict(self, train_series: pd.Series, steps_ahead: int):
-        try:
-            if len(train_series) < 4: return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
-            model = ThetaModel(train_series.values).fit()
-            return np.maximum(0, model.forecast(steps_ahead))
-        except Exception:
-            return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
-
-
-class CrostonModel:
-    def fit_predict(self, train_series: pd.Series, steps_ahead: int, alpha=0.1):
-        y = train_series.values
-        if len(y) == 0 or np.sum(y) == 0: return np.zeros(steps_ahead)
-        z, p = np.zeros(len(y)), np.zeros(len(y))  
-        last_p = 1
-        for i in range(len(y)):
-            if y[i] > 0:
-                z[i], p[i] = y[i], last_p
-                last_p = 1
-            else:
-                z[i] = z[i-1] if i > 0 else 0
-                p[i] = p[i-1] if i > 0 else 1
-                last_p += 1
-        z_hat, p_hat = np.zeros(len(y) + 1), np.zeros(len(y) + 1)
-        z_hat[0], p_hat[0] = z[0], p[0]
-        for i in range(len(y)):
-            z_hat[i+1] = alpha * z[i] + (1 - alpha) * z_hat[i]
-            p_hat[i+1] = alpha * p[i] + (1 - alpha) * p_hat[i]
-        p_hat = np.maximum(p_hat, 1.0) 
-        return np.full(steps_ahead, max(0, z_hat[-1] / p_hat[-1]))
-
+# =========================================================================
+# BIBLIOTECA DE ESTATÍSTICA CLÁSSICA
+# =========================================================================
 
 class MovingAverageModel:
     def __init__(self, window=3):
         self.window = window
-    def fit_predict(self, train_series: pd.Series, steps_ahead: int):
-        if len(train_series) == 0: return np.zeros(steps_ahead)
-        hist_y = list(train_series.values)
-        preds = []
-        for _ in range(steps_ahead):
-            pred = np.mean(hist_y[-self.window:]) if len(hist_y) >= self.window else np.mean(hist_y)
-            preds.append(max(0, pred))
-            hist_y.append(pred) 
-        return np.array(preds)
+        
+    def fit_predict(self, serie, horizon):
+        val = serie.iloc[-self.window:].mean() if len(serie) >= self.window else serie.mean()
+        return [val] * horizon
+
+class HoltModel:
+    def fit_predict(self, serie, horizon):
+        if len(serie) < 4: return [serie.iloc[-1]]*horizon
+        model = ExponentialSmoothing(serie, trend='add', seasonal=None, initialization_method='estimated').fit()
+        return model.forecast(horizon).tolist()
+
+class HoltWintersModel:
+    def fit_predict(self, serie, horizon):
+        if len(serie) < 14: return HoltModel().fit_predict(serie, horizon)
+        model = ExponentialSmoothing(serie, trend='add', seasonal='add', seasonal_periods=12, initialization_method='estimated').fit()
+        return model.forecast(horizon).tolist()
+
+class ThetaModelWrapper:
+    def fit_predict(self, serie, horizon):
+        if len(serie) < 4: return [serie.iloc[-1]]*horizon
+        res = ThetaModel(serie).fit()
+        return res.forecast(horizon).tolist()
+
+class CrostonModel:
+    def fit_predict(self, serie, horizon):
+        y = serie.values
+        if len(y) < 3: return [y[-1]] * horizon
+        a = 0.1
+        z, p, q = np.zeros(len(y)), np.zeros(len(y)), 1
+        z[0], p[0] = y[0], 1
+        for t in range(1, len(y)):
+            if y[t] > 0:
+                z[t] = a * y[t] + (1 - a) * z[t-1]
+                p[t] = a * q + (1 - a) * p[t-1]
+                q = 1
+            else:
+                z[t], p[t] = z[t-1], p[t-1]
+                q += 1
+        pred = z[-1] / max(p[-1], 0.1)
+        return [pred] * horizon
+
+class ProphetModel:
+    def fit_predict(self, serie, horizon):
+        if 'Prophet' not in globals() or len(serie) < 5:
+            return [serie.iloc[-1]]*horizon
+        df = serie.reset_index()
+        df.columns = ['ds', 'y']
+        m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
+        m.fit(df)
+        future = m.make_future_dataframe(periods=horizon, freq='MS')
+        fcst = m.predict(future)
+        return fcst['yhat'].iloc[-horizon:].clip(lower=0).tolist()
+
+class AutoArimaModel:
+    def fit_predict(self, serie, horizon):
+        if 'pm' not in globals() or len(serie) < 14:
+            return [serie.iloc[-1]]*horizon
+        model = pm.auto_arima(serie, seasonal=True, m=12, suppress_warnings=True, error_action='ignore')
+        return model.predict(n_periods=horizon).clip(lower=0).tolist()
+
+class DeepLearningForecaster:
+    def __init__(self, model_type):
+        self.model_type = model_type
+    def fit_predict(self, serie, horizon):
+        return [serie.iloc[-1]]*horizon
 
 
+# =========================================================================
+# A MÁGICA: LocalMLAutoregressive com Sinais Temporais (Fim da Linearidade)
+# =========================================================================
 class LocalMLAutoregressive:
-    """
-    MOTOR DIRECT MULTI-STEP COM ENGENHARIA DE SINAIS (SERROTE) E PERDA ASSIMÉTRICA
-    """
     def __init__(self, model_type='xgb'):
         self.model_type = model_type
 
-    def fit_predict(self, train_series: pd.Series, steps_ahead: int):
-        if len(train_series) < 15: 
-            return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
-
-        # 1. Feature Engineering: O Fim da Caixa Preta
-        df = pd.DataFrame({'y': train_series.values}, index=train_series.index)
+    def _create_features(self, serie: pd.Series):
+        """Vetoriza a série histórica em variáveis ricas de Sazonalidade e Aceleração."""
+        df = serie.reset_index()
+        df.columns = ['data', 'y']
         
-        # Calendário
-        df['mes'] = df.index.month
+        # 1. Decomposição de Fourier (O Ciclo Sazonal)
+        df['mes'] = df['data'].dt.month
         df['mes_sin'] = np.sin(2 * np.pi * df['mes'] / 12)
         df['mes_cos'] = np.cos(2 * np.pi * df['mes'] / 12)
-
-        # Lags Críticos
-        for lag in [1, 2, 3, 4, 6, 12]:
-            df[f'lag_{lag}'] = df['y'].shift(lag)
+        
+        # 2. Lags (A Memória do Passado)
+        for i in range(1, 4):
+            df[f'lag_{i}'] = df['y'].shift(i)
             
-        df['media_movel_3'] = df['y'].shift(1).rolling(3).mean()
-        df['media_movel_6'] = df['y'].shift(1).rolling(6).mean()
+        # 3. Suavização e Volatilidade (O Comportamento das Ondas)
+        df['mm_3'] = df['y'].shift(1).rolling(window=3, min_periods=1).mean()
+        df['volatilidade_3m'] = df['y'].shift(1).rolling(window=3, min_periods=1).std().fillna(0)
         
-        # Sinais Cíclicos (Capturando Inversão de Tendência)
-        df['diff_1'] = df['lag_1'] - df['lag_2']
-        df['diff_2'] = df['lag_2'] - df['lag_3']
+        # 4. Tendência (O Momentum Financeiro)
+        df['tendencia'] = df['lag_1'] - df['lag_2']
         
-        # Detector de Esgotamento (Trade Loading)
-        df['esgotamento_60d'] = (df['lag_1'] + df['lag_2']) / (df['media_movel_6'] * 2 + 0.1)
-        
-        # Detector de Picos Anômalos (Z-Score)
-        std_6m = df['y'].shift(1).rolling(6).std().replace(0, 1)
-        df['z_score'] = (df['lag_1'] - df['media_movel_6']) / std_6m
-        df['is_pico'] = (df['z_score'] > 1.2).astype(int)
-        df['picos_ultimos_3m'] = df['is_pico'].rolling(3).sum().fillna(0)
+        return df
 
+    def fit_predict(self, serie: pd.Series, horizon: int):
+        df = self._create_features(serie)
+        # Ao usar shift(3), perdemos as primeiras 3 linhas para treino. O dropna limpa a base.
+        train_df = df.dropna()
+        
+        if len(train_df) < 4:
+            # Se for NPI ou tiver pouco histórico, recua para uma média segura.
+            return [max(0, float(serie.iloc[-1]))] * horizon
+
+        features = [c for c in train_df.columns if c not in ['data', 'y', 'mes']]
+        X = train_df[features]
+        y = train_df['y']
+        
+        if self.model_type == 'xgb':
+            model = xgb.XGBRegressor(n_estimators=60, max_depth=3, learning_rate=0.1, random_state=42, objective='reg:tweedie')
+        elif self.model_type == 'lgb':
+            model = lgb.LGBMRegressor(n_estimators=60, max_depth=3, learning_rate=0.1, random_state=42, verbose=-1)
+        elif self.model_type == 'cat' and 'CatBoostRegressor' in globals():
+            model = CatBoostRegressor(n_estimators=60, depth=3, learning_rate=0.1, random_state=42, verbose=0)
+        else:
+            model = RandomForestRegressor(n_estimators=60, max_depth=3, random_state=42)
+            
+        model.fit(X, y)
+        
+        # A PREDIÇÃO RECURSIVA:
+        # A IA avança mês a mês. O que ela previu para M1 torna-se o histórico (Lag) para prever M2!
         preds = []
-        # X_current é o extrato exato de hoje, para prever o futuro.
-        X_current = df.iloc[[-1]].drop(columns=['y'], errors='ignore')
-
-        # 2. Estratégia DIRECT MULTI-STEP: Um Especilista para cada Mês
-        for h in range(1, steps_ahead + 1):
-            df_h = df.copy()
-            # A Magia: Deslocamos o Y alvo (h) passos para trás. 
-            # O modelo aprende a olhar para os dados de HOJE e adivinhar daqui a (h) meses.
-            df_h['target'] = df_h['y'].shift(-h) 
-            df_train = df_h.dropna()
-            
-            if len(df_train) < 5:
-                pred_fallback = np.mean(train_series.values[-3:])
-                preds.append(pred_fallback)
-                continue
-
-            X_train = df_train.drop(columns=['y', 'target'])
-            y_train = df_train['target']
-
-            # 3. Funções de Perda Assimétrica (Tweedie/Poisson) 
-            # Elas evitam o "achatamento" da média e são agressivas na deteção de picos de demanda
-            if self.model_type == 'xgb':
-                model = xgboost.XGBRegressor(n_estimators=75, max_depth=3, learning_rate=0.05, objective='reg:tweedie', random_state=42)
-            elif self.model_type == 'lgb':
-                model = lightgbm.LGBMRegressor(n_estimators=75, max_depth=3, learning_rate=0.05, objective='tweedie', random_state=42, verbose=-1)
-            elif self.model_type == 'cat':
-                model = CatBoostRegressor(iterations=75, depth=4, learning_rate=0.05, loss_function='Poisson', random_seed=42, verbose=0)
-            else:
-                model = RandomForestRegressor(n_estimators=75, max_depth=4, random_state=42)
-
-            model.fit(X_train, y_train)
-            pred_h = max(0, model.predict(X_current)[0])
-            preds.append(pred_h)
-
-        return np.array(preds)
-
-
-class DeepLearningForecaster:
-    """
-    MOTOR DE REDES NEURAIS (ZERO-SHOT)
-    """
-    def __init__(self, model_type='tide'):
-        self.model_type = model_type
-
-    def fit_predict(self, train_series: pd.Series, steps_ahead: int):
-        try:
-            if len(train_series) < 24:
-                return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
-
-            df_dl = pd.DataFrame({
-                'unique_id': 'sku_arena',
-                'ds': train_series.index,
-                'y': train_series.values
-            })
-
-            if self.model_type == 'tide':
-                model = TiDE(h=steps_ahead, input_size=12, max_steps=100, scaler_type='standard')
-            elif self.model_type == 'tft':
-                model = TFT(h=steps_ahead, input_size=12, max_steps=100, scaler_type='standard')
-            else:
-                return np.zeros(steps_ahead)
-
-            nf = NeuralForecast(models=[model], freq='MS')
-            nf.fit(df=df_dl)
-            forecast = nf.predict()
-            
-            preds = forecast[self.model_type.upper()].values
-            return np.maximum(0, preds)
-
-        except NameError:
-            return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
-        except Exception:
-            return np.full(steps_ahead, train_series.mean() if len(train_series) > 0 else 0)
-
-
-class GlobalMLTrainer:
-    """Construtor Avançado de Features Globais"""
-    @staticmethod
-    def gerar_features_globais(df_historico_completo: pd.DataFrame, lags=[1, 2, 3, 4, 6, 12]):
-        dfs_processados = []
-        for sku, group in df_historico_completo.groupby('produto'):
-            g = group.copy().sort_values('mes_ano_dt')
-            g['mes'] = g['mes_ano_dt'].dt.month
-            g['mes_sin'] = np.sin(2 * np.pi * g['mes'] / 12)
-            g['mes_cos'] = np.cos(2 * np.pi * g['mes'] / 12)
-            
-            for lag in lags: g[f'lag_{lag}'] = g['total_qtpedido'].shift(lag)
-            
-            g['media_movel_3'] = g['total_qtpedido'].shift(1).rolling(window=3).mean()
-            g['media_movel_6'] = g['total_qtpedido'].shift(1).rolling(window=6).mean()
-            g['volatilidade_3m'] = g['total_qtpedido'].shift(1).rolling(window=3).std().fillna(0)
-            
-            # Sinais Cíclicos
-            g['diff_1'] = g['lag_1'] - g['lag_2']
-            g['diff_2'] = g['lag_2'] - g['lag_3']
-            g['esgotamento_60d'] = (g['lag_1'] + g['lag_2']) / (g['media_movel_6'] * 2 + 0.1)
-            
-            std_6 = g['total_qtpedido'].shift(1).rolling(window=6).std().replace(0, 1)
-            g['z_score'] = (g['total_qtpedido'].shift(1) - g['media_movel_6']) / std_6
-            g['is_pico'] = (g['z_score'] > 1.2).astype(int)
-            g['picos_ultimos_3m'] = g['is_pico'].rolling(window=3).sum().fillna(0)
-            
-            dfs_processados.append(g)
-            
-        df_feat = pd.concat(dfs_processados).dropna(subset=[f'lag_{lags[-1]}']).copy()
+        current_serie = serie.copy()
         
-        cols_cat = ['bu', 'categoria', 'segmento', 'curva_2026']
-        for col in cols_cat:
-            if col in df_feat.columns: df_feat[col] = df_feat[col].astype('category').cat.codes
-                
-        return df_feat
+        for i in range(horizon):
+            next_date = current_serie.index[-1] + pd.DateOffset(months=1)
+            current_serie.loc[next_date] = 0.0 # Placeholder
+            
+            df_future = self._create_features(current_serie)
+            next_X = df_future.iloc[[-1]][features]
+            
+            pred = float(model.predict(next_X)[0])
+            pred = max(0.0, pred) # Bloqueia valores negativos
+            preds.append(pred)
+            
+            # Retroalimenta a máquina: A previsão atual vira o passado do próximo mês
+            current_serie.loc[next_date] = pred
+            
+        return preds
