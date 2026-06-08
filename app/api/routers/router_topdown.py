@@ -15,6 +15,7 @@ from app.api.routers.router_auth import get_current_user
 from app.api.routers.shared_ibp import (
     get_current_cycle,
     get_previous_cycle,
+    get_projection_window, # <-- Adicionado o delimitador tático
     get_truth_query,
     check_global_lock,
     parse_date_safe,
@@ -38,12 +39,12 @@ def require_admin(usuario: dict = Depends(get_current_user)):
 
 @router.get("")
 async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None, db: Session = Depends(get_db)):
-    """Constrói a árvore de decisão macro: Categoria -> Segmento -> SKU"""
+    """Constrói a árvore de decisão macro: Categoria -> Segmento -> SKU limitando a M2-M4"""
     try:
         ciclo = get_current_cycle(db)
         ciclo_ant = get_previous_cycle(db)
+        data_ini, data_fim = get_projection_window(db) # Bloqueia M0, M1 e M5
         
-        # 1. Busca os dados do ciclo atual (CORREÇÃO: Removido o vol_anterior inexistente)
         query = db.query(
             DimProduto.categoria, DimProduto.segmento, FatoIbpGranular.sku, DimProduto.descricao,
             FatoIbpGranular.mes_projetado,
@@ -51,7 +52,11 @@ async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None,
             func.sum(FatoIbpGranular.vol_topdown).label('td'),
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
         ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)\
-         .filter(FatoIbpGranular.ciclo_sop == ciclo)
+         .filter(
+             FatoIbpGranular.ciclo_sop == ciclo,
+             FatoIbpGranular.mes_projetado >= data_ini,
+             FatoIbpGranular.mes_projetado <= data_fim
+         )
 
         if categoria_filtro and valor_filtro:
             if categoria_filtro == 'categoria': query = query.filter(DimProduto.categoria == valor_filtro)
@@ -61,11 +66,14 @@ async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None,
             DimProduto.categoria, DimProduto.segmento, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado
         ).all()
 
-        # 2. Busca a Sombra do Ciclo Anterior (Lag 1) de forma segura
         query_ant = db.query(
             FatoIbpGranular.sku, FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_final).label('ant')
-        ).filter(FatoIbpGranular.ciclo_sop == ciclo_ant)
+        ).filter(
+            FatoIbpGranular.ciclo_sop == ciclo_ant,
+            FatoIbpGranular.mes_projetado >= data_ini,
+            FatoIbpGranular.mes_projetado <= data_fim
+        )
         
         if categoria_filtro and valor_filtro:
             query_ant = query_ant.join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)
@@ -77,11 +85,9 @@ async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None,
         mapa_ant = {}
         for r in resultados_ant:
             ms_iso = str(r.mes_projetado).split()[0]
-            # Padroniza para cruzar perfeitamente (dia 01)
             ms_padrao = ms_iso[:-2] + "01"
             mapa_ant[f"{r.sku}|{ms_padrao}"] = int(r.ant or 0)
 
-        # 3. Constrói a árvore de Agrupamentos com as Matrizes preenchidas
         arvore = {}
         for r in resultados:
             cat = r.categoria or 'SEM CATEGORIA'
@@ -108,13 +114,11 @@ async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None,
             vol_td = int(r.td) if r.td is not None else vol_ia
             pmv = float(r.pmv or 0)
 
-            # Preenche o Nível SKU
             arvore[cat]["subRows"][seg]["subRows"][sku]["meses_map"][mes_banco_str] = {
                 "mes_banco": mes_banco_str, "mes_str": mes_pt_str, "vol_ia": vol_ia, 
                 "vol_anterior": vol_ant_val, "vol_ajustado": vol_td, "pmv": pmv
             }
 
-            # Agrega no Nível Segmento
             s_map = arvore[cat]["subRows"][seg]["meses_map"]
             if mes_banco_str not in s_map:
                 s_map[mes_banco_str] = {"mes_banco": mes_banco_str, "mes_str": mes_pt_str, "vol_ia": 0, "vol_anterior": 0, "vol_ajustado": 0, "receita": 0}
@@ -124,7 +128,6 @@ async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None,
             s_map[mes_banco_str]["receita"] += (vol_td * pmv)
             s_map[mes_banco_str]["pmv"] = s_map[mes_banco_str]["receita"] / s_map[mes_banco_str]["vol_ajustado"] if s_map[mes_banco_str]["vol_ajustado"] > 0 else 0
 
-            # Agrega no Nível Categoria
             c_map = arvore[cat]["meses_map"]
             if mes_banco_str not in c_map:
                 c_map[mes_banco_str] = {"mes_banco": mes_banco_str, "mes_str": mes_pt_str, "vol_ia": 0, "vol_anterior": 0, "vol_ajustado": 0, "receita": 0}
@@ -134,7 +137,6 @@ async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None,
             c_map[mes_banco_str]["receita"] += (vol_td * pmv)
             c_map[mes_banco_str]["pmv"] = c_map[mes_banco_str]["receita"] / c_map[mes_banco_str]["vol_ajustado"] if c_map[mes_banco_str]["vol_ajustado"] > 0 else 0
 
-        # Converte mapas para arrays garantindo ordenação correta do calendário
         for c in arvore.values():
             c["meses"] = sorted(list(c["meses_map"].values()), key=lambda x: x["mes_banco"])
             del c["meses_map"]
@@ -153,18 +155,15 @@ async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None,
 
 @router.get("/status")
 async def topdown_status(db: Session = Depends(get_db)):
-    """Verifica se a fase Top-Down (Diretoria) já foi ratificada."""
     ciclo = get_current_cycle(db)
     reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down Arena').first()
     return {"is_fechado": reg.status == 'Fechado' if reg else False}
 
 @router.post("/salvar")
 async def salvar_rascunho_topdown(payload: PayloadAprovarTopDown, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
-    """Salva as decisões executivas apenas na coluna vol_topdown, com Rateio Inteligente para não multiplicar volumes."""
     check_global_lock(db, get_current_cycle(db))
     try:
         ciclo = get_current_cycle(db)
-        
         for ajuste in payload.ajustes:
             data_alvo = parse_date_safe(ajuste.mes_projetado)
             volume_alvo = int(ajuste.novo_volume)
@@ -201,10 +200,8 @@ async def salvar_rascunho_topdown(payload: PayloadAprovarTopDown, db: Session = 
 
 @router.post("/congelar")
 async def congelar_ratear_topdown(payload: PayloadAprovarTopDown, db: Session = Depends(get_db), usuario: dict = Depends(require_admin)):
-    """Publica a estratégia Macro, rateia os volumes aprovados pela Diretoria e tranca a fase."""
     ciclo = get_current_cycle(db)
     check_global_lock(db, ciclo)
-    
     try:
         for ajuste in payload.ajustes:
             data_alvo = parse_date_safe(ajuste.mes_projetado)
@@ -215,7 +212,6 @@ async def congelar_ratear_topdown(payload: PayloadAprovarTopDown, db: Session = 
             if not linhas: continue
 
             total_base_antigo = sum([float(l.vol_final or 0) for l in linhas])
-
             base_total_bu = sum([float(l.vol_bottomup or 0) for l in linhas])
             base_total_sp = sum([float(l.vol_supply or 0) for l in linhas])
             
@@ -260,23 +256,49 @@ async def congelar_ratear_topdown(payload: PayloadAprovarTopDown, db: Session = 
         raise HTTPException(500, repr(e))
 
 @router.get("/grafico")
-async def grafico_tatico_topdown(chave_matriz: str, db: Session = Depends(get_db)):
-    """Constrói a visualização tática comparando a IA, o Histórico e a Proposta atual da Diretoria."""
+async def grafico_tatico_topdown(chave_matriz: str, nivel_hierarquia: str = 'produto', db: Session = Depends(get_db)):
+    """Constrói o gráfico respeitando se é Produto, Segmento ou Categoria (24 Meses)"""
     try:
-        sku_alvo = chave_matriz.split('|')[-1]
+        partes = chave_matriz.split('|')
+        categoria = None
+        segmento = None
+        sku_alvo = None
+
+        # Resolve a Hierarquia
+        if nivel_hierarquia == 'categoria':
+            categoria = partes[0]
+        elif nivel_hierarquia == 'segmento':
+            categoria = partes[0]
+            segmento = partes[1] if len(partes) > 1 else None
+        else:
+            sku_alvo = partes[-1]
         
         hoje = datetime.date.today()
         ciclo_atual_dt = hoje.replace(day=1)
         ciclo_atual = ciclo_atual_dt.strftime('%m/%Y')
         ciclo_anterior = (ciclo_atual_dt - relativedelta(months=1)).strftime('%m/%Y')
         
+        # 1. Histórico base (Ajustado para 2 Anos de Histórico)
         q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol'))\
-                   .filter(FatoVendas.sku == sku_alvo, FatoVendas.data_pedido >= hoje - relativedelta(years=2))
+                   .join(DimProduto, FatoVendas.sku == DimProduto.sku)\
+                   .filter(FatoVendas.data_pedido >= hoje - relativedelta(years=2))
         
+        # 2. IBP (S&OP e IA)
         q_ibp = db.query(
             FatoIbpGranular.ciclo_sop, FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('ia'), func.sum(FatoIbpGranular.vol_topdown).label('td'), func.sum(FatoIbpGranular.vol_final).label('final')
-        ).filter(FatoIbpGranular.sku == sku_alvo)
+        ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)
+
+        # Filtros Dinâmicos de Hierarquia
+        if categoria:
+            q_hist = q_hist.filter(DimProduto.categoria == categoria)
+            q_ibp = q_ibp.filter(DimProduto.categoria == categoria)
+        if segmento:
+            q_hist = q_hist.filter(DimProduto.segmento == segmento)
+            q_ibp = q_ibp.filter(DimProduto.segmento == segmento)
+        if sku_alvo:
+            q_hist = q_hist.filter(FatoVendas.sku == sku_alvo)
+            q_ibp = q_ibp.filter(FatoIbpGranular.sku == sku_alvo)
 
         hist_dict = {h.mes_ano: int(h.vol or 0) for h in q_hist.group_by('mes_ano').all()}
         ibp_res = q_ibp.group_by(FatoIbpGranular.ciclo_sop, FatoIbpGranular.mes_projetado).all()
@@ -290,7 +312,8 @@ async def grafico_tatico_topdown(chave_matriz: str, db: Session = Depends(get_db
 
         meses_pt = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
         
-        inicio_grafico = ciclo_atual_dt - relativedelta(months=12)
+        # Expandimos a janela temporal para suportar os 2 anos reais do banco
+        inicio_grafico = ciclo_atual_dt - relativedelta(months=24)
         fim_grafico = ciclo_atual_dt + relativedelta(months=5)
         
         calendario = {}

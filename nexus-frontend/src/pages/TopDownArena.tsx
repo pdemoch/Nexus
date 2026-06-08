@@ -253,7 +253,10 @@ export default function TopDownArena() {
     setChartExpanded(chave);
     setLoadingGrafico(chave);
     try {
-      const res = await axios.get('/api/v1/consensus/macro/grafico', { params: { chave_matriz: chave } });
+      // INCLUSÃO DA HIERARQUIA: Agora o backend sabe se o clique foi na Categoria ou no SKU
+      const res = await axios.get('/api/v1/consensus/macro/grafico', { 
+         params: { chave_matriz: chave, nivel_hierarquia: node.tipo } 
+      });
       setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
     } catch (e) { console.error(e); } finally { setLoadingGrafico(null); }
   };
