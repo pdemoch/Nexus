@@ -115,17 +115,19 @@ class NexusTransformer:
             pl.col("curva_2026").first().alias("curva_2026")
         ])
 
-        # 5. Transformação do Orçamento (Melt para versões anteriores do Polars)
+        # 5. Transformação do Orçamento (Blindada contra Excel sujo e Polars antigo)
         df_orc_final = pl.DataFrame()
         if not df_orc.is_empty():
+            # VACINA 1: Filtra imediatamente qualquer linha fantasma sem SKU
+            df_orc = df_orc.filter(pl.col("Produto").is_not_null())
             df_orc = df_orc.with_columns(pl.col("Produto").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars())
+            
             meses = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez']
             meses_map = {'jan':'01','fev':'02','mar':'03','abr':'04','mai':'05','jun':'06','jul':'07','ago':'08','set':'09','out':'10','nov':'11','dez':'12'}
             
             meses_existentes = [m for m in meses if m in df_orc.columns]
             
             if meses_existentes:
-                # CORREÇÃO AQUI: Usamos .melt() com id_vars e value_vars no lugar de unpivot
                 df_melted = df_orc.melt(
                     id_vars=["Produto"], 
                     value_vars=meses_existentes, 
@@ -133,8 +135,14 @@ class NexusTransformer:
                     value_name="receita_orcamento"
                 )
                 
+                # VACINA 2: Tenta usar .replace (Polars novo). Se falhar, usa .map_dict (Polars antigo)
+                try:
+                    expr_mes = pl.col("mes_str").replace(meses_map).alias("mes_num")
+                except AttributeError:
+                    expr_mes = pl.col("mes_str").map_dict(meses_map).alias("mes_num")
+                    
                 df_orc_final = df_melted.with_columns([
-                    pl.col("mes_str").replace(meses_map).alias("mes_num")
+                    expr_mes
                 ]).with_columns([
                     pl.format("2026-{}-01", pl.col("mes_num")).str.strptime(pl.Date, "%Y-%m-%d").alias("mes_projetado"),
                     pl.col("receita_orcamento").cast(pl.Float64)
