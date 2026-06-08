@@ -1,7 +1,7 @@
 import polars as pl
 
 class NexusTransformer:
-    def processar_camada_silver(self, lf_150: pl.LazyFrame, lf_188: pl.LazyFrame, df_seg: pl.DataFrame):
+    def processar_camada_silver(self, lf_150: pl.LazyFrame, lf_188: pl.LazyFrame, df_seg: pl.DataFrame, df_orc: pl.DataFrame):
         print("\n⚙️ [SILVER] Harmonizando dados para Injeção no Banco (Upsert)...")
 
         # 1. Tratamento da Tabela de Vendas (150)
@@ -14,13 +14,11 @@ class NexusTransformer:
             pl.col("cliente").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars(),
             pl.col("loja").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars(),
             pl.col("descricao").cast(pl.Utf8).str.strip_chars(),
-            # BLINDAGEM DO PEDIDO: Se o ERP mandar vazio, cria um identificador genérico para não quebrar o banco
             pl.col("pedido").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars().fill_null("S/N") 
         ]).with_columns([
             pl.concat_str([pl.col("cliente"), pl.lit("_"), pl.col("loja")]).alias("cliente_loja")
         ])
 
-        # REMOVER HIERARQUIA SUJA DO 150 ANTES DO JOIN
         colunas_vendas = lf_vendas.columns
         colunas_conflito = ["vendedor_nome", "gerente_nome", "supervisor_nome", "cgc", "razao social", "cliente_razaosocial", "bloqueado"]
         col_remover = [c for c in colunas_conflito if c in colunas_vendas]
@@ -43,7 +41,6 @@ class NexusTransformer:
             pl.col("supervisor_nome").cast(pl.Utf8).str.to_uppercase().str.strip_chars()
         ])
 
-        # A REGRA DE OURO DIRETO NA FONTE DE CLIENTES!
         lf_clientes = lf_clientes.with_columns([
             pl.when(
                 pl.col("supervisor_nome").is_null() | 
@@ -92,15 +89,11 @@ class NexusTransformer:
                 pl.col("2026").fill_null("ATIVO")
             ])
         else:
-            return None, None
+            return None, None, None
 
         lf_silver = lf_silver.with_columns(pl.col("cliente").alias("cod_cliente"))
         lf_final = lf_silver.with_columns(pl.col("2026").alias("curva_2026"))
         
-        # ---------------------------------------------------------------------
-        # CORREÇÃO DA MATEMÁTICA DO ERP (FUSÃO DE LINHAS QUEBRADAS)
-        # Substituímos o '.unique()' por um agrupamento e soma das métricas.
-        # ---------------------------------------------------------------------
         lf_final = lf_final.group_by(["pedido", "produto", "cgc"]).agg([
             pl.col("qtpedido").sum().alias("qtpedido"),
             pl.col("vlpedido").sum().alias("vlpedido"),
@@ -121,6 +114,23 @@ class NexusTransformer:
             pl.col("bloqueado").first().alias("bloqueado"),
             pl.col("curva_2026").first().alias("curva_2026")
         ])
+
+        # 5. Transformação do Orçamento (Melt)
+        df_orc_final = pl.DataFrame()
+        if not df_orc.is_empty():
+            df_orc = df_orc.with_columns(pl.col("Produto").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars())
+            meses = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez']
+            meses_map = {'jan':'01','fev':'02','mar':'03','abr':'04','mai':'05','jun':'06','jul':'07','ago':'08','set':'09','out':'10','nov':'11','dez':'12'}
+            
+            meses_existentes = [m for m in meses if m in df_orc.columns]
+            
+            if meses_existentes:
+                df_melted = df_orc.unpivot(index=["Produto"], on=meses_existentes, variable_name="mes_str", value_name="receita_orcamento")
+                df_orc_final = df_melted.with_columns([
+                    pl.col("mes_str").replace(meses_map).alias("mes_num")
+                ]).with_columns([
+                    pl.format("2026-{}-01", pl.col("mes_num")).str.strptime(pl.Date, "%Y-%m-%d").alias("mes_projetado"),
+                    pl.col("receita_orcamento").cast(pl.Float64)
+                ]).rename({"Produto": "sku"}).select(["sku", "mes_projetado", "receita_orcamento"])
         
-        # RETORNA A VENDA (PARA UPSERT) E O CADASTRO DE CLIENTES (PARA ATUALIZAÇÃO HISTÓRICA)
-        return lf_final, lf_clientes
+        return lf_final, lf_clientes, df_orc_final

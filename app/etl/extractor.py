@@ -14,7 +14,6 @@ class GobiExtractor:
         self.base_url = "https://gobi-api.lineaalimentos.com.br/v1/reports" 
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        # Limitamos a 10 conexões simultâneas para não estourar a rede/RAM
         self.semaphore = asyncio.Semaphore(10)
         self.timeout = aiohttp.ClientTimeout(total=400)
 
@@ -62,13 +61,11 @@ class GobiExtractor:
         if cols_para_cast:
             df = df.with_columns([pl.col(c).cast(pl.Float64, strict=False) for c in cols_para_cast])
             
-        # O SEGREDO OOM: Salva no disco imediatamente e esvazia a RAM!
         arquivo_parquet = self.data_dir / f"150_{dia_str}.parquet"
         df.write_parquet(arquivo_parquet)
         return str(arquivo_parquet)
 
     async def extrair_pedidos_150(self, data_inicio: date, data_fim: date) -> pl.LazyFrame:
-        # Limpa o disco de execuções antigas
         for f in glob.glob(f"{self.data_dir}/150_*.parquet"):
             try: os.remove(f)
             except: pass
@@ -84,7 +81,6 @@ class GobiExtractor:
             tasks = [self._fetch_dia_paginado(session, dia) for dia in dias]
             await asyncio.gather(*tasks)
 
-        # Retorna o "mapa" para o Polars ler do disco depois (LazyFrame)
         arquivos_gerados = glob.glob(f"{self.data_dir}/150_*.parquet")
         if not arquivos_gerados: return pl.LazyFrame()
         return pl.scan_parquet(arquivos_gerados)
@@ -133,11 +129,26 @@ class GobiExtractor:
         except Exception as e: print(f"Erro ao ler Segmentos.xlsx: {e}")
         return pl.DataFrame()
 
+    def extrair_orcamento(self, caminho_arquivo: str) -> pl.DataFrame:
+        try:
+            caminho = Path(caminho_arquivo)
+            if caminho.exists():
+                df = pl.read_excel(caminho_arquivo)
+                # Garante que o SKU será tratado como string para evitar ".0" e notação científica
+                if "Produto" in df.columns: 
+                    df = df.with_columns(pl.col("Produto").cast(pl.Utf8))
+                return df
+        except Exception as e: print(f"Erro ao ler Orçamento.xlsx: {e}")
+        return pl.DataFrame()
+
     async def extrair_tudo(self, data_inicio: date, data_fim: date):
         caminho_excel = "app/etl/Segmentos.xlsx"
+        caminho_orcamento = "app/etl/Orçamento.xlsx"
+        
         tarefa_150 = self.extrair_pedidos_150(data_inicio, data_fim)
         tarefa_188 = self.extrair_clientes_188()
         df_seg = self.extrair_segmentos(caminho_excel)
+        df_orc = self.extrair_orcamento(caminho_orcamento)
         
         lf_150, lf_188 = await asyncio.gather(tarefa_150, tarefa_188)
-        return lf_150, lf_188, df_seg
+        return lf_150, lf_188, df_seg, df_orc

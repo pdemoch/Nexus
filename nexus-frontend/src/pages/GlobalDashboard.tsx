@@ -11,7 +11,6 @@ import {
 import axios from 'axios';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
-// --- HELPERS DE FORMATAÇÃO E CÁLCULO ---
 const formatMoeda = (valor: any) => {
   const num = Number(valor);
   if (isNaN(num)) return 'R$ 0';
@@ -37,7 +36,6 @@ const VarBadge = ({ atual = 0, anterior = 0 }: { atual?: number, anterior?: numb
   );
 };
 
-// BUSCA INTELIGENTE DE PREÇO MÉDIO: Garante que o faturamento calcule mesmo se o vol_final for 0
 const getPmvSeguro = (m: any) => {
   if (!m) return 0;
   if (m.vol_final > 0 && m.rec_final > 0) return m.rec_final / m.vol_final;
@@ -49,19 +47,16 @@ const getPmvSeguro = (m: any) => {
 };
 
 const tooltipSorterRow = (item: any) => {
-  const order: Record<string, number> = { 'Histórico Real': 1, 'Proposta Mês Passado': 2, 'Sinal IA': 3, 'Restrição Supply': 4, 'Global S&OP': 5 };
+  const order: Record<string, number> = { 'Histórico Real': 1, 'Proposta Mês Passado': 2, 'Sinal IA': 3, 'Restrição Supply': 4, 'Global S&OP': 5, 'Orçamento 2026': 0 };
   return order[item.name] || 99;
 };
 
-// --- COMPONENTES AUXILIARES ---
 const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (val: number) => void, disabled: boolean }) => {
   const [localVal, setLocalVal] = useState((value !== undefined && value !== null) ? formatVolume(value) : '0');
   const [isFocused, setIsFocused] = useState(false);
 
   useEffect(() => { 
-    if (!isFocused) {
-        setLocalVal((value !== undefined && value !== null) ? formatVolume(value) : '0'); 
-    }
+    if (!isFocused) setLocalVal((value !== undefined && value !== null) ? formatVolume(value) : '0'); 
   }, [value, isFocused]);
 
   const handleFocus = () => { setIsFocused(true); setLocalVal(localVal.replace(/\./g, '')); };
@@ -90,7 +85,7 @@ const AiInsightBox = ({ alvo, tipo }: { alvo: string, tipo: string }) => {
     setLoading(true);
     try {
       const res = await axios.post('/api/v1/ai-sql/perguntar', {
-        pergunta: `Faça o dossiê executivo 360° para ${tipo} "${alvo}". Extraia a cascata de volumes, histórico de vendas e calcule as oportunidades. Avalie as restrições de Supply e os cortes realizados.`,
+        pergunta: `Faça o dossiê executivo 360° para ${tipo} "${alvo}". Extraia a cascata de volumes, histórico de vendas e calcule as oportunidades. Avalie as restrições de Supply e o desvio da meta do Orçamento.`,
         contexto: { tela_ativa: `Painel Global S&OP`, ciclo_status: 'Analítico/Consolidado' }
       });
       setInsight(res.data.resposta);
@@ -107,7 +102,7 @@ const AiInsightBox = ({ alvo, tipo }: { alvo: string, tipo: string }) => {
         <div className="text-sm font-medium text-slate-600 leading-relaxed whitespace-pre-wrap overflow-y-auto custom-scrollbar pr-2" dangerouslySetInnerHTML={{ __html: insight.replace(/\*\*(.*?)\*\*/g, '<strong class="font-black text-slate-900">$1</strong>').replace(/\n/g, '<br/>') }} />
       ) : (
         <div className="flex flex-col items-start gap-3 mt-2">
-           <p className="text-xs text-slate-500 font-medium">Acione o consultor executivo para avaliar o histórico e diagnosticar os gargalos de Supply.</p>
+           <p className="text-xs text-slate-500 font-medium">Acione o consultor executivo para avaliar o histórico, gargalos de Supply e alinhamento com o Orçamento.</p>
            <button onClick={getInsight} disabled={loading} className="mt-2 text-xs font-bold bg-indigo-600 text-white px-4 py-3 rounded-xl hover:bg-indigo-700 transition flex items-center gap-2 disabled:opacity-50 w-full justify-center shadow-lg shadow-indigo-900/20">
              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Gerar Parecer Estratégico'}
            </button>
@@ -117,9 +112,9 @@ const AiInsightBox = ({ alvo, tipo }: { alvo: string, tipo: string }) => {
   );
 };
 
-// --- COMPONENTE PRINCIPAL ---
 export default function GlobalDashboard() {
   const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
+  const [orcamentoBase, setOrcamentoBase] = useState<any>({});
   const [isLoading, setIsLoading] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isLocked, setIsLocked] = useState(false);
@@ -143,6 +138,7 @@ export default function GlobalDashboard() {
     try {
       const res = await axios.get('/api/v1/dashboard/global');
       setDadosBrutos(res.data.dados || []);
+      setOrcamentoBase(res.data.orcamento || {});
       setIsLocked(res.data.is_locked);
       setLockMessage(res.data.lock_message);
       setExpanded({}); setChartExpanded(null); setCelulasEditadas({});
@@ -155,7 +151,6 @@ export default function GlobalDashboard() {
     return Array.from(new Set(dadosBrutos.map(d => d.mes_projetado))).sort() as string[];
   }, [dadosBrutos]);
 
-  // --- AGRUPAMENTO DA HIERARQUIA 3 NÍVEIS ---
   const { arvoreDados, skuReferencias } = useMemo(() => {
     if (!dadosBrutos.length) return { arvoreDados: [], skuReferencias: { totaisBU: new Map(), basesSupply: new Map(), basesFinal: new Map() } };
     
@@ -199,7 +194,7 @@ export default function GlobalDashboard() {
         if (!node.meses.has(mes)) {
             node.meses.set(mes, { 
               mes_banco: mes, vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, 
-              rec_ia:0, rec_td:0, rec_bu:0, rec_sp:0, rec_final:0 // <--- CORREÇÃO BUG DO PMV ZERO 
+              rec_ia:0, rec_td:0, rec_bu:0, rec_sp:0, rec_final:0, rec_orc:0
             });
         }
         const mNode = node.meses.get(mes);
@@ -217,6 +212,17 @@ export default function GlobalDashboard() {
       });
     });
 
+    // Injeção do Orçamento Financeiro pela raiz dos SKUs
+    Array.from(tree.values()).forEach((cat: any) => {
+       Array.from(cat.filhos.values()).forEach((sku: any) => {
+          sku.meses.forEach((m: any) => {
+             const orcSkuMes = orcamentoBase[sku.produto]?.[m.mes_banco] || 0;
+             m.rec_orc = orcSkuMes;
+             cat.meses.get(m.mes_banco).rec_orc += orcSkuMes;
+          });
+       });
+    });
+
     const dataArray = Array.from(tree.values()).map((cat: any) => ({
       ...cat,
       meses: Array.from(cat.meses.values()).sort((a: any, b: any) => a.mes_banco.localeCompare(b.mes_banco)),
@@ -231,7 +237,7 @@ export default function GlobalDashboard() {
     }));
 
     return { arvoreDados: dataArray, skuReferencias: { totaisBU, basesSupply, basesFinal } };
-  }, [dadosBrutos, busca]);
+  }, [dadosBrutos, busca, orcamentoBase]);
 
   const getDynamicRowVol = useCallback((rowOriginal: any, mesBanco: string): number => {
       if (rowOriginal.tipo === 'produto') {
@@ -241,35 +247,30 @@ export default function GlobalDashboard() {
           const baseFinal = (dbValue !== undefined && dbValue !== null) ? dbValue : (mesData?.vol_sp || 0);
           return editado !== undefined ? Number(editado) : baseFinal;
       }
-
       if (rowOriginal.tipo === 'cliente') {
           const skuId = rowOriginal.chave_pai;
           const editadoSku = celulasEditadas[skuId]?.[mesBanco];
-          
           const mesCliente = rowOriginal.meses.find((m:any) => m.mes_banco === mesBanco);
           const totalBU = skuReferencias.totaisBU.get(skuId)?.[mesBanco] || 1;
           const baseSupply = skuReferencias.basesSupply.get(skuId)?.[mesBanco] || 0;
           const baseFinal = skuReferencias.basesFinal.get(skuId)?.[mesBanco] > 0 ? skuReferencias.basesFinal.get(skuId)[mesBanco] : baseSupply;
-          
           const volAtualSku = editadoSku !== undefined ? Number(editadoSku) : baseFinal;
           const peso = (mesCliente?.vol_bu || 0) / totalBU;
-          
           return Math.round(volAtualSku * peso);
       }
-
       if (rowOriginal.tipo === 'categoria') {
           return rowOriginal.subRows.reduce((acc: number, child: any) => acc + getDynamicRowVol(child, mesBanco), 0);
       }
       return 0;
   }, [celulasEditadas, skuReferencias]);
 
-  // --- CÁLCULO DOS CARDS GERAIS ---
   const stats = useMemo(() => {
-    let t_ia = 0, t_td = 0, t_bu = 0, t_sp = 0, t_final = 0, r_ia = 0, r_td = 0, r_bu = 0, r_sp = 0, r_final = 0;
+    let t_ia = 0, t_td = 0, t_bu = 0, t_sp = 0, t_final = 0, r_ia = 0, r_td = 0, r_bu = 0, r_sp = 0, r_final = 0, r_orc = 0;
     
     arvoreDados.forEach((cat: any) => {
       cat.meses.forEach((m: any) => { 
           t_ia += (m.vol_ia || 0); t_td += (m.vol_td || 0); t_bu += (m.vol_bu || 0); t_sp += (m.vol_sp || 0); 
+          r_orc += (m.rec_orc || 0);
           const pmvSeguro = getPmvSeguro(m);
           r_ia += (m.vol_ia || 0) * pmvSeguro; 
           r_td += (m.vol_td || 0) * pmvSeguro; 
@@ -286,22 +287,24 @@ export default function GlobalDashboard() {
     });
 
     return [
-      { id: 'ia', label: 'Baseline IA', v: t_ia, r: r_ia, bV: 0, bR: 0, icon: <Bot className="w-5 h-5 opacity-70" /> },
-      { id: 'td', label: 'Meta Global', v: t_td, r: r_td, bV: t_ia, bR: r_ia, icon: <Globe className="w-5 h-5 opacity-70" /> },
-      { id: 'bu', label: 'Proposta Comercial', v: t_bu, r: r_bu, bV: t_td, bR: r_td, icon: <TrendingUp className="w-5 h-5 opacity-70" /> },
-      { id: 'sp', label: 'Restrição Supply', v: t_sp, r: r_sp, bV: t_bu, bR: r_bu, icon: <AlertTriangle className="w-5 h-5 opacity-70" /> },
-      { id: 'final', label: 'Plano S&OP Consolidado', v: t_final, r: r_final, bV: t_sp, bR: r_sp, icon: <Check className="w-5 h-5 opacity-70" /> }
+      { id: 'ia', label: 'Baseline IA', v: t_ia, r: r_ia, bV: 0, orc: r_orc, icon: <Bot className="w-5 h-5 opacity-70" /> },
+      { id: 'td', label: 'Meta Global', v: t_td, r: r_td, bV: t_ia, orc: r_orc, icon: <Globe className="w-5 h-5 opacity-70" /> },
+      { id: 'bu', label: 'Proposta Comercial', v: t_bu, r: r_bu, bV: t_td, orc: r_orc, icon: <TrendingUp className="w-5 h-5 opacity-70" /> },
+      { id: 'sp', label: 'Restrição Supply', v: t_sp, r: r_sp, bV: t_bu, orc: r_orc, icon: <AlertTriangle className="w-5 h-5 opacity-70" /> },
+      { id: 'final', label: 'Plano S&OP Consolidado', v: t_final, r: r_final, bV: t_sp, orc: r_orc, icon: <Check className="w-5 h-5 opacity-70" /> }
     ];
   }, [arvoreDados, getDynamicRowVol]);
 
-  // --- CÁLCULO DOS GRÁFICOS E RODAPÉ (TOTALIZADOR DINÂMICO) ---
   const chartDataBar = useMemo(() => {
     if (!mesesDisponiveis.length) return [];
     return mesesDisponiveis.map((mesBanco) => {
-      let ia = 0, topdown = 0, comercial = 0, supply = 0, final = 0;
+      let ia = 0, topdown = 0, comercial = 0, supply = 0, final = 0, orc = 0;
       let r_ia = 0, r_td = 0, r_com = 0, r_sup = 0, r_fin = 0;
 
       arvoreDados.forEach((cat: any) => {
+        const catMes = cat.meses.find((rm: any) => rm.mes_banco === mesBanco);
+        if(catMes) orc += catMes.rec_orc || 0;
+
         cat.subRows.forEach((sku: any) => {
           const m = sku.meses.find((rm: any) => rm.mes_banco === mesBanco);
           if (m) {
@@ -311,17 +314,14 @@ export default function GlobalDashboard() {
             ia += m.vol_ia || 0; topdown += m.vol_td || 0; comercial += m.vol_bu || 0; supply += m.vol_sp || 0;
             final += liveVol;
 
-            r_ia += (m.vol_ia || 0) * pmv; 
-            r_td += (m.vol_td || 0) * pmv; 
-            r_com += (m.vol_bu || 0) * pmv; 
-            r_sup += (m.vol_sp || 0) * pmv;
+            r_ia += (m.vol_ia || 0) * pmv; r_td += (m.vol_td || 0) * pmv; r_com += (m.vol_bu || 0) * pmv; r_sup += (m.vol_sp || 0) * pmv;
             r_fin += liveVol * pmv;
           }
         });
       });
 
       const name = mesBanco.split('-').reverse().slice(1).join('/');
-      return { name, mesBanco, IA: ia, TopDown: topdown, Comercial: comercial, Supply: supply, Final: final, RevIA: r_ia, RevTopDown: r_td, RevComercial: r_com, RevSupply: r_sup, RevFinal: r_fin };
+      return { name, mesBanco, IA: ia, TopDown: topdown, Comercial: comercial, Supply: supply, Final: final, RevIA: r_ia, RevTopDown: r_td, RevComercial: r_com, RevSupply: r_sup, RevFinal: r_fin, RevOrcamento: orc };
     });
   }, [arvoreDados, mesesDisponiveis, getDynamicRowVol]);
 
@@ -421,7 +421,6 @@ export default function GlobalDashboard() {
                  )}
               </div>
               
-              {/* Caixinhas Embasadoras IA e Top-Down */}
               {row.tipo !== 'cliente' && (
                  <div className="flex items-center gap-1.5 mb-1.5">
                     <span className="text-[9px] font-bold bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded shadow-sm" title="Sinal IA">IA: {formatVolume(dadosMes?.vol_ia)}</span>
@@ -484,19 +483,36 @@ export default function GlobalDashboard() {
            </div>
         </div>
 
-        {/* --- CARDS --- */}
+        {/* --- CARDS EXECUTIVOS ALINHADOS --- */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6 mb-10">
           {stats.map((card, i) => (
-             <div key={card.id} className={`p-6 rounded-[32px] shadow-sm relative overflow-hidden transition-all duration-300 hover:-translate-y-1 hover:shadow-md ${i === 4 ? 'bg-slate-900 text-white' : 'bg-white border border-slate-100'}`}>
+             <div key={card.id} className={`p-6 rounded-[32px] shadow-sm relative overflow-hidden transition-all duration-300 hover:-translate-y-1 hover:shadow-md flex flex-col justify-between min-h-[190px] ${i === 4 ? 'bg-slate-900 text-white' : 'bg-white border border-slate-100'}`}>
                 {i === 4 && <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-bl from-indigo-500/20 to-transparent rounded-full -mr-10 -mt-10 blur-xl" />}
-                <div className="flex flex-col h-full justify-between gap-6 relative z-10">
-                   <div className="flex justify-between items-start">
-                      <h3 className={`text-[11px] font-black uppercase tracking-widest max-w-[100px] leading-tight ${i === 4 ? 'text-indigo-300' : 'text-slate-400'}`}>{card.label}</h3>
-                      <div className={`p-2 rounded-xl ${i === 4 ? 'bg-slate-800' : 'bg-slate-50'}`}>{card.icon}</div>
+                
+                {/* CABEÇALHO DO CARD */}
+                <div className="flex justify-between items-start z-10">
+                   <h3 className={`text-[11px] font-black uppercase tracking-widest leading-tight ${i === 4 ? 'text-indigo-300' : 'text-slate-400'}`}>{card.label}</h3>
+                   <div className={`p-2 rounded-xl ${i === 4 ? 'bg-slate-800' : 'bg-slate-50'}`}>{card.icon}</div>
+                </div>
+                
+                {/* CORPO DO CARD (Fixo na Base) */}
+                <div className="flex flex-col z-10 mt-auto pt-4">
+                   <div className="flex items-end gap-2 mb-1">
+                      <p className="text-2xl font-black leading-none tracking-tighter">{formatVolume(card.v)} <span className="text-[10px] opacity-60">CX</span></p>
+                      {i > 0 && <VarBadge atual={card.v} anterior={card.bV} />}
                    </div>
-                   <div>
-                      <div className="flex items-end gap-2 mb-1"><p className="text-2xl font-black leading-none tracking-tighter">{formatVolume(card.v)} <span className="text-[10px] opacity-60">CX</span></p>{i > 0 && <VarBadge atual={card.v} anterior={card.bV} />}</div>
-                      <div className={`pt-3 border-t ${i === 4 ? 'border-white/10' : 'border-slate-100'}`}><p className="text-[13px] font-black">{formatMoeda(card.r)}</p>{i > 0 && <VarBadge atual={card.r} anterior={card.bR} />}</div>
+                   
+                   <div className={`pt-3 border-t flex flex-col gap-2.5 ${i === 4 ? 'border-white/10' : 'border-slate-100'}`}>
+                      <p className={`text-[13px] font-black ${i === 4 ? 'text-emerald-400' : 'text-slate-800'}`}>{formatMoeda(card.r)}</p>
+                      
+                      {/* LINHA DE COMPARAÇÃO DE ORÇAMENTO */}
+                      <div className={`flex items-center justify-between p-1.5 rounded-lg border ${i === 4 ? 'bg-slate-800/50 border-slate-700' : 'bg-slate-50 border-slate-100'}`}>
+                         <div className="flex flex-col">
+                            <span className={`text-[8px] font-black uppercase tracking-widest ${i === 4 ? 'text-slate-400' : 'text-slate-400'}`}>Orçamento 2026</span>
+                            <span className={`text-[10px] font-black ${i === 4 ? 'text-slate-300' : 'text-slate-600'}`}>{formatMoeda(card.orc)}</span>
+                         </div>
+                         <VarBadge atual={card.r} anterior={card.orc} />
+                      </div>
                    </div>
                 </div>
              </div>
@@ -524,7 +540,7 @@ export default function GlobalDashboard() {
             </div>
           </div>
           <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
-            <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-4 flex items-center gap-2"><Target className="w-5 h-5 text-emerald-500" /> Projeção de Faturamento (R$)</h3>
+            <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-4 flex items-center gap-2"><Target className="w-5 h-5 text-emerald-500" /> Projeção Financeira vs Orçamento</h3>
             <div className="h-[300px]">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={chartDataBar} margin={{ top: 10, right: 10, left: 10, bottom: 5 }}>
@@ -535,8 +551,8 @@ export default function GlobalDashboard() {
                   <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px', fontSize: '12px', fontWeight: 'bold' }} />
                   <Bar dataKey="RevIA" name="Receita IA" fill="#94a3b8" radius={[4, 4, 0, 0]} />
                   <Bar dataKey="RevComercial" name="Receita Comercial" fill="#f59e0b" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="RevSupply" name="Receita Supply" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
                   <Bar dataKey="RevFinal" name="Receita Atual" fill="#10b981" radius={[4, 4, 0, 0]} />
+                  <Line type="monotone" dataKey="RevOrcamento" name="Meta Orçamento" stroke="#f43f5e" strokeWidth={3} strokeDasharray="5 5" dot={{r: 4, strokeWidth: 2}} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -576,7 +592,7 @@ export default function GlobalDashboard() {
                          </td>
                        ))}
                      </tr>
-                     {/* --- EXPANSAO DO GRÁFICO DE LINHAS (100% Dinâmico) --- */}
+                     {/* --- DOSSIÊ CATEGORIA / GRÁFICO (AGORA COM ORÇAMENTO) --- */}
                      {chartExpanded === row.original.chave_matriz && (
                        <tr>
                          <td colSpan={mesesDisponiveis.length + 1} className="p-0 border-b-4 border-indigo-500">
@@ -587,7 +603,6 @@ export default function GlobalDashboard() {
                                        <ResponsiveContainer width="100%" height="100%">
                                           <LineChart 
                                              data={(dadosGraficoCache[row.original.chave_matriz] || []).map((pt: any) => {
-                                                // O pulo do gato: Cruzamento via data_iso universal
                                                 const mesProj = mesesDisponiveis.find((m: string) => m === pt.data_iso);
                                                 if (mesProj) return { ...pt, Final: getDynamicRowVol(row.original, mesProj) };
                                                 return pt;
@@ -604,6 +619,7 @@ export default function GlobalDashboard() {
                                              <Line type="monotone" dataKey="CicloAnterior" name="Proposta Mês Passado" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
                                              <Line type="monotone" dataKey="Supply" name="Restrição Supply" stroke="#f59e0b" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
                                              <Line type="monotone" dataKey="Final" name="Global S&OP" stroke="#10b981" strokeWidth={4} dot={{r:5, fill:'#10b981', stroke:'#fff', strokeWidth:2}} connectNulls={false} />
+                                             <Line type="monotone" dataKey="Orcamento" name="Orçamento 2026" stroke="#f43f5e" strokeWidth={2} strokeDasharray="5 5" dot={{r:4, fill:'#f43f5e', strokeWidth:0}} connectNulls={false} />
                                           </LineChart>
                                        </ResponsiveContainer>
                                      )}
@@ -620,7 +636,7 @@ export default function GlobalDashboard() {
                  ))}
                </tbody>
                
-               {/* --- RODAPÉ TOTALIZADOR (Dinâmico) --- */}
+               {/* --- RODAPÉ TOTALIZADOR --- */}
                {arvoreDados.length > 0 && (
                  <tfoot className="bg-slate-900 sticky bottom-0 z-20 shadow-[0_-10px_40px_rgba(0,0,0,0.1)] border-t-4 border-indigo-500">
                    <tr>
@@ -641,6 +657,10 @@ export default function GlobalDashboard() {
                              <span className="font-bold text-emerald-400 text-xs tracking-tight mt-1 bg-emerald-400/10 px-2 py-0.5 rounded">
                                {formatMoeda(mesData?.RevFinal || 0)}
                              </span>
+                             {/* GAP ORÇAMENTO RODAPÉ */}
+                             <div className="flex items-center justify-center gap-1 mt-1.5 pt-1.5 border-t border-slate-800 w-full">
+                               <span className="text-[9px] text-slate-500 font-bold tracking-widest uppercase">Orç: {formatMoeda(mesData?.RevOrcamento || 0)}</span>
+                             </div>
                            </div>
                          </td>
                        )

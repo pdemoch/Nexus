@@ -21,8 +21,7 @@ class NexusLoader:
             log_callback("      • Sincronizando Cadastro de Clientes e Hierarquias...")
             df_clientes = df_silver.select([
                 "cgc", "cod_cliente", "loja", "cliente_razaosocial", 
-                "regional", "bloqueado", "vendedor_nome", "gerente_nome", 
-                "supervisor_nome" 
+                "regional", "bloqueado", "vendedor_nome", "gerente_nome", "supervisor_nome" 
             ]).unique(subset=["cgc"])
 
             for row in df_clientes.to_dicts():
@@ -30,8 +29,7 @@ class NexusLoader:
                     cgc=row['cgc'], cod_cliente=row['cod_cliente'], loja=row['loja'],
                     razaosocial=row['cliente_razaosocial'], regional=row['regional'],
                     bloqueado=row['bloqueado'], vendedor_nome=row['vendedor_nome'], 
-                    gerente_nome=row['gerente_nome'],
-                    supervisor_nome=row['supervisor_nome'] 
+                    gerente_nome=row['gerente_nome'], supervisor_nome=row['supervisor_nome'] 
                 )
                 stmt = stmt.on_conflict_do_update(
                     index_elements=['cgc'],
@@ -39,16 +37,13 @@ class NexusLoader:
                         'cod_cliente': stmt.excluded.cod_cliente, 'loja': stmt.excluded.loja,
                         'razaosocial': stmt.excluded.razaosocial, 'regional': stmt.excluded.regional,
                         'bloqueado': stmt.excluded.bloqueado, 'vendedor_nome': stmt.excluded.vendedor_nome, 
-                        'gerente_nome': stmt.excluded.gerente_nome,
-                        'supervisor_nome': stmt.excluded.supervisor_nome
+                        'gerente_nome': stmt.excluded.gerente_nome, 'supervisor_nome': stmt.excluded.supervisor_nome
                     }
                 )
                 db.execute(stmt)
 
             log_callback("      • Sincronizando Cadastro de Produtos (Portfólio)...")
-            df_produtos = df_silver.select([
-                "produto", "descricao", "bu", "categoria", "segmento", "curva_2026"
-            ]).unique(subset=["produto"])
+            df_produtos = df_silver.select(["produto", "descricao", "bu", "categoria", "segmento", "curva_2026"]).unique(subset=["produto"])
 
             for row in df_produtos.to_dicts():
                 stmt_prod = pg_insert(DimProduto).values(
@@ -59,38 +54,27 @@ class NexusLoader:
                     index_elements=['sku'],
                     set_={
                         'descricao': stmt_prod.excluded.descricao, 'bu': stmt_prod.excluded.bu,
-                        'categoria': stmt_prod.excluded.categoria, 'segmento': stmt_prod.excluded.segmento,
-                        'curva': stmt_prod.excluded.curva
+                        'categoria': stmt_prod.excluded.categoria, 'segmento': stmt_prod.excluded.segmento, 'curva': stmt_prod.excluded.curva
                     }
                 )
                 db.execute(stmt_prod)
 
             log_callback("      • Realizando Upsert Atômico na Fato_Vendas (S&OE Ready)...")
-            
-            vendas_dicts = df_silver.select([
-                "pedido", "dtapedido", "produto", "cgc", "vendedor_nome", 
-                "qtpedido", "vlpedido", "qtfatura", "qtcorte" 
-            ]).to_dicts()
+            vendas_dicts = df_silver.select(["pedido", "dtapedido", "produto", "cgc", "vendedor_nome", "qtpedido", "vlpedido", "qtfatura", "qtcorte"]).to_dicts()
 
             for row in vendas_dicts:
                 qt_fatura_val = row.get('qtfatura') or 0.0
                 qt_corte_val = row.get('qtcorte') or 0.0
 
                 stmt_vendas = pg_insert(FatoVendas).values(
-                    pedido=row['pedido'], data_pedido=row['dtapedido'],
-                    sku=row['produto'], cgc=row['cgc'], vendedor_nome=row['vendedor_nome'],
-                    qt_pedido=row['qtpedido'], vl_pedido=row['vlpedido'],
-                    qtfatura=qt_fatura_val, qtcorte=qt_corte_val 
+                    pedido=row['pedido'], data_pedido=row['dtapedido'], sku=row['produto'], cgc=row['cgc'], vendedor_nome=row['vendedor_nome'],
+                    qt_pedido=row['qtpedido'], vl_pedido=row['vlpedido'], qtfatura=qt_fatura_val, qtcorte=qt_corte_val 
                 )
-                
                 stmt_vendas = stmt_vendas.on_conflict_do_update(
                     constraint='uix_vendas_pedido',
                     set_={
-                        'qt_pedido': stmt_vendas.excluded.qt_pedido,
-                        'vl_pedido': stmt_vendas.excluded.vl_pedido,
-                        'vendedor_nome': stmt_vendas.excluded.vendedor_nome,
-                        'qtfatura': stmt_vendas.excluded.qtfatura, 
-                        'qtcorte': stmt_vendas.excluded.qtcorte    
+                        'qt_pedido': stmt_vendas.excluded.qt_pedido, 'vl_pedido': stmt_vendas.excluded.vl_pedido,
+                        'vendedor_nome': stmt_vendas.excluded.vendedor_nome, 'qtfatura': stmt_vendas.excluded.qtfatura, 'qtcorte': stmt_vendas.excluded.qtcorte    
                     }
                 )
                 db.execute(stmt_vendas)
@@ -101,6 +85,45 @@ class NexusLoader:
             db.rollback()
             log_callback(f"❌ [SILVER] Erro no Upsert: {str(e)}")
             raise e
+
+    def executar_carga_orcamento(self, df_orcamento: pl.DataFrame, log_callback=print):
+        if df_orcamento.is_empty(): return
+        from app.core.database import SessionLocal
+        from sqlalchemy import text
+        
+        db = SessionLocal()
+        try:
+            log_callback("      • Sincronizando Base de Orçamento Financeiro (Meta Anual)...")
+            
+            # Cria a tabela de Orçamento caso não exista no schema inicial
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS fato_orcamento (
+                    sku VARCHAR(255),
+                    mes_projetado DATE,
+                    receita_orcamento NUMERIC(15,2),
+                    PRIMARY KEY (sku, mes_projetado)
+                )
+            """))
+            
+            orc_dicts = df_orcamento.to_dicts()
+            
+            # Upsert para garantir que metas orçamentárias podem ser atualizadas sem duplicar
+            query = text("""
+                INSERT INTO fato_orcamento (sku, mes_projetado, receita_orcamento)
+                VALUES (:sku, :mes_projetado, :receita_orcamento)
+                ON CONFLICT (sku, mes_projetado) 
+                DO UPDATE SET receita_orcamento = EXCLUDED.receita_orcamento
+            """)
+            
+            db.execute(query, orc_dicts)
+            db.commit()
+            log_callback("✅ [LOADER] Orçamento Financeiro injetado com sucesso!")
+        except Exception as e:
+            db.rollback()
+            log_callback(f"❌ [LOADER] Erro ao carregar orçamento: {e}")
+            raise e
+        finally:
+            db.close()
 
     def executar_carga_forecast(self, df_forecast: pl.DataFrame, ciclo_alvo: str, log_callback=print):
         from app.core.database import SessionLocal
@@ -117,19 +140,11 @@ class NexusLoader:
             log_callback(f"   -> [LOAD] Iniciando construção da matriz FatoIBP para o ciclo {ciclo_atual}...")
             
             log_callback("      • Registrando performance e vencedores do Ensemble no Banco...")
-            df_modelos = df_forecast.group_by("produto").agg([
-                pl.col("modelo_vencedor").first(),
-                pl.col("acuracia").first()
-            ]).to_dicts()
+            df_modelos = df_forecast.group_by("produto").agg([pl.col("modelo_vencedor").first(), pl.col("acuracia").first()]).to_dicts()
             
             for row in df_modelos:
-                db.execute(text("""
-                    UPDATE dim_produtos 
-                    SET modelo_vencedor = :mod, acuracia_ia = :acc 
-                    WHERE sku = :sku
-                """), {"mod": row["modelo_vencedor"], "acc": row["acuracia"], "sku": row["produto"]})
+                db.execute(text("UPDATE dim_produtos SET modelo_vencedor = :mod, acuracia_ia = :acc WHERE sku = :sku"), {"mod": row["modelo_vencedor"], "acc": row["acuracia"], "sku": row["produto"]})
 
-            # Busca Share. Apenas clientes ATIVOS nos últimos 6 meses.
             query_share = text("""
                 WITH cte_base AS (
                     SELECT v.sku, v.cgc, c.vendedor_nome, SUM(v.qt_pedido) as total_cliente
@@ -152,49 +167,32 @@ class NexusLoader:
             df_share = pl.DataFrame([dict(r._mapping) for r in res_share]) if res_share else pl.DataFrame()
 
             log_callback("      • Aplicando Rateio Atômico com Método do Maior Resto (Vetorizado)...")
-            
             df_forecast = df_forecast.rename({"produto": "sku"})
             
             if df_share.is_empty():
-                log_callback("⚠️ [LOAD] Nenhum share encontrado. Abortando injeção para evitar lixo.")
+                log_callback("⚠️ [LOAD] Nenhum share encontrado. Abortando injeção.")
                 return
             else:
                 df_share = df_share.rename({"sku": "sku_share"})
-                
-                # =========================================================================
-                # BLINDAGEM MÁXIMA: INNER JOIN
-                # Se a IA previu algo, mas não existe Share para o cliente ATIVO, a caixa evapora.
-                # =========================================================================
                 df_join = df_forecast.join(df_share, left_on="sku", right_on="sku_share", how="inner")
-                
-                # Destrói qualquer share zerado que possa ter passado
                 df_join = df_join.filter(pl.col("share_cliente") > 0)
 
                 if df_join.is_empty():
                     log_callback("⚠️ [LOAD] Após cruzar com clientes ativos, nenhuma projeção sobreviveu. Injeção abortada.")
                     return
 
-                # Cálculo de Caixas Perfeitas
-                df_join = df_join.with_columns(
-                    (pl.col("vol_ia_global") * pl.col("share_cliente")).alias("vol_exato")
-                ).with_columns([
+                df_join = df_join.with_columns((pl.col("vol_ia_global") * pl.col("share_cliente")).alias("vol_exato")).with_columns([
                     pl.col("vol_exato").floor().cast(pl.Int32).alias("vol_base"),
                     (pl.col("vol_exato") - pl.col("vol_exato").floor()).alias("fracao")
                 ])
                 
-                df_rem = df_join.group_by(["sku", "mes_projetado"]).agg(
-                    (pl.col("vol_ia_global").first() - pl.col("vol_base").sum()).cast(pl.Int32).alias("sobra")
-                )
+                df_rem = df_join.group_by(["sku", "mes_projetado"]).agg((pl.col("vol_ia_global").first() - pl.col("vol_base").sum()).cast(pl.Int32).alias("sobra"))
                 df_join = df_join.join(df_rem, on=["sku", "mes_projetado"])
                 
-                df_join = df_join.with_columns(
-                    pl.col("fracao").rank(method="ordinal", descending=True).over(["sku", "mes_projetado"]).alias("rank_fracao")
-                )
+                df_join = df_join.with_columns(pl.col("fracao").rank(method="ordinal", descending=True).over(["sku", "mes_projetado"]).alias("rank_fracao"))
                 
                 df_final = df_join.with_columns(
-                    pl.when(pl.col("rank_fracao") <= pl.col("sobra"))
-                    .then(pl.col("vol_base") + 1)
-                    .otherwise(pl.col("vol_base")).alias("vol_ia_atomico"),
+                    pl.when(pl.col("rank_fracao") <= pl.col("sobra")).then(pl.col("vol_base") + 1).otherwise(pl.col("vol_base")).alias("vol_ia_atomico"),
                     pl.col("pmv_aplicado").alias("pmv_ref")
                 )
 
@@ -204,26 +202,14 @@ class NexusLoader:
             ibp_dicts = []
             for row in df_final.to_dicts():
                 ibp_dicts.append({
-                    'ciclo_sop': ciclo_atual, 
-                    'mes_projetado': row['mes_projetado'], 
-                    'sku': row['sku'],
-                    'cgc': row['cgc'], 
-                    'vendedor_nome': row['vendedor_nome'], 
-                    'vol_ia': row['vol_ia_atomico'],
-                    'vol_topdown': row['vol_ia_atomico'], 
-                    'vol_bottomup': row['vol_ia_atomico'],
-                    'vol_supply': row['vol_ia_atomico'],
-                    'vol_meta': row['vol_ia_atomico'],                    
-                    'vol_final': row['vol_ia_atomico'],      
-                    'pmv_aplicado': row['pmv_ref']
+                    'ciclo_sop': ciclo_atual, 'mes_projetado': row['mes_projetado'], 'sku': row['sku'], 'cgc': row['cgc'], 'vendedor_nome': row['vendedor_nome'], 
+                    'vol_ia': row['vol_ia_atomico'], 'vol_topdown': row['vol_ia_atomico'], 'vol_bottomup': row['vol_ia_atomico'],
+                    'vol_supply': row['vol_ia_atomico'], 'vol_meta': row['vol_ia_atomico'], 'vol_final': row['vol_ia_atomico'], 'pmv_aplicado': row['pmv_ref']
                 })
-
                 if len(ibp_dicts) >= 10000:
                     db.bulk_insert_mappings(FatoIbpGranular, ibp_dicts)
                     ibp_dicts.clear()
-            
-            if ibp_dicts:
-                db.bulk_insert_mappings(FatoIbpGranular, ibp_dicts)
+            if ibp_dicts: db.bulk_insert_mappings(FatoIbpGranular, ibp_dicts)
             
             db.commit()
             log_callback("✅ [LOAD] S&OP Injetado! Nenhuma caixa perdida no rateio, apenas Lixo descartado.")
@@ -241,65 +227,33 @@ class NexusLoader:
         log_callback("      • Sincronizando Histórico de Vendas com a Hierarquia Atual (Retroativo)...")
         db = SessionLocal()
         try:
-            df_clientes = lf_clientes.select([
-                "cgc", "vendedor_nome", "gerente_nome", "supervisor_nome"
-            ]).unique(subset=["cgc"]).collect()
-
-            if df_clientes.is_empty():
-                log_callback("⚠️ [LOADER] Cadastro de clientes vazio. Pulando sincronização histórica.")
-                return
+            df_clientes = lf_clientes.select(["cgc", "vendedor_nome", "gerente_nome", "supervisor_nome"]).unique(subset=["cgc"]).collect()
+            if df_clientes.is_empty(): return
 
             query_temp = text("""
                 CREATE TEMP TABLE temp_clientes_hierarquia (
-                    cgc VARCHAR(255),
-                    vendedor_nome VARCHAR(255),
-                    gerente_nome VARCHAR(255),
-                    supervisor_nome VARCHAR(255)
+                    cgc VARCHAR(255), vendedor_nome VARCHAR(255), gerente_nome VARCHAR(255), supervisor_nome VARCHAR(255)
                 ) ON COMMIT DROP;
             """)
             db.execute(query_temp)
 
             dados_clientes = df_clientes.to_dicts()
-            
-            query_insert = text("""
-                INSERT INTO temp_clientes_hierarquia (cgc, vendedor_nome, gerente_nome, supervisor_nome)
-                VALUES (:cgc, :vendedor_nome, :gerente_nome, :supervisor_nome)
-            """)
+            query_insert = text("INSERT INTO temp_clientes_hierarquia (cgc, vendedor_nome, gerente_nome, supervisor_nome) VALUES (:cgc, :vendedor_nome, :gerente_nome, :supervisor_nome)")
             db.execute(query_insert, dados_clientes)
 
             query_update = text("""
                 WITH hierarquia_atualizada AS (
-                    UPDATE fato_vendas f
-                    SET vendedor_nome = t.vendedor_nome
-                    FROM temp_clientes_hierarquia t
-                    WHERE f.cgc = t.cgc
-                      AND f.vendedor_nome IS DISTINCT FROM t.vendedor_nome
-                    RETURNING f.cgc
-                )
-                SELECT count(*) FROM hierarquia_atualizada;
+                    UPDATE fato_vendas f SET vendedor_nome = t.vendedor_nome FROM temp_clientes_hierarquia t WHERE f.cgc = t.cgc AND f.vendedor_nome IS DISTINCT FROM t.vendedor_nome RETURNING f.cgc
+                ) SELECT count(*) FROM hierarquia_atualizada;
             """)
-            res = db.execute(query_update)
-            linhas_vendas_atualizadas = res.scalar() or 0
+            linhas_vendas_atualizadas = db.execute(query_update).scalar() or 0
 
             query_update_dim = text("""
                 WITH dim_atualizada AS (
-                    UPDATE dim_clientes d
-                    SET vendedor_nome = t.vendedor_nome,
-                        gerente_nome = t.gerente_nome,
-                        supervisor_nome = t.supervisor_nome
-                    FROM temp_clientes_hierarquia t
-                    WHERE d.cgc = t.cgc
-                    AND (
-                        d.vendedor_nome IS DISTINCT FROM t.vendedor_nome OR
-                        d.gerente_nome IS DISTINCT FROM t.gerente_nome OR
-                        d.supervisor_nome IS DISTINCT FROM t.supervisor_nome
-                    )
-                    RETURNING d.cgc
-                )
-                SELECT count(*) FROM dim_atualizada;
+                    UPDATE dim_clientes d SET vendedor_nome = t.vendedor_nome, gerente_nome = t.gerente_nome, supervisor_nome = t.supervisor_nome FROM temp_clientes_hierarquia t WHERE d.cgc = t.cgc AND (d.vendedor_nome IS DISTINCT FROM t.vendedor_nome OR d.gerente_nome IS DISTINCT FROM t.gerente_nome OR d.supervisor_nome IS DISTINCT FROM t.supervisor_nome) RETURNING d.cgc
+                ) SELECT count(*) FROM dim_atualizada;
             """)
-            res_dim = db.execute(query_update_dim)
-            linhas_dim_atualizadas = res_dim.scalar() or 0
+            linhas_dim_atualizadas = db.execute(query_update_dim).scalar() or 0
 
             db.commit()
             log_callback(f"✅ [LOADER] Histórico Sincronizado! {linhas_vendas_atualizadas} Vendas antigas e {linhas_dim_atualizadas} Clientes atualizados.")
