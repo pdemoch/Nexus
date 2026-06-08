@@ -115,7 +115,7 @@ class NexusTransformer:
             pl.col("curva_2026").first().alias("curva_2026")
         ])
 
-        # 5. Transformação do Orçamento (Melt)
+        # 5. Transformação do Orçamento (Melt para versões anteriores do Polars)
         df_orc_final = pl.DataFrame()
         if not df_orc.is_empty():
             df_orc = df_orc.with_columns(pl.col("Produto").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars())
@@ -125,7 +125,14 @@ class NexusTransformer:
             meses_existentes = [m for m in meses if m in df_orc.columns]
             
             if meses_existentes:
-                df_melted = df_orc.unpivot(index=["Produto"], on=meses_existentes, variable_name="mes_str", value_name="receita_orcamento")
+                # CORREÇÃO AQUI: Usamos .melt() com id_vars e value_vars no lugar de unpivot
+                df_melted = df_orc.melt(
+                    id_vars=["Produto"], 
+                    value_vars=meses_existentes, 
+                    variable_name="mes_str", 
+                    value_name="receita_orcamento"
+                )
+                
                 df_orc_final = df_melted.with_columns([
                     pl.col("mes_str").replace(meses_map).alias("mes_num")
                 ]).with_columns([

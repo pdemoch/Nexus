@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, Date, DateTime, ForeignKey, UniqueConstraint, Index
+from sqlalchemy import Column, Integer, String, Float, Boolean, Date, DateTime, ForeignKey, UniqueConstraint, Index, Numeric
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime
 
@@ -177,3 +177,10 @@ class FatoAcuracia(Base):
     
     acuracia_ia = Column(Float, default=0.0)
     acuracia_consenso = Column(Float, default=0.0)
+
+class FatoOrcamento(Base):
+    __tablename__ = "fato_orcamento"
+
+    sku = Column(String(255), primary_key=True)
+    mes_projetado = Column(Date, primary_key=True)
+    receita_orcamento = Column(Numeric(15, 2))
