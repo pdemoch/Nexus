@@ -3,21 +3,15 @@ import axios from 'axios';
 import { 
   ChevronRight, ChevronDown, Lock, Unlock, Search, X, 
   Package, Boxes, LayoutGrid, Download, BarChart2, Activity, Shield,
-  Wand2, Target, TrendingUp, TrendingDown, Users
+  Wand2, Target, TrendingUp, TrendingDown, Users, ShieldAlert, Save, Layers
 } from 'lucide-react';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
 } from 'recharts';
 
-// =====================================================================
-// HELPERS DE FORMATAÇÃO
-// =====================================================================
 const formatVolume = (val: number) => new Intl.NumberFormat('pt-BR').format(Math.round(val || 0));
 const formatMoeda = (val: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
 
-// =====================================================================
-// COMPONENTE: SMART INPUT (Sem Perda de Foco)
-// =====================================================================
 const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (val: number) => void, disabled: boolean }) => {
   const [localVal, setLocalVal] = useState(value ? formatVolume(value) : '0');
   const [isFocused, setIsFocused] = useState(false);
@@ -26,40 +20,24 @@ const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (v
     if (!isFocused) setLocalVal(value ? formatVolume(value) : '0');
   }, [value, isFocused]);
 
-  const handleFocus = () => {
-    setIsFocused(true);
-    setLocalVal(localVal.replace(/\./g, ''));
+  const handleFocus = () => { setIsFocused(true); setLocalVal(localVal.replace(/\./g, '')); };
+  const handleBlur = () => { 
+      setIsFocused(false); 
+      const num = parseInt(localVal.replace(/\D/g, ''), 10) || 0;
+      setLocalVal(formatVolume(num));
+      onChange(num);
   };
-
-  const handleBlur = () => {
-    setIsFocused(false);
-    const num = parseInt(localVal.replace(/\D/g, ''), 10) || 0;
-    setLocalVal(formatVolume(num));
-    onChange(num);
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') e.currentTarget.blur();
-  };
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') e.currentTarget.blur(); };
 
   return (
     <input
-      type="text"
-      value={localVal}
-      disabled={disabled}
-      onFocus={handleFocus}
-      onBlur={handleBlur}
-      onKeyDown={handleKeyDown}
-      onChange={(e) => setLocalVal(e.target.value)}
+      type="text" value={localVal} disabled={disabled} onFocus={handleFocus} onBlur={handleBlur} onKeyDown={handleKeyDown} onChange={(e) => setLocalVal(e.target.value)}
       className={`w-full bg-transparent border-none text-right focus:outline-none focus:ring-1 focus:ring-blue-500 rounded px-1
-        ${disabled ? 'text-slate-400 font-medium' : 'text-blue-700 font-bold bg-blue-50/50'}`}
+        ${disabled ? 'text-slate-400 font-medium cursor-not-allowed' : 'text-blue-700 font-bold bg-blue-50/50'}`}
     />
   );
 };
 
-// =====================================================================
-// COMPONENTE: CAIXA DE INSIGHT IA
-// =====================================================================
 const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo: string, pmv: number, volume: number, receita: number }) => {
   const [insight, setInsight] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -70,19 +48,14 @@ const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo
       const prompt = `Gere uma análise executiva de S&OP (máx 3 parágrafos) para a carteira comercial de ${alvo} (Nível: ${tipo}). O volume proposto pelo time é de ${volume} CX, com PMV médio de R$ ${pmv.toFixed(2)} e Receita Projetada de R$ ${receita.toFixed(2)}. Foque em rentabilidade e tendências comerciais.`;
       const res = await axios.post('/api/v1/ai-sql/perguntar', { pergunta: prompt });
       setInsight(res.data.resposta);
-    } catch (e) {
-      setInsight("Erro ao comunicar com a IA Nexus. Tente novamente.");
-    } finally {
-      setLoading(false);
-    }
+    } catch (e) { setInsight("Erro ao comunicar com a IA Nexus. Tente novamente."); } 
+    finally { setLoading(false); }
   };
 
   return (
     <div className="bg-slate-800 rounded-xl p-5 border border-slate-700 flex flex-col h-full shadow-lg">
       <div className="flex items-center justify-between mb-4">
-        <h4 className="font-bold text-slate-200 flex items-center gap-2">
-          <Wand2 className="w-4 h-4 text-blue-400" /> Nexus AI Insight 360°
-        </h4>
+        <h4 className="font-bold text-slate-200 flex items-center gap-2"><Wand2 className="w-4 h-4 text-blue-400" /> Nexus AI Insight 360°</h4>
         <button onClick={fetchInsight} disabled={loading} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-2">
           {loading ? "Processando..." : "Gerar Diagnóstico"}
         </button>
@@ -90,16 +63,11 @@ const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo
       <div className="flex-1 text-sm text-slate-300 leading-relaxed overflow-y-auto pr-2">
         {loading ? (
           <div className="animate-pulse flex flex-col gap-2">
-            <div className="h-2 bg-slate-700 rounded w-full"></div>
-            <div className="h-2 bg-slate-700 rounded w-5/6"></div>
-            <div className="h-2 bg-slate-700 rounded w-4/6"></div>
+             <div className="h-2 bg-slate-700 rounded w-full"></div><div className="h-2 bg-slate-700 rounded w-5/6"></div><div className="h-2 bg-slate-700 rounded w-4/6"></div>
           </div>
-        ) : insight ? (
-          <div className="whitespace-pre-wrap">{insight}</div>
-        ) : (
+        ) : insight ? <div className="whitespace-pre-wrap">{insight}</div> : (
           <div className="flex flex-col items-center justify-center h-full text-slate-500 opacity-50">
-            <Shield className="w-12 h-12 mb-2" />
-            <span>Nenhuma análise gerada.</span>
+            <Shield className="w-12 h-12 mb-2" /><span>Nenhuma análise gerada.</span>
           </div>
         )}
       </div>
@@ -108,7 +76,10 @@ const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo
 };
 
 export default function GerenciamentoArena({ usuarioSessao }: any) {
-  const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
+  const [visaoAtiva, setVisaoAtiva] = useState<'carteira' | 'portfolio'>('carteira');
+  const [dadosBase, setDadosBase] = useState<{ carteira: any[], portfolio: any[] }>({ carteira: [], portfolio: [] });
+  const [isTopDownFechado, setIsTopDownFechado] = useState(true);
+  
   const [busca, setBusca] = useState("");
   const [celulasEditadas, setCelulasEditadas] = useState<any>({});
   const [isLoading, setIsLoading] = useState(false);
@@ -118,15 +89,17 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
 
+  const dadosBrutos = visaoAtiva === 'carteira' ? dadosBase.carteira : dadosBase.portfolio;
+
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
       const res = await axios.get('/api/v1/consensus/gerenciamento', { params: { nocache: new Date().getTime() } });
-      setDadosBrutos(res.data.dados || []);
+      setDadosBase({ carteira: res.data.dados.carteira || [], portfolio: res.data.dados.portfolio || [] });
+      setIsTopDownFechado(res.data.is_topdown_fechado);
       setCelulasEditadas({});
     } catch (e) {
       console.error("Erro ao carregar gerenciamento:", e);
-      setDadosBrutos([]);
     } finally {
       setIsLoading(false);
     }
@@ -134,67 +107,87 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // Checa se todas as bases regionais estão trancadas
-  const isAllClosed = dadosBrutos.length > 0 && dadosBrutos.every(coord => coord.status === 'Fechado');
+  // Limpa as edições locais ao alternar de aba para garantir a consistência
+  const handleToggleVisao = (novaVisao: 'carteira' | 'portfolio') => {
+      if (Object.keys(celulasEditadas).length > 0) {
+          if (!confirm("Ao alternar de aba, os rascunhos não salvos serão perdidos. Deseja continuar ou prefere clicar em 'Salvar Rascunho' antes?")) return;
+      }
+      setCelulasEditadas({});
+      setExpanded({});
+      setChartExpanded(null);
+      setVisaoAtiva(novaVisao);
+  };
 
-  // Action: Travar todas as regionais em lote
+  const isAllClosed = dadosBase.carteira.length > 0 && dadosBase.carteira.every(coord => coord.status === 'Fechado');
+
   const handleLockAll = async () => {
     if (!confirm("Atenção: Deseja trancar comercialmente TODAS as regionais de uma vez só?")) return;
     try {
       await axios.post('/api/v1/consensus/gerenciamento/lock-all');
       alert("Todas as regionais foram trancadas com sucesso!");
       fetchData();
-    } catch (e: any) {
-      alert("Erro ao executar trava global: " + e.message);
-    }
+    } catch (e: any) { alert("Erro ao executar trava global: " + e.message); }
   };
 
-  // Action: Alternar trava individual de uma regional específica
   const handleToggleLock = async (regionalNome: string, statusAtual: string) => {
     const nextStatus = statusAtual === 'Fechado' ? 'Aberto' : 'Fechado';
     try {
-      await axios.post('/api/v1/consensus/gerenciamento/toggle-lock', {
-        regional: regionalNome,
-        status: nextStatus
-      });
+      await axios.post('/api/v1/consensus/gerenciamento/toggle-lock', { regional: regionalNome, status: nextStatus });
       fetchData();
-    } catch (e: any) {
-      alert("Erro ao alterar trava da regional: " + e.message);
-    }
+    } catch (e: any) { alert("Erro ao alterar trava da regional: " + e.message); }
   };
 
-  const handleCongelar = async () => {
-    if (!confirm("Atenção Gerência: Isso rateará o volume pelos clientes baseado no histórico real de pedidos e trancará as regionais editadas. Deseja prosseguir?")) return;
+  // AÇÃO 1: SALVAR RASCUNHO (Não tranca a regional, faz o rateio Backend e atualiza a tela)
+  const handleSalvarRascunho = async () => {
+    if (Object.keys(celulasEditadas).length === 0) return alert("Nenhuma alteração para salvar.");
     try {
       const payload = {
-        origem_ajuste: "Gerência Comercial",
+        origem_ajuste: "Gerência Comercial (Rascunho)",
         ajustes: Object.entries(celulasEditadas).flatMap(([chave, meses]: any) => 
-          Object.entries(meses)
-            .filter(() => chave.split('|').length === 4)
-            .map(([mes_projetado, val]: any) => ({
-              nivel: 'produto',
+          Object.entries(meses).map(([mes_projetado, val]: any) => ({
+              nivel: visaoAtiva,
               chave,
               mes_projetado,
               novo_volume: parseInt(val.novo_volume, 10)
-            }))
+          }))
         )
       };
-
-      await axios.post(`/api/v1/consensus/gerenciamento/congelar`, payload);
-      alert("Gestão Comercial Salva com Sucesso!");
+      await axios.post(`/api/v1/consensus/gerenciamento/salvar`, payload);
+      alert("Rascunho salvo e rateado com sucesso! Ambas as visões (Carteira e Portfólio) foram sincronizadas.");
       fetchData();
-    } catch (e: any) {
-      alert("Erro ao salvar: " + (e.response?.data?.detail || e.message));
-    }
+    } catch (e: any) { alert("Erro ao salvar: " + (e.response?.data?.detail || e.message)); }
   };
 
-  // =====================================================================
-  // MOTOR DE CASCATA EM TEMPO REAL (PAI -> FILHO / FILHO -> PAI)
-  // =====================================================================
+  // AÇÃO 2: APROVAR CARTEIRA (Transforma o Rascunho em Meta Final e Tranca)
+  const handleCongelar = async () => {
+    if (!confirm("Atenção Gerência: Esta ação salvará as edições, trancará as regionais editadas e passará a meta para a Fábrica (Supply). Deseja prosseguir?")) return;
+    try {
+      const payload = {
+        origem_ajuste: "Gerência Comercial (Final)",
+        ajustes: Object.entries(celulasEditadas).flatMap(([chave, meses]: any) => 
+          Object.entries(meses).map(([mes_projetado, val]: any) => ({
+              nivel: visaoAtiva,
+              chave,
+              mes_projetado,
+              novo_volume: parseInt(val.novo_volume, 10)
+          }))
+        )
+      };
+      await axios.post(`/api/v1/consensus/gerenciamento/congelar`, payload);
+      alert("Gestão Comercial Ratificada com Sucesso!");
+      fetchData();
+    } catch (e: any) { alert("Erro ao aprovar: " + (e.response?.data?.detail || e.message)); }
+  };
+
   const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
-    const coordRoot = chaveStr.split('|')[0];
-    const nodeCoord = dadosBrutos.find(c => c.nome === coordRoot);
-    if (nodeCoord && nodeCoord.status === 'Fechado') return;
+    if (!isTopDownFechado) return;
+    
+    // Bloqueia edição se a regional estiver fechada (Somente aplicável na visão de carteira)
+    if (visaoAtiva === 'carteira') {
+        const coordRoot = chaveStr.split('|')[0];
+        const nodeCoord = dadosBrutos.find(c => c.nome === coordRoot);
+        if (nodeCoord && nodeCoord.status === 'Fechado') return;
+    }
 
     setCelulasEditadas((currentEdits: any) => {
       const nextEdits = { ...currentEdits };
@@ -274,16 +267,15 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
-        const res = await axios.get('/api/v1/consensus/gerenciamento/grafico', { params: { chave_matriz: chave } });
+        const res = await axios.get('/api/v1/consensus/gerenciamento/grafico', { 
+            params: { chave_matriz: chave, visao: visaoAtiva } 
+        });
         setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
       } catch (e) { console.error(e); }
       finally { setLoadingGrafico(null); }
     }
   };
 
-  // =====================================================================
-  // PAINEL DE SAUDABILIDADE
-  // =====================================================================
   const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
     const chave = rowData.chave_matriz;
     const chartData = dadosGraficoCache[chave];
@@ -324,9 +316,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
       <div className="w-full bg-slate-900 shadow-inner px-8 py-8 border-y border-slate-800">
         <div className="flex items-center gap-2 mb-6">
           <Activity className="w-5 h-5 text-blue-400" />
-          <h3 className="font-bold text-lg text-white">
-            Dossiê Tático Executivo <span className="text-slate-500 font-normal">| {rowData.nome}</span>
-          </h3>
+          <h3 className="font-bold text-lg text-white">Dossiê Tático Executivo <span className="text-slate-500 font-normal">| {rowData.nome}</span></h3>
         </div>
 
         <div className="grid grid-cols-4 gap-4 mb-6">
@@ -407,11 +397,25 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     const hasChildren = row.subRows && row.subRows.length > 0;
     const isProduto = row.tipo === 'produto';
     
-    // Herdando o status da Regional (Coordenador)
-    const coordRoot = row.chave_matriz.split('|')[0];
-    const nodeCoord = dadosBrutos.find(c => c.nome === coordRoot);
-    const rowStatus = nodeCoord ? nodeCoord.status : 'Aberto';
-    const isRowFechado = rowStatus === 'Fechado';
+    // Herdando o status da Regional apenas se for a visão de Carteira
+    let rowStatus = 'Aberto';
+    let isRowFechado = false;
+    
+    if (visaoAtiva === 'carteira') {
+        const coordRoot = row.chave_matriz.split('|')[0];
+        const nodeCoord = dadosBrutos.find(c => c.nome === coordRoot);
+        rowStatus = nodeCoord ? nodeCoord.status : 'Aberto';
+        isRowFechado = rowStatus === 'Fechado';
+    }
+
+    // Ícones Dinâmicos por Visão
+    const renderIcon = () => {
+        if (visaoAtiva === 'carteira') {
+            return depth === 0 ? <Users className="w-4 h-4" /> : depth === 1 ? <LayoutGrid className="w-4 h-4" /> : depth === 2 ? <Boxes className="w-4 h-4" /> : <Package className="w-4 h-4" />;
+        } else {
+            return depth === 0 ? <LayoutGrid className="w-4 h-4" /> : depth === 1 ? <Boxes className="w-4 h-4" /> : <Package className="w-4 h-4" />;
+        }
+    };
 
     return (
       <React.Fragment key={row.chave_matriz}>
@@ -429,21 +433,18 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
               </button>
 
               <div className={`w-8 h-8 rounded-full flex items-center justify-center border shrink-0 ${depth === 0 ? 'bg-slate-800 text-white' : depth === 1 ? 'bg-slate-100 text-slate-600' : 'bg-blue-50 text-blue-600'}`}>
-                {depth === 0 ? <Users className="w-4 h-4" /> : depth === 1 ? <LayoutGrid className="w-4 h-4" /> : depth === 2 ? <Boxes className="w-4 h-4" /> : <Package className="w-4 h-4" />}
+                {renderIcon()}
               </div>
               
               <div className="flex flex-col">
                  <span className={`text-sm pr-4 ${!isProduto ? 'font-black text-slate-800 tracking-tight' : 'font-semibold text-slate-600'}`}>
                    {row.nome || "INDEFINIDO"}
                  </span>
-                 {/* INTERATIVIDADE REINTEGRADA: Clique no botão altera o status de trava da Regional */}
-                 {depth === 0 && (
+                 {depth === 0 && visaoAtiva === 'carteira' && (
                    <button 
                      onClick={(e) => { e.stopPropagation(); handleToggleLock(row.nome, rowStatus); }}
                      className={`text-[10px] font-bold mt-1 flex items-center gap-1 px-2 py-0.5 rounded border transition-colors max-w-max
-                       ${isRowFechado 
-                         ? 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100' 
-                         : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'}`}
+                       ${isRowFechado ? 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100' : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'}`}
                    >
                       {isRowFechado ? <Lock className="w-3 h-3"/> : <Unlock className="w-3 h-3"/>}
                       {isRowFechado ? 'TRANCADA (Clique p/ Abrir)' : 'ABERTA (Clique p/ Trancar)'}
@@ -460,9 +461,8 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
             return (
               <td key={idx} className="p-0 border-l border-slate-100 align-top">
-                <div className={`flex flex-col h-full min-h-[76px] ${isRowFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/40' : 'hover:bg-slate-50'}`}>
+                <div className={`flex flex-col h-full min-h-[76px] ${isRowFechado || !isTopDownFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/40' : 'hover:bg-slate-50'}`}>
                   
-                  {/* CABEÇALHO DA CÉLULA: IA vs LAG 1 CENTRALIZADOS */}
                   <div className="px-2 py-1.5 border-b border-slate-100/50 flex justify-center gap-3 items-center bg-slate-50/80">
                     <span className="text-[10px] font-bold text-slate-500 bg-slate-200/50 px-2 py-0.5 rounded whitespace-nowrap" title="Projeção IA Original">
                       IA: {formatVolume(m.vol_ia)}
@@ -472,17 +472,15 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                     </span>
                   </div>
                   
-                  {/* CORPO DA CÉLULA: VOLUME + RECEITA DINÂMICA */}
                   <div className="px-4 py-2 flex flex-col items-end justify-center flex-1">
                     <div className="w-24">
-                      {/* Bloqueio absoluto para a linha do Coordenador (tipo === 'coordenador') */}
+                      {/* Bloqueio Absoluto se a Fase 1 não estiver Fechada */}
                       <SmartInput 
                          value={valorExibicao} 
-                         disabled={isRowFechado || row.tipo === "coordenador"} 
+                         disabled={!isTopDownFechado || isRowFechado || (visaoAtiva === 'carteira' && row.tipo === "coordenador")} 
                          onChange={(novoVol) => handleEditCell(row.chave_matriz, m.mes_banco, novoVol)} 
                       />
                     </div>
-                    {/* Faturamento Previsto Dinâmico */}
                     <span className="text-[10px] font-bold text-emerald-500 tracking-tight pr-1 mt-0.5" title="Receita (R$) Prevista">
                       {formatMoeda(valorExibicao * (m.pmv || 0))}
                     </span>
@@ -510,33 +508,56 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
   return (
     <div className="min-h-screen bg-slate-50 p-8 pb-32">
-      <div className="max-w-[1600px] mx-auto mb-8 flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-black text-slate-800 tracking-tight flex items-center gap-3">
-            <Users className="w-8 h-8 text-blue-600" /> Macrociclo <span className="text-blue-600">Comercial</span>
-          </h1>
-          <p className="text-slate-500 mt-1 font-medium">Gestão de Carteira e Planejamento Regional (Gerência)</p>
+      <div className="max-w-[1600px] mx-auto mb-8 flex flex-col gap-6">
+        
+        <div className="flex items-center justify-between">
+            <div>
+            <h1 className="text-3xl font-black text-slate-800 tracking-tight flex items-center gap-3">
+                <Users className="w-8 h-8 text-blue-600" /> Macrociclo <span className="text-blue-600">Comercial</span>
+            </h1>
+            <p className="text-slate-500 mt-1 font-medium">Gestão Tática (Fase 2) - Distribuição e Rateio</p>
+            </div>
+
+            <div className="flex items-center gap-4">
+            
+            {/* TOGGLE DE VISÃO CARTEIRA/PORTFÓLIO */}
+            <div className="flex items-center bg-slate-200/50 p-1 rounded-xl">
+                <button onClick={() => handleToggleVisao('carteira')} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${visaoAtiva === 'carteira' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
+                    <Users className="w-4 h-4" /> Carteira de Clientes
+                </button>
+                <button onClick={() => handleToggleVisao('portfolio')} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${visaoAtiva === 'portfolio' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
+                    <Layers className="w-4 h-4" /> Hierarquia Portfólio
+                </button>
+            </div>
+
+            {visaoAtiva === 'carteira' && (
+                <div className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold border shadow-sm ${isAllClosed ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
+                    {isAllClosed ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+                    {isAllClosed ? 'REGIONAIS FECHADAS' : 'REGIONAIS ABERTAS'}
+                </div>
+            )}
+
+            <button onClick={handleSalvarRascunho} disabled={!isTopDownFechado || (isAllClosed && visaoAtiva === 'carteira')} className="px-4 py-2.5 bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold border border-blue-200 rounded-xl transition-all disabled:opacity-50 flex items-center gap-2">
+                <Save className="w-4 h-4" /> Salvar Rascunho
+            </button>
+
+            <button onClick={handleCongelar} disabled={!isTopDownFechado || (isAllClosed && visaoAtiva === 'carteira')} className="px-6 py-2.5 bg-slate-900 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg shadow-slate-900/20 transition-all disabled:opacity-50 flex items-center gap-2">
+                <Shield className="w-4 h-4" /> Aprovar Carteira Comercial
+            </button>
+            </div>
         </div>
 
-        <div className="flex items-center gap-4">
-          <div className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold border shadow-sm ${isAllClosed ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
-            {isAllClosed ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
-            {isAllClosed ? 'REGIONAIS FECHADAS' : 'REGIONAIS ABERTAS'}
-          </div>
+        {/* ALERTA DE BLOQUEIO FASE 1 (TOP-DOWN ABERTO) */}
+        {!isTopDownFechado && !isLoading && (
+            <div className="bg-amber-50 border border-amber-200 text-amber-800 p-5 rounded-2xl flex items-center gap-4 shadow-sm animate-in fade-in slide-in-from-top-4">
+                <ShieldAlert className="w-8 h-8 text-amber-500" />
+                <div>
+                    <h3 className="font-black uppercase tracking-widest text-sm">Aguardando Diretoria (Fase 1)</h3>
+                    <p className="font-medium text-sm mt-0.5">O processo Top-Down ainda não foi ratificado no ciclo atual. A edição comercial está temporariamente bloqueada para evitar desalinhamento da meta.</p>
+                </div>
+            </div>
+        )}
 
-          {/* CONTROLE GLOBAL REINTEGRADO: Permite trancar todas as regionais em um clique */}
-          <button 
-            onClick={handleLockAll} 
-            disabled={isAllClosed}
-            className="px-4 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl shadow-lg transition-colors disabled:opacity-50 flex items-center gap-2"
-          >
-            <Lock className="w-4 h-4" /> Travar Todos
-          </button>
-
-          <button onClick={handleCongelar} disabled={isAllClosed && Object.keys(celulasEditadas).length === 0} className="px-6 py-2.5 bg-slate-900 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg shadow-slate-900/20 transition-all disabled:opacity-50 flex items-center gap-2">
-            <Shield className="w-4 h-4" /> slots.length === 0 || Aprovar Carteira Comercial
-          </button>
-        </div>
       </div>
 
       <div className="max-w-[1600px] mx-auto bg-white rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-200 overflow-hidden">
@@ -547,7 +568,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                 <th className="bg-slate-900 p-0 border-b border-slate-800 w-[400px]">
                   <div className="flex items-center gap-3 px-6 py-5">
                     <Search className="w-5 h-5 text-slate-400" />
-                    <input type="text" placeholder="Procurar carteira, cliente ou produto..." value={busca} onChange={(e) => setBusca(e.target.value)} className="bg-transparent border-none text-white focus:outline-none placeholder-slate-500 text-sm font-medium w-full" />
+                    <input type="text" placeholder={visaoAtiva === 'carteira' ? "Procurar carteira, cliente ou produto..." : "Procurar categoria ou produto..."} value={busca} onChange={(e) => setBusca(e.target.value)} className="bg-transparent border-none text-white focus:outline-none placeholder-slate-500 text-sm font-medium w-full" />
                     {busca && <button onClick={() => setBusca("")}><X className="w-4 h-4 text-slate-400 hover:text-white" /></button>}
                   </div>
                 </th>
@@ -563,9 +584,9 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             </thead>
             <tbody>
               {isLoading ? (
-                <tr><td colSpan={10} className="p-12 text-center text-slate-400 font-medium">Mapeando Árvore Comercial...</td></tr>
+                <tr><td colSpan={10} className="p-12 text-center text-slate-400 font-medium">Mapeando Árvore Comercial e Portfólio...</td></tr>
               ) : dadosBrutos.length === 0 ? (
-                <tr><td colSpan={10} className="p-12 text-center text-slate-400 font-medium">Nenhuma carteira comercial encontrada para gestão.</td></tr>
+                <tr><td colSpan={10} className="p-12 text-center text-slate-400 font-medium">Nenhum dado encontrado para a sua gestão.</td></tr>
               ) : (
                 dadosBrutos.filter(d => d.nome?.toLowerCase().includes(busca.toLowerCase()) || busca === "").map(row => renderRow(row))
               )}
