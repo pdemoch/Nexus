@@ -281,3 +281,24 @@ async def resetar_senha(user_id: int, db: Session = Depends(get_db)):
     except Exception:
         db.rollback()
         raise HTTPException(status_code=500, detail="Erro ao resetar senha.")
+    
+@router.post("/reset-password-self")
+async def atualizar_senha_primeiro_acesso(payload: NovaSenhaPayload, db: Session = Depends(get_db)):
+    """Rota para o próprio utilizador definir a sua senha definitiva no primeiro acesso."""
+    try:
+        email_limpo = payload.email.lower().strip()
+        usuario = db.query(Usuario).filter(Usuario.email == email_limpo).first()
+        
+        if not usuario:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+            
+        # Atualiza a hash com a nova senha e tira a flag de primeiro acesso
+        usuario.senha_hash = gerar_hash(payload.nova_senha)
+        usuario.primeiro_acesso = False 
+        db.commit()
+        
+        return {"status": "success", "message": "Senha atualizada com sucesso!"}
+    except Exception as e:
+        db.rollback()
+        if isinstance(e, HTTPException): raise e
+        raise HTTPException(status_code=500, detail="Erro ao atualizar senha.")
