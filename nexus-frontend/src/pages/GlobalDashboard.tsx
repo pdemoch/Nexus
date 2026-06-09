@@ -63,9 +63,9 @@ const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (v
   const handleFocus = () => { setIsFocused(true); setLocalVal(localVal.replace(/\./g, '')); };
   const handleBlur = () => { 
       setIsFocused(false); 
-      const num = parseInt(localVal.replace(/\D/g, ''), 10) || 0; 
-      setLocalVal(formatVolume(num)); 
-      onChange(num); 
+      const num = parseInt(localVal.replace(/\D/g, ''), 10) || 0;
+      setLocalVal(formatVolume(num));
+      onChange(num);
   };
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') e.currentTarget.blur(); };
 
@@ -213,6 +213,7 @@ export default function GlobalDashboard() {
       });
     });
 
+    // Injeção do Orçamento Financeiro pela raiz dos SKUs
     Array.from(tree.values()).forEach((cat: any) => {
        Array.from(cat.filhos.values()).forEach((sku: any) => {
           sku.meses.forEach((m: any) => {
@@ -508,7 +509,7 @@ export default function GlobalDashboard() {
                    <div className={`p-2 rounded-xl ${i === 4 ? 'bg-slate-800' : 'bg-slate-50'}`}>{card.icon}</div>
                 </div>
                 
-                {/* CORPO DO CARD */}
+                {/* CORPO DO CARD (Fixo na Base) */}
                 <div className="flex flex-col z-10 mt-auto pt-4">
                    <div className="flex items-end gap-2 mb-1">
                       <p className="text-2xl font-black leading-none tracking-tighter">{formatVolume(card.v)} <span className="text-[10px] opacity-60">CX</span></p>
@@ -544,9 +545,10 @@ export default function GlobalDashboard() {
                   <YAxis tickFormatter={(v) => formatVolume(v)} tick={{fill: '#64748b', fontSize: 12}} axisLine={false} tickLine={false} />
                   <Tooltip cursor={{fill: '#f8fafc'}} formatter={(value: any, name: any) => [formatVolume(value), name]} contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)'}} />
                   <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px', fontSize: '12px', fontWeight: 'bold' }} />
+                  
                   <Bar dataKey="IA" name="Baseline IA" fill="#94a3b8" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="Comercial" name="Comercial" fill="#f59e0b" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="Supply" name="Supply" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="TopDown" name="Demanda Irrestrita" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="Comercial" name="Comercial" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
                   <Bar dataKey="Final" name="Consenso Atual" fill="#10b981" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
@@ -562,8 +564,10 @@ export default function GlobalDashboard() {
                   <YAxis tickFormatter={(v) => `R$ ${(Number(v)/1000000).toFixed(1)}M`} tick={{fill: '#64748b', fontSize: 12}} axisLine={false} tickLine={false} />
                   <Tooltip cursor={{fill: '#f8fafc'}} formatter={(value: any, name: any) => [formatMoeda(value), name]} contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)'}} />
                   <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px', fontSize: '12px', fontWeight: 'bold' }} />
+                  
                   <Bar dataKey="RevIA" name="Receita IA" fill="#94a3b8" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="RevComercial" name="Receita Comercial" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="RevTopDown" name="Receita Irrestrita" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="RevComercial" name="Receita Comercial" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
                   <Bar dataKey="RevFinal" name="Receita Atual" fill="#10b981" radius={[4, 4, 0, 0]} />
                   <Line type="monotone" dataKey="RevOrcamento" name="Meta Orçamento" stroke="#f43f5e" strokeWidth={3} strokeDasharray="5 5" dot={{r: 4, strokeWidth: 2}} />
                 </BarChart>
@@ -684,6 +688,7 @@ export default function GlobalDashboard() {
                              <span className="font-bold text-emerald-400 text-xs tracking-tight mt-1 bg-emerald-400/10 px-2 py-0.5 rounded">
                                {formatMoeda(mesData?.RevFinal || 0)}
                              </span>
+                             {/* GAP ORÇAMENTO RODAPÉ */}
                              <div className="flex items-center justify-center gap-1 mt-1.5 pt-1.5 border-t border-slate-800 w-full">
                                <span className="text-[9px] text-slate-500 font-bold tracking-widest uppercase">Orç: {formatMoeda(mesData?.RevOrcamento || 0)}</span>
                              </div>

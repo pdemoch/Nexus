@@ -194,7 +194,12 @@ async def salvar_rascunho_topdown(payload: PayloadAprovarTopDown, db: Session = 
                     rateado = int(round(volume_alvo * peso))
                     soma_dist += rateado
                 
+                # A CASCATA: Rascunho também passa o bastão para as fases seguintes
                 l.vol_topdown = rateado
+                l.vol_bottomup = rateado
+                l.vol_supply = rateado
+                l.vol_final = rateado
+                l.vol_meta = rateado
 
         db.commit()
         return {"status": "success", "message": "Rascunho salvo com sucesso."}
@@ -234,6 +239,7 @@ async def congelar_ratear_topdown(payload: PayloadAprovarTopDown, db: Session = 
                     rateado = int(round(volume_alvo * peso))
                     soma_dist += rateado
                 
+                # A CASCATA: Congelar garante a transferência da Meta
                 l.vol_topdown = rateado
                 l.vol_bottomup = rateado
                 l.vol_supply = rateado
@@ -327,24 +333,17 @@ async def grafico_tatico_topdown(chave_matriz: str, nivel_hierarquia: str = 'pro
             calendario[mes_str] = {"Realizado": hist_dict.get(mes_str, 0), "IA": None, "CicloAnterior": None, "TopDown": None}
             curr += relativedelta(months=1)
 
-        # =========================================================================
-        # SEPARAÇÃO DE PASSADO (LAG 2) vs FUTURO/PRESENTE (LAG 1)
-        # =========================================================================
         for ms in calendario.keys():
             mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
             
-            # --- 1. LINHA IA E TOPDOWN (Referem-se sempre ao que está a acontecer no ciclo ativo)
             if ciclo_atual in proj_por_mes[ms]:
                 calendario[ms]["IA"] = proj_por_mes[ms][ciclo_atual]["ia"]
                 calendario[ms]["TopDown"] = proj_por_mes[ms][ciclo_atual]["td"]
 
-            # --- 2. LINHA CICLO ANTERIOR (O REFERENCIAL DO PASSADO)
             if mes_dt >= ciclo_atual_dt:
-                # SE O MÊS ESTÁ NO FUTURO (Ex: Ago/2026), queremos saber o que o ciclo imediatamente anterior (05/2026) projetou para ele.
                 if ciclo_anterior in proj_por_mes[ms]:
                     calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_anterior]["final"]
             else:
-                # SE O MÊS ESTÁ NO PASSADO (Ex: Março/2026), queremos saber qual foi a meta final que fechou a fábrica. (Lag 2)
                 ciclo_congelamento_dt = mes_dt - relativedelta(months=2)
                 ciclo_congelamento_str = ciclo_congelamento_dt.strftime('%m/%Y')
                 
