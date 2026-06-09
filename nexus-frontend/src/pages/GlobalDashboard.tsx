@@ -6,11 +6,12 @@ import {
 import { 
   Loader2, ChevronDown, ChevronRight, Layers, Lock, Download, AlertTriangle, 
   ShieldCheck, Check, Globe, Package, Users, Search, BarChart3, TrendingUp, 
-  TrendingDown, Bot, Wand2, Target
+  TrendingDown, Bot, Wand2, Target, ArrowUp, ArrowDown, ArrowUpDown
 } from 'lucide-react';
 import axios from 'axios';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
+// --- HELPERS DE FORMATAÇÃO E CÁLCULO ---
 const formatMoeda = (valor: any) => {
   const num = Number(valor);
   if (isNaN(num)) return 'R$ 0';
@@ -27,10 +28,10 @@ const calcVar = (atual: number, anterior: number) => anterior > 0 ? ((atual - an
 
 const VarBadge = ({ atual = 0, anterior = 0 }: { atual?: number, anterior?: number }) => {
   const v = calcVar(atual, anterior);
-  if (v === 0 || anterior === 0) return <span className="text-[10px] text-slate-400 font-bold">-</span>;
+  if (v === 0 || anterior === 0) return null;
   const isPos = v > 0;
   return (
-    <span className={`text-[10px] font-black flex items-center gap-0.5 px-1.5 py-0.5 rounded ${isPos ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+    <span className={`text-[9px] font-black flex items-center gap-0.5 px-1 py-0.5 rounded ${isPos ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
       {isPos ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />} {Math.abs(v).toFixed(1)}%
     </span>
   );
@@ -212,7 +213,6 @@ export default function GlobalDashboard() {
       });
     });
 
-    // Injeção do Orçamento Financeiro pela raiz dos SKUs
     Array.from(tree.values()).forEach((cat: any) => {
        Array.from(cat.filhos.values()).forEach((sku: any) => {
           sku.meses.forEach((m: any) => {
@@ -428,7 +428,20 @@ export default function GlobalDashboard() {
                  </div>
               )}
 
-              <div className="text-[10px] font-bold text-emerald-600">{formatMoeda(receitaExibida)}</div>
+              {/* Faturamento e Comparativo com Orçamento */}
+              <div className="flex flex-col items-center mt-1">
+                 <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] font-bold text-emerald-600" title="Receita Prevista">{formatMoeda(receitaExibida)}</span>
+                    {row.tipo === 'categoria' && dadosMes?.rec_orc > 0 && (
+                       <VarBadge atual={receitaExibida} anterior={dadosMes.rec_orc} />
+                    )}
+                 </div>
+                 {row.tipo === 'categoria' && dadosMes?.rec_orc > 0 && (
+                    <span className="text-[9px] font-bold text-slate-400 mt-0.5" title="Orçamento Financeiro">
+                        Orç: {formatMoeda(dadosMes.rec_orc)}
+                    </span>
+                 )}
+              </div>
             </div>
           );
         }
@@ -495,7 +508,7 @@ export default function GlobalDashboard() {
                    <div className={`p-2 rounded-xl ${i === 4 ? 'bg-slate-800' : 'bg-slate-50'}`}>{card.icon}</div>
                 </div>
                 
-                {/* CORPO DO CARD (Fixo na Base) */}
+                {/* CORPO DO CARD */}
                 <div className="flex flex-col z-10 mt-auto pt-4">
                    <div className="flex items-end gap-2 mb-1">
                       <p className="text-2xl font-black leading-none tracking-tighter">{formatVolume(card.v)} <span className="text-[10px] opacity-60">CX</span></p>
@@ -566,15 +579,30 @@ export default function GlobalDashboard() {
 
         {/* --- TABELA PRINCIPAL --- */}
         <div className="bg-white rounded-[40px] shadow-sm border border-slate-100 overflow-hidden relative">
-           <div className="overflow-x-auto relative max-h-[800px] custom-scrollbar">
+           {/* Barra de rolagem vertical removida para a tabela fluir livremente */}
+           <div className="overflow-x-auto relative pb-10">
              <table className="w-full text-left border-collapse relative">
                <thead className="sticky top-0 z-20 shadow-sm">
                  {table.getHeaderGroups().map(hg => (
                    <tr key={hg.id}>
                      {hg.headers.map((h, idx) => (
-                       <th key={h.id} className={`bg-slate-900 p-6 ${idx === 0 ? 'min-w-[450px]' : 'border-l border-slate-800/50'}`}>
+                       <th 
+                          key={h.id} 
+                          onClick={h.column.getToggleSortingHandler()}
+                          className={`bg-slate-900 p-6 cursor-pointer group hover:bg-slate-800 transition-colors ${idx === 0 ? 'min-w-[450px]' : 'border-l border-slate-800/50'}`}
+                       >
                           <div className={`flex flex-col ${idx === 0 ? 'items-start' : 'items-center justify-center'}`}>
-                             <span className="text-white font-black text-sm tracking-widest">{flexRender(h.column.columnDef.header, h.getContext())}</span>
+                             <div className="flex items-center gap-2">
+                                <span className="text-white font-black text-sm tracking-widest group-hover:text-indigo-400 transition-colors">
+                                   {flexRender(h.column.columnDef.header, h.getContext())}
+                                </span>
+                                <span className="text-slate-500 opacity-50 group-hover:opacity-100 transition-opacity">
+                                   {{
+                                     asc: <ArrowUp className="w-4 h-4 text-indigo-400" />,
+                                     desc: <ArrowDown className="w-4 h-4 text-indigo-400" />
+                                   }[h.column.getIsSorted() as string] ?? <ArrowUpDown className="w-4 h-4" />}
+                                </span>
+                             </div>
                              {idx > 0 && <span className="text-indigo-400 text-[10px] font-bold tracking-widest uppercase mt-1">S&OP Forecast</span>}
                           </div>
                        </th>
@@ -592,7 +620,7 @@ export default function GlobalDashboard() {
                          </td>
                        ))}
                      </tr>
-                     {/* --- DOSSIÊ CATEGORIA / GRÁFICO (AGORA COM ORÇAMENTO) --- */}
+                     {/* --- DOSSIÊ CATEGORIA / GRÁFICO --- */}
                      {chartExpanded === row.original.chave_matriz && (
                        <tr>
                          <td colSpan={mesesDisponiveis.length + 1} className="p-0 border-b-4 border-indigo-500">
@@ -618,7 +646,7 @@ export default function GlobalDashboard() {
                                              <Line type="monotone" dataKey="IA" name="Sinal IA" stroke="#64748b" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
                                              <Line type="monotone" dataKey="CicloAnterior" name="Proposta Mês Passado" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
                                              <Line type="monotone" dataKey="Supply" name="Restrição Supply" stroke="#f59e0b" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
-                                             <Line type="monotone" dataKey="Final" name="Global S&OP" stroke="#10b981" strokeWidth={4} dot={{r:5, fill:'#10b981', stroke:'#fff', strokeWidth:2}} connectNulls={false} />                                            
+                                             <Line type="monotone" dataKey="Final" name="Global S&OP" stroke="#10b981" strokeWidth={4} dot={{r:5, fill:'#10b981', stroke:'#fff', strokeWidth:2}} connectNulls={false} />
                                           </LineChart>
                                        </ResponsiveContainer>
                                      )}
@@ -656,7 +684,6 @@ export default function GlobalDashboard() {
                              <span className="font-bold text-emerald-400 text-xs tracking-tight mt-1 bg-emerald-400/10 px-2 py-0.5 rounded">
                                {formatMoeda(mesData?.RevFinal || 0)}
                              </span>
-                             {/* GAP ORÇAMENTO RODAPÉ */}
                              <div className="flex items-center justify-center gap-1 mt-1.5 pt-1.5 border-t border-slate-800 w-full">
                                <span className="text-[9px] text-slate-500 font-bold tracking-widest uppercase">Orç: {formatMoeda(mesData?.RevOrcamento || 0)}</span>
                              </div>
