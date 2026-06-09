@@ -62,7 +62,7 @@ export default function LoginArena({ onLoginSuccess }: { onLoginSuccess: (userDa
       await axios.post('/api/v1/auth/cadastrar', {
         nome,
         email,
-        senha_initial: senha,
+        senha_inicial: senha,
         funcao,
         gerente_nome: funcao === 'Gerente' ? nomeGerente : null,
         supervisor_nome: funcao === 'Coordenador' ? nomeSupervisor : null
