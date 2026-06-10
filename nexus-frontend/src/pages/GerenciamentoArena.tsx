@@ -276,7 +276,8 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
       const ancora = totaisBaseAbaAtiva[m.mes_banco]?.fat || 0;
       const simulado = totaisGeraisTelaAtual[m.mes_banco]?.fat || 0;
       if (ancora === 0) return true;
-      return Math.abs((simulado / ancora) * 100 - 100) <= 0.05;
+      const percentual = (simulado / ancora) * 100;
+      return percentual >= 99.0 && percentual <= 101.0; // Nova Zona de Tolerância
     });
   }, [visaoAtiva, colunasData, totaisBaseAbaAtiva, totaisGeraisTelaAtual]);
 

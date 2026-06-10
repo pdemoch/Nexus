@@ -223,8 +223,11 @@ async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db:
     cx = get_coord_expr()
     
     soma_pct = sum([c.percentual for c in payload.distribuicao])
-    if not math.isclose(soma_pct, 100.0, abs_tol=0.01):
-        raise HTTPException(status_code=400, detail=f"A soma deve fechar em exatamente 100%. Recebido: {soma_pct}%")
+    if soma_pct < 99.0 or soma_pct > 101.0:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"A soma de distribuição regional deve estar na margem de 99% a 101%. Recebido: {soma_pct}%"
+        )
         
     q_gerente_total = db.query(FatoIbpGranular).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(FatoIbpGranular.ciclo_sop == ciclo, FatoIbpGranular.mes_projetado == mes_alvo)
     if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
