@@ -3,7 +3,8 @@ import axios from 'axios';
 import { 
   ChevronRight, ChevronDown, Lock, Unlock, Search, X, 
   Package, Boxes, LayoutGrid, BarChart2, Activity, Shield,
-  Wand2, Target, TrendingUp, TrendingDown, Users, ShieldAlert, Save, Layers
+  Wand2, Target, TrendingUp, TrendingDown, Users, ShieldAlert, Save, Layers,
+  Sliders // <- Adicionado ícone do painel de rateio
 } from 'lucide-react';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
@@ -12,12 +13,13 @@ import {
 const formatVolume = (val: number) => new Intl.NumberFormat('pt-BR').format(Math.round(val || 0));
 const formatMoeda = (val: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
 
+// Componente SmartInput: CORRIGIDO O BYPASS DO ZERO
 const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (val: number) => void, disabled: boolean }) => {
-  const [localVal, setLocalVal] = useState(value ? formatVolume(value) : '0');
+  const [localVal, setLocalVal] = useState(value !== undefined && value !== null ? formatVolume(value) : '0');
   const [isFocused, setIsFocused] = useState(false);
 
   useEffect(() => {
-    if (!isFocused) setLocalVal(value ? formatVolume(value) : '0');
+    if (!isFocused) setLocalVal(value !== undefined && value !== null ? formatVolume(value) : '0');
   }, [value, isFocused]);
 
   const handleFocus = () => { setIsFocused(true); setLocalVal(localVal.replace(/\./g, '')); };
@@ -89,7 +91,16 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
 
+  // =========================================================================
+  // ESTADOS DO NOVO PAINEL TOP-DOWN PERCENTUAL
+  // =========================================================================
+  const [mesSelecionado, setMesSelecionado] = useState<string>('');
+  const [showPainelPct, setShowPainelPct] = useState(false);
+  const [distribuicaoPct, setDistribuicaoPct] = useState<{[key: string]: number}>({});
+  const [isSalvandoPct, setIsSalvandoPct] = useState(false);
+
   const dadosBrutos = visaoAtiva === 'carteira' ? dadosBase.carteira : dadosBase.portfolio;
+  const colunasData = dadosBrutos.length > 0 ? dadosBrutos[0].meses : [];
 
   const fetchData = useCallback(async () => {
     setIsLoading(true);
@@ -98,6 +109,11 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
       setDadosBase({ carteira: res.data.dados.carteira || [], portfolio: res.data.dados.portfolio || [] });
       setIsTopDownFechado(res.data.is_topdown_fechado);
       setCelulasEditadas({});
+
+      // Definir o mês alvo inicial para o rateio percentual
+      if (res.data.dados.carteira?.length > 0 && res.data.dados.carteira[0].meses?.length > 0) {
+        setMesSelecionado(prev => prev ? prev : res.data.dados.carteira[0].meses[0].mes_banco);
+      }
     } catch (e) {
       console.error("Erro ao carregar gerenciamento:", e);
     } finally {
@@ -114,7 +130,8 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
       setCelulasEditadas({});
       setExpanded({});
       setChartExpanded(null);
-      setBusca(""); // Limpa a busca ao trocar de visão
+      setBusca("");
+      setShowPainelPct(false); // Fecha painel de rateio ao trocar abas
       setVisaoAtiva(novaVisao);
   };
 
@@ -187,9 +204,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                 if (node.subRows?.length > 0) {
                     childMatches = filtrarArvore(node.subRows);
                 }
-
-                // Se bater no nome do Pai, retorna o Pai com todos os Filhos originais. 
-                // Se não bater no Pai, mas bater num Filho, retorna o Pai contendo APENAS o filho que bateu.
                 if (matchSelf || childMatches.length > 0) {
                     return { ...node, subRows: matchSelf ? node.subRows : childMatches };
                 }
@@ -225,6 +239,62 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     }
     return (row.subRows || []).reduce((acc: number, child: any) => acc + getDynamicRec(child, mesBanco), 0);
   }, [getDynamicVol]);
+
+  // =========================================================================
+  // LÓGICA DO PAINEL TOP-DOWN PERCENTUAL
+  // =========================================================================
+  const sumarioCoordenadores = useMemo(() => {
+    if (visaoAtiva !== 'carteira' || !dadosBase.carteira || !mesSelecionado) return [];
+    
+    let totalGlobalFat = 0;
+    const resumo = dadosBase.carteira.map((coord: any) => {
+      const fat = getDynamicRec(coord, mesSelecionado);
+      const vol = getDynamicVol(coord, mesSelecionado);
+      totalGlobalFat += fat;
+      return { nome: coord.nome, faturamento: fat, volume: vol };
+    });
+
+    return resumo.map((c: any) => {
+      const pctAtual = totalGlobalFat > 0 ? (c.faturamento / totalGlobalFat) * 100 : 0;
+      return { ...c, pctOriginal: Number(pctAtual.toFixed(2)) };
+    });
+  }, [dadosBase.carteira, mesSelecionado, getDynamicRec, getDynamicVol, visaoAtiva]);
+
+  useEffect(() => {
+    if (showPainelPct && sumarioCoordenadores.length > 0) {
+      const estadoInicial: {[key: string]: number} = {};
+      sumarioCoordenadores.forEach((c: any) => {
+        estadoInicial[c.nome] = distribuicaoPct[c.nome] ?? c.pctOriginal;
+      });
+      setDistribuicaoPct(estadoInicial);
+    }
+  }, [showPainelPct, sumarioCoordenadores]);
+
+  const somaPercentuaisDigitados = useMemo(() => {
+    return Object.values(distribuicaoPct).reduce((acc, curr) => acc + (curr || 0), 0);
+  }, [distribuicaoPct]);
+
+  const handleSalvarPercentuais = async () => {
+    if (Math.abs(somaPercentuaisDigitados - 100) > 0.01) return;
+    setIsSalvandoPct(true);
+    try {
+      const payload = {
+        mes_projetado: mesSelecionado,
+        distribuicao: Object.keys(distribuicaoPct).map(key => ({
+          coordenador_nome: key,
+          percentual: distribuicaoPct[key]
+        }))
+      };
+      await axios.post('/api/v1/consensus/gerenciamento/ajustar-percentual', payload);
+      setShowPainelPct(false);
+      setDistribuicaoPct({});
+      await fetchData(); // Recarrega do backend já rateado anti-dízima
+    } catch (err: any) {
+      alert("Erro ao rebalancear metas: " + (err.response?.data?.detail || err.message));
+    } finally {
+      setIsSalvandoPct(false);
+    }
+  };
 
 
   const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
@@ -427,7 +497,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     );
   };
 
-  const colunasData = dadosBrutos.length > 0 ? dadosBrutos[0].meses : [];
 
   const totaisGerais = useMemo(() => {
     const totais: Record<string, { vol: number, fat: number }> = {};
@@ -580,6 +649,28 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                 </button>
             </div>
 
+            {/* NOVOS CONTROLES DO PAINEL TOP-DOWN */}
+            {visaoAtiva === 'carteira' && (
+                <div className="flex items-center gap-2 bg-slate-200/50 p-1 rounded-xl">
+                    <select
+                        value={mesSelecionado}
+                        onChange={(e) => setMesSelecionado(e.target.value)}
+                        className="bg-white border-none text-slate-700 text-sm font-bold rounded-lg px-3 py-2 cursor-pointer focus:ring-2 focus:ring-blue-500 outline-none"
+                    >
+                        {colunasData?.map((c: any) => (
+                            <option key={c.mes_banco} value={c.mes_banco}>{c.mes_str}</option>
+                        ))}
+                    </select>
+
+                    <button
+                        onClick={() => setShowPainelPct(!showPainelPct)}
+                        className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${showPainelPct ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'bg-white text-slate-700 hover:bg-slate-50'}`}
+                    >
+                        <Sliders className="w-4 h-4" /> Rateio (Top-Down)
+                    </button>
+                </div>
+            )}
+
             {visaoAtiva === 'carteira' && (
                 <div className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold border shadow-sm ${isAllClosed ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
                     {isAllClosed ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
@@ -606,6 +697,68 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                     <p className="font-medium text-sm mt-0.5">O processo Top-Down ainda não foi ratificado no ciclo atual. A edição comercial está temporariamente bloqueada para evitar desalinhamento da meta.</p>
                 </div>
             </div>
+        )}
+
+        {/* ========================================================= */}
+        {/* NOVO PAINEL EXPANDÍVEL: AJUSTE DE METAS TOP-DOWN          */}
+        {/* ========================================================= */}
+        {visaoAtiva === 'carteira' && showPainelPct && (
+          <div className="bg-white border border-indigo-200 rounded-2xl p-6 shadow-xl shadow-indigo-100/50 animate-in fade-in slide-in-from-top-4 mt-2">
+            <div className="flex justify-between items-center border-b border-slate-100 pb-4 mb-5">
+              <div className="flex items-center gap-2">
+                <Target className="h-5 w-5 text-indigo-600" />
+                <h2 className="font-bold text-lg text-slate-800 tracking-tight">Redistribuição Percentual de Metas (Top-Down)</h2>
+              </div>
+              <span className="text-xs font-bold text-slate-500 bg-slate-100 px-3 py-1.5 rounded-lg">
+                Mês Base 100%: <span className="text-indigo-600">{colunasData.find((c: any) => c.mes_banco === mesSelecionado)?.mes_str || mesSelecionado}</span>
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5 mb-6">
+              {sumarioCoordenadores.map((coord: any) => (
+                <div key={coord.nome} className="bg-slate-50 border border-slate-200 p-4 rounded-xl flex flex-col justify-between hover:border-indigo-300 transition-colors">
+                  <div>
+                    <div className="text-sm font-black text-slate-700 uppercase tracking-wide">{coord.nome}</div>
+                    <div className="flex justify-between items-center mt-2">
+                      <span className="text-xs font-bold text-slate-500">Share Atual: {coord.pctOriginal}%</span>
+                      <span className="text-xs font-bold text-slate-500">Vol: {formatVolume(coord.volume)} CX</span>
+                    </div>
+                    <div className="text-lg font-black text-emerald-600 mt-1">{formatMoeda(coord.faturamento)}</div>
+                  </div>
+                  <div className="mt-4 flex items-center gap-3 border-t border-slate-200 pt-4">
+                    <span className="text-sm font-bold text-slate-600 whitespace-nowrap">Novo Alvo (%):</span>
+                    <input
+                      type="number" step="0.01" min="0" max="100"
+                      value={distribuicaoPct[coord.nome] ?? ''}
+                      onChange={(e) => setDistribuicaoPct({ ...distribuicaoPct, [coord.nome]: parseFloat(e.target.value) || 0 })}
+                      className="w-full bg-white border border-slate-300 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 rounded-lg px-3 py-2 text-right font-bold text-slate-800 transition-all"
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex flex-col sm:flex-row justify-between items-center bg-slate-100 p-4 rounded-xl gap-4 border border-slate-200">
+              <div className="flex items-center gap-3">
+                <div className={`h-4 w-4 rounded-full shadow-inner ${Math.abs(somaPercentuaisDigitados - 100) < 0.01 ? 'bg-emerald-500 shadow-emerald-500/50 animate-pulse' : 'bg-rose-500 shadow-rose-500/50'}`} />
+                <div className="flex flex-col">
+                  <span className="text-[10px] font-black text-slate-500 uppercase tracking-wider">Soma Total de Rateio Regional</span>
+                  <span className={`text-lg font-black tracking-tight ${Math.abs(somaPercentuaisDigitados - 100) < 0.01 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                    {somaPercentuaisDigitados.toFixed(2)}% <span className="text-slate-400 text-sm font-bold">/ 100.00%</span>
+                  </span>
+                </div>
+              </div>
+
+              <button
+                onClick={handleSalvarPercentuais}
+                disabled={Math.abs(somaPercentuaisDigitados - 100) > 0.01 || isSalvandoPct}
+                className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-6 py-3 rounded-xl flex items-center justify-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
+              >
+                <Save className="w-5 h-5" /> 
+                {isSalvandoPct ? "Recalculando e Evitando Dízimas..." : "Subscrever Matriz Granular"}
+              </button>
+            </div>
+          </div>
         )}
 
       </div>

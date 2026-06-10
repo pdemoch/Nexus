@@ -40,6 +40,15 @@ class PayloadToggleLock(BaseModel):
     regional: str
     status: str
 
+# NOVOS PAYLOADS: BALANCEAMENTO PERCENTUAL TOP-DOWN
+class CoordenadorPercentual(BaseModel):
+    coordenador_nome: str
+    percentual: float  # Ex: 35.5 (representa 35.5%)
+
+class PayloadAjustePercentual(BaseModel):
+    mes_projetado: str
+    distribuicao: List[CoordenadorPercentual]
+
 # =====================================================================
 # EXPRESSÕES E GOVERNANÇA DE ACESSO
 # =====================================================================
@@ -210,6 +219,121 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         }
     except Exception as e:
         raise HTTPException(500, repr(e))
+
+
+# =====================================================================
+# NOVO ENDPOINT: BALANCEAMENTO PERCENTUAL TOP-DOWN (GERENTE)
+# =====================================================================
+@router.post("/ajustar-percentual")
+async def ajustar_percentual_coordenadores(
+    payload: PayloadAjustePercentual, 
+    db: Session = Depends(get_db), 
+    usuario: dict = Depends(require_manager_or_admin)
+):
+    """
+    Recupera o faturamento total da grade (Portfólio 100%) para o mês alvo 
+    e redistribui essa meta entre os coordenadores através de um fator de ajuste 
+    e pelo Método do Maior Resto, evitando dízimas nas caixas físicas.
+    """
+    # Apenas Gestores e Diretores podem forçar rebalanceamento macro
+    if usuario['funcao'] not in ['Administrador', 'Gerente']:
+        raise HTTPException(status_code=403, detail="Acesso restrito. Apenas Gerentes ou Administradores podem realizar o balanceamento percentual de metas.")
+
+    ciclo = get_current_cycle(db)
+    mes_alvo = parse_date_safe(payload.mes_projetado)
+    cx = get_coord_expr()
+    
+    # 1. Validar amarração matemática de 100%
+    soma_pct = sum([c.percentual for c in payload.distribuicao])
+    if not math.isclose(soma_pct, 100.0, abs_tol=0.01):
+        raise HTTPException(status_code=400, detail=f"A soma dos percentuais deve ser exatamente 100%. Recebido: {soma_pct}%")
+        
+    # 2. Obter o Faturamento Macro Total (A Âncora de 100%)
+    faturamento_macro_query = db.query(
+        func.sum(FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado)
+    ).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(
+        FatoIbpGranular.ciclo_sop == ciclo,
+        FatoIbpGranular.mes_projetado == mes_alvo
+    )
+    
+    # RLS: O Faturamento Total deve ser apenas sobre os clientes que este Gerente vê
+    if usuario['funcao'] == 'Gerente':
+        ger_nome = usuario.get('gerente_nome')
+        if ger_nome:
+            faturamento_macro_query = faturamento_macro_query.filter(func.upper(func.trim(DimCliente.gerente_nome)) == ger_nome.strip().upper())
+            
+    total_faturamento_macro = faturamento_macro_query.scalar() or 0
+    
+    if total_faturamento_macro == 0:
+        raise HTTPException(status_code=400, detail="Não há faturamento base/portfólio preenchido para este mês alvo.")
+
+    # 3. Processar cada Coordenador com o Método do Maior Resto
+    for item in payload.distribuicao:
+        meta_faturamento_coord = float(total_faturamento_macro) * (item.percentual / 100.0)
+        
+        # Coletar as linhas granulares exclusivas deste Coordenador
+        q_linhas = db.query(FatoIbpGranular).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(
+            FatoIbpGranular.ciclo_sop == ciclo,
+            FatoIbpGranular.mes_projetado == mes_alvo,
+            func.upper(cx) == item.coordenador_nome.strip().upper()
+        )
+        
+        if usuario['funcao'] == 'Gerente':
+            ger_nome = usuario.get('gerente_nome')
+            if ger_nome:
+                q_linhas = q_linhas.filter(func.upper(func.trim(DimCliente.gerente_nome)) == ger_nome.strip().upper())
+                
+        linhas = q_linhas.all()
+        if not linhas:
+            continue
+            
+        # Calcular o faturamento corrente do coordenador para extrair o fator multiplicador
+        faturamento_atual_coord = sum([(float(l.vol_bottomup or 0) * float(l.pmv_aplicado or 0)) for l in linhas])
+        
+        # Correção anti-divisão por zero caso o coordenador esteja zerado mas tenha carteira ativa
+        if faturamento_atual_coord == 0:
+            faturamento_atual_coord = len(linhas)
+            for l in linhas:
+                if (l.vol_bottomup or 0) == 0: 
+                    l.vol_bottomup = 1
+        
+        fator_ajuste = meta_faturamento_coord / faturamento_atual_coord
+        
+        # Variáveis de controlo do Método do Maior Resto
+        pool_alocacao = []
+        soma_caixas_inteiras = 0
+        soma_caixas_teoricas_iniciais = sum([(l.vol_bottomup or 0) for l in linhas])
+        
+        for l in linhas:
+            vol_atual = l.vol_bottomup or 0
+            novo_vol_float = vol_atual * fator_ajuste
+            
+            vol_inteiro = math.floor(novo_vol_float)
+            resto = novo_vol_float - vol_inteiro
+            
+            soma_caixas_inteiras += vol_inteiro
+            pool_alocacao.append({"linha": l, "inteiro": vol_inteiro, "resto": resto})
+            
+        # Determinar volume macro de caixas teóricas esperadas para o coordenador com o novo fator
+        total_caixas_esperadas = round(soma_caixas_teoricas_iniciais * fator_ajuste)
+        caixas_faltantes = max(0, int(total_caixas_esperadas - soma_caixas_inteiras))
+        
+        # Ordenação decrescente baseada na maior fração decimal (resto)
+        pool_alocacao.sort(key=lambda x: x["resto"], reverse=True)
+        
+        for idx, item_aloc in enumerate(pool_alocacao):
+            vol_final = item_aloc["inteiro"]
+            
+            # As caixas faltantes são doadas àqueles com maior fração decimal
+            if idx < caixas_faltantes:
+                vol_final += 1
+            
+            # Persiste o ajuste granular
+            item_aloc["linha"].vol_bottomup = vol_final
+            
+    db.commit()
+    return {"status": "success", "message": "Metas top-down redistribuídas com sucesso."}
+
 
 # =====================================================================
 # ROTA SALVAR RASCUNHO (BLINDADA)
