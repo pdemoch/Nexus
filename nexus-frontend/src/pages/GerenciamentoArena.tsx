@@ -13,7 +13,7 @@ const formatVolume = (val: number) => new Intl.NumberFormat('pt-BR').format(Math
 const formatMoeda = (val: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
 
 // =========================================================================
-// COMPONENTES DE INPUT
+// COMPONENTES DE INPUT E IA
 // =========================================================================
 const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (val: number) => void, disabled: boolean }) => {
   const [localVal, setLocalVal] = useState(value !== undefined && value !== null ? formatVolume(value) : '0');
@@ -65,6 +65,43 @@ const PercentInput = ({ pct, onChange, disabled }: { pct: number, onChange: (val
         className="w-full bg-transparent border-none text-right text-xs font-bold text-blue-700 outline-none p-0 focus:ring-0"
       />
       <span className="text-[10px] font-bold text-slate-400">%</span>
+    </div>
+  );
+};
+
+const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo: string, pmv: number, volume: number, receita: number }) => {
+  const [insight, setInsight] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const fetchInsight = async () => {
+    setLoading(true);
+    try {
+      const prompt = `Gere uma análise executiva de S&OP (máx 3 parágrafos) para a carteira comercial de ${alvo} (Nível: ${tipo}). O volume proposto pelo time é de ${volume} CX, com PMV médio de R$ ${pmv.toFixed(2)} e Receita Projetada de R$ ${receita.toFixed(2)}. Foque em rentabilidade e tendências comerciais.`;
+      const res = await axios.post('/api/v1/ai-sql/perguntar', { pergunta: prompt });
+      setInsight(res.data.resposta);
+    } catch (e) { setInsight("Erro ao comunicar com a IA Nexus. Tente novamente."); } 
+    finally { setLoading(false); }
+  };
+
+  return (
+    <div className="bg-slate-800 rounded-xl p-5 border border-slate-700 flex flex-col h-full shadow-lg">
+      <div className="flex items-center justify-between mb-4">
+        <h4 className="font-bold text-slate-200 flex items-center gap-2"><Wand2 className="w-4 h-4 text-blue-400" /> Nexus AI Insight 360°</h4>
+        <button onClick={fetchInsight} disabled={loading} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-2">
+          {loading ? "Processando..." : "Gerar Diagnóstico"}
+        </button>
+      </div>
+      <div className="flex-1 text-sm text-slate-300 leading-relaxed overflow-y-auto pr-2">
+        {loading ? (
+          <div className="animate-pulse flex flex-col gap-2">
+             <div className="h-2 bg-slate-700 rounded w-full"></div><div className="h-2 bg-slate-700 rounded w-5/6"></div><div className="h-2 bg-slate-700 rounded w-4/6"></div>
+          </div>
+        ) : insight ? <div className="whitespace-pre-wrap">{insight}</div> : (
+          <div className="flex flex-col items-center justify-center h-full text-slate-500 opacity-50">
+            <Shield className="w-12 h-12 mb-2" /><span>Nenhuma análise gerada.</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 };
@@ -136,7 +173,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
         )
       };
       await axios.post(`/api/v1/consensus/gerenciamento/salvar`, payload);
-      alert(visaoAtiva === 'portfolio' ? "Rateio Global do Portfólio concluído e distribuído!" : "Proposta Bottom-Up consolidada na matriz da sua Carteira!");
+      alert(visaoAtiva === 'portfolio' ? "Rateio Global do Portfólio concluído e distribuído na base!" : "Proposta Bottom-Up consolidada na matriz da sua Carteira!");
       fetchData();
     } catch (e: any) { alert("Erro ao salvar: " + (e.response?.data?.detail || e.message)); }
   };
@@ -204,25 +241,22 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   }, [getDynamicVol]);
 
   // =========================================================================
-  // MATEMÁTICA: ÂNCORAS SEPARADAS PARA PORTFÓLIO E CARTEIRA
+  // MATEMÁTICA: ÂNCORAS SEPARADAS PARA PORTFÓLIO E CARTEIRA (VOL_TOPDOWN)
   // =========================================================================
-  
-  // Total Base da Aba Ativa (Serve de Âncora 100% Intocável)
   const totaisBaseAbaAtiva = useMemo(() => {
     const totais: Record<string, { vol: number, fat: number }> = {};
     colunasData?.forEach((m: any) => {
       let vol = 0; let fat = 0;
       dadosBrutos.forEach((node: any) => {
         const mesData = node.meses?.find((x: any) => x.mes_banco === m.mes_banco);
-        vol += (mesData?.vol_ajustado || 0);
-        fat += (mesData?.receita || 0);
+        vol += (mesData?.vol_base || 0); // Lendo o vol_topdown
+        fat += (mesData?.receita_base || 0);
       });
       totais[m.mes_banco] = { vol, fat };
     });
     return totais;
   }, [dadosBrutos, colunasData]);
 
-  // Total Simulado (Com Rascunhos)
   const totaisGeraisTelaAtual = useMemo(() => {
     const totais: Record<string, { vol: number, fat: number }> = {};
     colunasData?.forEach((m: any) => {
@@ -342,6 +376,110 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     }
   };
 
+  // =========================================================================
+  // PAINEL DE SAUDABILIDADE (RESTAURADO COM RECHARTS)
+  // =========================================================================
+  const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
+    const chave = rowData.chave_matriz;
+    const chartData = dadosGraficoCache[chave];
+
+    const kpis = useMemo(() => {
+      let volAtual = 0; let volIA = 0; let rec = 0; let pmvAcc = 0; let count = 0;
+      (rowData?.meses || []).forEach((m: any) => {
+          const vFinal = getDynamicVol(rowData, m.mes_banco);
+          volAtual += vFinal;
+          volIA += (m.vol_ia || 0);
+          rec += vFinal * (m.pmv || 0);
+          if(m.pmv) { pmvAcc += m.pmv; count++; }
+      });
+      const gap = volAtual - volIA;
+      return { volAtual, volIA, rec, gap, pmvMedio: count > 0 ? (pmvAcc / count) : 0 };
+    }, [rowData, celulasEditadas]);
+
+    const CustomTooltip = ({ active, payload, label }: any) => {
+      if (active && payload && payload.length) {
+        return (
+          <div className="bg-slate-900 border border-slate-700 p-4 rounded-xl shadow-2xl z-50">
+            <p className="text-white font-bold mb-3 pb-2 border-b border-slate-700">{label}</p>
+            {payload.map((entry: any, idx: number) => (
+              <div key={idx} className="flex items-center gap-3 py-1">
+                <div className="w-3 h-3 rounded-full" style={{ backgroundColor: entry.color }} />
+                <span className="text-slate-300 text-sm w-36">{entry.name}:</span>
+                <span className="text-white font-bold text-sm">{formatVolume(entry.value)} cx</span>
+              </div>
+            ))}
+          </div>
+        );
+      }
+      return null;
+    };
+
+    return (
+      <div className="w-full bg-slate-900 shadow-inner px-8 py-8 border-y border-slate-800">
+        <div className="flex items-center gap-2 mb-6">
+          <Activity className="w-5 h-5 text-blue-400" />
+          <h3 className="font-bold text-lg text-white">Dossiê Tático Executivo <span className="text-slate-500 font-normal">| {rowData.nome}</span></h3>
+        </div>
+
+        <div className="grid grid-cols-4 gap-4 mb-6">
+          <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
+            <div className="flex items-center gap-2 text-slate-400 mb-2">
+               <Target className="w-4 h-4 text-emerald-400" /> <span className="text-xs font-bold uppercase tracking-wider">Receita Prevista</span>
+            </div>
+            <div className="text-2xl font-black text-white">{formatMoeda(kpis.rec)}</div>
+          </div>
+          <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
+            <div className="flex items-center gap-2 text-slate-400 mb-2">
+               <Activity className="w-4 h-4 text-blue-400" /> <span className="text-xs font-bold uppercase tracking-wider">Volume Proposto</span>
+            </div>
+            <div className="text-2xl font-black text-white">{formatVolume(kpis.volAtual)} <span className="text-sm font-normal text-slate-500">CX</span></div>
+          </div>
+          <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
+            <div className="flex items-center gap-2 text-slate-400 mb-2">
+               <LayoutGrid className="w-4 h-4 text-purple-400" /> <span className="text-xs font-bold uppercase tracking-wider">PMV Comercial</span>
+            </div>
+            <div className="text-2xl font-black text-white">{formatMoeda(kpis.pmvMedio)}</div>
+          </div>
+          <div className={`border p-4 rounded-xl ${kpis.gap < 0 ? 'bg-rose-900/20 border-rose-500/30' : 'bg-emerald-900/20 border-emerald-500/30'}`}>
+            <div className="flex items-center gap-2 text-slate-400 mb-2">
+               {kpis.gap < 0 ? <TrendingDown className="w-4 h-4 text-rose-400" /> : <TrendingUp className="w-4 h-4 text-emerald-400" />} 
+               <span className="text-xs font-bold uppercase tracking-wider">GAP Base IA</span>
+            </div>
+            <div className={`text-2xl font-black ${kpis.gap < 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
+              {kpis.gap > 0 ? '+' : ''}{formatVolume(kpis.gap)} <span className="text-sm font-normal opacity-70">CX</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-3 gap-6">
+          <div className="col-span-2 bg-slate-800 border border-slate-700 p-4 rounded-xl h-[340px]">
+            {loadingGrafico === chave ? (
+              <div className="h-full flex items-center justify-center text-slate-500">Extraindo inteligência temporal...</div>
+            ) : chartData ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
+                  <XAxis dataKey="name" tick={{fill: '#94a3b8', fontSize: 12}} tickMargin={10} axisLine={false} />
+                  <YAxis tickFormatter={(val) => formatVolume(val)} tick={{fill: '#94a3b8', fontSize: 12}} tickLine={false} axisLine={false} />
+                  <Tooltip content={<CustomTooltip />} />
+                  <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} />
+                  
+                  <Line type="monotone" dataKey="Realizado" name="Histórico Faturado" stroke="#0f172a" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} connectNulls={false} />
+                  <Line type="monotone" dataKey="IA" name="Projeção IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="CicloAnterior" name="Ciclo Anterior (Lag 1)" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="TopDown" name="Proposta Comercial" stroke="#3b82f6" strokeWidth={3} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : null}
+          </div>
+          <div className="col-span-1 h-[340px]">
+             <AiInsightBox alvo={rowData.nome} tipo={rowData.tipo} pmv={kpis.pmvMedio} volume={kpis.volAtual} receita={kpis.rec} />
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderRow = (row: any, depth = 0) => {
     const isExpanded = expanded[row.chave_matriz];
     const hasChildren = row.subRows && row.subRows.length > 0;
@@ -404,8 +542,8 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
           {colunasData?.map((m: any, idx: number) => {
             const mBase = row.meses?.find((x: any) => x.mes_banco === m.mes_banco);
-            const volBase = mBase?.vol_ajustado || 0;
-            const recBase = mBase?.receita || 0;
+            const volBase = mBase?.vol_base || 0; // BASE AGORA É O VOL_TOPDOWN
+            const recBase = mBase?.receita_base || 0;
 
             const isEdited = celulasEditadas[row.chave_matriz]?.[m.mes_banco] !== undefined;
             const volSimulado = getDynamicVol(row, m.mes_banco);
@@ -415,7 +553,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
             return (
               <React.Fragment key={idx}>
-                {/* 1. SUBCOLUNA: BASE ATUAL */}
+                {/* 1. SUBCOLUNA: BASE ATUAL (TOP-DOWN) */}
                 <td className="p-3 border-r border-slate-200 bg-slate-50/80 align-middle">
                    <div className="flex flex-col items-end opacity-70">
                       <span className="text-xs font-bold text-slate-600">{formatVolume(volBase)} cx</span>
@@ -454,7 +592,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                         <div className="w-24">
                           <SmartInput 
                             value={volSimulado} 
-                            disabled={!isTopDownFechado || isRowFechado || (!isProduto && visaoAtiva === 'portfolio')} 
+                            disabled={!isTopDownFechado || isRowFechado} /* EDITÁVEL EM QUALQUER NÍVEL DO PORTFÓLIO */
                             onChange={(novoVol) => handleEditCell(row.chave_matriz, m.mes_banco, novoVol)} 
                           />
                         </div>
@@ -469,6 +607,15 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             );
           })}
         </tr>
+        
+        {chartExpanded === row.chave_matriz && (
+          <tr>
+            <td colSpan={(colunasData?.length * 2 || 0) + 1} className="p-0">
+               <PainelSaudabilidade rowData={row} />
+            </td>
+          </tr>
+        )}
+        
         {isExpanded && hasChildren && row.subRows.map((child: any) => renderRow(child, depth + 1))}
       </React.Fragment>
     );

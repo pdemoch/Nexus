@@ -75,7 +75,7 @@ def check_topdown_lock(db: Session, ciclo: str):
         raise HTTPException(status_code=403, detail="Fase Comercial Bloqueada: Diretoria ainda não ratificou o Top-Down.")
 
 # =====================================================================
-# GET: ÁRVORES DE DADOS (CARTEIRA COM RLS / PORTFÓLIO GLOBAL)
+# GET: ÁRVORES DE DADOS (COM VOL_TOPDOWN NA BASE ATUAL)
 # =====================================================================
 @router.get("")
 async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
@@ -93,7 +93,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         meses_alvo = [(hoje + relativedelta(months=i)).strftime("%Y-%m-%d") for i in range(2, 5)]
         cx, vx, clx = get_coord_expr(), get_vend_expr(), get_cli_expr()
 
-        # 1. QUERY CARTEIRA (COM FILTRO RLS DO GERENTE)
+        # 1. QUERY CARTEIRA (COM FILTRO RLS DO GERENTE E VOL_TOPDOWN)
         q_cart = get_truth_query(db, ciclo, data_ini, data_fim)
         if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
             q_cart = q_cart.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
@@ -103,18 +103,20 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             FatoIbpGranular.sku, DimProduto.descricao.label('prod_desc'),
             FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
-            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'),
+            func.sum(FatoIbpGranular.vol_topdown).label('v_td'),  # BASE ATUAL
+            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), # SIMULAÇÃO
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
         ).group_by(cx, vx, clx, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all()
 
-        # 2. QUERY PORTFÓLIO (GLOBAL - SEM FILTRO RLS)
+        # 2. QUERY PORTFÓLIO (GLOBAL E VOL_TOPDOWN)
         q_port = get_truth_query(db, ciclo, data_ini, data_fim)
         resultados_port = q_port.with_entities(
             DimProduto.categoria.label('cat'), DimProduto.segmento.label('seg'),
             FatoIbpGranular.sku, DimProduto.descricao.label('prod_desc'),
             FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
-            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'),
+            func.sum(FatoIbpGranular.vol_topdown).label('v_td'),  # BASE ATUAL
+            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), # SIMULAÇÃO
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
         ).group_by(DimProduto.categoria, DimProduto.segmento, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all()
 
@@ -137,23 +139,30 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
 
         trancas_reg = {c.origem: c.status for c in db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo).all()}
 
-        def criar_meses(): return {m: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0, "pmv":0.0, "vol_anterior": 0} for m in meses_alvo}
+        def criar_meses(): return {"vol_ia":0, "vol_base":0, "receita_base":0, "vol_ajustado":0, "receita":0, "pmv":0.0, "vol_anterior": 0}
 
         # MONTAGEM DA ÁRVORE CARTEIRA
         arvore_carteira = {}
         for r in resultados_cart:
             co, ve, cl, sk, de, ms = str(r.coord).strip(), str(r.vend).strip(), str(r.cli).strip(), str(r.sku).strip(), str(r.prod_desc).strip(), str(r.mes_projetado)
-            if co not in arvore_carteira: arvore_carteira[co] = {"nome": co, "status": trancas_reg.get(co, "Aberto"), "meses": criar_meses(), "vendedores": {}}
-            if ve not in arvore_carteira[co]["vendedores"]: arvore_carteira[co]["vendedores"][ve] = {"nome": ve, "meses": criar_meses(), "clientes": {}}
-            if cl not in arvore_carteira[co]["vendedores"][ve]["clientes"]: arvore_carteira[co]["vendedores"][ve]["clientes"][cl] = {"nome": cl, "meses": criar_meses(), "produtos": {}}
-            if sk not in arvore_carteira[co]["vendedores"][ve]["clientes"][cl]["produtos"]: arvore_carteira[co]["vendedores"][ve]["clientes"][cl]["produtos"][sk] = {"nome": de, "produto": sk, "meses": criar_meses()}
+            if co not in arvore_carteira: arvore_carteira[co] = {"nome": co, "status": trancas_reg.get(co, "Aberto"), "meses": {m: criar_meses() for m in meses_alvo}, "vendedores": {}}
+            if ve not in arvore_carteira[co]["vendedores"]: arvore_carteira[co]["vendedores"][ve] = {"nome": ve, "meses": {m: criar_meses() for m in meses_alvo}, "clientes": {}}
+            if cl not in arvore_carteira[co]["vendedores"][ve]["clientes"]: arvore_carteira[co]["vendedores"][ve]["clientes"][cl] = {"nome": cl, "meses": {m: criar_meses() for m in meses_alvo}, "produtos": {}}
+            if sk not in arvore_carteira[co]["vendedores"][ve]["clientes"][cl]["produtos"]: arvore_carteira[co]["vendedores"][ve]["clientes"][cl]["produtos"][sk] = {"nome": de, "produto": sk, "meses": {m: criar_meses() for m in meses_alvo}}
             
             if ms in meses_alvo:
                 v_bu = int(r.v_bu or 0)
+                v_td = int(r.v_td or 0)
                 pmv_b = float(r.pmv or 0)
                 v_ant = ant_dict_cart[(cl, sk)][ms]
                 for nivel in [arvore_carteira[co]["meses"][ms], arvore_carteira[co]["vendedores"][ve]["meses"][ms], arvore_carteira[co]["vendedores"][ve]["clientes"][cl]["meses"][ms], arvore_carteira[co]["vendedores"][ve]["clientes"][cl]["produtos"][sk]["meses"][ms]]:
-                    nivel["vol_ia"] += int(r.v_ia or 0); nivel["vol_ajustado"] += v_bu; nivel["receita"] += (v_bu * pmv_b); nivel["vol_anterior"] += v_ant; nivel["pmv"] = (nivel["receita"] / nivel["vol_ajustado"]) if nivel["vol_ajustado"] > 0 else pmv_b
+                    nivel["vol_ia"] += int(r.v_ia or 0)
+                    nivel["vol_base"] += v_td
+                    nivel["receita_base"] += (v_td * pmv_b)
+                    nivel["vol_ajustado"] += v_bu
+                    nivel["receita"] += (v_bu * pmv_b)
+                    nivel["vol_anterior"] += v_ant
+                    nivel["pmv"] = (nivel["receita"] / nivel["vol_ajustado"]) if nivel["vol_ajustado"] > 0 else pmv_b
 
         final_carteira = []
         for co_k, co_v in arvore_carteira.items():
@@ -170,18 +179,25 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         arvore_port = {}
         for p in db.query(DimProduto).all():
             cat, seg, sk, de = p.categoria or 'SEM CATEGORIA', p.segmento or 'SEM SEGMENTO', p.sku, p.descricao or 'SEM NOME'
-            if cat not in arvore_port: arvore_port[cat] = {"nome": cat, "tipo": "categoria", "meses": criar_meses(), "segmentos": {}}
-            if seg not in arvore_port[cat]["segmentos"]: arvore_port[cat]["segmentos"][seg] = {"nome": seg, "tipo": "segmento", "meses": criar_meses(), "produtos": {}}
-            if sk not in arvore_port[cat]["segmentos"][seg]["produtos"]: arvore_port[cat]["segmentos"][seg]["produtos"][sk] = {"nome": de, "produto": sk, "tipo": "produto", "meses": criar_meses()}
+            if cat not in arvore_port: arvore_port[cat] = {"nome": cat, "tipo": "categoria", "meses": {m: criar_meses() for m in meses_alvo}, "segmentos": {}}
+            if seg not in arvore_port[cat]["segmentos"]: arvore_port[cat]["segmentos"][seg] = {"nome": seg, "tipo": "segmento", "meses": {m: criar_meses() for m in meses_alvo}, "produtos": {}}
+            if sk not in arvore_port[cat]["segmentos"][seg]["produtos"]: arvore_port[cat]["segmentos"][seg]["produtos"][sk] = {"nome": de, "produto": sk, "tipo": "produto", "meses": {m: criar_meses() for m in meses_alvo}}
 
         for r in resultados_port:
             cat, seg, sk, ms = r.cat or 'SEM CATEGORIA', r.seg or 'SEM SEGMENTO', str(r.sku).strip(), str(r.mes_projetado)
             if ms in meses_alvo and cat in arvore_port and seg in arvore_port[cat]["segmentos"] and sk in arvore_port[cat]["segmentos"][seg]["produtos"]:
                 v_bu = int(r.v_bu or 0)
+                v_td = int(r.v_td or 0)
                 pmv_b = float(r.pmv or 0)
                 v_ant = ant_dict_port[sk][ms]
                 for nivel in [arvore_port[cat]["meses"][ms], arvore_port[cat]["segmentos"][seg]["meses"][ms], arvore_port[cat]["segmentos"][seg]["produtos"][sk]["meses"][ms]]:
-                    nivel["vol_ia"] += int(r.v_ia or 0); nivel["vol_ajustado"] += v_bu; nivel["receita"] += (v_bu * pmv_b); nivel["vol_anterior"] += v_ant; nivel["pmv"] = (nivel["receita"] / nivel["vol_ajustado"]) if nivel["vol_ajustado"] > 0 else pmv_b
+                    nivel["vol_ia"] += int(r.v_ia or 0)
+                    nivel["vol_base"] += v_td
+                    nivel["receita_base"] += (v_td * pmv_b)
+                    nivel["vol_ajustado"] += v_bu
+                    nivel["receita"] += (v_bu * pmv_b)
+                    nivel["vol_anterior"] += v_ant
+                    nivel["pmv"] = (nivel["receita"] / nivel["vol_ajustado"]) if nivel["vol_ajustado"] > 0 else pmv_b
 
         final_portfolio = []
         for cat_k, cat_v in arvore_port.items():
@@ -196,8 +212,10 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         raise HTTPException(status_code=500, detail=repr(e))
 
 # =====================================================================
-# RATEIO POR PERCENTUAL (COM BASE NO FATURAMENTO EXCLUSIVO DO GERENTE)
+# DEMAIS ROTAS (AJUSTAR-PERCENTUAL, SALVAR, CONGELAR, GRAFICO, TOGGLE)
+# Mantidas integralmente e seguras conforme código anterior.
 # =====================================================================
+
 @router.post("/ajustar-percentual")
 async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     ciclo = get_current_cycle(db)
@@ -208,7 +226,6 @@ async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db:
     if not math.isclose(soma_pct, 100.0, abs_tol=0.01):
         raise HTTPException(status_code=400, detail=f"A soma deve fechar em exatamente 100%. Recebido: {soma_pct}%")
         
-    # Calcular o Total de Faturamento do Gerente Atual (A sua fatia 100%)
     q_gerente_total = db.query(FatoIbpGranular).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(FatoIbpGranular.ciclo_sop == ciclo, FatoIbpGranular.mes_projetado == mes_alvo)
     if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
         q_gerente_total = q_gerente_total.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
@@ -263,9 +280,6 @@ async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db:
     db.commit()
     return {"status": "success", "message": "Meta da carteira rateada nos coordenadores."}
 
-# =====================================================================
-# ROTA SALVAR RASCUNHO (TRATAMENTO DIFERENCIADO POR VISÃO)
-# =====================================================================
 @router.post("/salvar")
 async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
@@ -285,7 +299,6 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
             partes_chave = ajuste.chave.split('|')
             q = get_truth_query(db, ciclo, dt, dt)
 
-            # SE FOR CARTEIRA: Aplica a trava do Gerente para proteger o universo dele
             if ajuste.nivel == 'carteira':
                 if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
                     q = q.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
@@ -296,7 +309,6 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
                 if len(partes_chave) >= 3: q = q.filter(func.upper(clx) == partes_chave[2].upper())
                 if len(partes_chave) >= 4: q = q.filter(FatoIbpGranular.sku == partes_chave[3].strip())
             
-            # SE FOR PORTFÓLIO: Rateio Global (Ignora o RLS do Gerente)
             elif ajuste.nivel == 'portfolio':
                 if locked_coords:
                     q = q.filter(~func.upper(cx).in_(locked_coords))
