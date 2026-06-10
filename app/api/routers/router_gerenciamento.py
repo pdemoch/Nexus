@@ -41,7 +41,7 @@ class PayloadToggleLock(BaseModel):
     status: str
 
 # =====================================================================
-# EXPRESSÕES E GOVERNANÇA
+# EXPRESSÕES E GOVERNANÇA DE ACESSO
 # =====================================================================
 def get_coord_expr():
     return func.coalesce(func.nullif(func.trim(DimCliente.supervisor_nome), ''), func.nullif(func.trim(DimCliente.gerente_nome), ''), 'SEM COORDENADOR')
@@ -53,7 +53,8 @@ def get_cli_expr():
     return func.coalesce(func.nullif(func.trim(DimCliente.razaosocial), ''), DimCliente.cgc)
 
 def require_manager_or_admin(usuario: dict = Depends(get_current_user)):
-    if usuario['funcao'] not in ['Administrador', 'Gerente Comercial', 'Coordenador Comercial']:
+    # CORREÇÃO: Nomes dos perfis perfeitamente alinhados com o router_auth.py
+    if usuario['funcao'] not in ['Administrador', 'Gerente', 'Coordenador']:
         raise HTTPException(status_code=403, detail="Acesso restrito à Gestão Comercial.")
     return usuario
 
@@ -84,13 +85,19 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         cx, vx, clx = get_coord_expr(), get_vend_expr(), get_cli_expr()
         q = get_truth_query(db, ciclo, data_ini, data_fim)
 
-        if usuario['funcao'] == 'Coordenador Comercial':
-            q = q.filter(func.upper(cx) == usuario['nome'].strip().upper())
-        elif usuario['funcao'] == 'Gerente Comercial':
-            user_db = db.query(Usuario).filter(Usuario.id == usuario['id']).first()
-            filiais = [f.strip().upper() for f in (user_db.filiais_permissao or "").split(",") if f.strip()]
-            if filiais:
-                q = q.filter(func.upper(func.trim(DimCliente.filial)).in_(filiais))
+        # CORREÇÃO: Filtros amarrados às credenciais do ERP registradas no Login
+        if usuario['funcao'] == 'Coordenador':
+            sup_nome = usuario.get('supervisor_nome')
+            if sup_nome:
+                q = q.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == sup_nome.strip().upper())
+            else:
+                q = q.filter(False) # Bloqueia se a conta estiver corrompida
+        elif usuario['funcao'] == 'Gerente':
+            ger_nome = usuario.get('gerente_nome')
+            if ger_nome:
+                q = q.filter(func.upper(func.trim(DimCliente.gerente_nome)) == ger_nome.strip().upper())
+            else:
+                q = q.filter(False)
 
         resultados = q.with_entities(
             cx.label('coord'), vx.label('vend'), clx.label('cli'),
@@ -220,7 +227,6 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
 
         cx, vx, clx = get_coord_expr(), get_vend_expr(), get_cli_expr()
 
-        # BLINDAGEM DE RATEIO: Descobre regionais trancadas para ignorá-las matematicamente
         locked_coords = [c.origem.upper() for c in db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.status == 'Fechado').all()]
 
         for ajuste in payload.ajustes:
@@ -228,11 +234,13 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
             p = ajuste.chave.split('|')
             q = get_truth_query(db, ciclo, dt, dt)
 
-            if usuario['funcao'] == 'Coordenador Comercial': q = q.filter(func.upper(cx) == usuario['nome'].strip().upper())
-            elif usuario['funcao'] == 'Gerente Comercial':
-                user_db = db.query(Usuario).filter(Usuario.id == usuario['id']).first()
-                filiais = [f.strip().upper() for f in (user_db.filiais_permissao or "").split(",") if f.strip()]
-                if filiais: q = q.filter(func.upper(func.trim(DimCliente.filial)).in_(filiais))
+            # CORREÇÃO: Filtro de atuação do utilizador atualizado
+            if usuario['funcao'] == 'Coordenador':
+                sup_nome = usuario.get('supervisor_nome')
+                if sup_nome: q = q.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == sup_nome.strip().upper())
+            elif usuario['funcao'] == 'Gerente':
+                ger_nome = usuario.get('gerente_nome')
+                if ger_nome: q = q.filter(func.upper(func.trim(DimCliente.gerente_nome)) == ger_nome.strip().upper())
 
             # Ignora as linhas cuja regional (coordenador) já foi assinada
             if locked_coords:
@@ -306,14 +314,14 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
         cx = get_coord_expr()
         q_coords = get_truth_query(db, ciclo, data_ini, data_ini)
         
-        if usuario['funcao'] == 'Coordenador Comercial':
-            q_coords = q_coords.filter(func.upper(cx) == usuario['nome'].strip().upper())
-        elif usuario['funcao'] == 'Gerente Comercial':
-            user_db = db.query(Usuario).filter(Usuario.id == usuario['id']).first()
-            filiais = [f.strip().upper() for f in (user_db.filiais_permissao or "").split(",") if f.strip()]
-            if filiais: q_coords = q_coords.filter(func.upper(func.trim(DimCliente.filial)).in_(filiais))
+        # CORREÇÃO: Atualizado para buscar coords_acessiveis via ERP
+        if usuario['funcao'] == 'Coordenador':
+            sup_nome = usuario.get('supervisor_nome')
+            if sup_nome: q_coords = q_coords.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == sup_nome.strip().upper())
+        elif usuario['funcao'] == 'Gerente':
+            ger_nome = usuario.get('gerente_nome')
+            if ger_nome: q_coords = q_coords.filter(func.upper(func.trim(DimCliente.gerente_nome)) == ger_nome.strip().upper())
 
-        # Descobre as regionais sob a gestão deste utilizador que ainda estão abertas
         coords_acessiveis = [r[0] for r in q_coords.with_entities(cx).distinct().all() if r[0]]
 
         for coord in coords_acessiveis:
@@ -433,11 +441,13 @@ async def listar_filtros_gerenciamento(db: Session = Depends(get_db), usuario: d
     try:
         cx = get_coord_expr()
         q = db.query(cx)
-        if usuario['funcao'] == 'Coordenador Comercial': q = q.filter(func.upper(cx) == usuario['nome'].strip().upper())
-        elif usuario['funcao'] == 'Gerente Comercial':
-            user_db = db.query(Usuario).filter(Usuario.id == usuario['id']).first()
-            filiais = [f.strip().upper() for f in (user_db.filiais_permissao or "").split(",") if f.strip()]
-            if filiais: q = q.filter(func.upper(func.trim(DimCliente.filial)).in_(filiais))
+        if usuario['funcao'] == 'Coordenador':
+            sup_nome = usuario.get('supervisor_nome')
+            if sup_nome: q = q.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == sup_nome.strip().upper())
+        elif usuario['funcao'] == 'Gerente':
+            ger_nome = usuario.get('gerente_nome')
+            if ger_nome: q = q.filter(func.upper(func.trim(DimCliente.gerente_nome)) == ger_nome.strip().upper())
+            
         regionais = q.distinct().all()
         return {"status": "success", "dados": {"regionais": [r[0] for r in regionais if r[0]]}}
     except Exception as e:
