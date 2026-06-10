@@ -241,7 +241,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   }, [getDynamicVol]);
 
   // =========================================================================
-  // MATEMÁTICA: ÂNCORAS SEPARADAS PARA PORTFÓLIO E CARTEIRA (VOL_TOPDOWN)
+  // MATEMÁTICA: ÂNCORAS SEPARADAS PARA PORTFÓLIO E CARTEIRA COM MARGEM 1%
   // =========================================================================
   const totaisBaseAbaAtiva = useMemo(() => {
     const totais: Record<string, { vol: number, fat: number }> = {};
@@ -249,7 +249,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
       let vol = 0; let fat = 0;
       dadosBrutos.forEach((node: any) => {
         const mesData = node.meses?.find((x: any) => x.mes_banco === m.mes_banco);
-        vol += (mesData?.vol_base || 0); // Lendo o vol_topdown
+        vol += (mesData?.vol_base || 0);
         fat += (mesData?.receita_base || 0);
       });
       totais[m.mes_banco] = { vol, fat };
@@ -270,6 +270,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     return totais;
   }, [dadosProcessados, getDynamicVol, getDynamicRec, colunasData]);
 
+  // ATUALIZADO: Zona de Tolerância de 1% (99% - 101%)
   const allColumns100Percent = useMemo(() => {
     if (visaoAtiva === 'portfolio') return true; 
     return colunasData.every((m: any) => {
@@ -277,7 +278,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
       const simulado = totaisGeraisTelaAtual[m.mes_banco]?.fat || 0;
       if (ancora === 0) return true;
       const percentual = (simulado / ancora) * 100;
-      return percentual >= 99.0 && percentual <= 101.0; // Nova Zona de Tolerância
+      return percentual >= 99.0 && percentual <= 101.0;
     });
   }, [visaoAtiva, colunasData, totaisBaseAbaAtiva, totaisGeraisTelaAtual]);
 
@@ -543,7 +544,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
           {colunasData?.map((m: any, idx: number) => {
             const mBase = row.meses?.find((x: any) => x.mes_banco === m.mes_banco);
-            const volBase = mBase?.vol_base || 0; // BASE AGORA É O VOL_TOPDOWN
+            const volBase = mBase?.vol_base || 0;
             const recBase = mBase?.receita_base || 0;
 
             const isEdited = celulasEditadas[row.chave_matriz]?.[m.mes_banco] !== undefined;
@@ -593,7 +594,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                         <div className="w-24">
                           <SmartInput 
                             value={volSimulado} 
-                            disabled={!isTopDownFechado || isRowFechado} /* EDITÁVEL EM QUALQUER NÍVEL DO PORTFÓLIO */
+                            disabled={!isTopDownFechado || isRowFechado} 
                             onChange={(novoVol) => handleEditCell(row.chave_matriz, m.mes_banco, novoVol)} 
                           />
                         </div>
@@ -737,7 +738,8 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                      const simuladoVol = totaisGeraisTelaAtual[m.mes_banco]?.vol || 0;
 
                      const currentPct = ancoraBaseFat > 0 ? (simuladoFat / ancoraBaseFat) * 100 : 0;
-                     const is100 = ancoraBaseFat === 0 || Math.abs(currentPct - 100) <= 0.05;
+                     // ATUALIZADO: Margem de Tolerância OK no Frontend (99 a 101%)
+                     const isMargemOk = ancoraBaseFat === 0 || (currentPct >= 99.0 && currentPct <= 101.0);
 
                      return (
                       <React.Fragment key={`foot-${i}`}>
@@ -759,8 +761,8 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                             </span>
                             
                             {visaoAtiva === 'carteira' && (
-                              <span className={`font-black text-[10px] px-2 py-0.5 rounded mt-1.5 tracking-wider ${is100 ? 'bg-blue-500/20 text-blue-400' : 'bg-rose-500 text-white animate-bounce'}`}>
-                                {is100 ? '100.00% OK' : `ALERTA: ${currentPct.toFixed(2)}%`}
+                              <span className={`font-black text-[10px] px-2 py-0.5 rounded mt-1.5 tracking-wider ${isMargemOk ? 'bg-blue-500/20 text-blue-400' : 'bg-rose-500 text-white animate-bounce'}`}>
+                                {isMargemOk ? `${currentPct.toFixed(2)}% (MARGEM OK)` : `ALERTA: ${currentPct.toFixed(2)}%`}
                               </span>
                             )}
                           </div>

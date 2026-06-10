@@ -212,16 +212,15 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         raise HTTPException(status_code=500, detail=repr(e))
 
 # =====================================================================
-# DEMAIS ROTAS (AJUSTAR-PERCENTUAL, SALVAR, CONGELAR, GRAFICO, TOGGLE)
-# Mantidas integralmente e seguras conforme código anterior.
+# RATEIO POR PERCENTUAL COM MARGEM DE TOLERÂNCIA (99% - 101%)
 # =====================================================================
-
 @router.post("/ajustar-percentual")
 async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     ciclo = get_current_cycle(db)
     mes_alvo = parse_date_safe(payload.mes_projetado)
     cx = get_coord_expr()
     
+    # ATUALIZAÇÃO: Relaxamento da trava para a margem de segurança de 1%
     soma_pct = sum([c.percentual for c in payload.distribuicao])
     if soma_pct < 99.0 or soma_pct > 101.0:
         raise HTTPException(
@@ -283,6 +282,9 @@ async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db:
     db.commit()
     return {"status": "success", "message": "Meta da carteira rateada nos coordenadores."}
 
+# =====================================================================
+# ROTA SALVAR RASCUNHO
+# =====================================================================
 @router.post("/salvar")
 async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
@@ -302,6 +304,7 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
             partes_chave = ajuste.chave.split('|')
             q = get_truth_query(db, ciclo, dt, dt)
 
+            # SE FOR CARTEIRA: Aplica a trava do Gerente para proteger o universo dele
             if ajuste.nivel == 'carteira':
                 if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
                     q = q.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
@@ -312,6 +315,7 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
                 if len(partes_chave) >= 3: q = q.filter(func.upper(clx) == partes_chave[2].upper())
                 if len(partes_chave) >= 4: q = q.filter(FatoIbpGranular.sku == partes_chave[3].strip())
             
+            # SE FOR PORTFÓLIO: Rateio Global (Ignora o RLS do Gerente)
             elif ajuste.nivel == 'portfolio':
                 if locked_coords:
                     q = q.filter(~func.upper(cx).in_(locked_coords))
@@ -345,7 +349,7 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
                     linha.vol_bottomup = max(0, linha.vol_bottomup + inc)
 
         db.commit()
-        return {"status": "success", "message": "Proposta Comercial Bottom-Up consolidada."}
+        return {"status": "success", "message": "Proposta Comercial consolidada."}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=repr(e))
