@@ -13,7 +13,7 @@ const formatVolume = (val: number) => new Intl.NumberFormat('pt-BR').format(Math
 const formatMoeda = (val: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
 
 // =========================================================================
-// COMPONENTES DE INPUT (ZERO-BYPASS CORRIGIDO E NOVA SIMULAÇÃO %)
+// COMPONENTES DE INPUT
 // =========================================================================
 const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (val: number) => void, disabled: boolean }) => {
   const [localVal, setLocalVal] = useState(value !== undefined && value !== null ? formatVolume(value) : '0');
@@ -65,43 +65,6 @@ const PercentInput = ({ pct, onChange, disabled }: { pct: number, onChange: (val
         className="w-full bg-transparent border-none text-right text-xs font-bold text-blue-700 outline-none p-0 focus:ring-0"
       />
       <span className="text-[10px] font-bold text-slate-400">%</span>
-    </div>
-  );
-};
-
-const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo: string, pmv: number, volume: number, receita: number }) => {
-  const [insight, setInsight] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const fetchInsight = async () => {
-    setLoading(true);
-    try {
-      const prompt = `Gere uma análise executiva de S&OP (máx 3 parágrafos) para a carteira comercial de ${alvo} (Nível: ${tipo}). O volume proposto pelo time é de ${volume} CX, com PMV médio de R$ ${pmv.toFixed(2)} e Receita Projetada de R$ ${receita.toFixed(2)}. Foque em rentabilidade e tendências comerciais.`;
-      const res = await axios.post('/api/v1/ai-sql/perguntar', { pergunta: prompt });
-      setInsight(res.data.resposta);
-    } catch (e) { setInsight("Erro ao comunicar com a IA Nexus. Tente novamente."); } 
-    finally { setLoading(false); }
-  };
-
-  return (
-    <div className="bg-slate-800 rounded-xl p-5 border border-slate-700 flex flex-col h-full shadow-lg">
-      <div className="flex items-center justify-between mb-4">
-        <h4 className="font-bold text-slate-200 flex items-center gap-2"><Wand2 className="w-4 h-4 text-blue-400" /> Nexus AI Insight 360°</h4>
-        <button onClick={fetchInsight} disabled={loading} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-2">
-          {loading ? "Processando..." : "Gerar Diagnóstico"}
-        </button>
-      </div>
-      <div className="flex-1 text-sm text-slate-300 leading-relaxed overflow-y-auto pr-2">
-        {loading ? (
-          <div className="animate-pulse flex flex-col gap-2">
-             <div className="h-2 bg-slate-700 rounded w-full"></div><div className="h-2 bg-slate-700 rounded w-5/6"></div><div className="h-2 bg-slate-700 rounded w-4/6"></div>
-          </div>
-        ) : insight ? <div className="whitespace-pre-wrap">{insight}</div> : (
-          <div className="flex flex-col items-center justify-center h-full text-slate-500 opacity-50">
-            <Shield className="w-12 h-12 mb-2" /><span>Nenhuma análise gerada.</span>
-          </div>
-        )}
-      </div>
     </div>
   );
 };
@@ -173,7 +136,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
         )
       };
       await axios.post(`/api/v1/consensus/gerenciamento/salvar`, payload);
-      alert("Proposta Bottom-Up consolidada na matriz oficial!");
+      alert(visaoAtiva === 'portfolio' ? "Rateio Global do Portfólio concluído e distribuído!" : "Proposta Bottom-Up consolidada na matriz da sua Carteira!");
       fetchData();
     } catch (e: any) { alert("Erro ao salvar: " + (e.response?.data?.detail || e.message)); }
   };
@@ -241,21 +204,25 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   }, [getDynamicVol]);
 
   // =========================================================================
-  // A ÂNCORA ABSOLUTA DE PORTFÓLIO (INCLUI EDIÇÕES NÃO SALVAS DO PORTFÓLIO)
+  // MATEMÁTICA: ÂNCORAS SEPARADAS PARA PORTFÓLIO E CARTEIRA
   // =========================================================================
-  const totaisAncoraPortfolio = useMemo(() => {
+  
+  // Total Base da Aba Ativa (Serve de Âncora 100% Intocável)
+  const totaisBaseAbaAtiva = useMemo(() => {
     const totais: Record<string, { vol: number, fat: number }> = {};
     colunasData?.forEach((m: any) => {
       let vol = 0; let fat = 0;
-      dadosBase.portfolio.forEach((cat: any) => {
-        vol += getDynamicVol(cat, m.mes_banco);
-        fat += getDynamicRec(cat, m.mes_banco);
+      dadosBrutos.forEach((node: any) => {
+        const mesData = node.meses?.find((x: any) => x.mes_banco === m.mes_banco);
+        vol += (mesData?.vol_ajustado || 0);
+        fat += (mesData?.receita || 0);
       });
       totais[m.mes_banco] = { vol, fat };
     });
     return totais;
-  }, [dadosBase.portfolio, colunasData, getDynamicVol, getDynamicRec]);
+  }, [dadosBrutos, colunasData]);
 
+  // Total Simulado (Com Rascunhos)
   const totaisGeraisTelaAtual = useMemo(() => {
     const totais: Record<string, { vol: number, fat: number }> = {};
     colunasData?.forEach((m: any) => {
@@ -272,12 +239,12 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   const allColumns100Percent = useMemo(() => {
     if (visaoAtiva === 'portfolio') return true; 
     return colunasData.every((m: any) => {
-      const ancora = totaisAncoraPortfolio[m.mes_banco]?.fat || 0;
+      const ancora = totaisBaseAbaAtiva[m.mes_banco]?.fat || 0;
       const simulado = totaisGeraisTelaAtual[m.mes_banco]?.fat || 0;
       if (ancora === 0) return true;
       return Math.abs((simulado / ancora) * 100 - 100) <= 0.05;
     });
-  }, [visaoAtiva, colunasData, totaisAncoraPortfolio, totaisGeraisTelaAtual]);
+  }, [visaoAtiva, colunasData, totaisBaseAbaAtiva, totaisGeraisTelaAtual]);
 
   const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
     if (!isTopDownFechado) return;
@@ -375,11 +342,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     }
   };
 
-  const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
-     // Preservado intacto para visualização do gráfico executivo
-     return <div className="w-full bg-slate-900 shadow-inner px-8 py-8 border-y border-slate-800">[ Gráfico Executivo Renderizado ]</div>;
-  };
-
   const renderRow = (row: any, depth = 0) => {
     const isExpanded = expanded[row.chave_matriz];
     const hasChildren = row.subRows && row.subRows.length > 0;
@@ -406,7 +368,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
       <React.Fragment key={row.chave_matriz}>
         <tr className={`border-b transition-colors hover:bg-slate-50 ${depth === 0 ? 'bg-white shadow-[inset_0_-1px_0_rgba(0,0,0,0.05)]' : depth === 1 ? 'bg-slate-50/50' : 'bg-white'}`}>
           
-          {/* NÓ HIERÁRQUICO */}
           <td className="p-0 align-middle border-r border-slate-200">
             <div style={{ paddingLeft: `${depth * 2 + 1}rem` }} className={`flex items-center gap-3 py-3 min-w-[320px] h-full ${depth === 0 ? 'border-l-4 border-blue-500' : ''}`}>
               {hasChildren ? (
@@ -441,7 +402,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             </div>
           </td>
 
-          {/* DUPLA SUBCOLUNA (BASE vs SIMULAÇÃO) POR MÊS */}
           {colunasData?.map((m: any, idx: number) => {
             const mBase = row.meses?.find((x: any) => x.mes_banco === m.mes_banco);
             const volBase = mBase?.vol_ajustado || 0;
@@ -451,11 +411,11 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             const volSimulado = getDynamicVol(row, m.mes_banco);
             const recSimulado = getDynamicRec(row, m.mes_banco);
 
-            const anchorFat = totaisAncoraPortfolio[m.mes_banco]?.fat || 1; 
+            const anchorFat = totaisBaseAbaAtiva[m.mes_banco]?.fat || 1; 
 
             return (
               <React.Fragment key={idx}>
-                {/* 1. SUBCOLUNA: BASE ATUAL (Intocável) */}
+                {/* 1. SUBCOLUNA: BASE ATUAL */}
                 <td className="p-3 border-r border-slate-200 bg-slate-50/80 align-middle">
                    <div className="flex flex-col items-end opacity-70">
                       <span className="text-xs font-bold text-slate-600">{formatVolume(volBase)} cx</span>
@@ -463,10 +423,9 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                    </div>
                 </td>
 
-                {/* 2. SUBCOLUNA: SIMULAÇÃO BOTTOM-UP (Área Interativa) */}
+                {/* 2. SUBCOLUNA: SIMULAÇÃO */}
                 <td className={`p-0 border-l border-slate-100 align-top border-r-2 border-r-slate-200 ${isRowFechado || !isTopDownFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/40' : 'bg-white'}`}>
                   
-                  {/* COORDENADOR (INPUT PERCENTUAL BASEADO NO PORTFÓLIO) */}
                   {visaoAtiva === 'carteira' && depth === 0 ? (
                     <div className="flex flex-col h-full items-center justify-center p-3">
                         <PercentInput
@@ -485,7 +444,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                         </div>
                     </div>
                   ) : (
-                    /* NÍVEIS INFERIORES OU PORTFÓLIO */
                     <div className="flex flex-col h-full">
                       <div className="px-2 py-1 border-b border-slate-100/50 flex justify-center gap-2 items-center bg-slate-50/50">
                         <span className="text-[9px] font-bold text-slate-400 bg-slate-200/40 px-1.5 py-0.5 rounded" title="IA">IA: {formatVolume(mBase?.vol_ia || 0)}</span>
@@ -511,10 +469,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             );
           })}
         </tr>
-        
-        {chartExpanded === row.chave_matriz && (
-          <tr><td colSpan={(colunasData?.length * 2 || 0) + 1} className="p-0"><PainelSaudabilidade rowData={row} /></td></tr>
-        )}
         {isExpanded && hasChildren && row.subRows.map((child: any) => renderRow(child, depth + 1))}
       </React.Fragment>
     );
@@ -524,29 +478,28 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     <div className="min-h-screen bg-slate-50 p-8 pb-32">
       <div className="max-w-[1600px] mx-auto mb-8 flex flex-col gap-6">
         
-        {/* HEADER CONTROLES */}
         <div className="flex items-center justify-between">
             <div>
               <h1 className="text-3xl font-black text-slate-800 tracking-tight flex items-center gap-3">
                   <Users className="w-8 h-8 text-blue-600" /> Macrociclo <span className="text-blue-600">Comercial</span>
               </h1>
-              <p className="text-slate-500 mt-1 font-medium">Gestão Bottom-Up Orientada a Faturamento (De -{">"} Para)</p>
+              <p className="text-slate-500 mt-1 font-medium">Gestão Bottom-Up (Top-Down Herança e RLS Regional)</p>
             </div>
 
             <div className="flex items-center gap-4">
               <div className="flex items-center bg-slate-200/50 p-1 rounded-xl">
-                  <button onClick={() => handleToggleVisao('carteira')} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${visaoAtiva === 'carteira' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
-                      <Users className="w-4 h-4" /> Distribuição Regional
-                  </button>
                   <button onClick={() => handleToggleVisao('portfolio')} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${visaoAtiva === 'portfolio' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
-                      <Layers className="w-4 h-4" /> Âncora de Portfólio (100%)
+                      <Layers className="w-4 h-4" /> Portfólio Global (Âncora Corporativa)
+                  </button>
+                  <button onClick={() => handleToggleVisao('carteira')} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${visaoAtiva === 'carteira' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
+                      <Users className="w-4 h-4" /> Carteira Regional (Sua Alçada)
                   </button>
               </div>
 
               {visaoAtiva === 'carteira' && (
                   <div className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold border shadow-sm ${isAllClosed ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
                       {isAllClosed ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
-                      {isAllClosed ? 'REGIONAIS FECHADAS' : 'REGIONAIS ABERTAS'}
+                      {isAllClosed ? 'SUA CARTEIRA FECHADA' : 'CARTEIRA ABERTA'}
                   </div>
               )}
 
@@ -557,7 +510,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                    ${allColumns100Percent || visaoAtiva === 'portfolio' ? 'bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100' : 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-60'}`}
               >
                   <Save className="w-4 h-4" /> 
-                  {!allColumns100Percent && visaoAtiva === 'carteira' ? 'Rateio ≠ 100%' : 'Salvar Rascunho Bottom-Up'}
+                  {!allColumns100Percent && visaoAtiva === 'carteira' ? 'Rateio ≠ 100%' : visaoAtiva === 'portfolio' ? 'Ratear Portfólio Global' : 'Salvar Rateio da Carteira'}
               </button>
             </div>
         </div>
@@ -578,7 +531,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             
-            {/* CABEÇALHO DUPLO */}
             <thead>
               <tr>
                 <th rowSpan={2} className="bg-slate-900 p-0 border-b border-r border-slate-800 w-[400px] align-bottom">
@@ -597,7 +549,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                 {colunasData?.map((m: any, i: number) => (
                   <React.Fragment key={`subhead-${i}`}>
                     <th className="bg-slate-800/80 px-4 py-2 border-b border-l-2 border-l-slate-800 border-r border-slate-700/50 text-center text-[10px] text-slate-300 font-bold uppercase tracking-wider">
-                      Base Atual 🔒
+                      Base Atual (Âncora) 🔒
                     </th>
                     <th className="bg-slate-800 px-4 py-2 border-b border-slate-700 text-center text-[10px] text-blue-300 font-bold uppercase tracking-wider">
                       Simulação ✏️
@@ -607,7 +559,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
               </tr>
             </thead>
 
-            {/* CORPO DA TABELA */}
             <tbody>
               {isLoading ? (
                 <tr><td colSpan={10} className="p-12 text-center text-slate-400 font-medium">Mapeando Matriz Financeira...</td></tr>
@@ -618,21 +569,21 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
               )}
             </tbody>
             
-            {/* RODAPÉ E VALIDADOR DE 100% */}
             {dadosProcessados.length > 0 && (
               <tfoot className="bg-slate-900 sticky bottom-0 z-20 shadow-[0_-10px_40px_rgba(0,0,0,0.1)]">
                 <tr>
                   <td className="px-6 py-5 border-r border-slate-800/50">
                     <div className="flex flex-col">
-                      <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Total do Ciclo Operacional</span>
+                      <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">
+                        {visaoAtiva === 'portfolio' ? 'Faturamento Global Corporativo' : 'Faturamento Total da sua Carteira'}
+                      </span>
                       <span className="font-bold text-sm text-white">SUMÁRIO GERENCIAL</span>
                     </div>
                   </td>
                   {colunasData?.map((m: any, i: number) => {
                      
-                     // O Faturamento do Portfólio dita as regras
-                     const ancoraBaseFat = totaisAncoraPortfolio[m.mes_banco]?.fat || 0;
-                     const ancoraBaseVol = totaisAncoraPortfolio[m.mes_banco]?.vol || 0;
+                     const ancoraBaseFat = totaisBaseAbaAtiva[m.mes_banco]?.fat || 0;
+                     const ancoraBaseVol = totaisBaseAbaAtiva[m.mes_banco]?.vol || 0;
 
                      const simuladoFat = totaisGeraisTelaAtual[m.mes_banco]?.fat || 0;
                      const simuladoVol = totaisGeraisTelaAtual[m.mes_banco]?.vol || 0;
@@ -642,17 +593,14 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
                      return (
                       <React.Fragment key={`foot-${i}`}>
-                        
-                        {/* RODAPÉ: BASE (ÂNCORA) */}
                         <td className="px-4 py-4 border-l-2 border-l-slate-800 border-r border-slate-800/50 text-right bg-slate-900/50 opacity-80">
                            <div className="flex flex-col items-end">
                               <span className="text-xs font-bold text-slate-300">{formatVolume(ancoraBaseVol)} cx</span>
                               <span className="font-bold text-slate-400 text-xs mt-1">{formatMoeda(ancoraBaseFat)}</span>
-                              {visaoAtiva === 'carteira' && <span className="text-[9px] font-black text-slate-500 mt-1 uppercase">Âncora 100%</span>}
+                              {visaoAtiva === 'carteira' && <span className="text-[9px] font-black text-slate-500 mt-1 uppercase">Sua Âncora 100%</span>}
                            </div>
                         </td>
 
-                        {/* RODAPÉ: SIMULAÇÃO COM VALIDADOR DE 100% */}
                         <td className="px-4 py-4 border-slate-800 text-right">
                           <div className="flex flex-col items-end">
                             <span className="font-black text-white text-sm">
@@ -669,7 +617,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                             )}
                           </div>
                         </td>
-
                       </React.Fragment>
                     );
                   })}

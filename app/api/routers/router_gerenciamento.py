@@ -40,18 +40,16 @@ class PayloadToggleLock(BaseModel):
     regional: str
     status: str
 
-# Estrutura para receber a meta de faturamento definida no portfólio e o share dos coordenadores
 class CoordenadorPercentual(BaseModel):
     coordenador_nome: str
     percentual: float
 
 class PayloadAjustePercentual(BaseModel):
     mes_projetado: str
-    faturamento_macro_alvo: float
     distribuicao: List[CoordenadorPercentual]
 
 # =====================================================================
-# AUXILIARES DE EXPRESSÃO E GOVERNANÇA (RLS)
+# AUXILIARES DE EXPRESSÃO E GOVERNANÇA
 # =====================================================================
 def get_coord_expr():
     return func.coalesce(
@@ -68,22 +66,16 @@ def get_cli_expr():
 
 def require_manager_or_admin(usuario: dict = Depends(get_current_user)):
     if usuario['funcao'] not in ['Administrador', 'Gerente']:
-        raise HTTPException(
-            status_code=403, 
-            detail="Acesso negado. Apenas perfis de Gerência Comercial ou Administradores podem redistribuir o faturamento macro."
-        )
+        raise HTTPException(status_code=403, detail="Acesso restrito à Gerência Comercial.")
     return usuario
 
 def check_topdown_lock(db: Session, ciclo: str):
     td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down Arena').first()
     if not td or td.status != 'Fechado':
-        raise HTTPException(
-            status_code=403, 
-            detail="Fase Comercial Bloqueada: A Diretoria ainda não liberou o ciclo para a modelagem Bottom-Up comercial."
-        )
+        raise HTTPException(status_code=403, detail="Fase Comercial Bloqueada: Diretoria ainda não ratificou o Top-Down.")
 
 # =====================================================================
-# GET: ÁRVORE HIERÁRQUICA DUPLA (CARTEIRA E PORTFÓLIO)
+# GET: ÁRVORES DE DADOS (CARTEIRA COM RLS / PORTFÓLIO GLOBAL)
 # =====================================================================
 @router.get("")
 async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
@@ -96,78 +88,72 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         
         _mes_str, _ano_str = ciclo.split('/')
         hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
-
         data_ini = hoje + relativedelta(months=2)
         data_fim = hoje + relativedelta(months=4)
         meses_alvo = [(hoje + relativedelta(months=i)).strftime("%Y-%m-%d") for i in range(2, 5)]
-
         cx, vx, clx = get_coord_expr(), get_vend_expr(), get_cli_expr()
-        q = get_truth_query(db, ciclo, data_ini, data_fim)
 
-        if usuario['funcao'] == 'Coordenador':
-            sup_nome = usuario.get('supervisor_nome')
-            if sup_nome:
-                q = q.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == sup_nome.strip().upper())
-            else:
-                q = q.filter(False)
-        elif usuario['funcao'] == 'Gerente':
-            ger_nome = usuario.get('gerente_nome')
-            if ger_nome:
-                q = q.filter(func.upper(func.trim(DimCliente.gerente_nome)) == ger_nome.strip().upper())
-            else:
-                q = q.filter(False)
-
-        resultados = q.with_entities(
+        # 1. QUERY CARTEIRA (COM FILTRO RLS DO GERENTE)
+        q_cart = get_truth_query(db, ciclo, data_ini, data_fim)
+        if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
+            q_cart = q_cart.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
+            
+        resultados_cart = q_cart.with_entities(
             cx.label('coord'), vx.label('vend'), clx.label('cli'),
             FatoIbpGranular.sku, DimProduto.descricao.label('prod_desc'),
-            DimProduto.categoria.label('cat'), DimProduto.segmento.label('seg'),
             FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
             func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'),
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
-        ).group_by(cx, vx, clx, FatoIbpGranular.sku, DimProduto.descricao, DimProduto.categoria, DimProduto.segmento, FatoIbpGranular.mes_projetado).all()
+        ).group_by(cx, vx, clx, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all()
 
-        ant_dict = defaultdict(lambda: defaultdict(int))
-        skus_encontrados = list({r.sku for r in resultados if r.sku})
-        clientes_encontrados = list({r.cli for r in resultados if r.cli}) 
+        # 2. QUERY PORTFÓLIO (GLOBAL - SEM FILTRO RLS)
+        q_port = get_truth_query(db, ciclo, data_ini, data_fim)
+        resultados_port = q_port.with_entities(
+            DimProduto.categoria.label('cat'), DimProduto.segmento.label('seg'),
+            FatoIbpGranular.sku, DimProduto.descricao.label('prod_desc'),
+            FatoIbpGranular.mes_projetado,
+            func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
+            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'),
+            func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
+        ).group_by(DimProduto.categoria, DimProduto.segmento, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all()
+
+        # Extração de Lag 1 (Ciclo Anterior)
+        ant_dict_cart = defaultdict(lambda: defaultdict(int))
+        ant_dict_port = defaultdict(lambda: defaultdict(int))
         
-        if skus_encontrados and clientes_encontrados:
-            q_ant = get_truth_query(db, ciclo_anterior, data_ini, data_fim)
-            res_ant = q_ant.filter(
-                FatoIbpGranular.sku.in_(skus_encontrados), clx.in_(clientes_encontrados)
-            ).with_entities(
-                clx.label('cli'), FatoIbpGranular.sku, FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_final).label('v_ant')
-            ).group_by(clx, FatoIbpGranular.sku, FatoIbpGranular.mes_projetado).all()
-            
-            for ra in res_ant:
-                ant_dict[(str(ra.cli).strip(), str(ra.sku).strip())][str(ra.mes_projetado)] = int(ra.v_ant or 0)
+        skus_cart = list({r.sku for r in resultados_cart if r.sku})
+        clis_cart = list({r.cli for r in resultados_cart if r.cli}) 
+        if skus_cart and clis_cart:
+            q_ant_cart = get_truth_query(db, ciclo_anterior, data_ini, data_fim).filter(FatoIbpGranular.sku.in_(skus_cart), clx.in_(clis_cart))
+            for ra in q_ant_cart.with_entities(clx.label('cli'), FatoIbpGranular.sku, FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_final).label('v_ant')).group_by(clx, FatoIbpGranular.sku, FatoIbpGranular.mes_projetado).all():
+                ant_dict_cart[(str(ra.cli).strip(), str(ra.sku).strip())][str(ra.mes_projetado)] = int(ra.v_ant or 0)
+
+        skus_port = list({r.sku for r in resultados_port if r.sku})
+        if skus_port:
+            q_ant_port = get_truth_query(db, ciclo_anterior, data_ini, data_fim).filter(FatoIbpGranular.sku.in_(skus_port))
+            for ra in q_ant_port.with_entities(FatoIbpGranular.sku, FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_final).label('v_ant')).group_by(FatoIbpGranular.sku, FatoIbpGranular.mes_projetado).all():
+                ant_dict_port[str(ra.sku).strip()][str(ra.mes_projetado)] = int(ra.v_ant or 0)
 
         trancas_reg = {c.origem: c.status for c in db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo).all()}
 
-        def criar_meses():
-            return {m: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0, "pmv":0.0, "vol_anterior": 0} for m in meses_alvo}
+        def criar_meses(): return {m: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0, "pmv":0.0, "vol_anterior": 0} for m in meses_alvo}
 
-        # CONSTRUÇÃO DA ÁRVORE DA VISÃO CARTEIRA
+        # MONTAGEM DA ÁRVORE CARTEIRA
         arvore_carteira = {}
-        for r in resultados:
+        for r in resultados_cart:
             co, ve, cl, sk, de, ms = str(r.coord).strip(), str(r.vend).strip(), str(r.cli).strip(), str(r.sku).strip(), str(r.prod_desc).strip(), str(r.mes_projetado)
-
             if co not in arvore_carteira: arvore_carteira[co] = {"nome": co, "status": trancas_reg.get(co, "Aberto"), "meses": criar_meses(), "vendedores": {}}
             if ve not in arvore_carteira[co]["vendedores"]: arvore_carteira[co]["vendedores"][ve] = {"nome": ve, "meses": criar_meses(), "clientes": {}}
             if cl not in arvore_carteira[co]["vendedores"][ve]["clientes"]: arvore_carteira[co]["vendedores"][ve]["clientes"][cl] = {"nome": cl, "meses": criar_meses(), "produtos": {}}
             if sk not in arvore_carteira[co]["vendedores"][ve]["clientes"][cl]["produtos"]: arvore_carteira[co]["vendedores"][ve]["clientes"][cl]["produtos"][sk] = {"nome": de, "produto": sk, "meses": criar_meses()}
-
+            
             if ms in meses_alvo:
                 v_bu = int(r.v_bu or 0)
                 pmv_b = float(r.pmv or 0)
-                v_ant = ant_dict[(cl, sk)][ms]
-
+                v_ant = ant_dict_cart[(cl, sk)][ms]
                 for nivel in [arvore_carteira[co]["meses"][ms], arvore_carteira[co]["vendedores"][ve]["meses"][ms], arvore_carteira[co]["vendedores"][ve]["clientes"][cl]["meses"][ms], arvore_carteira[co]["vendedores"][ve]["clientes"][cl]["produtos"][sk]["meses"][ms]]:
-                    nivel["vol_ia"] += int(r.v_ia or 0)
-                    nivel["vol_ajustado"] += v_bu
-                    nivel["receita"] += (v_bu * pmv_b)
-                    nivel["vol_anterior"] += v_ant
-                    nivel["pmv"] = (nivel["receita"] / nivel["vol_ajustado"]) if nivel["vol_ajustado"] > 0 else pmv_b
+                    nivel["vol_ia"] += int(r.v_ia or 0); nivel["vol_ajustado"] += v_bu; nivel["receita"] += (v_bu * pmv_b); nivel["vol_anterior"] += v_ant; nivel["pmv"] = (nivel["receita"] / nivel["vol_ajustado"]) if nivel["vol_ajustado"] > 0 else pmv_b
 
         final_carteira = []
         for co_k, co_v in arvore_carteira.items():
@@ -175,122 +161,93 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             for ve_k, ve_v in co_v["vendedores"].items():
                 clis = []
                 for cl_k, cl_v in ve_v["clientes"].items():
-                    prods = []
-                    for sk_k, sk_v in cl_v["produtos"].items():
-                        prods.append({"id": f"{co_k}|{ve_k}|{cl_k}|{sk_k}", "chave_matriz": f"{co_k}|{ve_k}|{cl_k}|{sk_k}", "nome": sk_v["nome"], "produto": sk_k, "tipo": "produto", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in sk_v["meses"].items()]})
+                    prods = [{"id": f"{co_k}|{ve_k}|{cl_k}|{sk_k}", "chave_matriz": f"{co_k}|{ve_k}|{cl_k}|{sk_k}", "nome": sk_v["nome"], "produto": sk_k, "tipo": "produto", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in sk_v["meses"].items()]} for sk_k, sk_v in cl_v["produtos"].items()]
                     clis.append({"id": f"{co_k}|{ve_k}|{cl_k}", "chave_matriz": f"{co_k}|{ve_k}|{cl_k}", "nome": cl_k, "tipo": "cliente", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in cl_v["meses"].items()], "subRows": prods})
                 vends.append({"id": f"{co_k}|{ve_k}", "chave_matriz": f"{co_k}|{ve_k}", "nome": ve_k, "tipo": "vendedor", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in ve_v["meses"].items()], "subRows": clis})
             final_carteira.append({"id": co_k, "chave_matriz": co_k, "nome": co_k, "tipo": "coordenador", "status": co_v["status"], "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in co_v["meses"].items()], "subRows": vends})
 
-        # CONSTRUÇÃO DA ÁRVORE DA VISÃO PORTFÓLIO
+        # MONTAGEM DA ÁRVORE PORTFÓLIO
         arvore_port = {}
-        todos_produtos = db.query(DimProduto).all()
-        for p in todos_produtos:
+        for p in db.query(DimProduto).all():
             cat, seg, sk, de = p.categoria or 'SEM CATEGORIA', p.segmento or 'SEM SEGMENTO', p.sku, p.descricao or 'SEM NOME'
             if cat not in arvore_port: arvore_port[cat] = {"nome": cat, "tipo": "categoria", "meses": criar_meses(), "segmentos": {}}
             if seg not in arvore_port[cat]["segmentos"]: arvore_port[cat]["segmentos"][seg] = {"nome": seg, "tipo": "segmento", "meses": criar_meses(), "produtos": {}}
-            if sk not in arvore_port[cat]["segmentos"][seg]["produtos"]:
-                arvore_port[cat]["segmentos"][seg]["produtos"][sk] = {"nome": de, "produto": sk, "tipo": "produto", "meses": criar_meses()}
+            if sk not in arvore_port[cat]["segmentos"][seg]["produtos"]: arvore_port[cat]["segmentos"][seg]["produtos"][sk] = {"nome": de, "produto": sk, "tipo": "produto", "meses": criar_meses()}
 
-        for r in resultados:
+        for r in resultados_port:
             cat, seg, sk, ms = r.cat or 'SEM CATEGORIA', r.seg or 'SEM SEGMENTO', str(r.sku).strip(), str(r.mes_projetado)
             if ms in meses_alvo and cat in arvore_port and seg in arvore_port[cat]["segmentos"] and sk in arvore_port[cat]["segmentos"][seg]["produtos"]:
                 v_bu = int(r.v_bu or 0)
                 pmv_b = float(r.pmv or 0)
-                v_ant = sum(ant_dict[(c, sk)][ms] for c in clientes_encontrados if (c, sk) in ant_dict and ms in ant_dict[(c, sk)])
-
+                v_ant = ant_dict_port[sk][ms]
                 for nivel in [arvore_port[cat]["meses"][ms], arvore_port[cat]["segmentos"][seg]["meses"][ms], arvore_port[cat]["segmentos"][seg]["produtos"][sk]["meses"][ms]]:
-                    nivel["vol_ia"] += int(r.v_ia or 0)
-                    nivel["vol_ajustado"] += v_bu
-                    nivel["receita"] += (v_bu * pmv_b)
-                    nivel["vol_anterior"] += v_ant
-                    nivel["pmv"] = (nivel["receita"] / nivel["vol_ajustado"]) if nivel["vol_ajustado"] > 0 else pmv_b
+                    nivel["vol_ia"] += int(r.v_ia or 0); nivel["vol_ajustado"] += v_bu; nivel["receita"] += (v_bu * pmv_b); nivel["vol_anterior"] += v_ant; nivel["pmv"] = (nivel["receita"] / nivel["vol_ajustado"]) if nivel["vol_ajustado"] > 0 else pmv_b
 
         final_portfolio = []
         for cat_k, cat_v in arvore_port.items():
             segs = []
             for seg_k, seg_v in cat_v["segmentos"].items():
-                prods = []
-                for sk_k, sk_v in seg_v["produtos"].items():
-                    prods.append({"id": f"{cat_k}|{seg_k}|{sk_k}", "chave_matriz": f"{cat_k}|{seg_k}|{sk_k}", "nome": sk_v["nome"], "produto": sk_k, "tipo": "produto", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in sk_v["meses"].items()]})
+                prods = [{"id": f"{cat_k}|{seg_k}|{sk_k}", "chave_matriz": f"{cat_k}|{seg_k}|{sk_k}", "nome": sk_v["nome"], "produto": sk_k, "tipo": "produto", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in sk_v["meses"].items()]} for sk_k, sk_v in seg_v["produtos"].items()]
                 segs.append({"id": f"{cat_k}|{seg_k}", "chave_matriz": f"{cat_k}|{seg_k}", "nome": seg_k, "tipo": "segmento", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in seg_v["meses"].items()], "subRows": prods})
             final_portfolio.append({"id": cat_k, "chave_matriz": cat_k, "nome": cat_k, "tipo": "categoria", "status": "Aberto", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in cat_v["meses"].items()], "subRows": segs})
 
-        return {
-            "status": "success", 
-            "is_topdown_fechado": is_topdown_fechado,
-            "dados": {
-                "carteira": sorted(final_carteira, key=lambda x: x["nome"]),
-                "portfolio": sorted(final_portfolio, key=lambda x: x["nome"])
-            }
-        }
+        return {"status": "success", "is_topdown_fechado": is_topdown_fechado, "dados": {"carteira": sorted(final_carteira, key=lambda x: x["nome"]), "portfolio": sorted(final_portfolio, key=lambda x: x["nome"])}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=repr(e))
 
 # =====================================================================
-# POST: REDISTRIBUIÇÃO DE METAS POR PERCENTUAL (ÂNCORA PORTFÓLIO 100%)
+# RATEIO POR PERCENTUAL (COM BASE NO FATURAMENTO EXCLUSIVO DO GERENTE)
 # =====================================================================
 @router.post("/ajustar-percentual")
-async def ajustar_percentual_coordenadores(
-    payload: PayloadAjustePercentual, 
-    db: Session = Depends(get_db), 
-    usuario: dict = Depends(require_manager_or_admin)
-):
+async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     ciclo = get_current_cycle(db)
     mes_alvo = parse_date_safe(payload.mes_projetado)
     cx = get_coord_expr()
     
     soma_pct = sum([c.percentual for c in payload.distribuicao])
     if not math.isclose(soma_pct, 100.0, abs_tol=0.01):
-        raise HTTPException(
-            status_code=400, 
-            detail=f"A soma de distribuição regional deve fechar em exatamente 100%. Recebido: {soma_pct}%"
-        )
+        raise HTTPException(status_code=400, detail=f"A soma deve fechar em exatamente 100%. Recebido: {soma_pct}%")
         
-    total_faturamento_macro = payload.faturamento_macro_alvo
-    if total_faturamento_macro <= 0:
-        raise HTTPException(status_code=400, detail="Faturamento macro alvo inválido ou zerado.")
+    # Calcular o Total de Faturamento do Gerente Atual (A sua fatia 100%)
+    q_gerente_total = db.query(FatoIbpGranular).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(FatoIbpGranular.ciclo_sop == ciclo, FatoIbpGranular.mes_projetado == mes_alvo)
+    if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
+        q_gerente_total = q_gerente_total.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
+        
+    linhas_gerente = q_gerente_total.all()
+    total_faturamento_gerente = sum([(float(l.vol_bottomup or 0) * float(l.pmv_aplicado or 0)) for l in linhas_gerente])
+
+    if total_faturamento_gerente <= 0:
+        raise HTTPException(status_code=400, detail="A sua carteira não possui faturamento base definido para o cálculo.")
 
     for item in payload.distribuicao:
-        meta_faturamento_coordenador = float(total_faturamento_macro) * (item.percentual / 100.0)
+        meta_faturamento_coordenador = float(total_faturamento_gerente) * (item.percentual / 100.0)
         
-        q_linhas = db.query(FatoIbpGranular).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(
-            FatoIbpGranular.ciclo_sop == ciclo,
-            FatoIbpGranular.mes_projetado == mes_alvo,
-            func.upper(cx) == item.coordenador_nome.strip().upper()
+        q_linhas_coord = db.query(FatoIbpGranular).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(
+            FatoIbpGranular.ciclo_sop == ciclo, FatoIbpGranular.mes_projetado == mes_alvo, func.upper(cx) == item.coordenador_nome.strip().upper()
         )
-        
         if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
-            q_linhas = q_linhas.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
+            q_linhas_coord = q_linhas_coord.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
             
-        linhas = q_linhas.all()
-        if not linhas:
-            continue
+        linhas_coord = q_linhas_coord.all()
+        if not linhas_coord: continue
             
-        # CORREÇÃO DA NOMENCLATURA: Utilizando 'linhas' iterável e calculando o faturamento atual (Base Atual)
-        faturamento_atual_coordenador = sum([
-            (float(linha.vol_bottomup or 0) * float(linha.pmv_aplicado or 0)) for linha in linhas
-        ])
-        
-        if faturamento_atual_coordenador == 0:
-            faturamento_atual_coordenador = len(linhas)
-            for linha in linhas:
-                if (linha.vol_bottomup or 0) == 0: 
-                    linha.vol_bottomup = 1
+        faturamento_atual_coord = sum([(float(linha.vol_bottomup or 0) * float(linha.pmv_aplicado or 0)) for linha in linhas_coord])
+        if faturamento_atual_coord == 0:
+            faturamento_atual_coord = len(linhas_coord)
+            for linha in linhas_coord: 
+                if (linha.vol_bottomup or 0) == 0: linha.vol_bottomup = 1
                     
-        fator_ajuste_financeiro = meta_faturamento_coordenador / faturamento_atual_coordenador
+        fator_ajuste_financeiro = meta_faturamento_coordenador / faturamento_atual_coord
         
         pool_alocacao = []
         soma_caixas_inteiras = 0
-        soma_caixas_teoricas_iniciais = sum([(linha.vol_bottomup or 0) for linha in linhas])
+        soma_caixas_teoricas_iniciais = sum([(linha.vol_bottomup or 0) for linha in linhas_coord])
         
-        for linha in linhas:
+        for linha in linhas_coord:
             vol_atual = linha.vol_bottomup or 0
             novo_vol_float = vol_atual * fator_ajuste_financeiro
-            
             vol_inteiro = math.floor(novo_vol_float)
             resto = novo_vol_float - vol_inteiro
-            
             soma_caixas_inteiras += vol_inteiro
             pool_alocacao.append({"linha": linha, "inteiro": vol_inteiro, "resto": resto})
             
@@ -298,19 +255,16 @@ async def ajustar_percentual_coordenadores(
         caixas_faltantes = max(0, int(total_caixas_esperadas_coordenador - soma_caixas_inteiras))
         
         pool_alocacao.sort(key=lambda x: x["resto"], reverse=True)
-        
         for idx, item_aloc in enumerate(pool_alocacao):
             vol_final = item_aloc["inteiro"]
-            if idx < caixas_faltantes:
-                vol_final += 1
-                
+            if idx < caixas_faltantes: vol_final += 1
             item_aloc["linha"].vol_bottomup = vol_final
             
     db.commit()
-    return {"status": "success", "message": "Meta fixada do Portfólio distribuída com sucesso nos volumes comerciais (vol_bu)."}
+    return {"status": "success", "message": "Meta da carteira rateada nos coordenadores."}
 
 # =====================================================================
-# ROTAS DE GRAVAÇÃO, LOCK E GRÁFICOS
+# ROTA SALVAR RASCUNHO (TRATAMENTO DIFERENCIADO POR VISÃO)
 # =====================================================================
 @router.post("/salvar")
 async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
@@ -331,18 +285,21 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
             partes_chave = ajuste.chave.split('|')
             q = get_truth_query(db, ciclo, dt, dt)
 
-            if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
-                q = q.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
-
-            if locked_coords:
-                q = q.filter(~func.upper(cx).in_(locked_coords))
-
-            if list(q.all()) and ajuste.nivel == 'carteira':
+            # SE FOR CARTEIRA: Aplica a trava do Gerente para proteger o universo dele
+            if ajuste.nivel == 'carteira':
+                if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
+                    q = q.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
+                if locked_coords:
+                    q = q.filter(~func.upper(cx).in_(locked_coords))
                 if len(partes_chave) >= 1: q = q.filter(func.upper(cx) == partes_chave[0].upper())
                 if len(partes_chave) >= 2: q = q.filter(func.upper(vx) == partes_chave[1].upper())
                 if len(partes_chave) >= 3: q = q.filter(func.upper(clx) == partes_chave[2].upper())
                 if len(partes_chave) >= 4: q = q.filter(FatoIbpGranular.sku == partes_chave[3].strip())
-            elif list(q.all()) and ajuste.nivel == 'portfolio':
+            
+            # SE FOR PORTFÓLIO: Rateio Global (Ignora o RLS do Gerente)
+            elif ajuste.nivel == 'portfolio':
+                if locked_coords:
+                    q = q.filter(~func.upper(cx).in_(locked_coords))
                 q = q.filter(FatoIbpGranular.sku == partes_chave[-1].strip())
 
             linhas = q.all()
@@ -351,9 +308,7 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
             skus_alvo = list({linha.sku for linha in linhas if linha.sku})
             cgcs_alvo = list({linha.cgc for linha in linhas if linha.cgc})
 
-            hist_data = db.query(
-                FatoVendas.cgc, FatoVendas.sku, func.sum(FatoVendas.qt_pedido).label('vol_hist')
-            ).filter(
+            hist_data = db.query(FatoVendas.cgc, FatoVendas.sku, func.sum(FatoVendas.qt_pedido).label('vol_hist')).filter(
                 FatoVendas.sku.in_(skus_alvo), FatoVendas.cgc.in_(cgcs_alvo), FatoVendas.data_pedido >= data_hist
             ).group_by(FatoVendas.cgc, FatoVendas.sku).all()
 
@@ -364,7 +319,6 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
 
             total_bu_atual = sum(linha.vol_bottomup for linha in linhas)
             delta = ajuste.novo_volume - total_bu_atual
-
             linhas.sort(key=lambda x: peso_map.get((x.cgc, x.sku), 0), reverse=True)
 
             if delta != 0:
@@ -384,31 +338,22 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
 @router.post("/congelar")
 async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
-        if payload.ajustes:
-            await salvar_rascunho_gerencia(payload, db, usuario)
-        
+        if payload.ajustes: await salvar_rascunho_gerencia(payload, db, usuario)
         ciclo = get_current_cycle(db)
         _mes_str, _ano_str = ciclo.split('/')
         hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
         data_ini = hoje + relativedelta(months=2)
-
         cx = get_coord_expr()
-        q_coords = get_truth_query(db, ciclo, data_ini, data_ini)
         
+        q_coords = get_truth_query(db, ciclo, data_ini, data_ini)
         if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
             q_coords = q_coords.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
 
         coords_acessiveis = [r[0] for r in q_coords.with_entities(cx).distinct().all() if r[0]]
-
         for coord in coords_acessiveis:
-            db.query(FatoIbpGranular).filter(
-                FatoIbpGranular.ciclo_sop == ciclo,
-                func.upper(cx) == coord.upper()
-            ).update({
-                FatoIbpGranular.vol_supply: FatoIbpGranular.vol_bottomup,
-                FatoIbpGranular.vol_final: FatoIbpGranular.vol_bottomup
+            db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo, func.upper(cx) == coord.upper()).update({
+                FatoIbpGranular.vol_supply: FatoIbpGranular.vol_bottomup, FatoIbpGranular.vol_final: FatoIbpGranular.vol_bottomup
             }, synchronize_session=False)
-            
             reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == coord).first()
             if reg: reg.status = 'Fechado'
             else: db.add(ControleCiclo(ciclo_sop=ciclo, origem=coord, status='Fechado'))
