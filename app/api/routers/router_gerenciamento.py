@@ -23,7 +23,7 @@ from app.api.routers.shared_ibp import (
 router = APIRouter(prefix="/api/v1/consensus/gerenciamento", tags=["Consenso Gerenciamento"])
 
 # =====================================================================
-# PAYLOADS
+# PAYLOADS & SCHEMAS
 # =====================================================================
 class AjusteGerente(BaseModel):
     nivel: str
@@ -40,20 +40,25 @@ class PayloadToggleLock(BaseModel):
     regional: str
     status: str
 
-# NOVOS PAYLOADS: BALANCEAMENTO PERCENTUAL TOP-DOWN
+# Estrutura para receber a meta de faturamento definida no portfólio e o share dos coordenadores
 class CoordenadorPercentual(BaseModel):
     coordenador_nome: str
-    percentual: float  # Ex: 35.5 (representa 35.5%)
+    percentual: float
 
 class PayloadAjustePercentual(BaseModel):
     mes_projetado: str
+    faturamento_macro_alvo: float
     distribuicao: List[CoordenadorPercentual]
 
 # =====================================================================
-# EXPRESSÕES E GOVERNANÇA DE ACESSO
+# AUXILIARES DE EXPRESSÃO E GOVERNANÇA (RLS)
 # =====================================================================
 def get_coord_expr():
-    return func.coalesce(func.nullif(func.trim(DimCliente.supervisor_nome), ''), func.nullif(func.trim(DimCliente.gerente_nome), ''), 'SEM COORDENADOR')
+    return func.coalesce(
+        func.nullif(func.trim(DimCliente.supervisor_nome), ''), 
+        func.nullif(func.trim(DimCliente.gerente_nome), ''), 
+        'SEM COORDENADOR'
+    )
 
 def get_vend_expr():
     return func.coalesce(func.nullif(func.trim(DimCliente.vendedor_nome), ''), 'SEM VENDEDOR')
@@ -62,21 +67,26 @@ def get_cli_expr():
     return func.coalesce(func.nullif(func.trim(DimCliente.razaosocial), ''), DimCliente.cgc)
 
 def require_manager_or_admin(usuario: dict = Depends(get_current_user)):
-    # CORREÇÃO: Nomes dos perfis perfeitamente alinhados com o router_auth.py
-    if usuario['funcao'] not in ['Administrador', 'Gerente', 'Coordenador']:
-        raise HTTPException(status_code=403, detail="Acesso restrito à Gestão Comercial.")
+    if usuario['funcao'] not in ['Administrador', 'Gerente']:
+        raise HTTPException(
+            status_code=403, 
+            detail="Acesso negado. Apenas perfis de Gerência Comercial ou Administradores podem redistribuir o faturamento macro."
+        )
     return usuario
 
 def check_topdown_lock(db: Session, ciclo: str):
     td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down Arena').first()
     if not td or td.status != 'Fechado':
-        raise HTTPException(status_code=403, detail="Fase Comercial Bloqueada: A Diretoria (Top-Down) ainda não ratificou os volumes do ciclo.")
+        raise HTTPException(
+            status_code=403, 
+            detail="Fase Comercial Bloqueada: A Diretoria ainda não liberou o ciclo para a modelagem Bottom-Up comercial."
+        )
 
 # =====================================================================
-# GET: ÁRVORE DUPLA (CARTEIRA E PORTFÓLIO)
+# GET: ÁRVORE HIERÁRQUICA DUPLA (CARTEIRA E PORTFÓLIO)
 # =====================================================================
 @router.get("")
-async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
+async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
         ciclo = get_current_cycle(db)
         ciclo_anterior = get_previous_cycle(db)
@@ -94,13 +104,12 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         cx, vx, clx = get_coord_expr(), get_vend_expr(), get_cli_expr()
         q = get_truth_query(db, ciclo, data_ini, data_fim)
 
-        # CORREÇÃO: Filtros amarrados às credenciais do ERP registradas no Login
         if usuario['funcao'] == 'Coordenador':
             sup_nome = usuario.get('supervisor_nome')
             if sup_nome:
                 q = q.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == sup_nome.strip().upper())
             else:
-                q = q.filter(False) # Bloqueia se a conta estiver corrompida
+                q = q.filter(False)
         elif usuario['funcao'] == 'Gerente':
             ger_nome = usuario.get('gerente_nome')
             if ger_nome:
@@ -138,7 +147,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         def criar_meses():
             return {m: {"vol_ia":0, "vol_td":0, "vol_ajustado":0, "receita":0, "pmv":0.0, "vol_anterior": 0} for m in meses_alvo}
 
-        # ÁRVORE DE CARTEIRA
+        # CONSTRUÇÃO DA ÁRVORE DA VISÃO CARTEIRA
         arvore_carteira = {}
         for r in resultados:
             co, ve, cl, sk, de, ms = str(r.coord).strip(), str(r.vend).strip(), str(r.cli).strip(), str(r.sku).strip(), str(r.prod_desc).strip(), str(r.mes_projetado)
@@ -173,10 +182,9 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
                 vends.append({"id": f"{co_k}|{ve_k}", "chave_matriz": f"{co_k}|{ve_k}", "nome": ve_k, "tipo": "vendedor", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in ve_v["meses"].items()], "subRows": clis})
             final_carteira.append({"id": co_k, "chave_matriz": co_k, "nome": co_k, "tipo": "coordenador", "status": co_v["status"], "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in co_v["meses"].items()], "subRows": vends})
 
-        # ÁRVORE DE PORTFÓLIO
+        # CONSTRUÇÃO DA ÁRVORE DA VISÃO PORTFÓLIO
         arvore_port = {}
         todos_produtos = db.query(DimProduto).all()
-        
         for p in todos_produtos:
             cat, seg, sk, de = p.categoria or 'SEM CATEGORIA', p.segmento or 'SEM SEGMENTO', p.sku, p.descricao or 'SEM NOME'
             if cat not in arvore_port: arvore_port[cat] = {"nome": cat, "tipo": "categoria", "meses": criar_meses(), "segmentos": {}}
@@ -186,7 +194,6 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
 
         for r in resultados:
             cat, seg, sk, ms = r.cat or 'SEM CATEGORIA', r.seg or 'SEM SEGMENTO', str(r.sku).strip(), str(r.mes_projetado)
-            
             if ms in meses_alvo and cat in arvore_port and seg in arvore_port[cat]["segmentos"] and sk in arvore_port[cat]["segmentos"][seg]["produtos"]:
                 v_bu = int(r.v_bu or 0)
                 pmv_b = float(r.pmv or 0)
@@ -218,11 +225,10 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             }
         }
     except Exception as e:
-        raise HTTPException(500, repr(e))
-
+        raise HTTPException(status_code=500, detail=repr(e))
 
 # =====================================================================
-# NOVO ENDPOINT: BALANCEAMENTO PERCENTUAL TOP-DOWN (GERENTE)
+# POST: REDISTRIBUIÇÃO DE METAS POR PERCENTUAL (ÂNCORA PORTFÓLIO 100%)
 # =====================================================================
 @router.post("/ajustar-percentual")
 async def ajustar_percentual_coordenadores(
@@ -230,113 +236,81 @@ async def ajustar_percentual_coordenadores(
     db: Session = Depends(get_db), 
     usuario: dict = Depends(require_manager_or_admin)
 ):
-    """
-    Recupera o faturamento total da grade (Portfólio 100%) para o mês alvo 
-    e redistribui essa meta entre os coordenadores através de um fator de ajuste 
-    e pelo Método do Maior Resto, evitando dízimas nas caixas físicas.
-    """
-    # Apenas Gestores e Diretores podem forçar rebalanceamento macro
-    if usuario['funcao'] not in ['Administrador', 'Gerente']:
-        raise HTTPException(status_code=403, detail="Acesso restrito. Apenas Gerentes ou Administradores podem realizar o balanceamento percentual de metas.")
-
     ciclo = get_current_cycle(db)
     mes_alvo = parse_date_safe(payload.mes_projetado)
     cx = get_coord_expr()
     
-    # 1. Validar amarração matemática de 100%
     soma_pct = sum([c.percentual for c in payload.distribuicao])
     if not math.isclose(soma_pct, 100.0, abs_tol=0.01):
-        raise HTTPException(status_code=400, detail=f"A soma dos percentuais deve ser exatamente 100%. Recebido: {soma_pct}%")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"A soma de distribuição regional deve fechar em exatamente 100%. Recebido: {soma_pct}%"
+        )
         
-    # 2. Obter o Faturamento Macro Total (A Âncora de 100%)
-    faturamento_macro_query = db.query(
-        func.sum(FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado)
-    ).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(
-        FatoIbpGranular.ciclo_sop == ciclo,
-        FatoIbpGranular.mes_projetado == mes_alvo
-    )
-    
-    # RLS: O Faturamento Total deve ser apenas sobre os clientes que este Gerente vê
-    if usuario['funcao'] == 'Gerente':
-        ger_nome = usuario.get('gerente_nome')
-        if ger_nome:
-            faturamento_macro_query = faturamento_macro_query.filter(func.upper(func.trim(DimCliente.gerente_nome)) == ger_nome.strip().upper())
-            
-    total_faturamento_macro = faturamento_macro_query.scalar() or 0
-    
-    if total_faturamento_macro == 0:
-        raise HTTPException(status_code=400, detail="Não há faturamento base/portfólio preenchido para este mês alvo.")
+    total_faturamento_macro = payload.faturamento_macro_alvo
+    if total_faturamento_macro <= 0:
+        raise HTTPException(status_code=400, detail="Faturamento macro alvo inválido ou zerado.")
 
-    # 3. Processar cada Coordenador com o Método do Maior Resto
     for item in payload.distribuicao:
-        meta_faturamento_coord = float(total_faturamento_macro) * (item.percentual / 100.0)
+        meta_faturamento_coordenador = float(total_faturamento_macro) * (item.percentual / 100.0)
         
-        # Coletar as linhas granulares exclusivas deste Coordenador
         q_linhas = db.query(FatoIbpGranular).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(
             FatoIbpGranular.ciclo_sop == ciclo,
             FatoIbpGranular.mes_projetado == mes_alvo,
             func.upper(cx) == item.coordenador_nome.strip().upper()
         )
         
-        if usuario['funcao'] == 'Gerente':
-            ger_nome = usuario.get('gerente_nome')
-            if ger_nome:
-                q_linhas = q_linhas.filter(func.upper(func.trim(DimCliente.gerente_nome)) == ger_nome.strip().upper())
-                
+        if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
+            q_linhas = q_linhas.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
+            
         linhas = q_linhas.all()
         if not linhas:
             continue
             
-        # Calcular o faturamento corrente do coordenador para extrair o fator multiplicador
-        faturamento_atual_coord = sum([(float(l.vol_bottomup or 0) * float(l.pmv_aplicado or 0)) for l in linhas])
+        # CORREÇÃO DA NOMENCLATURA: Utilizando 'linhas' iterável e calculando o faturamento atual (Base Atual)
+        faturamento_atual_coordenador = sum([
+            (float(linha.vol_bottomup or 0) * float(linha.pmv_aplicado or 0)) for linha in linhas
+        ])
         
-        # Correção anti-divisão por zero caso o coordenador esteja zerado mas tenha carteira ativa
-        if faturamento_atual_coord == 0:
-            faturamento_atual_coord = len(linhas)
-            for l in linhas:
-                if (l.vol_bottomup or 0) == 0: 
-                    l.vol_bottomup = 1
+        if faturamento_atual_coordenador == 0:
+            faturamento_atual_coordenador = len(linhas)
+            for linha in linhas:
+                if (linha.vol_bottomup or 0) == 0: 
+                    linha.vol_bottomup = 1
+                    
+        fator_ajuste_financeiro = meta_faturamento_coordenador / faturamento_atual_coordenador
         
-        fator_ajuste = meta_faturamento_coord / faturamento_atual_coord
-        
-        # Variáveis de controlo do Método do Maior Resto
         pool_alocacao = []
         soma_caixas_inteiras = 0
-        soma_caixas_teoricas_iniciais = sum([(l.vol_bottomup or 0) for l in linhas])
+        soma_caixas_teoricas_iniciais = sum([(linha.vol_bottomup or 0) for linha in linhas])
         
-        for l in linhas:
-            vol_atual = l.vol_bottomup or 0
-            novo_vol_float = vol_atual * fator_ajuste
+        for linha in linhas:
+            vol_atual = linha.vol_bottomup or 0
+            novo_vol_float = vol_atual * fator_ajuste_financeiro
             
             vol_inteiro = math.floor(novo_vol_float)
             resto = novo_vol_float - vol_inteiro
             
             soma_caixas_inteiras += vol_inteiro
-            pool_alocacao.append({"linha": l, "inteiro": vol_inteiro, "resto": resto})
+            pool_alocacao.append({"linha": linha, "inteiro": vol_inteiro, "resto": resto})
             
-        # Determinar volume macro de caixas teóricas esperadas para o coordenador com o novo fator
-        total_caixas_esperadas = round(soma_caixas_teoricas_iniciais * fator_ajuste)
-        caixas_faltantes = max(0, int(total_caixas_esperadas - soma_caixas_inteiras))
+        total_caixas_esperadas_coordenador = round(soma_caixas_teoricas_iniciais * fator_ajuste_financeiro)
+        caixas_faltantes = max(0, int(total_caixas_esperadas_coordenador - soma_caixas_inteiras))
         
-        # Ordenação decrescente baseada na maior fração decimal (resto)
         pool_alocacao.sort(key=lambda x: x["resto"], reverse=True)
         
         for idx, item_aloc in enumerate(pool_alocacao):
             vol_final = item_aloc["inteiro"]
-            
-            # As caixas faltantes são doadas àqueles com maior fração decimal
             if idx < caixas_faltantes:
                 vol_final += 1
-            
-            # Persiste o ajuste granular
+                
             item_aloc["linha"].vol_bottomup = vol_final
             
     db.commit()
-    return {"status": "success", "message": "Metas top-down redistribuídas com sucesso."}
-
+    return {"status": "success", "message": "Meta fixada do Portfólio distribuída com sucesso nos volumes comerciais (vol_bu)."}
 
 # =====================================================================
-# ROTA SALVAR RASCUNHO (BLINDADA)
+# ROTAS DE GRAVAÇÃO, LOCK E GRÁFICOS
 # =====================================================================
 @router.post("/salvar")
 async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
@@ -350,40 +324,32 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
         data_hist = hoje - relativedelta(months=12)
 
         cx, vx, clx = get_coord_expr(), get_vend_expr(), get_cli_expr()
-
         locked_coords = [c.origem.upper() for c in db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.status == 'Fechado').all()]
 
         for ajuste in payload.ajustes:
             dt = parse_date_safe(ajuste.mes_projetado)
-            p = ajuste.chave.split('|')
+            partes_chave = ajuste.chave.split('|')
             q = get_truth_query(db, ciclo, dt, dt)
 
-            # CORREÇÃO: Filtro de atuação do utilizador atualizado
-            if usuario['funcao'] == 'Coordenador':
-                sup_nome = usuario.get('supervisor_nome')
-                if sup_nome: q = q.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == sup_nome.strip().upper())
-            elif usuario['funcao'] == 'Gerente':
-                ger_nome = usuario.get('gerente_nome')
-                if ger_nome: q = q.filter(func.upper(func.trim(DimCliente.gerente_nome)) == ger_nome.strip().upper())
+            if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
+                q = q.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
 
-            # Ignora as linhas cuja regional (coordenador) já foi assinada
             if locked_coords:
                 q = q.filter(~func.upper(cx).in_(locked_coords))
 
-            if ajuste.nivel == 'carteira':
-                if len(p) >= 1: q = q.filter(func.upper(cx) == p[0].upper())
-                if len(p) >= 2: q = q.filter(func.upper(vx) == p[1].upper())
-                if len(p) >= 3: q = q.filter(func.upper(clx) == p[2].upper())
-                if len(p) >= 4: q = q.filter(FatoIbpGranular.sku == p[3].strip())
-            elif ajuste.nivel == 'portfolio':
-                sku_alvo = p[-1]
-                q = q.filter(FatoIbpGranular.sku == sku_alvo.strip())
+            if list(q.all()) and ajuste.nivel == 'carteira':
+                if len(partes_chave) >= 1: q = q.filter(func.upper(cx) == partes_chave[0].upper())
+                if len(partes_chave) >= 2: q = q.filter(func.upper(vx) == partes_chave[1].upper())
+                if len(partes_chave) >= 3: q = q.filter(func.upper(clx) == partes_chave[2].upper())
+                if len(partes_chave) >= 4: q = q.filter(FatoIbpGranular.sku == partes_chave[3].strip())
+            elif list(q.all()) and ajuste.nivel == 'portfolio':
+                q = q.filter(FatoIbpGranular.sku == partes_chave[-1].strip())
 
             linhas = q.all()
-            if not list(linhas): continue 
+            if not linhas: continue
 
-            skus_alvo = list({l.sku for l in linhas if l.sku})
-            cgcs_alvo = list({l.cgc for l in linhas if l.cgc})
+            skus_alvo = list({linha.sku for linha in linhas if linha.sku})
+            cgcs_alvo = list({linha.cgc for linha in linhas if linha.cgc})
 
             hist_data = db.query(
                 FatoVendas.cgc, FatoVendas.sku, func.sum(FatoVendas.qt_pedido).label('vol_hist')
@@ -393,36 +359,28 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
 
             peso_map = {}
             total_hist_no = sum(float(r.vol_hist or 0) for r in hist_data if r.vol_hist)
-
             for r in hist_data:
-                v_h = float(r.vol_hist or 0)
-                if v_h > 0: peso_map[(r.cgc, r.sku)] = v_h / total_hist_no
+                if (r.vol_hist or 0) > 0: peso_map[(r.cgc, r.sku)] = r.vol_hist / total_hist_no
 
-            total_bu_atual = sum(l.vol_bottomup for l in linhas)
+            total_bu_atual = sum(linha.vol_bottomup for linha in linhas)
             delta = ajuste.novo_volume - total_bu_atual
 
             linhas.sort(key=lambda x: peso_map.get((x.cgc, x.sku), 0), reverse=True)
 
             if delta != 0:
-                for i, l in enumerate(linhas):
-                    peso = peso_map.get((l.cgc, l.sku), 1/len(linhas) if total_hist_no == 0 else 0)
-                    inc = int(round(delta * peso))
-                    
+                for i, linha in enumerate(linhas):
+                    p_val = peso_map.get((linha.cgc, linha.sku), 1/len(linhas) if total_hist_no == 0 else 0)
+                    inc = int(round(delta * p_val))
                     if i == len(linhas) - 1:
                         inc = delta - sum(int(round(delta * peso_map.get((x.cgc, x.sku), 1/len(linhas) if total_hist_no == 0 else 0))) for x in linhas[:-1])
-                    
-                    novo_v = max(0, l.vol_bottomup + inc)
-                    l.vol_bottomup = novo_v
+                    linha.vol_bottomup = max(0, linha.vol_bottomup + inc)
 
         db.commit()
-        return {"status": "success", "message": "Rascunho salvo e rateado com sucesso."}
+        return {"status": "success", "message": "Proposta Comercial Bottom-Up consolidada."}
     except Exception as e:
         db.rollback()
-        raise HTTPException(500, repr(e))
+        raise HTTPException(status_code=500, detail=repr(e))
 
-# =====================================================================
-# ROTA CONGELAR CARTEIRA GLOBAL
-# =====================================================================
 @router.post("/congelar")
 async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
@@ -430,7 +388,6 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
             await salvar_rascunho_gerencia(payload, db, usuario)
         
         ciclo = get_current_cycle(db)
-        
         _mes_str, _ano_str = ciclo.split('/')
         hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
         data_ini = hoje + relativedelta(months=2)
@@ -438,13 +395,8 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
         cx = get_coord_expr()
         q_coords = get_truth_query(db, ciclo, data_ini, data_ini)
         
-        # CORREÇÃO: Atualizado para buscar coords_acessiveis via ERP
-        if usuario['funcao'] == 'Coordenador':
-            sup_nome = usuario.get('supervisor_nome')
-            if sup_nome: q_coords = q_coords.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == sup_nome.strip().upper())
-        elif usuario['funcao'] == 'Gerente':
-            ger_nome = usuario.get('gerente_nome')
-            if ger_nome: q_coords = q_coords.filter(func.upper(func.trim(DimCliente.gerente_nome)) == ger_nome.strip().upper())
+        if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
+            q_coords = q_coords.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
 
         coords_acessiveis = [r[0] for r in q_coords.with_entities(cx).distinct().all() if r[0]]
 
@@ -465,20 +417,15 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
         return {"status": "success"}
     except Exception as e:
         db.rollback()
-        raise HTTPException(500, repr(e))
+        raise HTTPException(status_code=500, detail=repr(e))
 
-# =====================================================================
-# GRAFICOS, TRAVAS E FILTROS (MANTIDOS INTACTOS)
-# =====================================================================
 @router.get("/grafico")
 async def grafico_gerenciamento(chave_matriz: str, nivel_hierarquia: str = 'produto', visao: str = 'carteira', db: Session = Depends(get_db)):
     try:
         ciclo_atual = get_current_cycle(db)
         ciclo_anterior = get_previous_cycle(db)
-        
         _mes_str, _ano_str = ciclo_atual.split('/')
         hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
-        
         inicio_hist = hoje - relativedelta(months=24)
         m2_comercial = hoje + relativedelta(months=2)
 
@@ -490,21 +437,20 @@ async def grafico_gerenciamento(chave_matriz: str, nivel_hierarquia: str = 'prod
             curr += relativedelta(months=1)
 
         def apply_branch_filter(query, model_fact, is_portfolio=False):
-            p = chave_matriz.split('|')
+            partes_chave = chave_matriz.split('|')
             if is_portfolio:
-                if len(p) >= 1 and p[0]: query = query.filter(DimProduto.categoria == p[0])
-                if len(p) >= 2 and p[1]: query = query.filter(DimProduto.segmento == p[1])
-                if len(p) >= 3 and p[2]: query = query.filter(model_fact.sku == p[2].strip())
+                if len(partes_chave) >= 1 and partes_chave[0]: query = query.filter(DimProduto.categoria == partes_chave[0])
+                if len(partes_chave) >= 2 and partes_chave[1]: query = query.filter(DimProduto.segmento == partes_chave[1])
+                if len(partes_chave) >= 3 and partes_chave[2]: query = query.filter(model_fact.sku == partes_chave[2].strip())
             else:
                 cx, vx, clx = get_coord_expr(), get_vend_expr(), get_cli_expr()
-                if len(p) >= 1 and p[0]: query = query.filter(func.upper(cx) == p[0].upper())
-                if len(p) >= 2 and p[1]: query = query.filter(func.upper(vx) == p[1].upper())
-                if len(p) >= 3 and p[2]: query = query.filter(func.upper(clx) == p[2].upper())
-                if len(p) >= 4 and p[3]: query = query.filter(model_fact.sku == p[3].strip())
+                if len(partes_chave) >= 1 and partes_chave[0]: query = query.filter(func.upper(cx) == partes_chave[0].upper())
+                if len(partes_chave) >= 2 and partes_chave[1]: query = query.filter(func.upper(vx) == partes_chave[1].upper())
+                if len(partes_chave) >= 3 and partes_chave[2]: query = query.filter(func.upper(clx) == partes_chave[2].upper())
+                if len(partes_chave) >= 4 and partes_chave[3]: query = query.filter(model_fact.sku == partes_chave[3].strip())
             return query
 
         is_port = visao == 'portfolio'
-
         q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('realizado')).outerjoin(DimCliente, FatoVendas.cgc == DimCliente.cgc).join(DimProduto, FatoVendas.sku == DimProduto.sku).filter(FatoVendas.data_pedido >= inicio_hist)
         q_hist = apply_branch_filter(q_hist, FatoVendas, is_port)
         for row in q_hist.group_by('mes_ano').all():
@@ -534,10 +480,9 @@ async def grafico_gerenciamento(chave_matriz: str, nivel_hierarquia: str = 'prod
                 "IA": v["IA"], "CicloAnterior": v["CicloAnterior"],
                 "TopDown": v["TopDown"] if mes_dt >= m2_comercial else None 
             })
-
         return {"status": "success", "dados": timeline}
     except Exception as e:
-        raise HTTPException(500, repr(e))
+        raise HTTPException(status_code=500, detail=repr(e))
 
 @router.post("/toggle-lock")
 async def toggle_lock_regional(payload: PayloadToggleLock, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
@@ -548,31 +493,14 @@ async def toggle_lock_regional(payload: PayloadToggleLock, db: Session = Depends
     db.commit()
     return {"status": "success"}
 
-@router.post("/lock-all")
-async def lock_all_regionais(db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
-    ciclo = get_current_cycle(db)
-    cx = get_coord_expr()
-    regionais = db.query(cx).distinct().all()
-    for reg_nome in [r[0] for r in regionais if r[0]]:
-        reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == reg_nome).first()
-        if reg: reg.status = 'Fechado'
-        else: db.add(ControleCiclo(ciclo_sop=ciclo, origem=reg_nome, status='Fechado'))
-    db.commit()
-    return {"status": "success"}
-
 @router.get("/filtros")
 async def listar_filtros_gerenciamento(db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
         cx = get_coord_expr()
         q = db.query(cx)
-        if usuario['funcao'] == 'Coordenador':
-            sup_nome = usuario.get('supervisor_nome')
-            if sup_nome: q = q.filter(func.upper(func.trim(DimCliente.supervisor_nome)) == sup_nome.strip().upper())
-        elif usuario['funcao'] == 'Gerente':
-            ger_nome = usuario.get('gerente_nome')
-            if ger_nome: q = q.filter(func.upper(func.trim(DimCliente.gerente_nome)) == ger_nome.strip().upper())
-            
+        if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
+            q = q.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
         regionais = q.distinct().all()
         return {"status": "success", "dados": {"regionais": [r[0] for r in regionais if r[0]]}}
     except Exception as e:
-        raise HTTPException(500, repr(e))
+        raise HTTPException(status_code=500, detail=repr(e))
