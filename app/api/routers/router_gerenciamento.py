@@ -215,7 +215,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         raise HTTPException(status_code=500, detail=repr(e))
 
 # =====================================================================
-# POST: REDISTRIBUIÇÃO DE METAS COM MARGEM DE TOLERÂNCIA (99% - 101%)
+# POST: REDISTRIBUIÇÃO DE METAS POR PERCENTUAL (SEM TRAVAS MATEMÁTICAS)
 # =====================================================================
 @router.post("/ajustar-percentual")
 async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
@@ -223,13 +223,8 @@ async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db:
     mes_alvo = parse_date_safe(payload.mes_projetado)
     cx = get_coord_expr()
     
-    soma_pct = sum([c.percentual for c in payload.distribuicao])
-    if soma_pct < 99.0 or soma_pct > 101.0:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"A soma de distribuição regional deve estar na margem de 99% a 101%. Recebido: {soma_pct}%"
-        )
-        
+    # REGRA ATUALIZADA: Permite que os Coordenadores enxerguem potencial ALÉM do Portfolio. Sem trava de %.
+    
     q_gerente_total = db.query(FatoIbpGranular).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(FatoIbpGranular.ciclo_sop == ciclo, FatoIbpGranular.mes_projetado == mes_alvo)
     if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
         q_gerente_total = q_gerente_total.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
@@ -241,6 +236,7 @@ async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db:
         raise HTTPException(status_code=400, detail="A sua carteira não possui faturamento base definido para o cálculo.")
 
     for item in payload.distribuicao:
+        # Se o item mandar 120%, o sistema agora aceita e empurra esse crescimento pra base.
         meta_faturamento_coordenador = float(total_faturamento_gerente) * (item.percentual / 100.0)
         
         q_linhas_coord = db.query(FatoIbpGranular).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(
@@ -285,7 +281,7 @@ async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db:
     return {"status": "success", "message": "Meta da carteira rateada nos coordenadores."}
 
 # =====================================================================
-# POST: SALVAR RASCUNHO (MÉTODO DO PESO HISTÓRICO COM CORREÇÃO SINTÁTICA)
+# POST: SALVAR RASCUNHO (MÉTODO DO PESO HISTÓRICO)
 # =====================================================================
 @router.post("/salvar")
 async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
@@ -345,7 +341,6 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
                     p_val = peso_map.get((linha.cgc, linha.sku), 1/len(linhas) if total_hist_no == 0 else 0)
                     inc = int(round(delta * p_val))
                     if i == len(linhas) - 1:
-                        # SINTAXE REPARADA: Summation generator expression corrigida!
                         inc = delta - sum(int(round(delta * peso_map.get((x.cgc, x.sku), 1/len(linhas) if total_hist_no == 0 else 0))) for x in linhas[:-1])
                     linha.vol_bottomup = max(0, linha.vol_bottomup + inc)
 
@@ -377,7 +372,6 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
         coords_acessiveis = [r[0] for r in q_coords.with_entities(cx).distinct().all() if r[0]]
         
         for coord in coords_acessiveis:
-            # SUCESSO: Injeção total e simultânea nas 3 colunas exigidas da fato
             db.query(FatoIbpGranular).filter(
                 FatoIbpGranular.ciclo_sop == ciclo,
                 func.upper(cx) == coord.upper()
@@ -387,12 +381,10 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
                 FatoIbpGranular.vol_meta: FatoIbpGranular.vol_bottomup
             }, synchronize_session=False)
             
-            # DIGITAÇÃO CORRIGIDA: 'origem=coord' corrigido (antes estava origins)
             reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == coord).first()
             if reg: reg.status = 'Fechado'
             else: db.add(ControleCiclo(ciclo_sop=ciclo, origem=coord, status='Fechado'))
 
-        # Verificação automatizada de liberação nacional do Supply Chain
         todos_coords_modelo = db.query(cx).join(FatoIbpGranular, FatoIbpGranular.cgc == DimCliente.cgc).filter(FatoIbpGranular.ciclo_sop == ciclo).distinct().all()
         lista_todos_coords = [c[0].upper() for c in todos_coords_modelo if c[0]]
         

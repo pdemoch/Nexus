@@ -250,13 +250,10 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
       dadosBrutos.forEach((node: any) => {
         const mesData = node.meses?.find((x: any) => x.mes_banco === m.mes_banco);
         
-        // A INTELIGÊNCIA DA BASE ATUAL (Regra de Negócio)
         if (visaoAtiva === 'portfolio') {
-            // No portfólio, a âncora é o Top-Down original (o que a diretoria pediu)
             vol += (mesData?.vol_base || 0); 
             fat += (mesData?.receita_base || 0);
         } else {
-            // Na carteira, a âncora é o Bottom-Up atual (o que o próprio gerente já salvou via portfólio)
             vol += (mesData?.vol_ajustado || 0); 
             fat += (mesData?.receita || 0);      
         }
@@ -278,17 +275,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     });
     return totais;
   }, [dadosProcessados, getDynamicVol, getDynamicRec, colunasData]);
-
-  const allColumns100Percent = useMemo(() => {
-    if (visaoAtiva === 'portfolio') return true; 
-    return colunasData.every((m: any) => {
-      const ancora = totaisAncoraBanco[m.mes_banco]?.fat || 0;
-      const simulado = totaisGeraisTelaAtual[m.mes_banco]?.fat || 0;
-      if (ancora === 0) return true;
-      const percentual = (simulado / ancora) * 100;
-      return percentual >= 99.0 && percentual <= 101.0;
-    });
-  }, [visaoAtiva, colunasData, totaisAncoraBanco, totaisGeraisTelaAtual]);
 
   const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
     if (!isTopDownFechado) return;
@@ -560,7 +546,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
             return (
               <React.Fragment key={idx}>
-                {/* 1. SUBCOLUNA: BASE ATUAL */}
+                {/* 1. SUBCOLUNA: BASE ATUAL (O que está salvo no BD) */}
                 <td className="p-3 border-r border-slate-200 bg-slate-50/80 align-middle">
                    <div className="flex flex-col items-end opacity-70">
                       <span className="text-xs font-bold text-slate-600">{formatVolume(volBase)} cx</span>
@@ -568,7 +554,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                    </div>
                 </td>
 
-                {/* 2. SUBCOLUNA: SIMULAÇÃO */}
+                {/* 2. SUBCOLUNA: SIMULAÇÃO (Onde as edições/rascunhos acontecem) */}
                 <td className={`p-0 border-l border-slate-100 align-top border-r-2 border-r-slate-200 ${isRowFechado || !isTopDownFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/40' : 'bg-white'}`}>
                   
                   {visaoAtiva === 'carteira' && depth === 0 ? (
@@ -650,23 +636,22 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                   </button>
               </div>
 
-              {/* BOTÃO 1: SALVAR RASCUNHO / RATEIO */}
+              {/* BOTÃO 1: SALVAR RASCUNHO / RATEIO (Sem Trava Matemática) */}
               <button 
                  onClick={handleSalvarRascunho} 
-                 disabled={!isTopDownFechado || isAllClosed || (!allColumns100Percent && visaoAtiva === 'carteira')} 
-                 className={`px-5 py-2.5 font-bold rounded-xl transition-all flex items-center gap-2 border
-                   ${allColumns100Percent || visaoAtiva === 'portfolio' ? 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50' : 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-60'}`}
+                 disabled={!isTopDownFechado || isAllClosed} 
+                 className="px-5 py-2.5 font-bold rounded-xl transition-all flex items-center gap-2 border bg-white text-slate-700 border-slate-300 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                   <Save className="w-4 h-4" /> 
-                  {!allColumns100Percent && visaoAtiva === 'carteira' ? 'Ajuste para ~100% antes de Salvar' : visaoAtiva === 'portfolio' ? 'Salvar Ajustes Globais do Portfólio' : 'Salvar Rateio Parcial na Base'}
+                  Salvar Rascunho / Rateio
               </button>
 
-              {/* BOTÃO 2: FINALIZAR E ABRIR A FÁBRICA */}
+              {/* BOTÃO 2: FINALIZAR E ABRIR A FÁBRICA (Ativado apenas quando todos os cadeados estão fechados) */}
               <button 
                  onClick={handleCongelar} 
-                 disabled={!isTopDownFechado || !isAllClosed || (!allColumns100Percent && visaoAtiva === 'carteira')} 
+                 disabled={!isTopDownFechado || !isAllClosed} 
                  className={`px-6 py-2.5 font-bold rounded-xl shadow-lg transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed text-white
-                   ${isAllClosed && allColumns100Percent
+                   ${isAllClosed 
                        ? 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-900/20 animate-pulse' 
                        : 'bg-slate-300 text-slate-500'
                    }`}
@@ -751,7 +736,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                      const simuladoVol = totaisGeraisTelaAtual[m.mes_banco]?.vol || 0;
 
                      const currentPct = ancoraBaseFat > 0 ? (simuladoFat / ancoraBaseFat) * 100 : 0;
-                     const isMargemOk = ancoraBaseFat === 0 || (currentPct >= 99.0 && currentPct <= 101.0);
 
                      return (
                       <React.Fragment key={`foot-${i}`}>
@@ -759,7 +743,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                            <div className="flex flex-col items-end">
                               <span className="text-xs font-bold text-slate-300">{formatVolume(ancoraBaseVol)} cx</span>
                               <span className="font-bold text-slate-400 text-xs mt-1">{formatMoeda(ancoraBaseFat)}</span>
-                              {visaoAtiva === 'carteira' && <span className="text-[9px] font-black text-slate-500 mt-1 uppercase">Sua Âncora 100%</span>}
+                              {visaoAtiva === 'carteira' && <span className="text-[9px] font-black text-slate-500 mt-1 uppercase">Sua Âncora</span>}
                            </div>
                         </td>
 
@@ -772,9 +756,9 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                               {formatMoeda(simuladoFat)}
                             </span>
                             
-                            {visaoAtiva === 'carteira' && (
-                              <span className={`font-black text-[10px] px-2 py-0.5 rounded mt-1.5 tracking-wider ${isMargemOk ? 'bg-blue-500/20 text-blue-400' : 'bg-rose-500 text-white animate-bounce'}`}>
-                                {isMargemOk ? `${currentPct.toFixed(2)}% (MARGEM OK)` : `ALERTA: ${currentPct.toFixed(2)}%`}
+                            {visaoAtiva === 'carteira' && ancoraBaseFat > 0 && (
+                              <span className="font-black text-[10px] px-2 py-0.5 rounded mt-1.5 tracking-wider bg-blue-500/20 text-blue-400">
+                                {currentPct.toFixed(2)}% DA BASE
                               </span>
                             )}
                           </div>
