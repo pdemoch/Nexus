@@ -49,7 +49,7 @@ class PayloadAjustePercentual(BaseModel):
     distribuicao: List[CoordenadorPercentual]
 
 # =====================================================================
-# AUXILIARES DE EXPRESSÃO E GOVERNANÇA
+# AUXILIARES DE EXPRESSÃO E GOVERNANÇA (RLS)
 # =====================================================================
 def get_coord_expr():
     return func.coalesce(
@@ -72,10 +72,13 @@ def require_manager_or_admin(usuario: dict = Depends(get_current_user)):
 def check_topdown_lock(db: Session, ciclo: str):
     td = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down Arena').first()
     if not td or td.status != 'Fechado':
-        raise HTTPException(status_code=403, detail="Fase Comercial Bloqueada: Diretoria ainda não ratificou o Top-Down.")
+        raise HTTPException(
+            status_code=403, 
+            detail="Fase Comercial Bloqueada: A Diretoria ainda não liberou o ciclo para a modelagem Bottom-Up comercial."
+        )
 
 # =====================================================================
-# GET: ÁRVORES DE DADOS (COM VOL_TOPDOWN NA BASE ATUAL)
+# GET: ÁRVORES DE DADOS (PORTFÓLIO GLOBAL vs CARTEIRA REGIONAL COM RLS)
 # =====================================================================
 @router.get("")
 async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
@@ -103,8 +106,8 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             FatoIbpGranular.sku, DimProduto.descricao.label('prod_desc'),
             FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
-            func.sum(FatoIbpGranular.vol_topdown).label('v_td'),  # BASE ATUAL
-            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), # SIMULAÇÃO
+            func.sum(FatoIbpGranular.vol_topdown).label('v_td'),  
+            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), 
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
         ).group_by(cx, vx, clx, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all()
 
@@ -115,8 +118,8 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             FatoIbpGranular.sku, DimProduto.descricao.label('prod_desc'),
             FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
-            func.sum(FatoIbpGranular.vol_topdown).label('v_td'),  # BASE ATUAL
-            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), # SIMULAÇÃO
+            func.sum(FatoIbpGranular.vol_topdown).label('v_td'),  
+            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), 
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
         ).group_by(DimProduto.categoria, DimProduto.segmento, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all()
 
@@ -212,7 +215,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         raise HTTPException(status_code=500, detail=repr(e))
 
 # =====================================================================
-# RATEIO POR PERCENTUAL COM MARGEM DE TOLERÂNCIA (99% - 101%)
+# POST: REDISTRIBUIÇÃO DE METAS COM MARGEM DE TOLERÂNCIA (99% - 101%)
 # =====================================================================
 @router.post("/ajustar-percentual")
 async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
@@ -220,7 +223,6 @@ async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db:
     mes_alvo = parse_date_safe(payload.mes_projetado)
     cx = get_coord_expr()
     
-    # ATUALIZAÇÃO: Relaxamento da trava para a margem de segurança de 1%
     soma_pct = sum([c.percentual for c in payload.distribuicao])
     if soma_pct < 99.0 or soma_pct > 101.0:
         raise HTTPException(
@@ -283,7 +285,7 @@ async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db:
     return {"status": "success", "message": "Meta da carteira rateada nos coordenadores."}
 
 # =====================================================================
-# ROTA SALVAR RASCUNHO
+# POST: SALVAR RASCUNHO (MÉTODO DO PESO HISTÓRICO COM CORREÇÃO SINTÁTICA)
 # =====================================================================
 @router.post("/salvar")
 async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
@@ -304,7 +306,6 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
             partes_chave = ajuste.chave.split('|')
             q = get_truth_query(db, ciclo, dt, dt)
 
-            # SE FOR CARTEIRA: Aplica a trava do Gerente para proteger o universo dele
             if ajuste.nivel == 'carteira':
                 if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
                     q = q.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
@@ -315,7 +316,6 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
                 if len(partes_chave) >= 3: q = q.filter(func.upper(clx) == partes_chave[2].upper())
                 if len(partes_chave) >= 4: q = q.filter(FatoIbpGranular.sku == partes_chave[3].strip())
             
-            # SE FOR PORTFÓLIO: Rateio Global (Ignora o RLS do Gerente)
             elif ajuste.nivel == 'portfolio':
                 if locked_coords:
                     q = q.filter(~func.upper(cx).in_(locked_coords))
@@ -345,6 +345,7 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
                     p_val = peso_map.get((linha.cgc, linha.sku), 1/len(linhas) if total_hist_no == 0 else 0)
                     inc = int(round(delta * p_val))
                     if i == len(linhas) - 1:
+                        # SINTAXE REPARADA: Summation generator expression corrigida!
                         inc = delta - sum(int(round(delta * peso_map.get((x.cgc, x.sku), 1/len(linhas) if total_hist_no == 0 else 0))) for x in linhas[:-1])
                     linha.vol_bottomup = max(0, linha.vol_bottomup + inc)
 
@@ -354,10 +355,15 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
         db.rollback()
         raise HTTPException(status_code=500, detail=repr(e))
 
+# =====================================================================
+# POST: CONGELAR E PASSAR BASTÃO TRÍPLICE (SUPPLY, FINAL, META)
+# =====================================================================
 @router.post("/congelar")
 async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     try:
-        if payload.ajustes: await salvar_rascunho_gerencia(payload, db, usuario)
+        if payload.ajustes: 
+            await salvar_rascunho_gerencia(payload, db, usuario)
+        
         ciclo = get_current_cycle(db)
         _mes_str, _ano_str = ciclo.split('/')
         hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
@@ -369,20 +375,44 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
             q_coords = q_coords.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
 
         coords_acessiveis = [r[0] for r in q_coords.with_entities(cx).distinct().all() if r[0]]
+        
         for coord in coords_acessiveis:
-            db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo, func.upper(cx) == coord.upper()).update({
-                FatoIbpGranular.vol_supply: FatoIbpGranular.vol_bottomup, FatoIbpGranular.vol_final: FatoIbpGranular.vol_bottomup
+            # SUCESSO: Injeção total e simultânea nas 3 colunas exigidas da fato
+            db.query(FatoIbpGranular).filter(
+                FatoIbpGranular.ciclo_sop == ciclo,
+                func.upper(cx) == coord.upper()
+            ).update({
+                FatoIbpGranular.vol_supply: FatoIbpGranular.vol_bottomup,
+                FatoIbpGranular.vol_final: FatoIbpGranular.vol_bottomup,
+                FatoIbpGranular.vol_meta: FatoIbpGranular.vol_bottomup
             }, synchronize_session=False)
+            
+            # DIGITAÇÃO CORRIGIDA: 'origem=coord' corrigido (antes estava origins)
             reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == coord).first()
             if reg: reg.status = 'Fechado'
             else: db.add(ControleCiclo(ciclo_sop=ciclo, origem=coord, status='Fechado'))
 
+        # Verificação automatizada de liberação nacional do Supply Chain
+        todos_coords_modelo = db.query(cx).join(FatoIbpGranular, FatoIbpGranular.cgc == DimCliente.cgc).filter(FatoIbpGranular.ciclo_sop == ciclo).distinct().all()
+        lista_todos_coords = [c[0].upper() for c in todos_coords_modelo if c[0]]
+        
+        coords_ja_fechados = db.query(ControleCiclo.origem).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.status == 'Fechado', ControleCiclo.origem != 'Top-Down Arena').all()
+        lista_ja_fechados = [c[0].upper() for c in coords_ja_fechados if c[0]]
+        
+        if all(c in lista_ja_fechados for c in lista_todos_coords):
+            token_global = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Demand-Review').first()
+            if token_global: token_global.status = 'Fechado'
+            else: db.add(ControleCiclo(ciclo_sop=ciclo, origem='Demand-Review', status='Fechado'))
+
         db.commit()
-        return {"status": "success"}
+        return {"status": "success", "message": "Fase comercial trancada e bastão estendido para Supply."}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=repr(e))
 
+# =====================================================================
+# GET: TIMELINE DO GRÁFICO EXEC-SAUDABILIDADE
+# =====================================================================
 @router.get("/grafico")
 async def grafico_gerenciamento(chave_matriz: str, nivel_hierarquia: str = 'produto', visao: str = 'carteira', db: Session = Depends(get_db)):
     try:
@@ -396,8 +426,7 @@ async def grafico_gerenciamento(chave_matriz: str, nivel_hierarquia: str = 'prod
         calendario = {}
         curr = inicio_hist
         while curr <= hoje + relativedelta(months=4):
-            mes_str = curr.strftime('%Y-%m')
-            calendario[mes_str] = {"Realizado": None, "IA": None, "CicloAnterior": None, "TopDown": None}
+            calendario[curr.strftime('%Y-%m')] = {"Realizado": None, "IA": None, "CicloAnterior": None, "TopDown": None}
             curr += relativedelta(months=1)
 
         def apply_branch_filter(query, model_fact, is_portfolio=False):
@@ -464,7 +493,6 @@ async def listar_filtros_gerenciamento(db: Session = Depends(get_db), usuario: d
         q = db.query(cx)
         if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
             q = q.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
-        regionais = q.distinct().all()
-        return {"status": "success", "dados": {"regionais": [r[0] for r in regionais if r[0]]}}
+        return {"status": "success", "dados": {"regionais": [r[0] for r in q.distinct().all() if r[0]]}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=repr(e))

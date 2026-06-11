@@ -179,7 +179,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   };
 
   const handleCongelar = async () => {
-    if (!confirm("Atenção Gerência: Esta ação salvará as edições, trancará as regionais visíveis na tela e passará a meta para a Fábrica (Supply). Deseja prosseguir?")) return;
+    if (!confirm("Atenção: Esta ação confirmará a sua meta e passará o bastão oficial para a Fábrica (Supply Review). Deseja prosseguir com o fechamento?")) return;
     try {
       const payload = {
         origem_ajuste: "Gerência Comercial (Bottom-Up Final)",
@@ -194,7 +194,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
         )
       };
       await axios.post(`/api/v1/consensus/gerenciamento/congelar`, payload);
-      alert("Gestão Comercial Ratificada com Sucesso!");
+      alert("Gestão Comercial Ratificada! Bastão passado com sucesso.");
       fetchData();
     } catch (e: any) { alert("Erro ao aprovar: " + (e.response?.data?.detail || e.message)); }
   };
@@ -270,7 +270,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     return totais;
   }, [dadosProcessados, getDynamicVol, getDynamicRec, colunasData]);
 
-  // ATUALIZADO: Zona de Tolerância de 1% (99% - 101%)
   const allColumns100Percent = useMemo(() => {
     if (visaoAtiva === 'portfolio') return true; 
     return colunasData.every((m: any) => {
@@ -324,12 +323,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                 childTarget = Math.round((childCurrent / currentTotalChildren) * targetVolume);
               }
             } else {
-              if (idx === node.subRows.length - 1) {
-                const allocatedSoFar = Math.round(targetVolume / node.subRows.length) * idx;
-                childTarget = targetVolume - allocatedSoFar;
-              } else {
-                childTarget = Math.round(targetVolume / node.subRows.length);
-              }
+              childTarget = Math.round(targetVolume / node.subRows.length);
             }
             distributeDown(child, Math.max(0, childTarget));
           });
@@ -379,7 +373,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   };
 
   // =========================================================================
-  // PAINEL DE SAUDABILIDADE (RESTAURADO COM RECHARTS)
+  // PAINEL DE SAUDABILIDADE (RECHARTS)
   // =========================================================================
   const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
     const chave = rowData.chave_matriz;
@@ -645,21 +639,29 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                   </button>
               </div>
 
-              {visaoAtiva === 'carteira' && (
-                  <div className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold border shadow-sm ${isAllClosed ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
-                      {isAllClosed ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
-                      {isAllClosed ? 'SUA CARTEIRA FECHADA' : 'CARTEIRA ABERTA'}
-                  </div>
-              )}
-
+              {/* BOTÃO 1: SALVAR RASCUNHO / RATEIO */}
               <button 
                  onClick={handleSalvarRascunho} 
                  disabled={!isTopDownFechado || isAllClosed || (!allColumns100Percent && visaoAtiva === 'carteira')} 
-                 className={`px-5 py-2.5 font-bold rounded-xl transition-all flex items-center gap-2 
-                   ${allColumns100Percent || visaoAtiva === 'portfolio' ? 'bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100' : 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-60'}`}
+                 className={`px-5 py-2.5 font-bold rounded-xl transition-all flex items-center gap-2 border
+                   ${allColumns100Percent || visaoAtiva === 'portfolio' ? 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50' : 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-60'}`}
               >
                   <Save className="w-4 h-4" /> 
-                  {!allColumns100Percent && visaoAtiva === 'carteira' ? 'Rateio ≠ 100%' : visaoAtiva === 'portfolio' ? 'Ratear Portfólio Global' : 'Salvar Rateio da Carteira'}
+                  {!allColumns100Percent && visaoAtiva === 'carteira' ? 'Rateio Fora da Margem (±1%)' : visaoAtiva === 'portfolio' ? 'Ratear Portfólio Global' : 'Salvar Rateio da Carteira'}
+              </button>
+
+              {/* BOTÃO 2: CONCLUIR E PASSAR BASTÃO (A CHAVE MESTRA) */}
+              <button 
+                 onClick={handleCongelar} 
+                 disabled={!isTopDownFechado || (!allColumns100Percent && visaoAtiva === 'carteira')} 
+                 className={`px-6 py-2.5 font-bold rounded-xl shadow-lg transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed text-white
+                   ${isAllClosed 
+                       ? 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-900/20 animate-pulse' 
+                       : 'bg-slate-900 hover:bg-blue-600 shadow-slate-900/20'
+                   }`}
+              >
+                  <Shield className="w-4 h-4" /> 
+                  {isAllClosed ? 'Liberar Etapa de Supply Chain (Finalizar)' : 'Concluir e Trancar Minhas Regionais'}
               </button>
             </div>
         </div>
@@ -738,7 +740,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                      const simuladoVol = totaisGeraisTelaAtual[m.mes_banco]?.vol || 0;
 
                      const currentPct = ancoraBaseFat > 0 ? (simuladoFat / ancoraBaseFat) * 100 : 0;
-                     // ATUALIZADO: Margem de Tolerância OK no Frontend (99 a 101%)
                      const isMargemOk = ancoraBaseFat === 0 || (currentPct >= 99.0 && currentPct <= 101.0);
 
                      return (
