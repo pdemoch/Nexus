@@ -173,13 +173,13 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
         )
       };
       await axios.post(`/api/v1/consensus/gerenciamento/salvar`, payload);
-      alert(visaoAtiva === 'portfolio' ? "Rateio Global do Portfólio concluído e distribuído na base!" : "Proposta Bottom-Up consolidada na matriz da sua Carteira!");
+      alert(visaoAtiva === 'portfolio' ? "Rateio Global do Portfólio salvo com sucesso!" : "Rateio da Carteira salvo com sucesso (Rascunho atualizado).");
       fetchData();
     } catch (e: any) { alert("Erro ao salvar: " + (e.response?.data?.detail || e.message)); }
   };
 
   const handleCongelar = async () => {
-    if (!confirm("Atenção: Esta ação confirmará a sua meta e passará o bastão oficial para a Fábrica (Supply Review). Deseja prosseguir com o fechamento?")) return;
+    if (!confirm("Atenção: Esta ação confirmará a sua meta e passará o bastão oficial para a Fábrica (Supply Review). A Janela será trancada. Deseja prosseguir?")) return;
     try {
       const payload = {
         origem_ajuste: "Gerência Comercial (Bottom-Up Final)",
@@ -194,7 +194,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
         )
       };
       await axios.post(`/api/v1/consensus/gerenciamento/congelar`, payload);
-      alert("Gestão Comercial Ratificada! Bastão passado com sucesso.");
+      alert("Gestão Comercial Finalizada! Bastão passado com sucesso para a Fábrica.");
       fetchData();
     } catch (e: any) { alert("Erro ao aprovar: " + (e.response?.data?.detail || e.message)); }
   };
@@ -241,21 +241,30 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   }, [getDynamicVol]);
 
   // =========================================================================
-  // MATEMÁTICA: ÂNCORAS SEPARADAS PARA PORTFÓLIO E CARTEIRA COM MARGEM 1%
+  // MATEMÁTICA DA ÂNCORA (Base mutável dependendo da aba ativa)
   // =========================================================================
-  const totaisBaseAbaAtiva = useMemo(() => {
+  const totaisAncoraBanco = useMemo(() => {
     const totais: Record<string, { vol: number, fat: number }> = {};
     colunasData?.forEach((m: any) => {
       let vol = 0; let fat = 0;
       dadosBrutos.forEach((node: any) => {
         const mesData = node.meses?.find((x: any) => x.mes_banco === m.mes_banco);
-        vol += (mesData?.vol_base || 0);
-        fat += (mesData?.receita_base || 0);
+        
+        // A INTELIGÊNCIA DA BASE ATUAL (Regra de Negócio)
+        if (visaoAtiva === 'portfolio') {
+            // No portfólio, a âncora é o Top-Down original (o que a diretoria pediu)
+            vol += (mesData?.vol_base || 0); 
+            fat += (mesData?.receita_base || 0);
+        } else {
+            // Na carteira, a âncora é o Bottom-Up atual (o que o próprio gerente já salvou via portfólio)
+            vol += (mesData?.vol_ajustado || 0); 
+            fat += (mesData?.receita || 0);      
+        }
       });
       totais[m.mes_banco] = { vol, fat };
     });
     return totais;
-  }, [dadosBrutos, colunasData]);
+  }, [dadosBrutos, colunasData, visaoAtiva]);
 
   const totaisGeraisTelaAtual = useMemo(() => {
     const totais: Record<string, { vol: number, fat: number }> = {};
@@ -273,13 +282,13 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   const allColumns100Percent = useMemo(() => {
     if (visaoAtiva === 'portfolio') return true; 
     return colunasData.every((m: any) => {
-      const ancora = totaisBaseAbaAtiva[m.mes_banco]?.fat || 0;
+      const ancora = totaisAncoraBanco[m.mes_banco]?.fat || 0;
       const simulado = totaisGeraisTelaAtual[m.mes_banco]?.fat || 0;
       if (ancora === 0) return true;
       const percentual = (simulado / ancora) * 100;
       return percentual >= 99.0 && percentual <= 101.0;
     });
-  }, [visaoAtiva, colunasData, totaisBaseAbaAtiva, totaisGeraisTelaAtual]);
+  }, [visaoAtiva, colunasData, totaisAncoraBanco, totaisGeraisTelaAtual]);
 
   const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
     if (!isTopDownFechado) return;
@@ -538,18 +547,20 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
           {colunasData?.map((m: any, idx: number) => {
             const mBase = row.meses?.find((x: any) => x.mes_banco === m.mes_banco);
-            const volBase = mBase?.vol_base || 0;
-            const recBase = mBase?.receita_base || 0;
+            
+            // INTELIGÊNCIA DA BASE ATUAL (CÉLULA)
+            const volBase = visaoAtiva === 'portfolio' ? (mBase?.vol_base || 0) : (mBase?.vol_ajustado || 0);
+            const recBase = visaoAtiva === 'portfolio' ? (mBase?.receita_base || 0) : (mBase?.receita || 0);
 
             const isEdited = celulasEditadas[row.chave_matriz]?.[m.mes_banco] !== undefined;
             const volSimulado = getDynamicVol(row, m.mes_banco);
             const recSimulado = getDynamicRec(row, m.mes_banco);
 
-            const anchorFat = totaisBaseAbaAtiva[m.mes_banco]?.fat || 1; 
+            const anchorFat = totaisAncoraBanco[m.mes_banco]?.fat || 1; 
 
             return (
               <React.Fragment key={idx}>
-                {/* 1. SUBCOLUNA: BASE ATUAL (TOP-DOWN) */}
+                {/* 1. SUBCOLUNA: BASE ATUAL */}
                 <td className="p-3 border-r border-slate-200 bg-slate-50/80 align-middle">
                    <div className="flex flex-col items-end opacity-70">
                       <span className="text-xs font-bold text-slate-600">{formatVolume(volBase)} cx</span>
@@ -647,21 +658,21 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                    ${allColumns100Percent || visaoAtiva === 'portfolio' ? 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50' : 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-60'}`}
               >
                   <Save className="w-4 h-4" /> 
-                  {!allColumns100Percent && visaoAtiva === 'carteira' ? 'Rateio Fora da Margem (±1%)' : visaoAtiva === 'portfolio' ? 'Ratear Portfólio Global' : 'Salvar Rateio da Carteira'}
+                  {!allColumns100Percent && visaoAtiva === 'carteira' ? 'Ajuste para ~100% antes de Salvar' : visaoAtiva === 'portfolio' ? 'Salvar Ajustes Globais do Portfólio' : 'Salvar Rateio Parcial na Base'}
               </button>
 
-              {/* BOTÃO 2: CONCLUIR E PASSAR BASTÃO (A CHAVE MESTRA) */}
+              {/* BOTÃO 2: FINALIZAR E ABRIR A FÁBRICA */}
               <button 
                  onClick={handleCongelar} 
-                 disabled={!isTopDownFechado || (!allColumns100Percent && visaoAtiva === 'carteira')} 
+                 disabled={!isTopDownFechado || !isAllClosed || (!allColumns100Percent && visaoAtiva === 'carteira')} 
                  className={`px-6 py-2.5 font-bold rounded-xl shadow-lg transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed text-white
-                   ${isAllClosed 
+                   ${isAllClosed && allColumns100Percent
                        ? 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-900/20 animate-pulse' 
-                       : 'bg-slate-900 hover:bg-blue-600 shadow-slate-900/20'
+                       : 'bg-slate-300 text-slate-500'
                    }`}
               >
                   <Shield className="w-4 h-4" /> 
-                  {isAllClosed ? 'Liberar Etapa de Supply Chain (Finalizar)' : 'Concluir e Trancar Minhas Regionais'}
+                  {isAllClosed ? 'Liberar Etapa de Supply Chain (Finalizar)' : 'Tranque todas as Regionais para Finalizar'}
               </button>
             </div>
         </div>
@@ -733,8 +744,8 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                   </td>
                   {colunasData?.map((m: any, i: number) => {
                      
-                     const ancoraBaseFat = totaisBaseAbaAtiva[m.mes_banco]?.fat || 0;
-                     const ancoraBaseVol = totaisBaseAbaAtiva[m.mes_banco]?.vol || 0;
+                     const ancoraBaseFat = totaisAncoraBanco[m.mes_banco]?.fat || 0;
+                     const ancoraBaseVol = totaisAncoraBanco[m.mes_banco]?.vol || 0;
 
                      const simuladoFat = totaisGeraisTelaAtual[m.mes_banco]?.fat || 0;
                      const simuladoVol = totaisGeraisTelaAtual[m.mes_banco]?.vol || 0;
