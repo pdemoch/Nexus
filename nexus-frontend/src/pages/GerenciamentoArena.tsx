@@ -1,9 +1,9 @@
-import React, { useState, useMemo, useEffect, useCallback, Fragment } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import axios from 'axios';
 import { 
-  ChevronRight, ChevronDown, Lock, Unlock, Search, X, 
+  ChevronRight, ChevronDown, Search, 
   Package, Boxes, LayoutGrid, BarChart2, Activity, Shield,
-  Wand2, Target, TrendingUp, TrendingDown, Users, ShieldAlert, Save, Layers
+  Wand2, ShieldAlert, Save, Target
 } from 'lucide-react';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
@@ -13,7 +13,7 @@ const formatVolume = (val: number) => new Intl.NumberFormat('pt-BR').format(Math
 const formatMoeda = (val: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
 
 // =========================================================================
-// COMPONENTES DE INPUT E IA
+// COMPONENTES AUXILIARES
 // =========================================================================
 const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (val: number) => void, disabled: boolean }) => {
   const [localVal, setLocalVal] = useState(value !== undefined && value !== null ? formatVolume(value) : '0');
@@ -41,34 +41,6 @@ const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (v
   );
 };
 
-const PercentInput = ({ pct, onChange, disabled }: { pct: number, onChange: (val: number) => void, disabled: boolean }) => {
-  const [localVal, setLocalVal] = useState(pct.toFixed(2));
-  const [isFocused, setIsFocused] = useState(false);
-
-  useEffect(() => {
-    if (!isFocused) setLocalVal(pct.toFixed(2));
-  }, [pct, isFocused]);
-
-  const handleFocus = () => { setIsFocused(true); };
-  const handleBlur = () => {
-      setIsFocused(false);
-      const parsed = parseFloat(localVal.replace(',', '.')) || 0;
-      onChange(parsed);
-      setLocalVal(parsed.toFixed(2));
-  };
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') e.currentTarget.blur(); };
-
-  return (
-    <div className={`flex items-center gap-1 border rounded px-1.5 py-1 w-20 justify-between transition-colors shadow-inner ${disabled ? 'bg-slate-100 border-slate-200' : 'bg-white border-blue-300 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-500'}`}>
-      <input
-        type="text" value={localVal} disabled={disabled} onFocus={handleFocus} onBlur={handleBlur} onChange={(e) => setLocalVal(e.target.value)} onKeyDown={handleKeyDown}
-        className="w-full bg-transparent border-none text-right text-xs font-bold text-blue-700 outline-none p-0 focus:ring-0"
-      />
-      <span className="text-[10px] font-bold text-slate-400">%</span>
-    </div>
-  );
-};
-
 const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo: string, pmv: number, volume: number, receita: number }) => {
   const [insight, setInsight] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -76,7 +48,7 @@ const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo
   const fetchInsight = async () => {
     setLoading(true);
     try {
-      const prompt = `Gere uma análise executiva de S&OP (máx 3 parágrafos) para a carteira comercial de ${alvo} (Nível: ${tipo}). O volume proposto pelo time é de ${volume} CX, com PMV médio de R$ ${pmv.toFixed(2)} e Receita Projetada de R$ ${receita.toFixed(2)}. Foque em rentabilidade e tendências comerciais.`;
+      const prompt = `Gere uma análise executiva de S&OP (máx 3 parágrafos) para a carteira comercial de ${alvo} (Nível: ${tipo}). O volume proposto pelo time é de ${volume} CX, com PMV médio de R$ ${pmv.toFixed(2)} e Receita Projetada de R$ ${receita.toFixed(2)}. Foque em rentabilidade e tendências comerciais em relação ao Top-Down.`;
       const res = await axios.post('/api/v1/ai-sql/perguntar', { pergunta: prompt });
       setInsight(res.data.resposta);
     } catch (e) { setInsight("Erro ao comunicar com a IA Nexus. Tente novamente."); } 
@@ -106,9 +78,11 @@ const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo
   );
 };
 
+// =========================================================================
+// COMPONENTE PRINCIPAL
+// =========================================================================
 export default function GerenciamentoArena({ usuarioSessao }: any) {
-  const [visaoAtiva, setVisaoAtiva] = useState<'carteira' | 'portfolio'>('carteira');
-  const [dadosBase, setDadosBase] = useState<{ carteira: any[], portfolio: any[] }>({ carteira: [], portfolio: [] });
+  const [dadosBase, setDadosBase] = useState<any[]>([]);
   const [isTopDownFechado, setIsTopDownFechado] = useState(true);
   
   const [busca, setBusca] = useState("");
@@ -120,14 +94,14 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
 
-  const dadosBrutos = visaoAtiva === 'carteira' ? dadosBase.carteira : dadosBase.portfolio;
-  const colunasData = dadosBrutos.length > 0 ? dadosBrutos[0].meses : [];
+  const colunasData = dadosBase.length > 0 ? dadosBase[0].meses : [];
 
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
       const res = await axios.get('/api/v1/consensus/gerenciamento', { params: { nocache: new Date().getTime() } });
-      setDadosBase({ carteira: res.data.dados.carteira || [], portfolio: res.data.dados.portfolio || [] });
+      // Ignoramos a carteira. Usamos apenas o portfólio global.
+      setDadosBase(res.data.dados.portfolio || []);
       setIsTopDownFechado(res.data.is_topdown_fechado);
       setCelulasEditadas({});
     } catch (e) { console.error("Erro ao carregar gerenciamento:", e); } 
@@ -136,36 +110,12 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const handleToggleVisao = (novaVisao: 'carteira' | 'portfolio') => {
-      if (Object.keys(celulasEditadas).length > 0) {
-          if (!confirm("Ao alternar de aba, os rascunhos não salvos serão perdidos. Deseja continuar ou prefere clicar em 'Salvar Rascunho' antes?")) return;
-      }
-      setCelulasEditadas({});
-      setExpanded({});
-      setChartExpanded(null);
-      setBusca(""); 
-      setVisaoAtiva(novaVisao);
-  };
-
-  const isAllClosed = dadosBase.carteira.length > 0 && dadosBase.carteira.every(coord => coord.status === 'Fechado');
-
-  const handleToggleLock = async (regionalNome: string, statusAtual: string) => {
-    const nextStatus = statusAtual === 'Fechado' ? 'Aberto' : 'Fechado';
-    try {
-      await axios.post('/api/v1/consensus/gerenciamento/toggle-lock', { regional: regionalNome, status: nextStatus });
-      fetchData();
-    } catch (e: any) { alert("Erro ao alterar trava da regional: " + e.message); }
-  };
-
-  const gerarPayloadFolhas = (origemNome: string) => {
-    const leafEdits = Object.entries(celulasEditadas).filter(([chave]) => {
-        const parts = chave.split('|').length;
-        return visaoAtiva === 'carteira' ? parts === 4 : parts === 3;
-    });
-
+  const gerarPayloadFolhas = () => {
+    // Portfólio tem 3 níveis: Categoria | Segmento | SKU
+    const leafEdits = Object.entries(celulasEditadas).filter(([chave]) => chave.split('|').length === 3);
     return {
-        origem_ajuste: origemNome,
-        visao: visaoAtiva,
+        origem_ajuste: "Gerência Comercial (Portfólio Global)",
+        visao: 'portfolio',
         ajustes: leafEdits.flatMap(([chave, meses]: any) => 
           Object.entries(meses).map(([mes_projetado, val]: any) => ({
               chave,
@@ -178,29 +128,29 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
   const handleSalvarRascunho = async () => {
     if (Object.keys(celulasEditadas).length === 0) return alert("Nenhuma alteração para salvar.");
-    const payload = gerarPayloadFolhas("Gerência Comercial (Bottom-Up)");
+    const payload = gerarPayloadFolhas();
     if (payload.ajustes.length === 0) return alert("Nenhuma edição detectada na granularidade de SKU.");
     
     try {
       await axios.post(`/api/v1/consensus/gerenciamento/salvar`, payload);
-      alert(visaoAtiva === 'portfolio' ? "Rateio Absoluto do Portfólio salvo com sucesso!" : "Rateio da Carteira salvo com sucesso (Rascunho atualizado).");
+      alert("Rateio Absoluto do Portfólio salvo com sucesso no Banco de Dados!");
       fetchData();
     } catch (e: any) { alert("Erro ao salvar: " + (e.response?.data?.detail || e.message)); }
   };
 
   const handleCongelar = async () => {
-    if (!confirm("Atenção: Esta ação confirmará a sua meta e passará o bastão oficial para a Fábrica (Supply Review). A Janela será trancada. Deseja prosseguir?")) return;
-    const payload = gerarPayloadFolhas("Gerência Comercial (Bottom-Up Final)");
+    if (!confirm("Atenção: Esta ação confirmará o seu portfólio e passará o bastão oficial para a Fábrica (Supply Review). Deseja prosseguir?")) return;
+    const payload = gerarPayloadFolhas();
     
     try {
       await axios.post(`/api/v1/consensus/gerenciamento/congelar`, payload);
-      alert("Gestão Comercial Finalizada! Bastão passado com sucesso para a Fábrica.");
+      alert("Gestão de Portfólio Finalizada! Bastão passado com sucesso para a Fábrica.");
       fetchData();
     } catch (e: any) { alert("Erro ao aprovar: " + (e.response?.data?.detail || e.message)); }
   };
 
   const dadosProcessados = useMemo(() => {
-    let processados = dadosBrutos;
+    let processados = dadosBase;
     if (busca) {
         const lowerTerm = busca.toLowerCase();
         const filtrarArvore = (nodes: any[]): any[] => {
@@ -213,10 +163,10 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                 return null;
             }).filter(Boolean);
         };
-        processados = filtrarArvore(dadosBrutos);
+        processados = filtrarArvore(dadosBase);
     }
     return processados;
-  }, [dadosBrutos, busca]);
+  }, [dadosBase, busca]);
 
   const getDynamicVol = useCallback((row: any, mesBanco: string): number => {
     if (row.tipo === 'produto') {
@@ -237,20 +187,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     return (row.subRows || []).reduce((acc: number, child: any) => acc + getDynamicRec(child, mesBanco), 0);
   }, [getDynamicVol]);
 
-  const totaisAncoraBanco = useMemo(() => {
-    const totais: Record<string, { vol: number, fat: number }> = {};
-    colunasData?.forEach((m: any) => {
-      let vol = 0; let fat = 0;
-      dadosBrutos.forEach((node: any) => {
-        const mesData = node.meses?.find((x: any) => x.mes_banco === m.mes_banco);
-        vol += (mesData?.vol_base || 0); 
-        fat += (mesData?.receita_base || 0);
-      });
-      totais[m.mes_banco] = { vol, fat };
-    });
-    return totais;
-  }, [dadosBrutos, colunasData]);
-
   const totaisGeraisTelaAtual = useMemo(() => {
     const totais: Record<string, { vol: number, fat: number }> = {};
     colunasData?.forEach((m: any) => {
@@ -266,68 +202,29 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
   const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
     if (!isTopDownFechado) return;
-    if (visaoAtiva === 'carteira') {
-        const coordRoot = chaveStr.split('|')[0];
-        const nodeCoord = dadosBase.carteira.find(c => c.nome === coordRoot);
-        if (nodeCoord && nodeCoord.status === 'Fechado') return;
-    } else {
-        if (isAllClosed) return;
-    }
 
     setCelulasEditadas((currentEdits: any) => {
       const nextEdits = { ...currentEdits };
-
-      const getVolActual = (chave: string, originalVol: number) => {
-        if (nextEdits[chave]?.[mesBanco] !== undefined) return nextEdits[chave][mesBanco].novo_volume;
-        return originalVol;
-      };
 
       const distributeDown = (node: any, targetVolume: number) => {
         if (!nextEdits[node.chave_matriz]) nextEdits[node.chave_matriz] = {};
         nextEdits[node.chave_matriz][mesBanco] = { novo_volume: targetVolume };
 
         if (node.subRows && node.subRows.length > 0) {
-          
-          if (visaoAtiva === 'portfolio') {
-             // NOVO RATEIO HISTÓRICO (Portfólio)
-             const totalHist = node.subRows.reduce((acc: number, child: any) => acc + (child.vol_historico_mix || 1), 0);
+           // RATEIO HISTÓRICO: Distribui de cima para baixo com base no mix de vendas do SKU
+           const totalHist = node.subRows.reduce((acc: number, child: any) => acc + (child.vol_historico_mix || 1), 0);
 
-             node.subRows.forEach((child: any, idx: number) => {
-               let childTarget = 0;
-               if (idx === node.subRows.length - 1) {
-                 const allocatedSoFar = node.subRows.slice(0, idx).reduce((sum: number, c: any) => sum + (nextEdits[c.chave_matriz]?.[mesBanco]?.novo_volume || 0), 0);
-                 childTarget = targetVolume - allocatedSoFar;
-               } else {
-                 childTarget = Math.round(((child.vol_historico_mix || 1) / totalHist) * targetVolume);
-               }
-               distributeDown(child, Math.max(0, childTarget));
-             });
-
-          } else {
-             // RATEIO POR DELTA COM VOLUME ATUAL (Carteira)
-             const currentTotalChildren = node.subRows.reduce((acc: number, child: any) => {
-                const childMes = child.meses.find((m: any) => m.mes_banco === mesBanco);
-                return acc + getVolActual(child.chave_matriz, childMes ? childMes.vol_ajustado : 0);
-             }, 0);
-
-             node.subRows.forEach((child: any, idx: number) => {
-                const childMes = child.meses.find((m: any) => m.mes_banco === mesBanco);
-                const childCurrent = getVolActual(child.chave_matriz, childMes ? childMes.vol_ajustado : 0);
-                
-                let childTarget = 0;
-                if (currentTotalChildren > 0) {
-                  if (idx === node.subRows.length - 1) {
-                    const allocatedSoFar = node.subRows.slice(0, idx).reduce((sum: number, c: any) => sum + (nextEdits[c.chave_matriz]?.[mesBanco]?.novo_volume || 0), 0);
-                    childTarget = targetVolume - allocatedSoFar;
-                  } else {
-                    childTarget = Math.round((childCurrent / currentTotalChildren) * targetVolume);
-                  }
-                } else {
-                  childTarget = Math.round(targetVolume / node.subRows.length);
-                }
-                distributeDown(child, Math.max(0, childTarget));
-             });
-          }
+           node.subRows.forEach((child: any, idx: number) => {
+             let childTarget = 0;
+             if (idx === node.subRows.length - 1) {
+               // Maior resto para a última linha para não quebrar decimais
+               const allocatedSoFar = node.subRows.slice(0, idx).reduce((sum: number, c: any) => sum + (nextEdits[c.chave_matriz]?.[mesBanco]?.novo_volume || 0), 0);
+               childTarget = targetVolume - allocatedSoFar;
+             } else {
+               childTarget = Math.round(((child.vol_historico_mix || 1) / totalHist) * targetVolume);
+             }
+             distributeDown(child, Math.max(0, childTarget));
+           });
         }
       };
 
@@ -340,10 +237,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
           if (node.subRows && node.subRows.length > 0) {
             const foundInChild = rollupUp(node.subRows);
             if (foundInChild) {
-              const newTotal = node.subRows.reduce((acc: number, child: any) => {
-                const childMes = child.meses.find((m: any) => m.mes_banco === mesBanco);
-                return acc + getVolActual(child.chave_matriz, childMes ? childMes.vol_ajustado : 0);
-              }, 0);
+              const newTotal = node.subRows.reduce((acc: number, child: any) => acc + getDynamicVol(child, mesBanco), 0);
               if (!nextEdits[node.chave_matriz]) nextEdits[node.chave_matriz] = {};
               nextEdits[node.chave_matriz][mesBanco] = { novo_volume: newTotal };
               return true;
@@ -353,7 +247,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
         return false;
       };
 
-      rollupUp(dadosBrutos);
+      rollupUp(dadosBase);
       return nextEdits;
     });
   };
@@ -366,7 +260,8 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     if (!dadosGraficoCache[chave]) {
       setLoadingGrafico(chave);
       try {
-        const res = await axios.get('/api/v1/consensus/gerenciamento/grafico', { params: { chave_matriz: chave, visao: visaoAtiva } });
+        // Envia visao='portfolio' para puxar globalmente da base
+        const res = await axios.get('/api/v1/consensus/gerenciamento/grafico', { params: { chave_matriz: chave, visao: 'portfolio' } });
         setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
       } catch (e) { console.error(e); }
       finally { setLoadingGrafico(null); }
@@ -402,8 +297,8 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             const rowMes = rowData.meses?.find((m: any) => m.mes_str === d.name);
             return {
                 ...d,
-                TopDown: d.TopDown,
-                SimulacaoBU: rowMes ? getDynamicVol(rowData, rowMes.mes_banco) : d.TopDown
+                TopDown: d.TopDown, // Âncora Estática
+                SimulacaoBU: rowMes ? getDynamicVol(rowData, rowMes.mes_banco) : d.TopDown // Linha dinâmica moldável
             };
         });
     }, [chartData, rowData, celulasEditadas, getDynamicVol]);
@@ -452,7 +347,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                   <Line type="monotone" dataKey="IA" name="Modelo IA" stroke="#ec4899" strokeDasharray="3 3" strokeWidth={2} dot={false} connectNulls={false} />
                   <Line type="monotone" dataKey="CicloAnterior" name="Proposto Lag 1" stroke="#8b5cf6" strokeWidth={2} dot={false} connectNulls={false} />
                   
-                  {/* Linhas de Decisão do Ciclo Atual */}
+                  {/* Linhas de Decisão do Ciclo Atual (Como solicitado) */}
                   <Line type="monotone" dataKey="TopDown" name="Top-Down (Âncora)" stroke="#94a3b8" strokeDasharray="4 4" strokeWidth={2} dot={false} connectNulls={false} />
                   <Line type="monotone" dataKey="SimulacaoBU" name="Sua Proposta (Vol_BU)" stroke="#3b82f6" strokeWidth={3} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
                 </LineChart>
@@ -471,21 +366,8 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     const isExpanded = expanded[row.chave_matriz];
     const hasChildren = row.subRows && row.subRows.length > 0;
     const isProduto = row.tipo === 'produto';
-    
-    let rowStatus = 'Aberto';
-    let isRowFechado = false;
-    
-    if (visaoAtiva === 'carteira') {
-        const coordRoot = row.chave_matriz.split('|')[0];
-        const nodeCoord = dadosBase.carteira.find(c => c.nome === coordRoot);
-        rowStatus = nodeCoord ? nodeCoord.status : 'Aberto';
-        isRowFechado = rowStatus === 'Fechado';
-    } else {
-        isRowFechado = isAllClosed;
-    }
 
     const renderIcon = () => {
-        if (visaoAtiva === 'carteira') return depth === 0 ? <Users className="w-4 h-4" /> : depth === 1 ? <LayoutGrid className="w-4 h-4" /> : depth === 2 ? <Boxes className="w-4 h-4" /> : <Package className="w-4 h-4" />;
         return depth === 0 ? <LayoutGrid className="w-4 h-4" /> : depth === 1 ? <Boxes className="w-4 h-4" /> : <Package className="w-4 h-4" />;
     };
 
@@ -513,64 +395,29 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                  <span className={`text-sm pr-4 ${!isProduto ? 'font-black text-slate-800 tracking-tight' : 'font-semibold text-slate-600'}`}>
                    {row.nome || "INDEFINIDO"}
                  </span>
-                 {depth === 0 && visaoAtiva === 'carteira' && (
-                   <button 
-                     onClick={(e) => { e.stopPropagation(); handleToggleLock(row.nome, rowStatus); }}
-                     className={`text-[10px] font-bold mt-1 flex items-center gap-1 px-2 py-0.5 rounded border transition-colors max-w-max
-                       ${isRowFechado ? 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100' : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'}`}
-                   >
-                      {isRowFechado ? <Lock className="w-3 h-3"/> : <Unlock className="w-3 h-3"/>}
-                      {isRowFechado ? 'TRANCADA (Clique p/ Abrir)' : 'ABERTA (Clique p/ Trancar)'}
-                   </button>
-                 )}
               </div>
             </div>
           </td>
 
           {colunasData?.map((m: any, idx: number) => {
-            const mBase = row.meses?.find((x: any) => x.mes_banco === m.mes_banco);
-            const volBase = visaoAtiva === 'portfolio' ? (mBase?.vol_base || 0) : (mBase?.vol_ajustado || 0);
-            const recBase = visaoAtiva === 'portfolio' ? (mBase?.receita_base || 0) : (mBase?.receita || 0);
-
             const isEdited = celulasEditadas[row.chave_matriz]?.[m.mes_banco] !== undefined;
             const volSimulado = getDynamicVol(row, m.mes_banco);
             const recSimulado = getDynamicRec(row, m.mes_banco);
 
-            const anchorFat = totaisAncoraBanco[m.mes_banco]?.fat || 1; 
-
             return (
-              <td key={idx} className={`p-4 border-l border-slate-100 align-top border-r border-slate-200 ${isRowFechado || !isTopDownFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/20' : 'bg-white'}`}>
-                {visaoAtiva === 'carteira' && depth === 0 ? (
-                  <div className="flex flex-col items-center justify-center">
-                      <PercentInput
-                          pct={(recSimulado / anchorFat) * 100}
-                          disabled={!isTopDownFechado || isRowFechado}
-                          onChange={(newPct) => {
-                              const targetFat = anchorFat * (newPct / 100);
-                              const factor = targetFat / (recBase || 1);
-                              const newVol = Math.round(volBase * factor);
-                              handleEditCell(row.chave_matriz, m.mes_banco, newVol);
-                          }}
+              <td key={idx} className={`p-4 border-l border-slate-100 align-top border-r border-slate-200 ${!isTopDownFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/20' : 'bg-white'}`}>
+                <div className="flex flex-col items-center justify-center">
+                    <div className="w-28 bg-white border border-slate-200 rounded px-2 py-1.5 shadow-sm">
+                      <SmartInput 
+                        value={volSimulado} 
+                        disabled={!isTopDownFechado} 
+                        onChange={(novoVol) => handleEditCell(row.chave_matriz, m.mes_banco, novoVol)} 
                       />
-                      <div className="flex flex-col items-center mt-2">
-                          <span className="text-xs font-bold text-slate-600">{formatVolume(volSimulado)} cx</span>
-                          <span className="text-[10px] font-bold text-emerald-600">{formatMoeda(recSimulado)}</span>
-                      </div>
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center justify-center">
-                      <div className="w-28 bg-white border border-slate-200 rounded px-2 py-1.5 shadow-sm">
-                        <SmartInput 
-                          value={volSimulado} 
-                          disabled={!isTopDownFechado || isRowFechado} 
-                          onChange={(novoVol) => handleEditCell(row.chave_matriz, m.mes_banco, novoVol)} 
-                        />
-                      </div>
-                      <span className="text-[11px] font-bold text-emerald-600 tracking-tight mt-1.5">
-                        {formatMoeda(recSimulado)}
-                      </span>
-                  </div>
-                )}
+                    </div>
+                    <span className="text-[11px] font-bold text-emerald-600 tracking-tight mt-1.5">
+                      {formatMoeda(recSimulado)}
+                    </span>
+                </div>
               </td>
             );
           })}
@@ -596,41 +443,28 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
         <div className="flex items-center justify-between">
             <div>
               <h1 className="text-3xl font-black text-slate-800 tracking-tight flex items-center gap-3">
-                  <Users className="w-8 h-8 text-blue-600" /> Macrociclo <span className="text-blue-600">Comercial</span>
+                  <Target className="w-8 h-8 text-blue-600" /> Macrociclo <span className="text-blue-600">Comercial</span>
               </h1>
-              <p className="text-slate-500 mt-1 font-medium">Gestão Bottom-Up (Top-Down Herança e Captura de Demanda)</p>
+              <p className="text-slate-500 mt-1 font-medium">Gestão Bottom-Up (Portfólio Global)</p>
             </div>
 
             <div className="flex items-center gap-4">
-              <div className="flex items-center bg-slate-200/50 p-1 rounded-xl">
-                  <button onClick={() => handleToggleVisao('portfolio')} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${visaoAtiva === 'portfolio' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
-                      <Layers className="w-4 h-4" /> Portfólio Global (Âncora Corporativa)
-                  </button>
-                  <button onClick={() => handleToggleVisao('carteira')} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${visaoAtiva === 'carteira' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
-                      <Users className="w-4 h-4" /> Carteira Regional (Sua Alçada)
-                  </button>
-              </div>
-
               <button 
                  onClick={handleSalvarRascunho} 
-                 disabled={!isTopDownFechado || isAllClosed} 
+                 disabled={!isTopDownFechado} 
                  className="px-5 py-2.5 font-bold rounded-xl transition-all flex items-center gap-2 border bg-white text-slate-700 border-slate-300 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                   <Save className="w-4 h-4" /> 
-                  Salvar Rascunho / Rateio
+                  Salvar Rascunho
               </button>
 
               <button 
                  onClick={handleCongelar} 
-                 disabled={!isTopDownFechado || !isAllClosed} 
-                 className={`px-6 py-2.5 font-bold rounded-xl shadow-lg transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed text-white
-                   ${isAllClosed 
-                       ? 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-900/20 animate-pulse' 
-                       : 'bg-slate-300 text-slate-500'
-                   }`}
+                 disabled={!isTopDownFechado} 
+                 className="px-6 py-2.5 font-bold rounded-xl shadow-lg transition-all flex items-center gap-2 text-white bg-blue-600 hover:bg-blue-500 shadow-blue-900/20 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                   <Shield className="w-4 h-4" /> 
-                  {isAllClosed ? 'Liberar Etapa de Supply Chain (Finalizar)' : 'Tranque todas as Regionais para Finalizar'}
+                  Finalizar Portfólio (Enviar para Supply)
               </button>
             </div>
         </div>
@@ -640,7 +474,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                 <ShieldAlert className="w-8 h-8 text-amber-500" />
                 <div>
                     <h3 className="font-black uppercase tracking-widest text-sm">Aguardando Diretoria (Fase 1)</h3>
-                    <p className="font-medium text-sm mt-0.5">O processo Bottom-Up encontra-se bloqueado até que o nível Top-Down seja formalizado.</p>
+                    <p className="font-medium text-sm mt-0.5">O processo Bottom-Up encontra-se bloqueado até que a Diretoria aprove a meta Top-Down.</p>
                 </div>
             </div>
         )}
@@ -654,12 +488,12 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             <thead>
               <tr>
                 <th className="bg-slate-900 p-0 border-b border-r border-slate-800 w-[400px]">
-                   <input type="text" placeholder="Pesquisar..." value={busca} onChange={(e) => setBusca(e.target.value)} className="bg-transparent border-none text-white focus:outline-none text-sm w-full p-4" />
+                   <input type="text" placeholder="Pesquisar categoria, segmento ou SKU..." value={busca} onChange={(e) => setBusca(e.target.value)} className="bg-transparent border-none text-white focus:outline-none text-sm w-full p-4" />
                 </th>
                 {colunasData?.map((m: any, i: number) => (
                   <th key={i} className="bg-slate-900 px-4 py-3 border-b border-l-2 border-l-slate-800 text-center">
                       <span className="text-white font-bold text-sm tracking-widest">{m.mes_str}</span>
-                      <div className="text-[9px] text-blue-300 uppercase mt-1">Simulação (BU)</div>
+                      <div className="text-[9px] text-blue-300 uppercase mt-1">Sua Proposta (BU)</div>
                   </th>
                 ))}
               </tr>
@@ -667,7 +501,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
             <tbody>
               {isLoading ? (
-                <tr><td colSpan={(colunasData?.length || 0) + 1} className="p-12 text-center text-slate-400 font-medium">Mapeando Matriz Financeira...</td></tr>
+                <tr><td colSpan={(colunasData?.length || 0) + 1} className="p-12 text-center text-slate-400 font-medium">Mapeando Matriz de Portfólio...</td></tr>
               ) : dadosProcessados.length === 0 ? (
                 <tr><td colSpan={(colunasData?.length || 0) + 1} className="p-12 text-center text-slate-400 font-medium">Nenhum dado encontrado para a sua busca.</td></tr>
               ) : (
@@ -680,33 +514,23 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                 <tr>
                   <td className="px-6 py-5 border-r border-slate-800/50">
                     <div className="flex flex-col">
-                      <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">
-                        {visaoAtiva === 'portfolio' ? 'Faturamento Global Corporativo' : 'Faturamento Total da sua Carteira'}
-                      </span>
+                      <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Total do Portfólio</span>
                       <span className="font-bold text-sm text-white">SUMÁRIO GERENCIAL</span>
                     </div>
                   </td>
                   {colunasData?.map((m: any, i: number) => {
-                     const ancoraBaseFat = totaisAncoraBanco[m.mes_banco]?.fat || 0;
                      const simuladoFat = totaisGeraisTelaAtual[m.mes_banco]?.fat || 0;
                      const simuladoVol = totaisGeraisTelaAtual[m.mes_banco]?.vol || 0;
-                     const currentPct = ancoraBaseFat > 0 ? (simuladoFat / ancoraBaseFat) * 100 : 0;
 
                      return (
                         <td key={i} className="px-4 py-4 border-l-2 border-slate-800 text-center">
                           <div className="flex flex-col items-center">
-                            <span className="font-black text-white text-sm">
+                            <span className="font-black text-white text-base">
                               {formatVolume(simuladoVol)} <span className="text-[10px] text-slate-400 font-medium ml-0.5">cx</span>
                             </span>
                             <span className="font-bold text-emerald-400 text-xs tracking-tight bg-emerald-400/10 px-2 py-0.5 rounded mt-1">
                               {formatMoeda(simuladoFat)}
                             </span>
-                            
-                            {visaoAtiva === 'carteira' && ancoraBaseFat > 0 && (
-                              <span className="font-black text-[10px] px-2 py-0.5 rounded mt-1.5 tracking-wider bg-blue-500/20 text-blue-400">
-                                {currentPct.toFixed(2)}% DA BASE
-                              </span>
-                            )}
                           </div>
                         </td>
                     );
