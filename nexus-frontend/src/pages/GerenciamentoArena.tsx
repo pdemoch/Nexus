@@ -1,19 +1,33 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { 
-  ChevronRight, ChevronDown, Search, 
-  Package, Boxes, LayoutGrid, BarChart2, Activity, Shield,
-  Wand2, ShieldAlert, Save, Target
+  useReactTable, getCoreRowModel, flexRender, getExpandedRowModel, ColumnDef
+} from '@tanstack/react-table';
+import { 
+  ChevronRight, ChevronDown, Package, Boxes, LayoutGrid, 
+  Target, Save, Shield, ShieldAlert, BarChart3, TrendingUp, TrendingDown, ArrowUp, ArrowDown,
+  Activity, Wand2
 } from 'lucide-react';
 import { 
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
+  ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,  
 } from 'recharts';
 
-const formatVolume = (val: number) => new Intl.NumberFormat('pt-BR').format(Math.round(val || 0));
-const formatMoeda = (val: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
+const formatVolume = (val: any) => {
+  const num = Number(val);
+  if (isNaN(num)) return '0';
+  return new Intl.NumberFormat('pt-BR').format(Math.round(num));
+};
+
+const formatMoeda = (val: any) => {
+  const num = Number(val);
+  if (isNaN(num)) return 'R$ 0,00';
+  return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(num));
+};
+
+const calcVar = (atual: number, anterior: number) => anterior > 0 ? ((atual - anterior) / anterior) * 100 : 0;
 
 // =========================================================================
-// COMPONENTES AUXILIARES
+// COMPONENTE DE INPUT (SMART)
 // =========================================================================
 const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (val: number) => void, disabled: boolean }) => {
   const [localVal, setLocalVal] = useState(value !== undefined && value !== null ? formatVolume(value) : '0');
@@ -35,46 +49,9 @@ const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (v
   return (
     <input
       type="text" value={localVal} disabled={disabled} onFocus={handleFocus} onBlur={handleBlur} onKeyDown={handleKeyDown} onChange={(e) => setLocalVal(e.target.value)}
-      className={`w-full bg-transparent border-none text-center focus:outline-none focus:ring-1 focus:ring-blue-500 rounded px-1
-        ${disabled ? 'text-slate-400 font-medium cursor-not-allowed' : 'text-blue-700 font-bold bg-blue-50/50'}`}
+      className={`w-full bg-transparent border-none text-center outline-none text-sm
+        ${disabled ? 'text-slate-400 font-medium cursor-not-allowed' : 'text-blue-700 font-black'}`}
     />
-  );
-};
-
-const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo: string, pmv: number, volume: number, receita: number }) => {
-  const [insight, setInsight] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const fetchInsight = async () => {
-    setLoading(true);
-    try {
-      const prompt = `Gere uma análise executiva de S&OP (máx 3 parágrafos) para a carteira comercial de ${alvo} (Nível: ${tipo}). O volume proposto pelo time é de ${volume} CX, com PMV médio de R$ ${pmv.toFixed(2)} e Receita Projetada de R$ ${receita.toFixed(2)}. Foque em rentabilidade e tendências comerciais em relação ao Top-Down.`;
-      const res = await axios.post('/api/v1/ai-sql/perguntar', { pergunta: prompt });
-      setInsight(res.data.resposta);
-    } catch (e) { setInsight("Erro ao comunicar com a IA Nexus. Tente novamente."); } 
-    finally { setLoading(false); }
-  };
-
-  return (
-    <div className="bg-slate-800 rounded-xl p-5 border border-slate-700 flex flex-col h-full shadow-lg">
-      <div className="flex items-center justify-between mb-4">
-        <h4 className="font-bold text-slate-200 flex items-center gap-2"><Wand2 className="w-4 h-4 text-blue-400" /> Nexus AI Insight 360°</h4>
-        <button onClick={fetchInsight} disabled={loading} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-2">
-          {loading ? "Processando..." : "Gerar Diagnóstico"}
-        </button>
-      </div>
-      <div className="flex-1 text-sm text-slate-300 leading-relaxed overflow-y-auto pr-2">
-        {loading ? (
-          <div className="animate-pulse flex flex-col gap-2">
-             <div className="h-2 bg-slate-700 rounded w-full"></div><div className="h-2 bg-slate-700 rounded w-5/6"></div><div className="h-2 bg-slate-700 rounded w-4/6"></div>
-          </div>
-        ) : insight ? <div className="whitespace-pre-wrap">{insight}</div> : (
-          <div className="flex flex-col items-center justify-center h-full text-slate-500 opacity-50">
-            <Shield className="w-12 h-12 mb-2" /><span>Nenhuma análise gerada.</span>
-          </div>
-        )}
-      </div>
-    </div>
   );
 };
 
@@ -84,15 +61,14 @@ const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo
 export default function GerenciamentoArena({ usuarioSessao }: any) {
   const [dadosBase, setDadosBase] = useState<any[]>([]);
   const [isTopDownFechado, setIsTopDownFechado] = useState(true);
-  
-  const [busca, setBusca] = useState("");
-  const [celulasEditadas, setCelulasEditadas] = useState<any>({});
   const [isLoading, setIsLoading] = useState(false);
   
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [chartExpanded, setChartExpanded] = useState<string | null>(null);
-  const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
-  const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
+  const [celulasEditadas, setCelulasEditadas] = useState<any>({});
+  const [expanded, setExpanded] = useState({});
+  const [rowSelecionada, setRowSelecionada] = useState<any | null>(null);
+  
+  const [chartData, setChartData] = useState<any[]>([]);
+  const [loadingChart, setLoadingChart] = useState(false);
 
   const colunasData = dadosBase.length > 0 ? dadosBase[0].meses : [];
 
@@ -100,80 +76,38 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     setIsLoading(true);
     try {
       const res = await axios.get('/api/v1/consensus/gerenciamento', { params: { nocache: new Date().getTime() } });
-      // Ignoramos a carteira. Usamos apenas o portfólio global.
       setDadosBase(res.data.dados.portfolio || []);
       setIsTopDownFechado(res.data.is_topdown_fechado);
       setCelulasEditadas({});
-    } catch (e) { console.error("Erro ao carregar gerenciamento:", e); } 
+    } catch (e) { console.error("Erro ao carregar:", e); } 
     finally { setIsLoading(false); }
   }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const gerarPayloadFolhas = () => {
-    // Portfólio tem 3 níveis: Categoria | Segmento | SKU
-    const leafEdits = Object.entries(celulasEditadas).filter(([chave]) => chave.split('|').length === 3);
-    return {
-        origem_ajuste: "Gerência Comercial (Portfólio Global)",
-        visao: 'portfolio',
-        ajustes: leafEdits.flatMap(([chave, meses]: any) => 
-          Object.entries(meses).map(([mes_projetado, val]: any) => ({
-              chave,
-              mes_projetado,
-              novo_volume: parseInt(val.novo_volume, 10)
-          }))
-        )
+  // Carregar Gráfico Global ou da Linha Selecionada
+  useEffect(() => {
+    const fetchChart = async () => {
+      setLoadingChart(true);
+      try {
+        const chave = rowSelecionada ? rowSelecionada.chave_matriz : 'ROOT';
+        const res = await axios.get('/api/v1/consensus/gerenciamento/grafico', { params: { chave_matriz: chave } });
+        setChartData(res.data.dados);
+      } catch (e) { console.error(e); }
+      finally { setLoadingChart(false); }
     };
-  };
+    fetchChart();
+  }, [rowSelecionada]);
 
-  const handleSalvarRascunho = async () => {
-    if (Object.keys(celulasEditadas).length === 0) return alert("Nenhuma alteração para salvar.");
-    const payload = gerarPayloadFolhas();
-    if (payload.ajustes.length === 0) return alert("Nenhuma edição detectada na granularidade de SKU.");
-    
-    try {
-      await axios.post(`/api/v1/consensus/gerenciamento/salvar`, payload);
-      alert("Rateio Absoluto do Portfólio salvo com sucesso no Banco de Dados!");
-      fetchData();
-    } catch (e: any) { alert("Erro ao salvar: " + (e.response?.data?.detail || e.message)); }
-  };
-
-  const handleCongelar = async () => {
-    if (!confirm("Atenção: Esta ação confirmará o seu portfólio e passará o bastão oficial para a Fábrica (Supply Review). Deseja prosseguir?")) return;
-    const payload = gerarPayloadFolhas();
-    
-    try {
-      await axios.post(`/api/v1/consensus/gerenciamento/congelar`, payload);
-      alert("Gestão de Portfólio Finalizada! Bastão passado com sucesso para a Fábrica.");
-      fetchData();
-    } catch (e: any) { alert("Erro ao aprovar: " + (e.response?.data?.detail || e.message)); }
-  };
-
-  const dadosProcessados = useMemo(() => {
-    let processados = dadosBase;
-    if (busca) {
-        const lowerTerm = busca.toLowerCase();
-        const filtrarArvore = (nodes: any[]): any[] => {
-            return nodes.map(node => {
-                const matchSelf = (node.nome && String(node.nome).toLowerCase().includes(lowerTerm)) ||
-                                  (node.produto && String(node.produto).toLowerCase().includes(lowerTerm));
-                let childMatches: any[] = []; 
-                if (node.subRows?.length > 0) childMatches = filtrarArvore(node.subRows);
-                if (matchSelf || childMatches.length > 0) return { ...node, subRows: matchSelf ? node.subRows : childMatches };
-                return null;
-            }).filter(Boolean);
-        };
-        processados = filtrarArvore(dadosBase);
-    }
-    return processados;
-  }, [dadosBase, busca]);
-
+  // =========================================================================
+  // LÓGICA DE RATEIO HISTÓRICO (MAIOR RESTO)
+  // =========================================================================
   const getDynamicVol = useCallback((row: any, mesBanco: string): number => {
     if (row.tipo === 'produto') {
-      const edicao = celulasEditadas[row.chave_matriz]?.[mesBanco];
-      if (edicao !== undefined) return isNaN(Number(edicao.novo_volume)) ? 0 : Number(edicao.novo_volume);
+      const ed = celulasEditadas[row.chave_matriz]?.[mesBanco];
+      if (ed !== undefined) return isNaN(Number(ed.novo_volume)) ? 0 : Number(ed.novo_volume);
       const m = row.meses?.find((x: any) => x.mes_banco === mesBanco);
-      return m?.vol_ajustado !== undefined ? Number(m.vol_ajustado) : 0;
+      return m?.vol_bu || 0;
     }
     return (row.subRows || []).reduce((acc: number, child: any) => acc + getDynamicVol(child, mesBanco), 0);
   }, [celulasEditadas]);
@@ -187,22 +121,19 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     return (row.subRows || []).reduce((acc: number, child: any) => acc + getDynamicRec(child, mesBanco), 0);
   }, [getDynamicVol]);
 
-  const totaisGeraisTelaAtual = useMemo(() => {
-    const totais: Record<string, { vol: number, fat: number }> = {};
-    colunasData?.forEach((m: any) => {
-      let vol = 0; let fat = 0;
-      dadosProcessados.forEach((rootNode: any) => {
-        vol += getDynamicVol(rootNode, m.mes_banco);
-        fat += getDynamicRec(rootNode, m.mes_banco);
-      });
-      totais[m.mes_banco] = { vol, fat };
-    });
-    return totais;
-  }, [dadosProcessados, getDynamicVol, getDynamicRec, colunasData]);
+  const getStaticTD = useCallback((row: any, mesBanco: string): { vol: number, rec: number } => {
+    if (row.tipo === 'produto') {
+      const m = row.meses?.find((x: any) => x.mes_banco === mesBanco);
+      return { vol: m?.vol_td || 0, rec: m?.receita_td || 0 };
+    }
+    return (row.subRows || []).reduce((acc: any, child: any) => {
+        const c = getStaticTD(child, mesBanco);
+        return { vol: acc.vol + c.vol, rec: acc.rec + c.rec };
+    }, { vol: 0, rec: 0 });
+  }, []);
 
   const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
     if (!isTopDownFechado) return;
-
     setCelulasEditadas((currentEdits: any) => {
       const nextEdits = { ...currentEdits };
 
@@ -211,13 +142,10 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
         nextEdits[node.chave_matriz][mesBanco] = { novo_volume: targetVolume };
 
         if (node.subRows && node.subRows.length > 0) {
-           // RATEIO HISTÓRICO: Distribui de cima para baixo com base no mix de vendas do SKU
            const totalHist = node.subRows.reduce((acc: number, child: any) => acc + (child.vol_historico_mix || 1), 0);
-
            node.subRows.forEach((child: any, idx: number) => {
              let childTarget = 0;
              if (idx === node.subRows.length - 1) {
-               // Maior resto para a última linha para não quebrar decimais
                const allocatedSoFar = node.subRows.slice(0, idx).reduce((sum: number, c: any) => sum + (nextEdits[c.chave_matriz]?.[mesBanco]?.novo_volume || 0), 0);
                childTarget = targetVolume - allocatedSoFar;
              } else {
@@ -235,8 +163,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             return true;
           }
           if (node.subRows && node.subRows.length > 0) {
-            const foundInChild = rollupUp(node.subRows);
-            if (foundInChild) {
+            if (rollupUp(node.subRows)) {
               const newTotal = node.subRows.reduce((acc: number, child: any) => acc + getDynamicVol(child, mesBanco), 0);
               if (!nextEdits[node.chave_matriz]) nextEdits[node.chave_matriz] = {};
               nextEdits[node.chave_matriz][mesBanco] = { novo_volume: newTotal };
@@ -252,294 +179,318 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     });
   };
 
-  const toggleChart = async (node: any) => {
-    const chave = node.chave_matriz;
-    if (chartExpanded === chave) { setChartExpanded(null); return; }
-    setChartExpanded(chave);
+  // =========================================================================
+  // PREPARAÇÃO DO GRÁFICO (REAL-TIME)
+  // =========================================================================
+  const chartDataDynamic = useMemo(() => {
+    if (!chartData) return [];
+    return chartData.map((d: any) => {
+        // Encontrar o mês correspondente se houver projeção
+        const isProjected = d.TopDown !== null;
+        let dynamicBU = d.BottomUpBase;
+        
+        if (isProjected) {
+           const rootList = rowSelecionada ? [rowSelecionada] : dadosBase;
+           // Calcula o Bottom-up somando em tempo real da tela
+           let totalM = 0;
+           rootList.forEach(r => {
+              const m = r.meses?.find((x: any) => x.mes_str === d.name);
+              if (m) totalM += getDynamicVol(r, m.mes_banco);
+           });
+           dynamicBU = totalM > 0 ? totalM : d.BottomUpBase;
+        }
 
-    if (!dadosGraficoCache[chave]) {
-      setLoadingGrafico(chave);
-      try {
-        // Envia visao='portfolio' para puxar globalmente da base
-        const res = await axios.get('/api/v1/consensus/gerenciamento/grafico', { params: { chave_matriz: chave, visao: 'portfolio' } });
-        setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
-      } catch (e) { console.error(e); }
-      finally { setLoadingGrafico(null); }
-    }
-  };
+        return { ...d, BottomUp: dynamicBU };
+    });
+  }, [chartData, rowSelecionada, celulasEditadas, dadosBase, getDynamicVol]);
 
-  const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
-    const chave = rowData.chave_matriz;
-    const chartData = dadosGraficoCache[chave];
+  const kpiTotais = useMemo(() => {
+    let volTDFull = 0; let volBUFull = 0;
+    colunasData.forEach((m: any) => {
+       dadosBase.forEach(r => {
+          volTDFull += getStaticTD(r, m.mes_banco).vol;
+          volBUFull += getDynamicVol(r, m.mes_banco);
+       });
+    });
+    return { volTDFull, volBUFull };
+  }, [dadosBase, colunasData, getStaticTD, getDynamicVol]);
 
-    const kpis = useMemo(() => {
-      let volBU = 0; let recBU = 0; 
-      let recTopDown = 0; let recIA = 0; let recOrcamento = 0;
-      let pmvAcc = 0; let count = 0;
+  // =========================================================================
+  // COLUNAS TANSTACK TABLE (Idêntico ao Dashboard)
+  // =========================================================================
+  const columns = useMemo<ColumnDef<any>[]>(() => {
+    const cols: ColumnDef<any>[] = [
+      {
+        accessorKey: 'nome',
+        header: 'Hierarquia de Produto',
+        cell: ({ row, getValue }) => {
+          const depth = row.depth;
+          const isExpanded = row.getIsExpanded();
+          const hasChildren = row.getCanExpand();
+          const isProduto = row.original.tipo === 'produto';
 
-      (rowData?.meses || []).forEach((m: any) => {
-          const vFinalBU = getDynamicVol(rowData, m.mes_banco);
-          volBU += vFinalBU;
-          recBU += vFinalBU * (m.pmv || 0);
-          
-          recTopDown += m.receita_base || 0;
-          recIA += (m.vol_ia || 0) * (m.pmv || 0);
-          recOrcamento += m.receita_orcamento || 0; // Extraído de vol_meta no backend
-
-          if(m.pmv) { pmvAcc += m.pmv; count++; }
-      });
-      return { volBU, recBU, recTopDown, recIA, recOrcamento, pmvMedio: count > 0 ? (pmvAcc / count) : 0 };
-    }, [rowData, celulasEditadas, getDynamicVol]);
-
-    const chartDataDynamic = useMemo(() => {
-        if (!chartData) return [];
-        return chartData.map((d: any) => {
-            const rowMes = rowData.meses?.find((m: any) => m.mes_str === d.name);
-            return {
-                ...d,
-                TopDown: d.TopDown, // Âncora Estática
-                SimulacaoBU: rowMes ? getDynamicVol(rowData, rowMes.mes_banco) : d.TopDown // Linha dinâmica moldável
-            };
-        });
-    }, [chartData, rowData, celulasEditadas, getDynamicVol]);
-
-    return (
-      <div className="w-full bg-slate-900 shadow-inner px-8 py-8 border-y border-slate-800">
-        <div className="flex items-center gap-2 mb-6">
-          <Activity className="w-5 h-5 text-blue-400" />
-          <h3 className="font-bold text-lg text-white">Dossiê Tático de Receitas <span className="text-slate-500 font-normal">| {rowData.nome}</span></h3>
-        </div>
-
-        <div className="grid grid-cols-4 gap-4 mb-6">
-          <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
-            <div className="text-xs font-bold text-slate-400 mb-1 uppercase">Top-Down (Diretoria)</div>
-            <div className="text-xl font-black text-slate-300">{formatMoeda(kpis.recTopDown)}</div>
-          </div>
-          <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
-            <div className="text-xs font-bold text-slate-400 mb-1 uppercase">Modelo de IA</div>
-            <div className="text-xl font-black text-slate-300">{formatMoeda(kpis.recIA)}</div>
-          </div>
-          <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
-            <div className="text-xs font-bold text-slate-400 mb-1 uppercase">Orçamento Aprovado</div>
-            <div className="text-xl font-black text-slate-300">{formatMoeda(kpis.recOrcamento)}</div>
-          </div>
-          <div className="bg-blue-900/30 border border-blue-500/50 p-4 rounded-xl shadow-[0_0_15px_rgba(59,130,246,0.1)]">
-            <div className="text-xs font-bold text-blue-400 mb-1 uppercase tracking-wider">Proposta (Vol_BU)</div>
-            <div className="text-2xl font-black text-blue-400">{formatMoeda(kpis.recBU)}</div>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-3 gap-6">
-          <div className="col-span-2 bg-slate-800 border border-slate-700 p-4 rounded-xl h-[340px]">
-            {loadingGrafico === chave ? (
-              <div className="h-full flex items-center justify-center text-slate-500">Extraindo inteligência temporal...</div>
-            ) : chartDataDynamic.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartDataDynamic} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
-                  <XAxis dataKey="name" tick={{fill: '#94a3b8', fontSize: 12}} tickMargin={10} axisLine={false} />
-                  <YAxis tickFormatter={(val) => formatVolume(val)} tick={{fill: '#94a3b8', fontSize: 12}} tickLine={false} axisLine={false} />
-                  <Tooltip contentStyle={{backgroundColor: '#0f172a', borderColor: '#334155', color: '#fff'}} itemStyle={{color: '#fff'}} />
-                  <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} />
-                  
-                  {/* Linhas de Contexto e Histórico Restauradas */}
-                  <Line type="monotone" dataKey="Realizado" name="Vendas (Realizado)" stroke="#f59e0b" strokeWidth={2} dot={false} connectNulls={false} />
-                  <Line type="monotone" dataKey="IA" name="Modelo IA" stroke="#ec4899" strokeDasharray="3 3" strokeWidth={2} dot={false} connectNulls={false} />
-                  <Line type="monotone" dataKey="CicloAnterior" name="Proposto Lag 1" stroke="#8b5cf6" strokeWidth={2} dot={false} connectNulls={false} />
-                  
-                  {/* Linhas de Decisão do Ciclo Atual (Como solicitado) */}
-                  <Line type="monotone" dataKey="TopDown" name="Top-Down (Âncora)" stroke="#94a3b8" strokeDasharray="4 4" strokeWidth={2} dot={false} connectNulls={false} />
-                  <Line type="monotone" dataKey="SimulacaoBU" name="Sua Proposta (Vol_BU)" stroke="#3b82f6" strokeWidth={3} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            ) : null}
-          </div>
-          <div className="col-span-1 h-[340px]">
-             <AiInsightBox alvo={rowData.nome} tipo={rowData.tipo} pmv={kpis.pmvMedio} volume={kpis.volBU} receita={kpis.recBU} />
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  const renderRow = (row: any, depth = 0) => {
-    const isExpanded = expanded[row.chave_matriz];
-    const hasChildren = row.subRows && row.subRows.length > 0;
-    const isProduto = row.tipo === 'produto';
-
-    const renderIcon = () => {
-        return depth === 0 ? <LayoutGrid className="w-4 h-4" /> : depth === 1 ? <Boxes className="w-4 h-4" /> : <Package className="w-4 h-4" />;
-    };
-
-    return (
-      <React.Fragment key={row.chave_matriz}>
-        <tr className={`border-b transition-colors hover:bg-slate-50 ${depth === 0 ? 'bg-white shadow-[inset_0_-1px_0_rgba(0,0,0,0.05)]' : depth === 1 ? 'bg-slate-50/50' : 'bg-white'}`}>
-          
-          <td className="p-0 align-middle border-r border-slate-200">
-            <div style={{ paddingLeft: `${depth * 2 + 1}rem` }} className={`flex items-center gap-3 py-3 min-w-[320px] h-full ${depth === 0 ? 'border-l-4 border-blue-500' : ''}`}>
+          return (
+            <div style={{ paddingLeft: `${depth * 1.5}rem` }} className="flex items-center gap-3 py-2 cursor-pointer group" onClick={() => { setRowSelecionada(row.original); if(hasChildren) row.toggleExpanded(); }}>
               {hasChildren ? (
-                <button onClick={() => setExpanded(p => ({ ...p, [row.chave_matriz]: !p[row.chave_matriz] }))} className="p-1.5 hover:bg-slate-200 text-slate-500 rounded-lg transition-colors">
-                  {isExpanded ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
+                <button className="p-1 hover:bg-slate-200 text-slate-500 rounded transition-colors">
+                  {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                 </button>
-              ) : !isProduto ? <div className="w-8 text-center text-slate-300">•</div> : <div className="w-8" />}
+              ) : <div className="w-6" />}
               
-              <button onClick={() => toggleChart(row)} className={`p-1.5 rounded-lg border transition-colors ${chartExpanded === row.chave_matriz ? 'bg-blue-100 text-blue-600 border-blue-200' : 'hover:bg-slate-100 text-slate-400'}`}>
-                <BarChart2 className="w-4 h-4" />
-              </button>
-
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center border shrink-0 ${depth === 0 ? 'bg-slate-800 text-white' : depth === 1 ? 'bg-slate-100 text-slate-600' : 'bg-blue-50 text-blue-600'}`}>
-                {renderIcon()}
+              <div className={`w-7 h-7 rounded flex items-center justify-center border shrink-0 transition-colors ${rowSelecionada?.chave_matriz === row.original.chave_matriz ? 'bg-blue-600 border-blue-700 text-white' : depth === 0 ? 'bg-slate-800 text-white border-slate-700' : depth === 1 ? 'bg-slate-100 text-slate-600' : 'bg-white border-slate-200 text-slate-400 group-hover:bg-blue-50 group-hover:text-blue-600 group-hover:border-blue-200'}`}>
+                {depth === 0 ? <LayoutGrid className="w-3.5 h-3.5" /> : depth === 1 ? <Boxes className="w-3.5 h-3.5" /> : <Package className="w-3.5 h-3.5" />}
               </div>
               
-              <div className="flex flex-col">
-                 <span className={`text-sm pr-4 ${!isProduto ? 'font-black text-slate-800 tracking-tight' : 'font-semibold text-slate-600'}`}>
-                   {row.nome || "INDEFINIDO"}
-                 </span>
-              </div>
+              <span className={`text-sm pr-4 truncate max-w-[200px] ${rowSelecionada?.chave_matriz === row.original.chave_matriz ? 'text-blue-700 font-black' : !isProduto ? 'font-black text-slate-800' : 'font-semibold text-slate-600'}`}>
+                {getValue() as string}
+              </span>
             </div>
-          </td>
-
-          {colunasData?.map((m: any, idx: number) => {
-            const isEdited = celulasEditadas[row.chave_matriz]?.[m.mes_banco] !== undefined;
-            const volSimulado = getDynamicVol(row, m.mes_banco);
-            const recSimulado = getDynamicRec(row, m.mes_banco);
-
-            return (
-              <td key={idx} className={`p-4 border-l border-slate-100 align-top border-r border-slate-200 ${!isTopDownFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/20' : 'bg-white'}`}>
-                <div className="flex flex-col items-center justify-center">
-                    <div className="w-28 bg-white border border-slate-200 rounded px-2 py-1.5 shadow-sm">
-                      <SmartInput 
-                        value={volSimulado} 
-                        disabled={!isTopDownFechado} 
-                        onChange={(novoVol) => handleEditCell(row.chave_matriz, m.mes_banco, novoVol)} 
-                      />
-                    </div>
-                    <span className="text-[11px] font-bold text-emerald-600 tracking-tight mt-1.5">
-                      {formatMoeda(recSimulado)}
-                    </span>
+          );
+        },
+      },
+      {
+        id: 'hist_m1',
+        header: 'Realizado M-1',
+        cell: ({ row }) => {
+          const v = row.original.historico?.vol_m1 || 0;
+          return (
+            <div className="flex flex-col items-center justify-center py-1">
+              <span className="font-bold text-slate-700 text-sm">{formatVolume(v)}</span>
+              <span className="text-[9px] text-slate-400 font-bold uppercase tracking-widest mt-0.5">Vol Faturado</span>
+            </div>
+          );
+        }
+      },
+      {
+        id: 'hist_a1',
+        header: 'Realizado A-1',
+        cell: ({ row }) => {
+          const vAtual = row.original.historico?.vol_m1 || 0;
+          const vAnt = row.original.historico?.vol_a1 || 0;
+          const variacao = calcVar(vAtual, vAnt);
+          
+          return (
+            <div className="flex flex-col items-center justify-center py-1">
+              <span className="font-bold text-slate-500 text-sm">{formatVolume(vAnt)}</span>
+              {vAnt > 0 && (
+                <div className={`flex items-center gap-0.5 text-[10px] font-black px-1.5 py-0.5 rounded mt-1 ${variacao >= 0 ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'}`}>
+                  {variacao >= 0 ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
+                  {Math.abs(variacao).toFixed(1)}% YoY
                 </div>
-              </td>
-            );
-          })}
-        </tr>
-        
-        {chartExpanded === row.chave_matriz && (
-          <tr>
-            <td colSpan={(colunasData?.length || 0) + 1} className="p-0">
-               <PainelSaudabilidade rowData={row} />
-            </td>
-          </tr>
-        )}
-        
-        {isExpanded && hasChildren && row.subRows.map((child: any) => renderRow(child, depth + 1))}
-      </React.Fragment>
-    );
+              )}
+            </div>
+          );
+        }
+      }
+    ];
+
+    colunasData.forEach((mes: any) => {
+      cols.push({
+        id: mes.mes_banco,
+        header: mes.mes_str,
+        cell: ({ row }) => {
+          const vBU = getDynamicVol(row.original, mes.mes_banco);
+          const rBU = getDynamicRec(row.original, mes.mes_banco);
+          const tdData = getStaticTD(row.original, mes.mes_banco);
+
+          return (
+            <div className="flex flex-col items-center justify-center p-1.5 min-w-[120px]">
+              {/* Referência Fixa Top-Down */}
+              <div className="flex items-center gap-1 text-[10px] font-black text-slate-400 mb-1.5">
+                 <Target className="w-3 h-3 text-slate-300" /> TD: {formatVolume(tdData.vol)}
+              </div>
+              
+              {/* Input Dinâmico Bottom-Up */}
+              <div className={`w-full max-w-[100px] border rounded-lg px-2 py-1.5 shadow-sm transition-colors focus-within:ring-2 focus-within:ring-blue-500/50 focus-within:border-blue-500 ${!isTopDownFechado ? 'bg-slate-50 border-slate-200' : 'bg-white border-blue-200 hover:border-blue-400'}`}>
+                 <SmartInput 
+                    value={vBU} 
+                    onChange={(val) => handleEditCell(row.original.chave_matriz, mes.mes_banco, val)} 
+                    disabled={!isTopDownFechado} 
+                 />
+              </div>
+
+              {/* Receita Bottom-Up */}
+              <span className="text-[10px] font-bold text-blue-600 bg-blue-50/50 px-2 py-0.5 rounded mt-1.5 tracking-tight border border-blue-100">
+                 {formatMoeda(rBU)}
+              </span>
+            </div>
+          );
+        },
+      });
+    });
+
+    return cols;
+  }, [colunasData, celulasEditadas, rowSelecionada, isTopDownFechado]);
+
+  const table = useReactTable({
+    data: dadosBase,
+    columns,
+    state: { expanded },
+    onExpandedChange: setExpanded,
+    getSubRows: row => row.subRows,
+    getCoreRowModel: getCoreRowModel(),
+    getExpandedRowModel: getExpandedRowModel(),
+  });
+
+  // =========================================================================
+  // ACTIONS API
+  // =========================================================================
+  const gerarPayloadFolhas = () => {
+    const leafEdits = Object.entries(celulasEditadas).filter(([chave]) => chave.split('|').length === 3);
+    return {
+        origem_ajuste: "Gerência Comercial (Portfólio Global)", visao: 'portfolio',
+        ajustes: leafEdits.flatMap(([chave, meses]: any) => Object.entries(meses).map(([mes_projetado, val]: any) => ({ chave, mes_projetado, novo_volume: parseInt(val.novo_volume, 10) })))
+    };
+  };
+
+  const handleSalvarRascunho = async () => {
+    if (Object.keys(celulasEditadas).length === 0) return alert("Nenhuma alteração para salvar.");
+    const p = gerarPayloadFolhas();
+    if (p.ajustes.length === 0) return alert("Edite ao menos um volume.");
+    try {
+      await axios.post(`/api/v1/consensus/gerenciamento/salvar`, p);
+      alert("Rateio Absoluto salvo com sucesso no Banco de Dados!");
+      fetchData();
+    } catch (e: any) { alert("Erro ao salvar: " + (e.response?.data?.detail || e.message)); }
+  };
+
+  const handleCongelar = async () => {
+    if (!confirm("Esta ação passará o bastão oficial para Supply Review. Deseja prosseguir?")) return;
+    try {
+      await axios.post(`/api/v1/consensus/gerenciamento/congelar`, gerarPayloadFolhas());
+      alert("Portfólio Trancado e enviado para a Fábrica.");
+      fetchData();
+    } catch (e: any) { alert("Erro ao aprovar: " + (e.response?.data?.detail || e.message)); }
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 p-8 pb-32">
+    <div className="min-h-screen bg-slate-50 p-8 pb-32 font-sans">
       <div className="max-w-[1600px] mx-auto mb-8 flex flex-col gap-6">
         
+        {/* HEADER & ACTIONS */}
         <div className="flex items-center justify-between">
             <div>
               <h1 className="text-3xl font-black text-slate-800 tracking-tight flex items-center gap-3">
-                  <Target className="w-8 h-8 text-blue-600" /> Macrociclo <span className="text-blue-600">Comercial</span>
+                  <BarChart3 className="w-8 h-8 text-blue-600" /> S&OP <span className="text-blue-600">Comercial</span>
               </h1>
-              <p className="text-slate-500 mt-1 font-medium">Gestão Bottom-Up (Portfólio Global)</p>
+              <p className="text-slate-500 mt-1 font-medium">Gestão Bottom-Up (Decisão de Portfólio Global)</p>
             </div>
 
             <div className="flex items-center gap-4">
-              <button 
-                 onClick={handleSalvarRascunho} 
-                 disabled={!isTopDownFechado} 
-                 className="px-5 py-2.5 font-bold rounded-xl transition-all flex items-center gap-2 border bg-white text-slate-700 border-slate-300 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                  <Save className="w-4 h-4" /> 
-                  Salvar Rascunho
+              <button onClick={handleSalvarRascunho} disabled={!isTopDownFechado} className="px-5 py-2.5 font-bold rounded-xl transition-all flex items-center gap-2 border bg-white text-slate-700 border-slate-300 hover:bg-slate-50 disabled:opacity-50">
+                  <Save className="w-4 h-4" /> Salvar Rascunho
               </button>
-
-              <button 
-                 onClick={handleCongelar} 
-                 disabled={!isTopDownFechado} 
-                 className="px-6 py-2.5 font-bold rounded-xl shadow-lg transition-all flex items-center gap-2 text-white bg-blue-600 hover:bg-blue-500 shadow-blue-900/20 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                  <Shield className="w-4 h-4" /> 
-                  Finalizar Portfólio (Enviar para Supply)
+              <button onClick={handleCongelar} disabled={!isTopDownFechado} className="px-6 py-2.5 font-bold rounded-xl shadow-lg transition-all flex items-center gap-2 text-white bg-blue-600 hover:bg-blue-500 shadow-blue-900/20 disabled:opacity-50">
+                  <Shield className="w-4 h-4" /> Finalizar Portfólio (Aprovar)
               </button>
             </div>
         </div>
 
         {!isTopDownFechado && !isLoading && (
-            <div className="bg-amber-50 border border-amber-200 text-amber-800 p-5 rounded-2xl flex items-center gap-4 shadow-sm">
-                <ShieldAlert className="w-8 h-8 text-amber-500" />
-                <div>
-                    <h3 className="font-black uppercase tracking-widest text-sm">Aguardando Diretoria (Fase 1)</h3>
-                    <p className="font-medium text-sm mt-0.5">O processo Bottom-Up encontra-se bloqueado até que a Diretoria aprove a meta Top-Down.</p>
-                </div>
+            <div className="bg-amber-50 border border-amber-200 text-amber-800 p-5 rounded-xl flex items-center gap-4 shadow-sm">
+                <ShieldAlert className="w-6 h-6 text-amber-500" />
+                <div><h3 className="font-bold uppercase text-xs">Bloqueio de Ciclo</h3><p className="text-sm">O modelo Bottom-Up aguarda a formalização Top-Down pela Diretoria.</p></div>
             </div>
         )}
 
-      </div>
-
-      <div className="max-w-[1600px] mx-auto bg-white rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-200 overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
-            
-            <thead>
-              <tr>
-                <th className="bg-slate-900 p-0 border-b border-r border-slate-800 w-[400px]">
-                   <input type="text" placeholder="Pesquisar categoria, segmento ou SKU..." value={busca} onChange={(e) => setBusca(e.target.value)} className="bg-transparent border-none text-white focus:outline-none text-sm w-full p-4" />
-                </th>
-                {colunasData?.map((m: any, i: number) => (
-                  <th key={i} className="bg-slate-900 px-4 py-3 border-b border-l-2 border-l-slate-800 text-center">
-                      <span className="text-white font-bold text-sm tracking-widest">{m.mes_str}</span>
-                      <div className="text-[9px] text-blue-300 uppercase mt-1">Sua Proposta (BU)</div>
-                  </th>
-                ))}
-              </tr>
-            </thead>
-
-            <tbody>
-              {isLoading ? (
-                <tr><td colSpan={(colunasData?.length || 0) + 1} className="p-12 text-center text-slate-400 font-medium">Mapeando Matriz de Portfólio...</td></tr>
-              ) : dadosProcessados.length === 0 ? (
-                <tr><td colSpan={(colunasData?.length || 0) + 1} className="p-12 text-center text-slate-400 font-medium">Nenhum dado encontrado para a sua busca.</td></tr>
-              ) : (
-                dadosProcessados.map(row => renderRow(row))
-              )}
-            </tbody>
-            
-            {dadosProcessados.length > 0 && (
-              <tfoot className="bg-slate-900 sticky bottom-0 z-20 shadow-[0_-10px_40px_rgba(0,0,0,0.1)]">
-                <tr>
-                  <td className="px-6 py-5 border-r border-slate-800/50">
-                    <div className="flex flex-col">
-                      <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Total do Portfólio</span>
-                      <span className="font-bold text-sm text-white">SUMÁRIO GERENCIAL</span>
-                    </div>
-                  </td>
-                  {colunasData?.map((m: any, i: number) => {
-                     const simuladoFat = totaisGeraisTelaAtual[m.mes_banco]?.fat || 0;
-                     const simuladoVol = totaisGeraisTelaAtual[m.mes_banco]?.vol || 0;
-
-                     return (
-                        <td key={i} className="px-4 py-4 border-l-2 border-slate-800 text-center">
-                          <div className="flex flex-col items-center">
-                            <span className="font-black text-white text-base">
-                              {formatVolume(simuladoVol)} <span className="text-[10px] text-slate-400 font-medium ml-0.5">cx</span>
-                            </span>
-                            <span className="font-bold text-emerald-400 text-xs tracking-tight bg-emerald-400/10 px-2 py-0.5 rounded mt-1">
-                              {formatMoeda(simuladoFat)}
-                            </span>
-                          </div>
-                        </td>
-                    );
-                  })}
-                </tr>
-              </tfoot>
-            )}
-          </table>
+        {/* TOP KPI CARDS */}
+        <div className="grid grid-cols-3 gap-6">
+           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 flex flex-col justify-center">
+              <div className="text-xs font-black text-slate-400 uppercase tracking-widest mb-1 flex items-center gap-2"><Target className="w-4 h-4"/> Âncora Diretoria (Total TD)</div>
+              <div className="text-3xl font-black text-slate-800">{formatVolume(kpiTotais.volTDFull)} <span className="text-sm text-slate-400 font-semibold">Caixas</span></div>
+           </div>
+           <div className="bg-blue-600 rounded-2xl shadow-xl shadow-blue-900/10 border border-blue-500 p-6 flex flex-col justify-center relative overflow-hidden">
+              <div className="absolute right-[-10px] top-[-10px] opacity-10"><BarChart3 className="w-32 h-32 text-white" /></div>
+              <div className="text-xs font-black text-blue-200 uppercase tracking-widest mb-1 relative z-10 flex items-center gap-2"><ArrowUp className="w-4 h-4"/> Sua Proposta Atual (Total BU)</div>
+              <div className="text-3xl font-black text-white relative z-10">{formatVolume(kpiTotais.volBUFull)} <span className="text-sm text-blue-200 font-semibold">Caixas</span></div>
+           </div>
+           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 flex flex-col justify-center">
+              <div className="text-xs font-black text-slate-400 uppercase tracking-widest mb-1">Gap Operacional (BU vs TD)</div>
+              <div className={`text-3xl font-black ${kpiTotais.volBUFull >= kpiTotais.volTDFull ? 'text-emerald-500' : 'text-rose-500'}`}>
+                 {formatVolume(kpiTotais.volBUFull - kpiTotais.volTDFull)} <span className="text-sm font-semibold opacity-70">Caixas</span>
+              </div>
+           </div>
         </div>
+
+        {/* MAIN CHART AREA (Like Dashboard) */}
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+            <div className="flex justify-between items-center mb-6">
+              <div>
+                 <h2 className="text-lg font-black text-slate-800 flex items-center gap-2">
+                    <Activity className="w-5 h-5 text-blue-600" /> 
+                    {rowSelecionada ? `Modelagem Temporal: ${rowSelecionada.nome}` : 'Modelagem Temporal: Portfólio Global (Empresa)'}
+                 </h2>
+                 <p className="text-xs font-semibold text-slate-400 mt-1 uppercase tracking-widest">
+                    Clique em qualquer linha da tabela para analisar o seu comportamento.
+                 </p>
+              </div>
+              {rowSelecionada && (
+                 <button onClick={() => setRowSelecionada(null)} className="text-xs font-bold text-blue-600 bg-blue-50 px-3 py-1.5 rounded-lg hover:bg-blue-100 transition-colors">
+                    Ver Empresa Total
+                 </button>
+              )}
+            </div>
+
+            {loadingChart ? (
+               <div className="h-[300px] flex items-center justify-center text-slate-400 font-bold animate-pulse">Consultando Motor Analítico Nexus...</div>
+            ) : chartDataDynamic.length > 0 ? (
+               <ResponsiveContainer width="100%" height={320}>
+                  <ComposedChart data={chartDataDynamic} margin={{ top: 10, right: 10, left: 10, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12, fontWeight: 600}} />
+                    <YAxis tickFormatter={(val) => formatVolume(val)} axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12, fontWeight: 600}} />
+                    <Tooltip 
+                       contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)', backgroundColor: '#1e293b', color: '#fff' }} 
+                       itemStyle={{ color: '#f8fafc', fontWeight: 'bold' }} 
+                       labelStyle={{ color: '#94a3b8', marginBottom: '8px' }}
+                    />
+                    <Legend wrapperStyle={{ paddingTop: '20px' }} iconType="circle" />
+                    
+                    <Bar dataKey="Realizado" name="Histórico Faturado" fill="#cbd5e1" radius={[4, 4, 0, 0]} maxBarSize={40} />
+                    <Line type="monotone" dataKey="TopDown" name="Meta Top-Down (Diretoria)" stroke="#94a3b8" strokeWidth={2} strokeDasharray="6 4" dot={false} connectNulls={false} />
+                    <Line type="monotone" dataKey="BottomUp" name="Sua Proposta Dinâmica (Bottom-Up)" stroke="#3b82f6" strokeWidth={4} dot={{ r: 5, strokeWidth: 2, fill: '#fff', stroke: '#3b82f6' }} activeDot={{ r: 7 }} connectNulls={false} />
+                  </ComposedChart>
+               </ResponsiveContainer>
+            ) : (
+               <div className="h-[300px] flex items-center justify-center text-slate-400">Nenhum dado temporal encontrado.</div>
+            )}
+        </div>
+
+        {/* TANSTACK TABLE (Like Dashboard) */}
+        <div className="bg-white rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-200 overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse whitespace-nowrap">
+              <thead>
+                {table.getHeaderGroups().map(headerGroup => (
+                  <tr key={headerGroup.id}>
+                    {headerGroup.headers.map((header, idx) => (
+                      <th key={header.id} className={`bg-slate-900 py-4 font-black uppercase tracking-widest text-[11px] text-white border-b border-slate-800 ${idx === 0 ? 'px-6 border-r border-slate-800/50' : 'text-center border-l border-slate-800/50'}`}>
+                        {flexRender(header.column.columnDef.header, header.getContext())}
+                      </th>
+                    ))}
+                  </tr>
+                ))}
+              </thead>
+              
+              <tbody>
+                {isLoading ? (
+                  <tr><td colSpan={columns.length} className="p-12 text-center text-slate-400 font-bold">Modelando Estrutura de Rateio...</td></tr>
+                ) : (
+                  table.getRowModel().rows.map(row => (
+                    <tr key={row.id} className={`border-b border-slate-100 transition-colors hover:bg-blue-50/50 ${rowSelecionada?.chave_matriz === row.original.chave_matriz ? 'bg-blue-50/80' : row.depth === 0 ? 'bg-slate-50/50' : 'bg-white'}`}>
+                      {row.getVisibleCells().map((cell, idx) => (
+                        <td key={cell.id} className={`align-middle ${idx === 0 ? 'border-r border-slate-100' : 'border-l border-slate-100'}`}>
+                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                        </td>
+                      ))}
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
       </div>
     </div>
   );
