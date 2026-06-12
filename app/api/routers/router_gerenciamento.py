@@ -100,7 +100,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         q_peso = db.query(FatoVendas.sku, func.sum(FatoVendas.qt_pedido).label('v')).filter(FatoVendas.data_pedido >= data_hist_inicio).group_by(FatoVendas.sku).all()
         peso_hist_dict = {str(r.sku).strip(): int(r.v or 0) for r in q_peso}
 
-        # 1. QUERY CARTEIRA (COM FILTRO RLS DO GERENTE E VOL_TOPDOWN)
+        # 1. QUERY CARTEIRA (COM FILTRO RLS DO GERENTE E VOL_TOPDOWN / VOL_META)
         q_cart = get_truth_query(db, ciclo, data_ini, data_fim)
         if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
             q_cart = q_cart.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
@@ -112,10 +112,11 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
             func.sum(FatoIbpGranular.vol_topdown).label('v_td'),  
             func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), 
+            func.sum(FatoIbpGranular.vol_meta).label('v_meta'), # Orçamento Real
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
         ).group_by(cx, vx, clx, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all()
 
-        # 2. QUERY PORTFÓLIO (GLOBAL E VOL_TOPDOWN)
+        # 2. QUERY PORTFÓLIO (GLOBAL E VOL_TOPDOWN / VOL_META)
         q_port = get_truth_query(db, ciclo, data_ini, data_fim)
         resultados_port = q_port.with_entities(
             DimProduto.categoria.label('cat'), DimProduto.segmento.label('seg'),
@@ -124,6 +125,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
             func.sum(FatoIbpGranular.vol_topdown).label('v_td'),  
             func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), 
+            func.sum(FatoIbpGranular.vol_meta).label('v_meta'), # Orçamento Real
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
         ).group_by(DimProduto.categoria, DimProduto.segmento, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all()
 
@@ -160,6 +162,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             if ms in meses_alvo:
                 v_bu = int(r.v_bu or 0)
                 v_td = int(r.v_td or 0)
+                v_meta = int(r.v_meta or 0) # Real Budget Meta
                 pmv_b = float(r.pmv or 0)
                 v_ant = ant_dict_cart[(cl, sk)][ms]
                 for nivel in [arvore_carteira[co]["meses"][ms], arvore_carteira[co]["vendedores"][ve]["meses"][ms], arvore_carteira[co]["vendedores"][ve]["clientes"][cl]["meses"][ms], arvore_carteira[co]["vendedores"][ve]["clientes"][cl]["produtos"][sk]["meses"][ms]]:
@@ -168,7 +171,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
                     nivel["receita_base"] += (v_td * pmv_b)
                     nivel["vol_ajustado"] += v_bu
                     nivel["receita"] += (v_bu * pmv_b)
-                    nivel["receita_orcamento"] += (v_td * pmv_b) * 1.05 # Mock Orçamento (+5%)
+                    nivel["receita_orcamento"] += (v_meta * pmv_b) # Distribuição granular do Orçamento
                     nivel["vol_anterior"] += v_ant
                     nivel["pmv"] = (nivel["receita"] / nivel["vol_ajustado"]) if nivel["vol_ajustado"] > 0 else pmv_b
 
@@ -196,6 +199,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             if ms in meses_alvo and cat in arvore_port and seg in arvore_port[cat]["segmentos"] and sk in arvore_port[cat]["segmentos"][seg]["produtos"]:
                 v_bu = int(r.v_bu or 0)
                 v_td = int(r.v_td or 0)
+                v_meta = int(r.v_meta or 0) # Real Budget Meta
                 pmv_b = float(r.pmv or 0)
                 v_ant = ant_dict_port[sk][ms]
                 for nivel in [arvore_port[cat]["meses"][ms], arvore_port[cat]["segmentos"][seg]["meses"][ms], arvore_port[cat]["segmentos"][seg]["produtos"][sk]["meses"][ms]]:
@@ -204,7 +208,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
                     nivel["receita_base"] += (v_td * pmv_b)
                     nivel["vol_ajustado"] += v_bu
                     nivel["receita"] += (v_bu * pmv_b)
-                    nivel["receita_orcamento"] += (v_td * pmv_b) * 1.05 # Mock Orçamento (+5%)
+                    nivel["receita_orcamento"] += (v_meta * pmv_b) # Distribuição granular do Orçamento
                     nivel["vol_anterior"] += v_ant
                     nivel["pmv"] = (nivel["receita"] / nivel["vol_ajustado"]) if nivel["vol_ajustado"] > 0 else pmv_b
 

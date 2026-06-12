@@ -389,7 +389,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
           
           recTopDown += m.receita_base || 0;
           recIA += (m.vol_ia || 0) * (m.pmv || 0);
-          recOrcamento += m.receita_orcamento || 0;
+          recOrcamento += m.receita_orcamento || 0; // Extraído de vol_meta no backend
 
           if(m.pmv) { pmvAcc += m.pmv; count++; }
       });
@@ -402,7 +402,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             const rowMes = rowData.meses?.find((m: any) => m.mes_str === d.name);
             return {
                 ...d,
-                TopDown: d.TopDown, // Mantém estático da IA/TopDown base
+                TopDown: d.TopDown,
                 SimulacaoBU: rowMes ? getDynamicVol(rowData, rowMes.mes_banco) : d.TopDown
             };
         });
@@ -447,6 +447,12 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                   <Tooltip contentStyle={{backgroundColor: '#0f172a', borderColor: '#334155', color: '#fff'}} itemStyle={{color: '#fff'}} />
                   <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} />
                   
+                  {/* Linhas de Contexto e Histórico Restauradas */}
+                  <Line type="monotone" dataKey="Realizado" name="Vendas (Realizado)" stroke="#f59e0b" strokeWidth={2} dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="IA" name="Modelo IA" stroke="#ec4899" strokeDasharray="3 3" strokeWidth={2} dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="CicloAnterior" name="Proposto Lag 1" stroke="#8b5cf6" strokeWidth={2} dot={false} connectNulls={false} />
+                  
+                  {/* Linhas de Decisão do Ciclo Atual */}
                   <Line type="monotone" dataKey="TopDown" name="Top-Down (Âncora)" stroke="#94a3b8" strokeDasharray="4 4" strokeWidth={2} dot={false} connectNulls={false} />
                   <Line type="monotone" dataKey="SimulacaoBU" name="Sua Proposta (Vol_BU)" stroke="#3b82f6" strokeWidth={3} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
                 </LineChart>
