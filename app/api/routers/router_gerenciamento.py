@@ -14,6 +14,7 @@ from app.api.routers.router_auth import get_current_user
 
 from app.api.routers.shared_ibp import (
     get_current_cycle,
+    get_previous_cycle,
     get_truth_query,
     check_global_lock,
     parse_date_safe
@@ -58,31 +59,12 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         data_fim = hoje + relativedelta(months=4)
         meses_alvo = [(hoje + relativedelta(months=i)).strftime("%Y-%m-%d") for i in range(2, 5)]
 
-        # LÓGICA M-1 E A-1 PARA A NOVA TABELA DASHBOARD
-        mes_m1_str = (hoje - relativedelta(months=1)).strftime('%Y-%m')
-        mes_a1_str = (hoje - relativedelta(months=13)).strftime('%Y-%m')
-        data_hist_inicio = hoje - relativedelta(months=24) # Para mix histórico
+        data_hist_inicio = hoje - relativedelta(months=24)
         
-        q_hist = db.query(
-            FatoVendas.sku,
-            func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes'),
-            func.sum(FatoVendas.qt_pedido).label('vol'),
-            func.sum(FatoVendas.qt_pedido * FatoVendas.preco_unitario).label('rec')
-        ).filter(FatoVendas.data_pedido >= data_hist_inicio).group_by(FatoVendas.sku, 'mes').all()
+        q_peso = db.query(FatoVendas.sku, func.sum(FatoVendas.qt_pedido).label('v')).filter(FatoVendas.data_pedido >= data_hist_inicio).group_by(FatoVendas.sku).all()
+        peso_hist_dict = {str(r.sku).strip(): int(r.v or 0) for r in q_peso}
 
-        peso_hist_dict = defaultdict(int)
-        hist_cols = defaultdict(lambda: {'vol_m1': 0, 'rec_m1': 0, 'vol_a1': 0, 'rec_a1': 0})
-        
-        for r in q_hist:
-            peso_hist_dict[str(r.sku).strip()] += int(r.vol or 0)
-            if r.mes == mes_m1_str:
-                hist_cols[str(r.sku).strip()]['vol_m1'] = int(r.vol or 0)
-                hist_cols[str(r.sku).strip()]['rec_m1'] = float(r.rec or 0)
-            elif r.mes == mes_a1_str:
-                hist_cols[str(r.sku).strip()]['vol_a1'] = int(r.vol or 0)
-                hist_cols[str(r.sku).strip()]['rec_a1'] = float(r.rec or 0)
-
-        # QUERY PORTFÓLIO GLOBAL (Apenas TD e BU)
+        # QUERY PORTFÓLIO GLOBAL
         q_port = get_truth_query(db, ciclo, data_ini, data_fim)
         resultados_port = q_port.with_entities(
             DimProduto.categoria.label('cat'), DimProduto.segmento.label('seg'),
@@ -94,25 +76,13 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         ).group_by(DimProduto.categoria, DimProduto.segmento, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all()
 
         def criar_meses(): return {"vol_td":0, "receita_td":0, "vol_bu":0, "receita_bu":0, "pmv":0.0}
-        def criar_hist(): return {"vol_m1":0, "rec_m1":0, "vol_a1":0, "rec_a1":0}
 
         arvore_port = {}
         for p in db.query(DimProduto).all():
             cat, seg, sk, de = p.categoria or 'SEM CATEGORIA', p.segmento or 'SEM SEGMENTO', p.sku, p.descricao or 'SEM NOME'
-            if cat not in arvore_port: arvore_port[cat] = {"nome": cat, "tipo": "categoria", "historico": criar_hist(), "meses": {m: criar_meses() for m in meses_alvo}, "segmentos": {}}
-            if seg not in arvore_port[cat]["segmentos"]: arvore_port[cat]["segmentos"][seg] = {"nome": seg, "tipo": "segmento", "historico": criar_hist(), "meses": {m: criar_meses() for m in meses_alvo}, "produtos": {}}
-            if sk not in arvore_port[cat]["segmentos"][seg]["produtos"]: arvore_port[cat]["segmentos"][seg]["produtos"][sk] = {"nome": de, "produto": sk, "tipo": "produto", "historico": criar_hist(), "meses": {m: criar_meses() for m in meses_alvo}}
-
-        # Injetar Histórico nas Folhas e propaga para cima
-        for sk, h in hist_cols.items():
-            for cat_k, cat_v in arvore_port.items():
-                for seg_k, seg_v in cat_v["segmentos"].items():
-                    if sk in seg_v["produtos"]:
-                        for nivel in [cat_v, seg_v, seg_v["produtos"][sk]]:
-                            nivel["historico"]["vol_m1"] += h["vol_m1"]
-                            nivel["historico"]["rec_m1"] += h["rec_m1"]
-                            nivel["historico"]["vol_a1"] += h["vol_a1"]
-                            nivel["historico"]["rec_a1"] += h["rec_a1"]
+            if cat not in arvore_port: arvore_port[cat] = {"nome": cat, "tipo": "categoria", "meses": {m: criar_meses() for m in meses_alvo}, "segmentos": {}}
+            if seg not in arvore_port[cat]["segmentos"]: arvore_port[cat]["segmentos"][seg] = {"nome": seg, "tipo": "segmento", "meses": {m: criar_meses() for m in meses_alvo}, "produtos": {}}
+            if sk not in arvore_port[cat]["segmentos"][seg]["produtos"]: arvore_port[cat]["segmentos"][seg]["produtos"][sk] = {"nome": de, "produto": sk, "tipo": "produto", "meses": {m: criar_meses() for m in meses_alvo}}
 
         # Injetar volumes projetados
         for r in resultados_port:
@@ -133,9 +103,9 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         for cat_k, cat_v in arvore_port.items():
             segs = []
             for seg_k, seg_v in cat_v["segmentos"].items():
-                prods = [{"id": f"{cat_k}|{seg_k}|{sk_k}", "chave_matriz": f"{cat_k}|{seg_k}|{sk_k}", "nome": sk_v["nome"], "produto": sk_k, "tipo": "produto", "historico": sk_v["historico"], "vol_historico_mix": peso_hist_dict.get(sk_k, 1), "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in sk_v["meses"].items()]} for sk_k, sk_v in seg_v["produtos"].items()]
-                segs.append({"id": f"{cat_k}|{seg_k}", "chave_matriz": f"{cat_k}|{seg_k}", "nome": seg_k, "tipo": "segmento", "historico": seg_v["historico"], "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in seg_v["meses"].items()], "subRows": prods})
-            final_portfolio.append({"id": cat_k, "chave_matriz": cat_k, "nome": cat_k, "tipo": "categoria", "historico": cat_v["historico"], "status": "Aberto", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in cat_v["meses"].items()], "subRows": segs})
+                prods = [{"id": f"{cat_k}|{seg_k}|{sk_k}", "chave_matriz": f"{cat_k}|{seg_k}|{sk_k}", "nome": sk_v["nome"], "produto": sk_k, "tipo": "produto", "vol_historico_mix": peso_hist_dict.get(sk_k, 1), "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in sk_v["meses"].items()]} for sk_k, sk_v in seg_v["produtos"].items()]
+                segs.append({"id": f"{cat_k}|{seg_k}", "chave_matriz": f"{cat_k}|{seg_k}", "nome": seg_k, "tipo": "segmento", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in seg_v["meses"].items()], "subRows": prods})
+            final_portfolio.append({"id": cat_k, "chave_matriz": cat_k, "nome": cat_k, "tipo": "categoria", "status": "Aberto", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in cat_v["meses"].items()], "subRows": segs})
 
         return {"status": "success", "is_topdown_fechado": is_topdown_fechado, "dados": {"portfolio": sorted(final_portfolio, key=lambda x: x["nome"])}}
     except Exception as e:
@@ -214,7 +184,7 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
         raise HTTPException(status_code=500, detail=repr(e))
 
 @router.get("/grafico")
-async def grafico_gerenciamento(chave_matriz: str = 'ROOT', visao: str = 'portfolio', db: Session = Depends(get_db)):
+async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depends(get_db)):
     try:
         ciclo_atual = get_current_cycle(db)
         _mes_str, _ano_str = ciclo_atual.split('/')

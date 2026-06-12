@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { 
-  useReactTable, getCoreRowModel, flexRender, getExpandedRowModel, ColumnDef
+  useReactTable, getCoreRowModel, flexRender, getExpandedRowModel, ColumnDef 
 } from '@tanstack/react-table';
 import { 
   ChevronRight, ChevronDown, Package, Boxes, LayoutGrid, 
@@ -9,7 +9,7 @@ import {
   Activity, Wand2
 } from 'lucide-react';
 import { 
-  ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,  
+  ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
 } from 'recharts';
 
 const formatVolume = (val: any) => {
@@ -23,8 +23,6 @@ const formatMoeda = (val: any) => {
   if (isNaN(num)) return 'R$ 0,00';
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(num));
 };
-
-const calcVar = (atual: number, anterior: number) => anterior > 0 ? ((atual - anterior) / anterior) * 100 : 0;
 
 // =========================================================================
 // COMPONENTE DE INPUT (SMART)
@@ -180,18 +178,16 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   };
 
   // =========================================================================
-  // PREPARAÇÃO DO GRÁFICO (REAL-TIME)
+  // PREPARAÇÃO DO GRÁFICO E KPIs
   // =========================================================================
   const chartDataDynamic = useMemo(() => {
     if (!chartData) return [];
     return chartData.map((d: any) => {
-        // Encontrar o mês correspondente se houver projeção
         const isProjected = d.TopDown !== null;
         let dynamicBU = d.BottomUpBase;
         
         if (isProjected) {
            const rootList = rowSelecionada ? [rowSelecionada] : dadosBase;
-           // Calcula o Bottom-up somando em tempo real da tela
            let totalM = 0;
            rootList.forEach(r => {
               const m = r.meses?.find((x: any) => x.mes_str === d.name);
@@ -216,7 +212,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   }, [dadosBase, colunasData, getStaticTD, getDynamicVol]);
 
   // =========================================================================
-  // COLUNAS TANSTACK TABLE (Idêntico ao Dashboard)
+  // COLUNAS TANSTACK TABLE (Apenas M2, M3 e M4)
   // =========================================================================
   const columns = useMemo<ColumnDef<any>[]>(() => {
     const cols: ColumnDef<any>[] = [
@@ -241,49 +237,16 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                 {depth === 0 ? <LayoutGrid className="w-3.5 h-3.5" /> : depth === 1 ? <Boxes className="w-3.5 h-3.5" /> : <Package className="w-3.5 h-3.5" />}
               </div>
               
-              <span className={`text-sm pr-4 truncate max-w-[200px] ${rowSelecionada?.chave_matriz === row.original.chave_matriz ? 'text-blue-700 font-black' : !isProduto ? 'font-black text-slate-800' : 'font-semibold text-slate-600'}`}>
+              <span className={`text-sm pr-4 truncate max-w-[300px] ${rowSelecionada?.chave_matriz === row.original.chave_matriz ? 'text-blue-700 font-black' : !isProduto ? 'font-black text-slate-800' : 'font-semibold text-slate-600'}`}>
                 {getValue() as string}
               </span>
             </div>
           );
         },
-      },
-      {
-        id: 'hist_m1',
-        header: 'Realizado M-1',
-        cell: ({ row }) => {
-          const v = row.original.historico?.vol_m1 || 0;
-          return (
-            <div className="flex flex-col items-center justify-center py-1">
-              <span className="font-bold text-slate-700 text-sm">{formatVolume(v)}</span>
-              <span className="text-[9px] text-slate-400 font-bold uppercase tracking-widest mt-0.5">Vol Faturado</span>
-            </div>
-          );
-        }
-      },
-      {
-        id: 'hist_a1',
-        header: 'Realizado A-1',
-        cell: ({ row }) => {
-          const vAtual = row.original.historico?.vol_m1 || 0;
-          const vAnt = row.original.historico?.vol_a1 || 0;
-          const variacao = calcVar(vAtual, vAnt);
-          
-          return (
-            <div className="flex flex-col items-center justify-center py-1">
-              <span className="font-bold text-slate-500 text-sm">{formatVolume(vAnt)}</span>
-              {vAnt > 0 && (
-                <div className={`flex items-center gap-0.5 text-[10px] font-black px-1.5 py-0.5 rounded mt-1 ${variacao >= 0 ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'}`}>
-                  {variacao >= 0 ? <ArrowUp className="w-2.5 h-2.5" /> : <ArrowDown className="w-2.5 h-2.5" />}
-                  {Math.abs(variacao).toFixed(1)}% YoY
-                </div>
-              )}
-            </div>
-          );
-        }
       }
     ];
 
+    // Adiciona apenas as colunas de projeção (M2, M3, M4)
     colunasData.forEach((mes: any) => {
       cols.push({
         id: mes.mes_banco,
@@ -294,14 +257,14 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
           const tdData = getStaticTD(row.original, mes.mes_banco);
 
           return (
-            <div className="flex flex-col items-center justify-center p-1.5 min-w-[120px]">
+            <div className="flex flex-col items-center justify-center p-1.5 min-w-[140px]">
               {/* Referência Fixa Top-Down */}
               <div className="flex items-center gap-1 text-[10px] font-black text-slate-400 mb-1.5">
                  <Target className="w-3 h-3 text-slate-300" /> TD: {formatVolume(tdData.vol)}
               </div>
               
               {/* Input Dinâmico Bottom-Up */}
-              <div className={`w-full max-w-[100px] border rounded-lg px-2 py-1.5 shadow-sm transition-colors focus-within:ring-2 focus-within:ring-blue-500/50 focus-within:border-blue-500 ${!isTopDownFechado ? 'bg-slate-50 border-slate-200' : 'bg-white border-blue-200 hover:border-blue-400'}`}>
+              <div className={`w-full max-w-[120px] border rounded-lg px-2 py-1.5 shadow-sm transition-colors focus-within:ring-2 focus-within:ring-blue-500/50 focus-within:border-blue-500 ${!isTopDownFechado ? 'bg-slate-50 border-slate-200' : 'bg-white border-blue-200 hover:border-blue-400'}`}>
                  <SmartInput 
                     value={vBU} 
                     onChange={(val) => handleEditCell(row.original.chave_matriz, mes.mes_banco, val)} 
@@ -365,7 +328,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
   return (
     <div className="min-h-screen bg-slate-50 p-8 pb-32 font-sans">
-      <div className="max-w-[1600px] mx-auto mb-8 flex flex-col gap-6">
+      <div className="max-w-[1400px] mx-auto mb-8 flex flex-col gap-6">
         
         {/* HEADER & ACTIONS */}
         <div className="flex items-center justify-between">
@@ -412,7 +375,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
            </div>
         </div>
 
-        {/* MAIN CHART AREA (Like Dashboard) */}
+        {/* MAIN CHART AREA */}
         <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
             <div className="flex justify-between items-center mb-6">
               <div>
@@ -421,7 +384,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                     {rowSelecionada ? `Modelagem Temporal: ${rowSelecionada.nome}` : 'Modelagem Temporal: Portfólio Global (Empresa)'}
                  </h2>
                  <p className="text-xs font-semibold text-slate-400 mt-1 uppercase tracking-widest">
-                    Clique em qualquer linha da tabela para analisar o seu comportamento.
+                    Clique em qualquer linha da tabela abaixo para analisar o histórico e as curvas.
                  </p>
               </div>
               {rowSelecionada && (
@@ -456,7 +419,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             )}
         </div>
 
-        {/* TANSTACK TABLE (Like Dashboard) */}
+        {/* TANSTACK TABLE - APENAS M2, M3 e M4 */}
         <div className="bg-white rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-200 overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse whitespace-nowrap">
