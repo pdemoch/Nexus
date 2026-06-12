@@ -5,11 +5,10 @@ import {
 } from '@tanstack/react-table';
 import { 
   ChevronRight, ChevronDown, Package, Boxes, LayoutGrid, 
-  Target, Save, Shield, ShieldAlert, BarChart3, TrendingUp, TrendingDown, ArrowUp, ArrowDown,
-  Activity, Wand2
+  Target, Save, Shield, ShieldAlert, BarChart3, Activity, Wand2
 } from 'lucide-react';
 import { 
-  ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
 } from 'recharts';
 
 const formatVolume = (val: any) => {
@@ -25,7 +24,7 @@ const formatMoeda = (val: any) => {
 };
 
 // =========================================================================
-// COMPONENTE DE INPUT (SMART)
+// COMPONENTES AUXILIARES
 // =========================================================================
 const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (val: number) => void, disabled: boolean }) => {
   const [localVal, setLocalVal] = useState(value !== undefined && value !== null ? formatVolume(value) : '0');
@@ -53,6 +52,39 @@ const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (v
   );
 };
 
+const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo: string, pmv: number, volume: number, receita: number }) => {
+  const [insight, setInsight] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const fetchInsight = async () => {
+    setLoading(true);
+    try {
+      const prompt = `Gere uma análise executiva de S&OP para ${alvo} (Nível: ${tipo}). Volume BU: ${volume} CX. Receita Projetada: R$ ${receita.toFixed(2)}. Foque em rentabilidade e tendências comerciais comparadas ao Top-Down.`;
+      const res = await axios.post('/api/v1/ai-sql/perguntar', { pergunta: prompt });
+      setInsight(res.data.resposta);
+    } catch (e) { setInsight("Erro ao comunicar com a IA Nexus."); } 
+    finally { setLoading(false); }
+  };
+
+  return (
+    <div className="bg-slate-800 rounded-xl p-5 border border-slate-700 flex flex-col h-full shadow-lg">
+      <div className="flex items-center justify-between mb-4">
+        <h4 className="font-bold text-slate-200 flex items-center gap-2"><Wand2 className="w-4 h-4 text-blue-400" /> Nexus AI Insight 360°</h4>
+        <button onClick={fetchInsight} disabled={loading} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg transition-colors">
+          {loading ? "Processando..." : "Gerar Diagnóstico"}
+        </button>
+      </div>
+      <div className="flex-1 text-sm text-slate-300 leading-relaxed overflow-y-auto pr-2">
+        {loading ? (
+          <div className="animate-pulse flex flex-col gap-2"><div className="h-2 bg-slate-700 rounded w-full"></div><div className="h-2 bg-slate-700 rounded w-5/6"></div></div>
+        ) : insight ? <div className="whitespace-pre-wrap">{insight}</div> : (
+          <div className="flex flex-col items-center justify-center h-full text-slate-500 opacity-50"><Shield className="w-8 h-8 mb-2" /><span>Nenhuma análise gerada.</span></div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // =========================================================================
 // COMPONENTE PRINCIPAL
 // =========================================================================
@@ -63,10 +95,10 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   
   const [celulasEditadas, setCelulasEditadas] = useState<any>({});
   const [expanded, setExpanded] = useState({});
-  const [rowSelecionada, setRowSelecionada] = useState<any | null>(null);
+  const [chartExpanded, setChartExpanded] = useState<string | null>(null);
   
-  const [chartData, setChartData] = useState<any[]>([]);
-  const [loadingChart, setLoadingChart] = useState(false);
+  const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
+  const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
 
   const colunasData = dadosBase.length > 0 ? dadosBase[0].meses : [];
 
@@ -83,22 +115,8 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // Carregar Gráfico Global ou da Linha Selecionada
-  useEffect(() => {
-    const fetchChart = async () => {
-      setLoadingChart(true);
-      try {
-        const chave = rowSelecionada ? rowSelecionada.chave_matriz : 'ROOT';
-        const res = await axios.get('/api/v1/consensus/gerenciamento/grafico', { params: { chave_matriz: chave } });
-        setChartData(res.data.dados);
-      } catch (e) { console.error(e); }
-      finally { setLoadingChart(false); }
-    };
-    fetchChart();
-  }, [rowSelecionada]);
-
   // =========================================================================
-  // LÓGICA DE RATEIO HISTÓRICO (MAIOR RESTO)
+  // LÓGICA DE RATEIO HISTÓRICO E EXTRAÇÃO DINÂMICA
   // =========================================================================
   const getDynamicVol = useCallback((row: any, mesBanco: string): number => {
     if (row.tipo === 'produto') {
@@ -109,15 +127,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     }
     return (row.subRows || []).reduce((acc: number, child: any) => acc + getDynamicVol(child, mesBanco), 0);
   }, [celulasEditadas]);
-
-  const getDynamicRec = useCallback((row: any, mesBanco: string): number => {
-    if (row.tipo === 'produto') {
-      const vol = getDynamicVol(row, mesBanco);
-      const m = row.meses?.find((x: any) => x.mes_banco === mesBanco);
-      return vol * (m?.pmv || 0);
-    }
-    return (row.subRows || []).reduce((acc: number, child: any) => acc + getDynamicRec(child, mesBanco), 0);
-  }, [getDynamicVol]);
 
   const getStaticTD = useCallback((row: any, mesBanco: string): { vol: number, rec: number } => {
     if (row.tipo === 'produto') {
@@ -177,39 +186,115 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     });
   };
 
-  // =========================================================================
-  // PREPARAÇÃO DO GRÁFICO E KPIs
-  // =========================================================================
-  const chartDataDynamic = useMemo(() => {
-    if (!chartData) return [];
-    return chartData.map((d: any) => {
-        const isProjected = d.TopDown !== null;
-        let dynamicBU = d.BottomUpBase;
-        
-        if (isProjected) {
-           const rootList = rowSelecionada ? [rowSelecionada] : dadosBase;
-           let totalM = 0;
-           rootList.forEach(r => {
-              const m = r.meses?.find((x: any) => x.mes_str === d.name);
-              if (m) totalM += getDynamicVol(r, m.mes_banco);
-           });
-           dynamicBU = totalM > 0 ? totalM : d.BottomUpBase;
-        }
+  const toggleChart = async (node: any) => {
+    const chave = node.chave_matriz;
+    if (chartExpanded === chave) { setChartExpanded(null); return; }
+    setChartExpanded(chave);
 
-        return { ...d, BottomUp: dynamicBU };
-    });
-  }, [chartData, rowSelecionada, celulasEditadas, dadosBase, getDynamicVol]);
+    if (!dadosGraficoCache[chave]) {
+      setLoadingGrafico(chave);
+      try {
+        const res = await axios.get('/api/v1/consensus/gerenciamento/grafico', { params: { chave_matriz: chave } });
+        setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
+      } catch (e) { console.error(e); }
+      finally { setLoadingGrafico(null); }
+    }
+  };
 
-  const kpiTotais = useMemo(() => {
-    let volTDFull = 0; let volBUFull = 0;
-    colunasData.forEach((m: any) => {
-       dadosBase.forEach(r => {
-          volTDFull += getStaticTD(r, m.mes_banco).vol;
-          volBUFull += getDynamicVol(r, m.mes_banco);
-       });
-    });
-    return { volTDFull, volBUFull };
-  }, [dadosBase, colunasData, getStaticTD, getDynamicVol]);
+  // =========================================================================
+  // O DOSSIÊ EXPANSÍVEL DA LINHA (Gráfico 100% Linhas e Cards Embutidos)
+  // =========================================================================
+  const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
+    const chave = rowData.chave_matriz;
+    const chartData = dadosGraficoCache[chave];
+
+    const kpis = useMemo(() => {
+      let recBU = 0; let recIA = 0; let recTD = 0; let recMeta = 0; let volBU = 0;
+      let pmvAcc = 0; let count = 0;
+
+      (rowData?.meses || []).forEach((m: any) => {
+          const vBU = getDynamicVol(rowData, m.mes_banco);
+          volBU += vBU;
+          recBU += vBU * (m.pmv || 0);
+          recIA += (m.vol_ia || 0) * (m.pmv || 0);
+          recTD += (m.vol_td || 0) * (m.pmv || 0);
+          recMeta += (m.vol_meta || 0) * (m.pmv || 0);
+
+          if(m.pmv) { pmvAcc += m.pmv; count++; }
+      });
+      return { recBU, recIA, recTD, recMeta, volBU, pmvMedio: count > 0 ? (pmvAcc / count) : 0 };
+    }, [rowData, celulasEditadas, getDynamicVol]);
+
+    const chartDataDynamic = useMemo(() => {
+        if (!chartData) return [];
+        return chartData.map((d: any) => {
+            let dynamicBU = d.BottomUpBase;
+            if (d.TopDown !== null) {
+               const m = rowData.meses?.find((x: any) => x.mes_str === d.name);
+               if (m) dynamicBU = getDynamicVol(rowData, m.mes_banco);
+            }
+            return { ...d, BottomUp: dynamicBU };
+        });
+    }, [chartData, rowData, celulasEditadas, getDynamicVol]);
+
+    return (
+      <div className="w-full bg-slate-900 shadow-inner px-8 py-8 border-y border-slate-800">
+        <div className="flex items-center gap-2 mb-6">
+          <Activity className="w-5 h-5 text-blue-400" />
+          <h3 className="font-bold text-lg text-white">Dossiê Analítico: <span className="text-slate-400 font-normal">{rowData.nome}</span></h3>
+        </div>
+
+        {/* 4 CARDS DE RECEITA (Orçamento garantido por categoria/nível) */}
+        <div className="grid grid-cols-4 gap-4 mb-6">
+          <div className="bg-blue-900/30 border border-blue-500/50 p-4 rounded-xl shadow-[0_0_15px_rgba(59,130,246,0.15)]">
+            <div className="text-[10px] font-black text-blue-400 mb-1 uppercase tracking-widest">Sua Proposta (Vol_BU)</div>
+            <div className="text-xl font-black text-white">{formatMoeda(kpis.recBU)}</div>
+          </div>
+          <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
+            <div className="text-[10px] font-black text-slate-400 mb-1 uppercase tracking-widest">Sinal de IA</div>
+            <div className="text-xl font-black text-slate-300">{formatMoeda(kpis.recIA)}</div>
+          </div>
+          <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
+            <div className="text-[10px] font-black text-slate-400 mb-1 uppercase tracking-widest">Âncora Diretoria (TD)</div>
+            <div className="text-xl font-black text-slate-300">{formatMoeda(kpis.recTD)}</div>
+          </div>
+          <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
+            <div className="text-[10px] font-black text-slate-400 mb-1 uppercase tracking-widest">Orçamento/Budget Oficial</div>
+            <div className="text-xl font-black text-slate-300">{formatMoeda(kpis.recMeta)}</div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-3 gap-6">
+          <div className="col-span-2 bg-slate-800 border border-slate-700 p-4 rounded-xl h-[340px]">
+            {loadingGrafico === chave ? (
+              <div className="h-full flex items-center justify-center text-slate-500 font-bold animate-pulse">Extraindo inteligência temporal (24 meses)...</div>
+            ) : chartDataDynamic.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={chartDataDynamic} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
+                  <XAxis dataKey="name" tick={{fill: '#94a3b8', fontSize: 12}} tickMargin={10} axisLine={false} />
+                  <YAxis tickFormatter={(val) => formatVolume(val)} tick={{fill: '#94a3b8', fontSize: 12}} tickLine={false} axisLine={false} />
+                  <Tooltip contentStyle={{backgroundColor: '#0f172a', borderColor: '#334155', color: '#fff'}} itemStyle={{color: '#fff'}} />
+                  <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} />
+                  
+                  {/* TODAS AS 5 CURVAS EM LINHA */}
+                  <Line type="monotone" dataKey="Realizado" name="Realizado (Histórico)" stroke="#64748b" strokeWidth={2} dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="IA" name="Modelo IA (Baseline)" stroke="#ec4899" strokeDasharray="3 3" strokeWidth={2} dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="CicloAnterior" name="Lag 1 (Ciclo Passado)" stroke="#f59e0b" strokeWidth={2} dot={false} connectNulls={false} />
+                  
+                  <Line type="monotone" dataKey="TopDown" name="Top-Down (Meta Fixo)" stroke="#cbd5e1" strokeDasharray="6 4" strokeWidth={2} dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="BottomUp" name="Sua Proposta Dinâmica (BU)" stroke="#3b82f6" strokeWidth={4} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : null}
+          </div>
+          <div className="col-span-1 h-[340px]">
+             <AiInsightBox alvo={rowData.nome} tipo={rowData.tipo} pmv={kpis.pmvMedio} volume={kpis.volBU} receita={kpis.recBU} />
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   // =========================================================================
   // COLUNAS TANSTACK TABLE (Apenas M2, M3 e M4)
@@ -226,18 +311,26 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
           const isProduto = row.original.tipo === 'produto';
 
           return (
-            <div style={{ paddingLeft: `${depth * 1.5}rem` }} className="flex items-center gap-3 py-2 cursor-pointer group" onClick={() => { setRowSelecionada(row.original); if(hasChildren) row.toggleExpanded(); }}>
+            <div style={{ paddingLeft: `${depth * 1.5}rem` }} className="flex items-center gap-3 py-2">
               {hasChildren ? (
-                <button className="p-1 hover:bg-slate-200 text-slate-500 rounded transition-colors">
+                <button onClick={() => row.toggleExpanded()} className="p-1 hover:bg-slate-200 text-slate-500 rounded transition-colors">
                   {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                 </button>
               ) : <div className="w-6" />}
               
-              <div className={`w-7 h-7 rounded flex items-center justify-center border shrink-0 transition-colors ${rowSelecionada?.chave_matriz === row.original.chave_matriz ? 'bg-blue-600 border-blue-700 text-white' : depth === 0 ? 'bg-slate-800 text-white border-slate-700' : depth === 1 ? 'bg-slate-100 text-slate-600' : 'bg-white border-slate-200 text-slate-400 group-hover:bg-blue-50 group-hover:text-blue-600 group-hover:border-blue-200'}`}>
+              {/* BOTÃO DO GRÁFICO - ACIONA O DOSSIÊ DA LINHA */}
+              <button 
+                 onClick={(e) => { e.stopPropagation(); toggleChart(row.original); }} 
+                 className={`p-1.5 rounded-lg border transition-colors ${chartExpanded === row.original.chave_matriz ? 'bg-blue-100 text-blue-600 border-blue-200' : 'bg-white hover:bg-slate-100 text-slate-400'}`}
+              >
+                <BarChart3 className="w-4 h-4" />
+              </button>
+
+              <div className={`w-7 h-7 rounded flex items-center justify-center border shrink-0 transition-colors ${chartExpanded === row.original.chave_matriz ? 'bg-blue-600 border-blue-700 text-white' : depth === 0 ? 'bg-slate-800 text-white border-slate-700' : depth === 1 ? 'bg-slate-100 text-slate-600' : 'bg-white border-slate-200 text-slate-400'}`}>
                 {depth === 0 ? <LayoutGrid className="w-3.5 h-3.5" /> : depth === 1 ? <Boxes className="w-3.5 h-3.5" /> : <Package className="w-3.5 h-3.5" />}
               </div>
               
-              <span className={`text-sm pr-4 truncate max-w-[300px] ${rowSelecionada?.chave_matriz === row.original.chave_matriz ? 'text-blue-700 font-black' : !isProduto ? 'font-black text-slate-800' : 'font-semibold text-slate-600'}`}>
+              <span className={`text-sm pr-4 truncate max-w-[300px] ${chartExpanded === row.original.chave_matriz ? 'text-blue-700 font-black' : !isProduto ? 'font-black text-slate-800' : 'font-semibold text-slate-600'}`}>
                 {getValue() as string}
               </span>
             </div>
@@ -246,33 +339,27 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
       }
     ];
 
-    // Adiciona apenas as colunas de projeção (M2, M3, M4)
+    // Colunas exclusivas de M2, M3 e M4
     colunasData.forEach((mes: any) => {
       cols.push({
         id: mes.mes_banco,
         header: mes.mes_str,
         cell: ({ row }) => {
           const vBU = getDynamicVol(row.original, mes.mes_banco);
-          const rBU = getDynamicRec(row.original, mes.mes_banco);
           const tdData = getStaticTD(row.original, mes.mes_banco);
+          const pmv = row.original.meses?.find((x: any) => x.mes_banco === mes.mes_banco)?.pmv || 0;
+          const rBU = vBU * pmv;
 
           return (
             <div className="flex flex-col items-center justify-center p-1.5 min-w-[140px]">
-              {/* Referência Fixa Top-Down */}
               <div className="flex items-center gap-1 text-[10px] font-black text-slate-400 mb-1.5">
                  <Target className="w-3 h-3 text-slate-300" /> TD: {formatVolume(tdData.vol)}
               </div>
               
-              {/* Input Dinâmico Bottom-Up */}
               <div className={`w-full max-w-[120px] border rounded-lg px-2 py-1.5 shadow-sm transition-colors focus-within:ring-2 focus-within:ring-blue-500/50 focus-within:border-blue-500 ${!isTopDownFechado ? 'bg-slate-50 border-slate-200' : 'bg-white border-blue-200 hover:border-blue-400'}`}>
-                 <SmartInput 
-                    value={vBU} 
-                    onChange={(val) => handleEditCell(row.original.chave_matriz, mes.mes_banco, val)} 
-                    disabled={!isTopDownFechado} 
-                 />
+                 <SmartInput value={vBU} onChange={(val) => handleEditCell(row.original.chave_matriz, mes.mes_banco, val)} disabled={!isTopDownFechado} />
               </div>
 
-              {/* Receita Bottom-Up */}
               <span className="text-[10px] font-bold text-blue-600 bg-blue-50/50 px-2 py-0.5 rounded mt-1.5 tracking-tight border border-blue-100">
                  {formatMoeda(rBU)}
               </span>
@@ -283,7 +370,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     });
 
     return cols;
-  }, [colunasData, celulasEditadas, rowSelecionada, isTopDownFechado]);
+  }, [colunasData, celulasEditadas, chartExpanded, isTopDownFechado]);
 
   const table = useReactTable({
     data: dadosBase,
@@ -318,10 +405,10 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   };
 
   const handleCongelar = async () => {
-    if (!confirm("Esta ação passará o bastão oficial para Supply Review. Deseja prosseguir?")) return;
+    if (!confirm("Esta ação gravará definitivamente os volumes em vol_supply, vol_final e vol_meta. Deseja prosseguir?")) return;
     try {
       await axios.post(`/api/v1/consensus/gerenciamento/congelar`, gerarPayloadFolhas());
-      alert("Portfólio Trancado e enviado para a Fábrica.");
+      alert("Volumes travados e bastão passado com sucesso!");
       fetchData();
     } catch (e: any) { alert("Erro ao aprovar: " + (e.response?.data?.detail || e.message)); }
   };
@@ -330,13 +417,13 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     <div className="min-h-screen bg-slate-50 p-8 pb-32 font-sans">
       <div className="max-w-[1400px] mx-auto mb-8 flex flex-col gap-6">
         
-        {/* HEADER & ACTIONS */}
-        <div className="flex items-center justify-between">
+        {/* HEADER LIMPO (Sem Cards) */}
+        <div className="flex items-center justify-between mb-4">
             <div>
               <h1 className="text-3xl font-black text-slate-800 tracking-tight flex items-center gap-3">
                   <BarChart3 className="w-8 h-8 text-blue-600" /> S&OP <span className="text-blue-600">Comercial</span>
               </h1>
-              <p className="text-slate-500 mt-1 font-medium">Gestão Bottom-Up (Decisão de Portfólio Global)</p>
+              <p className="text-slate-500 mt-1 font-medium">Modelagem e Decisão de Portfólio Global (Apenas Vol_BU)</p>
             </div>
 
             <div className="flex items-center gap-4">
@@ -344,7 +431,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                   <Save className="w-4 h-4" /> Salvar Rascunho
               </button>
               <button onClick={handleCongelar} disabled={!isTopDownFechado} className="px-6 py-2.5 font-bold rounded-xl shadow-lg transition-all flex items-center gap-2 text-white bg-blue-600 hover:bg-blue-500 shadow-blue-900/20 disabled:opacity-50">
-                  <Shield className="w-4 h-4" /> Finalizar Portfólio (Aprovar)
+                  <Shield className="w-4 h-4" /> Travar e Enviar Volumes
               </button>
             </div>
         </div>
@@ -356,70 +443,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             </div>
         )}
 
-        {/* TOP KPI CARDS */}
-        <div className="grid grid-cols-3 gap-6">
-           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 flex flex-col justify-center">
-              <div className="text-xs font-black text-slate-400 uppercase tracking-widest mb-1 flex items-center gap-2"><Target className="w-4 h-4"/> Âncora Diretoria (Total TD)</div>
-              <div className="text-3xl font-black text-slate-800">{formatVolume(kpiTotais.volTDFull)} <span className="text-sm text-slate-400 font-semibold">Caixas</span></div>
-           </div>
-           <div className="bg-blue-600 rounded-2xl shadow-xl shadow-blue-900/10 border border-blue-500 p-6 flex flex-col justify-center relative overflow-hidden">
-              <div className="absolute right-[-10px] top-[-10px] opacity-10"><BarChart3 className="w-32 h-32 text-white" /></div>
-              <div className="text-xs font-black text-blue-200 uppercase tracking-widest mb-1 relative z-10 flex items-center gap-2"><ArrowUp className="w-4 h-4"/> Sua Proposta Atual (Total BU)</div>
-              <div className="text-3xl font-black text-white relative z-10">{formatVolume(kpiTotais.volBUFull)} <span className="text-sm text-blue-200 font-semibold">Caixas</span></div>
-           </div>
-           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 flex flex-col justify-center">
-              <div className="text-xs font-black text-slate-400 uppercase tracking-widest mb-1">Gap Operacional (BU vs TD)</div>
-              <div className={`text-3xl font-black ${kpiTotais.volBUFull >= kpiTotais.volTDFull ? 'text-emerald-500' : 'text-rose-500'}`}>
-                 {formatVolume(kpiTotais.volBUFull - kpiTotais.volTDFull)} <span className="text-sm font-semibold opacity-70">Caixas</span>
-              </div>
-           </div>
-        </div>
-
-        {/* MAIN CHART AREA */}
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-            <div className="flex justify-between items-center mb-6">
-              <div>
-                 <h2 className="text-lg font-black text-slate-800 flex items-center gap-2">
-                    <Activity className="w-5 h-5 text-blue-600" /> 
-                    {rowSelecionada ? `Modelagem Temporal: ${rowSelecionada.nome}` : 'Modelagem Temporal: Portfólio Global (Empresa)'}
-                 </h2>
-                 <p className="text-xs font-semibold text-slate-400 mt-1 uppercase tracking-widest">
-                    Clique em qualquer linha da tabela abaixo para analisar o histórico e as curvas.
-                 </p>
-              </div>
-              {rowSelecionada && (
-                 <button onClick={() => setRowSelecionada(null)} className="text-xs font-bold text-blue-600 bg-blue-50 px-3 py-1.5 rounded-lg hover:bg-blue-100 transition-colors">
-                    Ver Empresa Total
-                 </button>
-              )}
-            </div>
-
-            {loadingChart ? (
-               <div className="h-[300px] flex items-center justify-center text-slate-400 font-bold animate-pulse">Consultando Motor Analítico Nexus...</div>
-            ) : chartDataDynamic.length > 0 ? (
-               <ResponsiveContainer width="100%" height={320}>
-                  <ComposedChart data={chartDataDynamic} margin={{ top: 10, right: 10, left: 10, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12, fontWeight: 600}} />
-                    <YAxis tickFormatter={(val) => formatVolume(val)} axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12, fontWeight: 600}} />
-                    <Tooltip 
-                       contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)', backgroundColor: '#1e293b', color: '#fff' }} 
-                       itemStyle={{ color: '#f8fafc', fontWeight: 'bold' }} 
-                       labelStyle={{ color: '#94a3b8', marginBottom: '8px' }}
-                    />
-                    <Legend wrapperStyle={{ paddingTop: '20px' }} iconType="circle" />
-                    
-                    <Bar dataKey="Realizado" name="Histórico Faturado" fill="#cbd5e1" radius={[4, 4, 0, 0]} maxBarSize={40} />
-                    <Line type="monotone" dataKey="TopDown" name="Meta Top-Down (Diretoria)" stroke="#94a3b8" strokeWidth={2} strokeDasharray="6 4" dot={false} connectNulls={false} />
-                    <Line type="monotone" dataKey="BottomUp" name="Sua Proposta Dinâmica (Bottom-Up)" stroke="#3b82f6" strokeWidth={4} dot={{ r: 5, strokeWidth: 2, fill: '#fff', stroke: '#3b82f6' }} activeDot={{ r: 7 }} connectNulls={false} />
-                  </ComposedChart>
-               </ResponsiveContainer>
-            ) : (
-               <div className="h-[300px] flex items-center justify-center text-slate-400">Nenhum dado temporal encontrado.</div>
-            )}
-        </div>
-
-        {/* TANSTACK TABLE - APENAS M2, M3 e M4 */}
+        {/* TANSTACK TABLE - VISÃO ÚNICA (M2, M3 e M4 COM DOSSIÊ EXPANSÍVEL) */}
         <div className="bg-white rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-200 overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse whitespace-nowrap">
@@ -440,13 +464,23 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                   <tr><td colSpan={columns.length} className="p-12 text-center text-slate-400 font-bold">Modelando Estrutura de Rateio...</td></tr>
                 ) : (
                   table.getRowModel().rows.map(row => (
-                    <tr key={row.id} className={`border-b border-slate-100 transition-colors hover:bg-blue-50/50 ${rowSelecionada?.chave_matriz === row.original.chave_matriz ? 'bg-blue-50/80' : row.depth === 0 ? 'bg-slate-50/50' : 'bg-white'}`}>
-                      {row.getVisibleCells().map((cell, idx) => (
-                        <td key={cell.id} className={`align-middle ${idx === 0 ? 'border-r border-slate-100' : 'border-l border-slate-100'}`}>
-                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                        </td>
-                      ))}
-                    </tr>
+                    <React.Fragment key={row.id}>
+                      <tr className={`border-b border-slate-100 transition-colors hover:bg-blue-50/50 ${chartExpanded === row.original.chave_matriz ? 'bg-blue-50/80' : row.depth === 0 ? 'bg-slate-50/50' : 'bg-white'}`}>
+                        {row.getVisibleCells().map((cell, idx) => (
+                          <td key={cell.id} className={`align-middle ${idx === 0 ? 'border-r border-slate-100' : 'border-l border-slate-100'}`}>
+                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                          </td>
+                        ))}
+                      </tr>
+                      {/* DOSSIÊ NA LINHA (COM CARDS E GRÁFICO 100% LINHAS) */}
+                      {chartExpanded === row.original.chave_matriz && (
+                        <tr>
+                          <td colSpan={columns.length} className="p-0 border-b-2 border-blue-500">
+                             <PainelSaudabilidade rowData={row.original} />
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   ))
                 )}
               </tbody>

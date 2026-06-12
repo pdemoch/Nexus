@@ -6,7 +6,7 @@ from collections import defaultdict
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import func, or_
+from sqlalchemy import func
 
 from app.core.database import get_db
 from app.models.domain_models import DimProduto, FatoIbpGranular, ControleCiclo, FatoVendas
@@ -59,23 +59,24 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         data_fim = hoje + relativedelta(months=4)
         meses_alvo = [(hoje + relativedelta(months=i)).strftime("%Y-%m-%d") for i in range(2, 5)]
 
-        data_hist_inicio = hoje - relativedelta(months=24)
-        
+        data_hist_inicio = hoje - relativedelta(months=24) # Mix histórico
         q_peso = db.query(FatoVendas.sku, func.sum(FatoVendas.qt_pedido).label('v')).filter(FatoVendas.data_pedido >= data_hist_inicio).group_by(FatoVendas.sku).all()
         peso_hist_dict = {str(r.sku).strip(): int(r.v or 0) for r in q_peso}
 
-        # QUERY PORTFÓLIO GLOBAL
+        # QUERY PORTFÓLIO GLOBAL COM IA E META (Orçamento) PARA O DOSSIÊ
         q_port = get_truth_query(db, ciclo, data_ini, data_fim)
         resultados_port = q_port.with_entities(
             DimProduto.categoria.label('cat'), DimProduto.segmento.label('seg'),
             FatoIbpGranular.sku, DimProduto.descricao.label('prod_desc'),
             FatoIbpGranular.mes_projetado,
+            func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
             func.sum(FatoIbpGranular.vol_topdown).label('v_td'),  
             func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), 
+            func.sum(FatoIbpGranular.vol_meta).label('v_meta'),
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
         ).group_by(DimProduto.categoria, DimProduto.segmento, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all()
 
-        def criar_meses(): return {"vol_td":0, "receita_td":0, "vol_bu":0, "receita_bu":0, "pmv":0.0}
+        def criar_meses(): return {"vol_td":0, "receita_td":0, "vol_bu":0, "receita_bu":0, "vol_ia":0, "receita_ia":0, "vol_meta":0, "receita_meta":0, "pmv":0.0}
 
         arvore_port = {}
         for p in db.query(DimProduto).all():
@@ -90,15 +91,20 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             if ms in meses_alvo and cat in arvore_port and seg in arvore_port[cat]["segmentos"] and sk in arvore_port[cat]["segmentos"][seg]["produtos"]:
                 v_bu = int(r.v_bu or 0)
                 v_td = int(r.v_td or 0)
+                v_ia = int(r.v_ia or 0)
+                v_meta = int(r.v_meta or 0)
                 pmv_b = float(r.pmv or 0)
                 for nivel in [arvore_port[cat]["meses"][ms], arvore_port[cat]["segmentos"][seg]["meses"][ms], arvore_port[cat]["segmentos"][seg]["produtos"][sk]["meses"][ms]]:
                     nivel["vol_td"] += v_td
                     nivel["receita_td"] += (v_td * pmv_b)
                     nivel["vol_bu"] += v_bu
                     nivel["receita_bu"] += (v_bu * pmv_b)
+                    nivel["vol_ia"] += v_ia
+                    nivel["receita_ia"] += (v_ia * pmv_b)
+                    nivel["vol_meta"] += v_meta
+                    nivel["receita_meta"] += (v_meta * pmv_b)
                     nivel["pmv"] = (nivel["receita_bu"] / nivel["vol_bu"]) if nivel["vol_bu"] > 0 else pmv_b
 
-        # Formatar saída JSON
         final_portfolio = []
         for cat_k, cat_v in arvore_port.items():
             segs = []
@@ -136,7 +142,7 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
             for r in q_hist.group_by(FatoVendas.cgc, FatoVendas.sku).all():
                 if r.vol_hist and r.vol_hist > 0: peso_map_global[(r.cgc, r.sku)] = float(r.vol_hist)
 
-        # Rateio Absoluto e Esmagamento do vol_bu
+        # Rateio Absoluto do vol_bu (Exclusivamente BU)
         for ajuste in payload.ajustes:
             dt = parse_date_safe(ajuste.mes_projetado)
             sku = ajuste.chave.split('|')[-1].strip()
@@ -153,11 +159,13 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
                 peso_bruto = peso_map_global.get((linha.cgc, linha.sku), 0)
                 p_val = peso_bruto / total_hist_no if total_hist_no > 0 else 1.0 / len(linhas)
                 inc = target_volume - allocated if i == len(linhas) - 1 else int(round(target_volume * p_val))
+                
+                # Apenas altera o vol_bottomup
                 linha.vol_bottomup = max(0, inc)
                 allocated += inc
 
         db.commit()
-        return {"status": "success", "message": "Proposta de Portfólio consolidada na base de dados."}
+        return {"status": "success", "message": "Proposta de Portfólio (BU) consolidada na base de dados."}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=repr(e))
@@ -168,6 +176,7 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
         if payload.ajustes: await salvar_rascunho_gerencia(payload, db, usuario)
         ciclo = get_current_cycle(db)
         
+        # A Mágica do Transbordo: vol_bu esmaga os volumes seguintes
         db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo).update({
             FatoIbpGranular.vol_supply: FatoIbpGranular.vol_bottomup,
             FatoIbpGranular.vol_final: FatoIbpGranular.vol_bottomup,
@@ -187,19 +196,22 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
 async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depends(get_db)):
     try:
         ciclo_atual = get_current_cycle(db)
+        ciclo_anterior = get_previous_cycle(db)
         _mes_str, _ano_str = ciclo_atual.split('/')
         hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
-        inicio_hist = hoje - relativedelta(months=18)
+        
+        # Histórico de 2 anos (24 meses) e corte IA desde Abril
+        inicio_hist = hoje - relativedelta(months=24)
         m2_comercial = hoje + relativedelta(months=2)
 
         calendario = {}
         curr = inicio_hist
         while curr <= hoje + relativedelta(months=4):
-            calendario[curr.strftime('%Y-%m')] = {"Realizado": None, "TopDown": None, "BottomUpBase": None}
+            calendario[curr.strftime('%Y-%m')] = {"Realizado": None, "TopDown": None, "BottomUpBase": None, "IA": None, "CicloAnterior": None}
             curr += relativedelta(months=1)
 
         q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('realizado')).join(DimProduto, FatoVendas.sku == DimProduto.sku).filter(FatoVendas.data_pedido >= inicio_hist)
-        q_proj = db.query(func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes_ano'), func.sum(FatoIbpGranular.vol_topdown).label('td'), func.sum(FatoIbpGranular.vol_bottomup).label('bu')).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku).filter(FatoIbpGranular.ciclo_sop == ciclo_atual)
+        q_proj = db.query(func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes_ano'), FatoIbpGranular.ciclo_sop, func.sum(FatoIbpGranular.vol_topdown).label('td'), func.sum(FatoIbpGranular.vol_bottomup).label('bu'), func.sum(FatoIbpGranular.vol_ia).label('ia'), func.sum(FatoIbpGranular.vol_final).label('final')).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku).filter(FatoIbpGranular.ciclo_sop.in_([ciclo_atual, ciclo_anterior]))
         
         if chave_matriz != 'ROOT':
             partes_chave = chave_matriz.split('|')
@@ -216,17 +228,28 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
         for row in q_hist.group_by('mes_ano').all():
             if row.mes_ano in calendario: calendario[row.mes_ano]["Realizado"] = int(row.realizado or 0)
 
-        for row in q_proj.group_by('mes_ano').all():
-            if row.mes_ano in calendario:
-                calendario[row.mes_ano]["TopDown"] = int(row.td or 0)
-                calendario[row.mes_ano]["BottomUpBase"] = int(row.bu or 0)
+        proj_por_mes = defaultdict(dict)
+        for row in q_proj.group_by('mes_ano', FatoIbpGranular.ciclo_sop).all():
+            proj_por_mes[row.mes_ano][row.ciclo_sop] = {"td": int(row.td or 0), "bu": int(row.bu or 0), "ia": int(row.ia or 0), "final": int(row.final or 0)}
+
+        for ms in calendario.keys():
+            if ms in proj_por_mes:
+                if ciclo_atual in proj_por_mes[ms]:
+                    calendario[ms]["TopDown"] = proj_por_mes[ms][ciclo_atual]["td"]
+                    calendario[ms]["BottomUpBase"] = proj_por_mes[ms][ciclo_atual]["bu"]
+                    calendario[ms]["IA"] = proj_por_mes[ms][ciclo_atual]["ia"]
+                if ciclo_anterior in proj_por_mes[ms]:
+                    calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_anterior]["final"]
 
         timeline = []
         for ms, v in sorted(calendario.items()):
             mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
+            mostrar_projecoes = mes_dt >= hoje
             timeline.append({
                 "name": ms, "data_iso": f"{ms}-01",
-                "Realizado": None if mes_dt >= hoje else (v["Realizado"] or 0),
+                "Realizado": None if mostrar_projecoes else (v["Realizado"] or 0),
+                "IA": v["IA"] if mostrar_projecoes else None,
+                "CicloAnterior": v["CicloAnterior"] if mostrar_projecoes else None,
                 "TopDown": v["TopDown"] if mes_dt >= m2_comercial else None,
                 "BottomUpBase": v["BottomUpBase"] if mes_dt >= m2_comercial else None 
             })
