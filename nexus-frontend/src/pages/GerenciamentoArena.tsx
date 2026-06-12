@@ -35,7 +35,7 @@ const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (v
   return (
     <input
       type="text" value={localVal} disabled={disabled} onFocus={handleFocus} onBlur={handleBlur} onKeyDown={handleKeyDown} onChange={(e) => setLocalVal(e.target.value)}
-      className={`w-full bg-transparent border-none text-right focus:outline-none focus:ring-1 focus:ring-blue-500 rounded px-1
+      className={`w-full bg-transparent border-none text-center focus:outline-none focus:ring-1 focus:ring-blue-500 rounded px-1
         ${disabled ? 'text-slate-400 font-medium cursor-not-allowed' : 'text-blue-700 font-bold bg-blue-50/50'}`}
     />
   );
@@ -157,12 +157,9 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     } catch (e: any) { alert("Erro ao alterar trava da regional: " + e.message); }
   };
 
-  // OTIMIZAÇÃO: Filtramos para enviar APENAS as folhas (Produtos) para evitar explosão de rede
   const gerarPayloadFolhas = (origemNome: string) => {
     const leafEdits = Object.entries(celulasEditadas).filter(([chave]) => {
         const parts = chave.split('|').length;
-        // No nível carteira: Coord|Vend|Cli|SKU (4 partes)
-        // No nível portfólio: Cat|Seg|SKU (3 partes)
         return visaoAtiva === 'carteira' ? parts === 4 : parts === 3;
     });
 
@@ -186,7 +183,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     
     try {
       await axios.post(`/api/v1/consensus/gerenciamento/salvar`, payload);
-      alert(visaoAtiva === 'portfolio' ? "Rateio Global do Portfólio salvo com sucesso!" : "Rateio da Carteira salvo com sucesso (Rascunho atualizado).");
+      alert(visaoAtiva === 'portfolio' ? "Rateio Absoluto do Portfólio salvo com sucesso!" : "Rateio da Carteira salvo com sucesso (Rascunho atualizado).");
       fetchData();
     } catch (e: any) { alert("Erro ao salvar: " + (e.response?.data?.detail || e.message)); }
   };
@@ -246,18 +243,13 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
       let vol = 0; let fat = 0;
       dadosBrutos.forEach((node: any) => {
         const mesData = node.meses?.find((x: any) => x.mes_banco === m.mes_banco);
-        if (visaoAtiva === 'portfolio') {
-            vol += (mesData?.vol_base || 0); 
-            fat += (mesData?.receita_base || 0);
-        } else {
-            vol += (mesData?.vol_ajustado || 0); 
-            fat += (mesData?.receita || 0);      
-        }
+        vol += (mesData?.vol_base || 0); 
+        fat += (mesData?.receita_base || 0);
       });
       totais[m.mes_banco] = { vol, fat };
     });
     return totais;
-  }, [dadosBrutos, colunasData, visaoAtiva]);
+  }, [dadosBrutos, colunasData]);
 
   const totaisGeraisTelaAtual = useMemo(() => {
     const totais: Record<string, { vol: number, fat: number }> = {};
@@ -295,28 +287,47 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
         nextEdits[node.chave_matriz][mesBanco] = { novo_volume: targetVolume };
 
         if (node.subRows && node.subRows.length > 0) {
-          const currentTotalChildren = node.subRows.reduce((acc: number, child: any) => {
-            const childMes = child.meses.find((m: any) => m.mes_banco === mesBanco);
-            return acc + getVolActual(child.chave_matriz, childMes ? childMes.vol_ajustado : 0);
-          }, 0);
+          
+          if (visaoAtiva === 'portfolio') {
+             // NOVO RATEIO HISTÓRICO (Portfólio)
+             const totalHist = node.subRows.reduce((acc: number, child: any) => acc + (child.vol_historico_mix || 1), 0);
 
-          node.subRows.forEach((child: any, idx: number) => {
-            const childMes = child.meses.find((m: any) => m.mes_banco === mesBanco);
-            const childCurrent = getVolActual(child.chave_matriz, childMes ? childMes.vol_ajustado : 0);
-            
-            let childTarget = 0;
-            if (currentTotalChildren > 0) {
-              if (idx === node.subRows.length - 1) {
-                const allocatedSoFar = node.subRows.slice(0, idx).reduce((sum: number, c: any) => sum + (nextEdits[c.chave_matriz]?.[mesBanco]?.novo_volume || 0), 0);
-                childTarget = targetVolume - allocatedSoFar;
-              } else {
-                childTarget = Math.round((childCurrent / currentTotalChildren) * targetVolume);
-              }
-            } else {
-              childTarget = Math.round(targetVolume / node.subRows.length);
-            }
-            distributeDown(child, Math.max(0, childTarget));
-          });
+             node.subRows.forEach((child: any, idx: number) => {
+               let childTarget = 0;
+               if (idx === node.subRows.length - 1) {
+                 const allocatedSoFar = node.subRows.slice(0, idx).reduce((sum: number, c: any) => sum + (nextEdits[c.chave_matriz]?.[mesBanco]?.novo_volume || 0), 0);
+                 childTarget = targetVolume - allocatedSoFar;
+               } else {
+                 childTarget = Math.round(((child.vol_historico_mix || 1) / totalHist) * targetVolume);
+               }
+               distributeDown(child, Math.max(0, childTarget));
+             });
+
+          } else {
+             // RATEIO POR DELTA COM VOLUME ATUAL (Carteira)
+             const currentTotalChildren = node.subRows.reduce((acc: number, child: any) => {
+                const childMes = child.meses.find((m: any) => m.mes_banco === mesBanco);
+                return acc + getVolActual(child.chave_matriz, childMes ? childMes.vol_ajustado : 0);
+             }, 0);
+
+             node.subRows.forEach((child: any, idx: number) => {
+                const childMes = child.meses.find((m: any) => m.mes_banco === mesBanco);
+                const childCurrent = getVolActual(child.chave_matriz, childMes ? childMes.vol_ajustado : 0);
+                
+                let childTarget = 0;
+                if (currentTotalChildren > 0) {
+                  if (idx === node.subRows.length - 1) {
+                    const allocatedSoFar = node.subRows.slice(0, idx).reduce((sum: number, c: any) => sum + (nextEdits[c.chave_matriz]?.[mesBanco]?.novo_volume || 0), 0);
+                    childTarget = targetVolume - allocatedSoFar;
+                  } else {
+                    childTarget = Math.round((childCurrent / currentTotalChildren) * targetVolume);
+                  }
+                } else {
+                  childTarget = Math.round(targetVolume / node.subRows.length);
+                }
+                distributeDown(child, Math.max(0, childTarget));
+             });
+          }
         }
       };
 
@@ -367,70 +378,59 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     const chartData = dadosGraficoCache[chave];
 
     const kpis = useMemo(() => {
-      let volAtual = 0; let volIA = 0; let rec = 0; let pmvAcc = 0; let count = 0;
+      let volBU = 0; let recBU = 0; 
+      let recTopDown = 0; let recIA = 0; let recOrcamento = 0;
+      let pmvAcc = 0; let count = 0;
+
       (rowData?.meses || []).forEach((m: any) => {
-          const vFinal = getDynamicVol(rowData, m.mes_banco);
-          volAtual += vFinal;
-          volIA += (m.vol_ia || 0);
-          rec += vFinal * (m.pmv || 0);
+          const vFinalBU = getDynamicVol(rowData, m.mes_banco);
+          volBU += vFinalBU;
+          recBU += vFinalBU * (m.pmv || 0);
+          
+          recTopDown += m.receita_base || 0;
+          recIA += (m.vol_ia || 0) * (m.pmv || 0);
+          recOrcamento += m.receita_orcamento || 0;
+
           if(m.pmv) { pmvAcc += m.pmv; count++; }
       });
-      const gap = volAtual - volIA;
-      return { volAtual, volIA, rec, gap, pmvMedio: count > 0 ? (pmvAcc / count) : 0 };
-    }, [rowData, celulasEditadas]);
+      return { volBU, recBU, recTopDown, recIA, recOrcamento, pmvMedio: count > 0 ? (pmvAcc / count) : 0 };
+    }, [rowData, celulasEditadas, getDynamicVol]);
 
-    const CustomTooltip = ({ active, payload, label }: any) => {
-      if (active && payload && payload.length) {
-        return (
-          <div className="bg-slate-900 border border-slate-700 p-4 rounded-xl shadow-2xl z-50">
-            <p className="text-white font-bold mb-3 pb-2 border-b border-slate-700">{label}</p>
-            {payload.map((entry: any, idx: number) => (
-              <div key={idx} className="flex items-center gap-3 py-1">
-                <div className="w-3 h-3 rounded-full" style={{ backgroundColor: entry.color }} />
-                <span className="text-slate-300 text-sm w-36">{entry.name}:</span>
-                <span className="text-white font-bold text-sm">{formatVolume(entry.value)} cx</span>
-              </div>
-            ))}
-          </div>
-        );
-      }
-      return null;
-    };
+    const chartDataDynamic = useMemo(() => {
+        if (!chartData) return [];
+        return chartData.map((d: any) => {
+            const rowMes = rowData.meses?.find((m: any) => m.mes_str === d.name);
+            return {
+                ...d,
+                TopDown: d.TopDown, // Mantém estático da IA/TopDown base
+                SimulacaoBU: rowMes ? getDynamicVol(rowData, rowMes.mes_banco) : d.TopDown
+            };
+        });
+    }, [chartData, rowData, celulasEditadas, getDynamicVol]);
 
     return (
       <div className="w-full bg-slate-900 shadow-inner px-8 py-8 border-y border-slate-800">
         <div className="flex items-center gap-2 mb-6">
           <Activity className="w-5 h-5 text-blue-400" />
-          <h3 className="font-bold text-lg text-white">Dossiê Tático Executivo <span className="text-slate-500 font-normal">| {rowData.nome}</span></h3>
+          <h3 className="font-bold text-lg text-white">Dossiê Tático de Receitas <span className="text-slate-500 font-normal">| {rowData.nome}</span></h3>
         </div>
 
         <div className="grid grid-cols-4 gap-4 mb-6">
           <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
-            <div className="flex items-center gap-2 text-slate-400 mb-2">
-               <Target className="w-4 h-4 text-emerald-400" /> <span className="text-xs font-bold uppercase tracking-wider">Receita Prevista</span>
-            </div>
-            <div className="text-2xl font-black text-white">{formatMoeda(kpis.rec)}</div>
+            <div className="text-xs font-bold text-slate-400 mb-1 uppercase">Top-Down (Diretoria)</div>
+            <div className="text-xl font-black text-slate-300">{formatMoeda(kpis.recTopDown)}</div>
           </div>
           <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
-            <div className="flex items-center gap-2 text-slate-400 mb-2">
-               <Activity className="w-4 h-4 text-blue-400" /> <span className="text-xs font-bold uppercase tracking-wider">Volume Proposto</span>
-            </div>
-            <div className="text-2xl font-black text-white">{formatVolume(kpis.volAtual)} <span className="text-sm font-normal text-slate-500">CX</span></div>
+            <div className="text-xs font-bold text-slate-400 mb-1 uppercase">Modelo de IA</div>
+            <div className="text-xl font-black text-slate-300">{formatMoeda(kpis.recIA)}</div>
           </div>
           <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
-            <div className="flex items-center gap-2 text-slate-400 mb-2">
-               <LayoutGrid className="w-4 h-4 text-purple-400" /> <span className="text-xs font-bold uppercase tracking-wider">PMV Comercial</span>
-            </div>
-            <div className="text-2xl font-black text-white">{formatMoeda(kpis.pmvMedio)}</div>
+            <div className="text-xs font-bold text-slate-400 mb-1 uppercase">Orçamento Aprovado</div>
+            <div className="text-xl font-black text-slate-300">{formatMoeda(kpis.recOrcamento)}</div>
           </div>
-          <div className={`border p-4 rounded-xl ${kpis.gap < 0 ? 'bg-rose-900/20 border-rose-500/30' : 'bg-emerald-900/20 border-emerald-500/30'}`}>
-            <div className="flex items-center gap-2 text-slate-400 mb-2">
-               {kpis.gap < 0 ? <TrendingDown className="w-4 h-4 text-rose-400" /> : <TrendingUp className="w-4 h-4 text-emerald-400" />} 
-               <span className="text-xs font-bold uppercase tracking-wider">GAP Base IA</span>
-            </div>
-            <div className={`text-2xl font-black ${kpis.gap < 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
-              {kpis.gap > 0 ? '+' : ''}{formatVolume(kpis.gap)} <span className="text-sm font-normal opacity-70">CX</span>
-            </div>
+          <div className="bg-blue-900/30 border border-blue-500/50 p-4 rounded-xl shadow-[0_0_15px_rgba(59,130,246,0.1)]">
+            <div className="text-xs font-bold text-blue-400 mb-1 uppercase tracking-wider">Proposta (Vol_BU)</div>
+            <div className="text-2xl font-black text-blue-400">{formatMoeda(kpis.recBU)}</div>
           </div>
         </div>
 
@@ -438,25 +438,23 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
           <div className="col-span-2 bg-slate-800 border border-slate-700 p-4 rounded-xl h-[340px]">
             {loadingGrafico === chave ? (
               <div className="h-full flex items-center justify-center text-slate-500">Extraindo inteligência temporal...</div>
-            ) : chartData ? (
+            ) : chartDataDynamic.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                <LineChart data={chartDataDynamic} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
                   <XAxis dataKey="name" tick={{fill: '#94a3b8', fontSize: 12}} tickMargin={10} axisLine={false} />
                   <YAxis tickFormatter={(val) => formatVolume(val)} tick={{fill: '#94a3b8', fontSize: 12}} tickLine={false} axisLine={false} />
-                  <Tooltip content={<CustomTooltip />} />
+                  <Tooltip contentStyle={{backgroundColor: '#0f172a', borderColor: '#334155', color: '#fff'}} itemStyle={{color: '#fff'}} />
                   <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} />
                   
-                  <Line type="monotone" dataKey="Realizado" name="Histórico Faturado" stroke="#0f172a" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} connectNulls={false} />
-                  <Line type="monotone" dataKey="IA" name="Projeção IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
-                  <Line type="monotone" dataKey="CicloAnterior" name="Ciclo Anterior (Lag 1)" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
-                  <Line type="monotone" dataKey="TopDown" name="Proposta Comercial" stroke="#3b82f6" strokeWidth={3} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
+                  <Line type="monotone" dataKey="TopDown" name="Top-Down (Âncora)" stroke="#94a3b8" strokeDasharray="4 4" strokeWidth={2} dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="SimulacaoBU" name="Sua Proposta (Vol_BU)" stroke="#3b82f6" strokeWidth={3} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
                 </LineChart>
               </ResponsiveContainer>
             ) : null}
           </div>
           <div className="col-span-1 h-[340px]">
-             <AiInsightBox alvo={rowData.nome} tipo={rowData.tipo} pmv={kpis.pmvMedio} volume={kpis.volAtual} receita={kpis.rec} />
+             <AiInsightBox alvo={rowData.nome} tipo={rowData.tipo} pmv={kpis.pmvMedio} volume={kpis.volBU} receita={kpis.recBU} />
           </div>
         </div>
       </div>
@@ -525,7 +523,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
           {colunasData?.map((m: any, idx: number) => {
             const mBase = row.meses?.find((x: any) => x.mes_banco === m.mes_banco);
-            
             const volBase = visaoAtiva === 'portfolio' ? (mBase?.vol_base || 0) : (mBase?.vol_ajustado || 0);
             const recBase = visaoAtiva === 'portfolio' ? (mBase?.receita_base || 0) : (mBase?.receita || 0);
 
@@ -536,63 +533,46 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             const anchorFat = totaisAncoraBanco[m.mes_banco]?.fat || 1; 
 
             return (
-              <React.Fragment key={idx}>
-                <td className="p-3 border-r border-slate-200 bg-slate-50/80 align-middle">
-                   <div className="flex flex-col items-end opacity-70">
-                      <span className="text-xs font-bold text-slate-600">{formatVolume(volBase)} cx</span>
-                      <span className="text-[10px] font-bold text-slate-500 mt-0.5">{formatMoeda(recBase)}</span>
-                   </div>
-                </td>
-
-                <td className={`p-0 border-l border-slate-100 align-top border-r-2 border-r-slate-200 ${isRowFechado || !isTopDownFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/40' : 'bg-white'}`}>
-                  
-                  {visaoAtiva === 'carteira' && depth === 0 ? (
-                    <div className="flex flex-col h-full items-center justify-center p-3">
-                        <PercentInput
-                            pct={(recSimulado / anchorFat) * 100}
-                            disabled={!isTopDownFechado || isRowFechado}
-                            onChange={(newPct) => {
-                                const targetFat = anchorFat * (newPct / 100);
-                                const factor = targetFat / (recBase || 1);
-                                const newVol = Math.round(volBase * factor);
-                                handleEditCell(row.chave_matriz, m.mes_banco, newVol);
-                            }}
+              <td key={idx} className={`p-4 border-l border-slate-100 align-top border-r border-slate-200 ${isRowFechado || !isTopDownFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/20' : 'bg-white'}`}>
+                {visaoAtiva === 'carteira' && depth === 0 ? (
+                  <div className="flex flex-col items-center justify-center">
+                      <PercentInput
+                          pct={(recSimulado / anchorFat) * 100}
+                          disabled={!isTopDownFechado || isRowFechado}
+                          onChange={(newPct) => {
+                              const targetFat = anchorFat * (newPct / 100);
+                              const factor = targetFat / (recBase || 1);
+                              const newVol = Math.round(volBase * factor);
+                              handleEditCell(row.chave_matriz, m.mes_banco, newVol);
+                          }}
+                      />
+                      <div className="flex flex-col items-center mt-2">
+                          <span className="text-xs font-bold text-slate-600">{formatVolume(volSimulado)} cx</span>
+                          <span className="text-[10px] font-bold text-emerald-600">{formatMoeda(recSimulado)}</span>
+                      </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center">
+                      <div className="w-28 bg-white border border-slate-200 rounded px-2 py-1.5 shadow-sm">
+                        <SmartInput 
+                          value={volSimulado} 
+                          disabled={!isTopDownFechado || isRowFechado} 
+                          onChange={(novoVol) => handleEditCell(row.chave_matriz, m.mes_banco, novoVol)} 
                         />
-                        <div className="flex flex-col items-center mt-2">
-                           <span className="text-xs font-bold text-slate-600">{formatVolume(volSimulado)} cx</span>
-                           <span className="text-[10px] font-bold text-emerald-600">{formatMoeda(recSimulado)}</span>
-                        </div>
-                    </div>
-                  ) : (
-                    <div className="flex flex-col h-full">
-                      <div className="px-2 py-1 border-b border-slate-100/50 flex justify-center gap-2 items-center bg-slate-50/50">
-                        <span className="text-[9px] font-bold text-slate-400 bg-slate-200/40 px-1.5 py-0.5 rounded" title="IA">IA: {formatVolume(mBase?.vol_ia || 0)}</span>
-                        <span className="text-[9px] font-bold text-purple-400 bg-purple-50 px-1.5 py-0.5 rounded" title="Ciclo Anterior">Lag: {formatVolume(mBase?.vol_anterior || 0)}</span>
                       </div>
-                      
-                      <div className="px-4 py-2 flex flex-col items-end justify-center flex-1">
-                        <div className="w-24">
-                          <SmartInput 
-                            value={volSimulado} 
-                            disabled={!isTopDownFechado || isRowFechado} 
-                            onChange={(novoVol) => handleEditCell(row.chave_matriz, m.mes_banco, novoVol)} 
-                          />
-                        </div>
-                        <span className="text-[10px] font-bold text-emerald-500 tracking-tight pr-1 mt-0.5">
-                          {formatMoeda(recSimulado)}
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                </td>
-              </React.Fragment>
+                      <span className="text-[11px] font-bold text-emerald-600 tracking-tight mt-1.5">
+                        {formatMoeda(recSimulado)}
+                      </span>
+                  </div>
+                )}
+              </td>
             );
           })}
         </tr>
         
         {chartExpanded === row.chave_matriz && (
           <tr>
-            <td colSpan={(colunasData?.length * 2 || 0) + 1} className="p-0">
+            <td colSpan={(colunasData?.length || 0) + 1} className="p-0">
                <PainelSaudabilidade rowData={row} />
             </td>
           </tr>
@@ -625,7 +605,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                   </button>
               </div>
 
-              {/* BOTÃO 1: SALVAR RASCUNHO */}
               <button 
                  onClick={handleSalvarRascunho} 
                  disabled={!isTopDownFechado || isAllClosed} 
@@ -635,7 +614,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                   Salvar Rascunho / Rateio
               </button>
 
-              {/* BOTÃO 2: FINALIZAR E ABRIR A FÁBRICA */}
               <button 
                  onClick={handleCongelar} 
                  disabled={!isTopDownFechado || !isAllClosed} 
@@ -669,37 +647,23 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             
             <thead>
               <tr>
-                <th rowSpan={2} className="bg-slate-900 p-0 border-b border-r border-slate-800 w-[400px] align-bottom">
-                  <div className="flex items-center gap-3 px-6 py-4">
-                    <Search className="w-5 h-5 text-slate-400" />
-                    <input type="text" placeholder="Pesquisar..." value={busca} onChange={(e) => setBusca(e.target.value)} className="bg-transparent border-none text-white focus:outline-none text-sm w-full" />
-                  </div>
+                <th className="bg-slate-900 p-0 border-b border-r border-slate-800 w-[400px]">
+                   <input type="text" placeholder="Pesquisar..." value={busca} onChange={(e) => setBusca(e.target.value)} className="bg-transparent border-none text-white focus:outline-none text-sm w-full p-4" />
                 </th>
                 {colunasData?.map((m: any, i: number) => (
-                  <th key={`head-${i}`} colSpan={2} className="bg-slate-900 px-0 py-3 border-b border-l-2 border-l-slate-800 border-slate-800 text-center">
+                  <th key={i} className="bg-slate-900 px-4 py-3 border-b border-l-2 border-l-slate-800 text-center">
                       <span className="text-white font-bold text-sm tracking-widest">{m.mes_str}</span>
+                      <div className="text-[9px] text-blue-300 uppercase mt-1">Simulação (BU)</div>
                   </th>
-                ))}
-              </tr>
-              <tr>
-                {colunasData?.map((m: any, i: number) => (
-                  <React.Fragment key={`subhead-${i}`}>
-                    <th className="bg-slate-800/80 px-4 py-2 border-b border-l-2 border-l-slate-800 border-r border-slate-700/50 text-center text-[10px] text-slate-300 font-bold uppercase tracking-wider">
-                      Base Atual (Âncora) 🔒
-                    </th>
-                    <th className="bg-slate-800 px-4 py-2 border-b border-slate-700 text-center text-[10px] text-blue-300 font-bold uppercase tracking-wider">
-                      Simulação ✏️
-                    </th>
-                  </React.Fragment>
                 ))}
               </tr>
             </thead>
 
             <tbody>
               {isLoading ? (
-                <tr><td colSpan={10} className="p-12 text-center text-slate-400 font-medium">Mapeando Matriz Financeira...</td></tr>
+                <tr><td colSpan={(colunasData?.length || 0) + 1} className="p-12 text-center text-slate-400 font-medium">Mapeando Matriz Financeira...</td></tr>
               ) : dadosProcessados.length === 0 ? (
-                <tr><td colSpan={10} className="p-12 text-center text-slate-400 font-medium">Nenhum dado encontrado para a sua busca.</td></tr>
+                <tr><td colSpan={(colunasData?.length || 0) + 1} className="p-12 text-center text-slate-400 font-medium">Nenhum dado encontrado para a sua busca.</td></tr>
               ) : (
                 dadosProcessados.map(row => renderRow(row))
               )}
@@ -717,27 +681,14 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                     </div>
                   </td>
                   {colunasData?.map((m: any, i: number) => {
-                     
                      const ancoraBaseFat = totaisAncoraBanco[m.mes_banco]?.fat || 0;
-                     const ancoraBaseVol = totaisAncoraBanco[m.mes_banco]?.vol || 0;
-
                      const simuladoFat = totaisGeraisTelaAtual[m.mes_banco]?.fat || 0;
                      const simuladoVol = totaisGeraisTelaAtual[m.mes_banco]?.vol || 0;
-
                      const currentPct = ancoraBaseFat > 0 ? (simuladoFat / ancoraBaseFat) * 100 : 0;
 
                      return (
-                      <React.Fragment key={`foot-${i}`}>
-                        <td className="px-4 py-4 border-l-2 border-l-slate-800 border-r border-slate-800/50 text-right bg-slate-900/50 opacity-80">
-                           <div className="flex flex-col items-end">
-                              <span className="text-xs font-bold text-slate-300">{formatVolume(ancoraBaseVol)} cx</span>
-                              <span className="font-bold text-slate-400 text-xs mt-1">{formatMoeda(ancoraBaseFat)}</span>
-                              {visaoAtiva === 'carteira' && <span className="text-[9px] font-black text-slate-500 mt-1 uppercase">Sua Âncora</span>}
-                           </div>
-                        </td>
-
-                        <td className="px-4 py-4 border-slate-800 text-right">
-                          <div className="flex flex-col items-end">
+                        <td key={i} className="px-4 py-4 border-l-2 border-slate-800 text-center">
+                          <div className="flex flex-col items-center">
                             <span className="font-black text-white text-sm">
                               {formatVolume(simuladoVol)} <span className="text-[10px] text-slate-400 font-medium ml-0.5">cx</span>
                             </span>
@@ -752,7 +703,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                             )}
                           </div>
                         </td>
-                      </React.Fragment>
                     );
                   })}
                 </tr>

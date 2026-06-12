@@ -95,6 +95,11 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         meses_alvo = [(hoje + relativedelta(months=i)).strftime("%Y-%m-%d") for i in range(2, 5)]
         cx, vx, clx = get_coord_expr(), get_vend_expr(), get_cli_expr()
 
+        # Extração de Peso Histórico para o Frontend fatiar Categorias e Segmentos
+        data_hist_inicio = hoje - relativedelta(months=12)
+        q_peso = db.query(FatoVendas.sku, func.sum(FatoVendas.qt_pedido).label('v')).filter(FatoVendas.data_pedido >= data_hist_inicio).group_by(FatoVendas.sku).all()
+        peso_hist_dict = {str(r.sku).strip(): int(r.v or 0) for r in q_peso}
+
         # 1. QUERY CARTEIRA (COM FILTRO RLS DO GERENTE E VOL_TOPDOWN)
         q_cart = get_truth_query(db, ciclo, data_ini, data_fim)
         if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
@@ -141,7 +146,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
 
         trancas_reg = {c.origem: c.status for c in db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo).all()}
 
-        def criar_meses(): return {"vol_ia":0, "vol_base":0, "receita_base":0, "vol_ajustado":0, "receita":0, "pmv":0.0, "vol_anterior": 0}
+        def criar_meses(): return {"vol_ia":0, "vol_base":0, "receita_base":0, "vol_ajustado":0, "receita":0, "receita_orcamento":0, "pmv":0.0, "vol_anterior": 0}
 
         # MONTAGEM DA ÁRVORE CARTEIRA
         arvore_carteira = {}
@@ -163,6 +168,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
                     nivel["receita_base"] += (v_td * pmv_b)
                     nivel["vol_ajustado"] += v_bu
                     nivel["receita"] += (v_bu * pmv_b)
+                    nivel["receita_orcamento"] += (v_td * pmv_b) * 1.05 # Mock Orçamento (+5%)
                     nivel["vol_anterior"] += v_ant
                     nivel["pmv"] = (nivel["receita"] / nivel["vol_ajustado"]) if nivel["vol_ajustado"] > 0 else pmv_b
 
@@ -172,7 +178,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             for ve_k, ve_v in co_v["vendedores"].items():
                 clis = []
                 for cl_k, cl_v in ve_v["clientes"].items():
-                    prods = [{"id": f"{co_k}|{ve_k}|{cl_k}|{sk_k}", "chave_matriz": f"{co_k}|{ve_k}|{cl_k}|{sk_k}", "nome": sk_v["nome"], "produto": sk_k, "tipo": "produto", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in sk_v["meses"].items()]} for sk_k, sk_v in cl_v["produtos"].items()]
+                    prods = [{"id": f"{co_k}|{ve_k}|{cl_k}|{sk_k}", "chave_matriz": f"{co_k}|{ve_k}|{cl_k}|{sk_k}", "nome": sk_v["nome"], "produto": sk_k, "tipo": "produto", "vol_historico_mix": peso_hist_dict.get(sk_k, 1), "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in sk_v["meses"].items()]} for sk_k, sk_v in cl_v["produtos"].items()]
                     clis.append({"id": f"{co_k}|{ve_k}|{cl_k}", "chave_matriz": f"{co_k}|{ve_k}|{cl_k}", "nome": cl_k, "tipo": "cliente", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in cl_v["meses"].items()], "subRows": prods})
                 vends.append({"id": f"{co_k}|{ve_k}", "chave_matriz": f"{co_k}|{ve_k}", "nome": ve_k, "tipo": "vendedor", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in ve_v["meses"].items()], "subRows": clis})
             final_carteira.append({"id": co_k, "chave_matriz": co_k, "nome": co_k, "tipo": "coordenador", "status": co_v["status"], "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in co_v["meses"].items()], "subRows": vends})
@@ -198,6 +204,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
                     nivel["receita_base"] += (v_td * pmv_b)
                     nivel["vol_ajustado"] += v_bu
                     nivel["receita"] += (v_bu * pmv_b)
+                    nivel["receita_orcamento"] += (v_td * pmv_b) * 1.05 # Mock Orçamento (+5%)
                     nivel["vol_anterior"] += v_ant
                     nivel["pmv"] = (nivel["receita"] / nivel["vol_ajustado"]) if nivel["vol_ajustado"] > 0 else pmv_b
 
@@ -205,7 +212,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         for cat_k, cat_v in arvore_port.items():
             segs = []
             for seg_k, seg_v in cat_v["segmentos"].items():
-                prods = [{"id": f"{cat_k}|{seg_k}|{sk_k}", "chave_matriz": f"{cat_k}|{seg_k}|{sk_k}", "nome": sk_v["nome"], "produto": sk_k, "tipo": "produto", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in sk_v["meses"].items()]} for sk_k, sk_v in seg_v["produtos"].items()]
+                prods = [{"id": f"{cat_k}|{seg_k}|{sk_k}", "chave_matriz": f"{cat_k}|{seg_k}|{sk_k}", "nome": sk_v["nome"], "produto": sk_k, "tipo": "produto", "vol_historico_mix": peso_hist_dict.get(sk_k, 1), "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in sk_v["meses"].items()]} for sk_k, sk_v in seg_v["produtos"].items()]
                 segs.append({"id": f"{cat_k}|{seg_k}", "chave_matriz": f"{cat_k}|{seg_k}", "nome": seg_k, "tipo": "segmento", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in seg_v["meses"].items()], "subRows": prods})
             final_portfolio.append({"id": cat_k, "chave_matriz": cat_k, "nome": cat_k, "tipo": "categoria", "status": "Aberto", "meses": [{"mes_banco": k, "mes_str": datetime.datetime.strptime(k, "%Y-%m-%d").strftime("%m/%y"), **v} for k, v in cat_v["meses"].items()], "subRows": segs})
 
@@ -277,7 +284,7 @@ async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db:
     return {"status": "success", "message": "Meta da carteira rateada nos coordenadores."}
 
 # =====================================================================
-# POST: SALVAR RASCUNHO (NOVO MOTOR IN-MEMORY BLAZING FAST)
+# POST: SALVAR RASCUNHO (NOVO MOTOR ABSOLUTO E IN-MEMORY)
 # =====================================================================
 @router.post("/salvar")
 async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
@@ -296,11 +303,10 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
         if not payload.ajustes:
             return {"status": "success", "message": "Nenhuma alteração enviada."}
 
-        # 1. Agrupar datas e SKUs alvo para fazer um SELECT único e massivo
         meses_alvos = list({parse_date_safe(a.mes_projetado) for a in payload.ajustes})
         skus_alvos = list({a.chave.split('|')[-1].strip() for a in payload.ajustes})
 
-        # 2. SELECT único: Carrega todas as linhas afetadas de uma vez
+        # SELECT único massivo
         q_all = db.query(FatoIbpGranular, cx.label('coord'), vx.label('vend'), clx.label('cli'))\
                   .outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
                   .filter(
@@ -316,7 +322,6 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
 
         todas_linhas_row = q_all.all()
 
-        # 3. Mapear em memória (Dicionário RAM) para busca em 0.001s
         mapa_linhas = defaultdict(list)
         cgcs_alvo_globais = set()
         for row in todas_linhas_row:
@@ -331,7 +336,7 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
                 cl = row.cli.strip().upper() if row.cli else l.cgc
                 mapa_linhas[(l.mes_projetado, co, ve, cl, l.sku)].append(l)
 
-        # 4. SELECT único do Histórico de Vendas (Apenas se precisar ratear)
+        # Matriz Histórica para Share de Clientes
         peso_map_global = {}
         if skus_alvos:
             q_hist = db.query(FatoVendas.cgc, FatoVendas.sku, func.sum(FatoVendas.qt_pedido).label('vol_hist'))\
@@ -342,20 +347,43 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
                 if r.vol_hist and r.vol_hist > 0:
                     peso_map_global[(r.cgc, r.sku)] = float(r.vol_hist)
 
-        # 5. Aplicar Matemática diretamente nos objetos da memória
+        # Aplicar Matemática
         for ajuste in payload.ajustes:
             dt = parse_date_safe(ajuste.mes_projetado)
             linhas = []
+            
+            # --- NOVA LÓGICA PORTFÓLIO: RATEIO ABSOLUTO (Esmagamento) ---
             if payload.visao == 'portfolio':
                 sku = ajuste.chave.split('|')[-1].strip()
                 linhas = mapa_linhas.get((dt, sku), [])
-            else:
-                partes = ajuste.chave.split('|')
-                if len(partes) == 4:
-                    linhas = mapa_linhas.get((dt, partes[0].upper(), partes[1].upper(), partes[2].upper(), partes[3].strip()), [])
+                if not linhas: continue
+
+                total_hist_no = sum(peso_map_global.get((l.cgc, l.sku), 0) for l in linhas)
+                linhas.sort(key=lambda x: peso_map_global.get((x.cgc, x.sku), 0), reverse=True)
+
+                target_volume = ajuste.novo_volume
+                allocated = 0
+
+                for i, linha in enumerate(linhas):
+                    peso_bruto = peso_map_global.get((linha.cgc, linha.sku), 0)
+                    p_val = peso_bruto / total_hist_no if total_hist_no > 0 else 1.0 / len(linhas)
+
+                    if i == len(linhas) - 1:
+                        inc = target_volume - allocated
+                    else:
+                        inc = int(round(target_volume * p_val))
+
+                    # Sobrescrita Absoluta
+                    linha.vol_bottomup = max(0, inc)
+                    allocated += inc
+                continue 
+
+            # --- LÓGICA CARTEIRA: RATEIO POR DELTA (Mantida) ---
+            partes = ajuste.chave.split('|')
+            if len(partes) == 4:
+                linhas = mapa_linhas.get((dt, partes[0].upper(), partes[1].upper(), partes[2].upper(), partes[3].strip()), [])
 
             if not linhas: continue
-
             total_bu_atual = sum(l.vol_bottomup or 0 for l in linhas)
             delta = ajuste.novo_volume - total_bu_atual
 
@@ -370,15 +398,14 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
                 inc = int(round(delta * p_val))
 
                 if i == len(linhas) - 1:
-                    allocated = sum(
+                    allocated_delta = sum(
                         int(round(delta * (peso_map_global.get((x.cgc, x.sku), 0) / total_hist_no if total_hist_no > 0 else 1.0 / len(linhas))))
                         for x in linhas[:-1]
                     )
-                    inc = delta - allocated
+                    inc = delta - allocated_delta
 
                 linha.vol_bottomup = max(0, (linha.vol_bottomup or 0) + inc)
 
-        # 6. Um único COMMIT hiper veloz
         db.commit()
         return {"status": "success", "message": "Proposta Comercial consolidada na base de dados."}
 
@@ -477,18 +504,18 @@ async def grafico_gerenciamento(chave_matriz: str, nivel_hierarquia: str = 'prod
         for row in q_hist.group_by('mes_ano').all():
             if row.mes_ano in calendario: calendario[row.mes_ano]["Realizado"] = int(row.realizado or 0)
 
-        q_proj = db.query(func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes_ano'), FatoIbpGranular.ciclo_sop, func.sum(FatoIbpGranular.vol_ia).label('ia'), func.sum(FatoIbpGranular.vol_final).label('final'), func.sum(FatoIbpGranular.vol_bottomup).label('bu')).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)
+        q_proj = db.query(func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes_ano'), FatoIbpGranular.ciclo_sop, func.sum(FatoIbpGranular.vol_ia).label('ia'), func.sum(FatoIbpGranular.vol_final).label('final'), func.sum(FatoIbpGranular.vol_topdown).label('td')).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)
         q_proj = apply_branch_filter(q_proj, FatoIbpGranular, is_port)
 
         proj_por_mes = defaultdict(dict)
         for row in q_proj.group_by('mes_ano', FatoIbpGranular.ciclo_sop).all():
-            proj_por_mes[row.mes_ano][row.ciclo_sop] = {"ia": int(row.ia or 0), "final": int(row.final or 0), "bu": int(row.bu or 0)}
+            proj_por_mes[row.mes_ano][row.ciclo_sop] = {"ia": int(row.ia or 0), "final": int(row.final or 0), "td": int(row.td or 0)}
 
         for mes_str in calendario.keys():
             if mes_str in proj_por_mes:
                 if ciclo_atual in proj_por_mes[mes_str]:
                     calendario[mes_str]["IA"] = proj_por_mes[mes_str][ciclo_atual]["ia"]
-                    calendario[mes_str]["TopDown"] = proj_por_mes[mes_str][ciclo_atual]["bu"]
+                    calendario[mes_str]["TopDown"] = proj_por_mes[mes_str][ciclo_atual]["td"]
                 if ciclo_anterior in proj_por_mes[mes_str]:
                     calendario[mes_str]["CicloAnterior"] = proj_por_mes[mes_str][ciclo_anterior]["final"]
 
