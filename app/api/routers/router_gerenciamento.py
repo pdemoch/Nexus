@@ -26,7 +26,6 @@ router = APIRouter(prefix="/api/v1/consensus/gerenciamento", tags=["Consenso Ger
 # PAYLOADS & SCHEMAS
 # =====================================================================
 class AjusteGerente(BaseModel):
-    nivel: str
     chave: str
     mes_projetado: str
     novo_volume: int
@@ -78,7 +77,7 @@ def check_topdown_lock(db: Session, ciclo: str):
         )
 
 # =====================================================================
-# GET: ÁRVORES DE DADOS (PORTFÓLIO GLOBAL vs CARTEIRA REGIONAL COM RLS)
+# GET: ÁRVORES DE DADOS (PORTFÓLIO GLOBAL vs CARTEIRA REGIONAL)
 # =====================================================================
 @router.get("")
 async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
@@ -215,16 +214,14 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         raise HTTPException(status_code=500, detail=repr(e))
 
 # =====================================================================
-# POST: REDISTRIBUIÇÃO DE METAS POR PERCENTUAL (SEM TRAVAS MATEMÁTICAS)
+# POST: REDISTRIBUIÇÃO DE METAS POR PERCENTUAL
 # =====================================================================
 @router.post("/ajustar-percentual")
 async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
     ciclo = get_current_cycle(db)
     mes_alvo = parse_date_safe(payload.mes_projetado)
     cx = get_coord_expr()
-    
-    # REGRA ATUALIZADA: Permite que os Coordenadores enxerguem potencial ALÉM do Portfolio. Sem trava de %.
-    
+        
     q_gerente_total = db.query(FatoIbpGranular).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(FatoIbpGranular.ciclo_sop == ciclo, FatoIbpGranular.mes_projetado == mes_alvo)
     if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
         q_gerente_total = q_gerente_total.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
@@ -236,7 +233,6 @@ async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db:
         raise HTTPException(status_code=400, detail="A sua carteira não possui faturamento base definido para o cálculo.")
 
     for item in payload.distribuicao:
-        # Se o item mandar 120%, o sistema agora aceita e empurra esse crescimento pra base.
         meta_faturamento_coordenador = float(total_faturamento_gerente) * (item.percentual / 100.0)
         
         q_linhas_coord = db.query(FatoIbpGranular).outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc).filter(
@@ -281,7 +277,7 @@ async def ajustar_percentual_coordenadores(payload: PayloadAjustePercentual, db:
     return {"status": "success", "message": "Meta da carteira rateada nos coordenadores."}
 
 # =====================================================================
-# POST: SALVAR RASCUNHO (MÉTODO DO PESO HISTÓRICO)
+# POST: SALVAR RASCUNHO (NOVO MOTOR IN-MEMORY BLAZING FAST)
 # =====================================================================
 @router.post("/salvar")
 async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
@@ -297,55 +293,95 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
         cx, vx, clx = get_coord_expr(), get_vend_expr(), get_cli_expr()
         locked_coords = [c.origem.upper() for c in db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.status == 'Fechado').all()]
 
+        if not payload.ajustes:
+            return {"status": "success", "message": "Nenhuma alteração enviada."}
+
+        # 1. Agrupar datas e SKUs alvo para fazer um SELECT único e massivo
+        meses_alvos = list({parse_date_safe(a.mes_projetado) for a in payload.ajustes})
+        skus_alvos = list({a.chave.split('|')[-1].strip() for a in payload.ajustes})
+
+        # 2. SELECT único: Carrega todas as linhas afetadas de uma vez
+        q_all = db.query(FatoIbpGranular, cx.label('coord'), vx.label('vend'), clx.label('cli'))\
+                  .outerjoin(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
+                  .filter(
+                      FatoIbpGranular.ciclo_sop == ciclo,
+                      FatoIbpGranular.mes_projetado.in_(meses_alvos),
+                      FatoIbpGranular.sku.in_(skus_alvos)
+                  )
+
+        if payload.visao == 'carteira' and locked_coords:
+            q_all = q_all.filter(~func.upper(cx).in_(locked_coords))
+        if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
+            q_all = q_all.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
+
+        todas_linhas_row = q_all.all()
+
+        # 3. Mapear em memória (Dicionário RAM) para busca em 0.001s
+        mapa_linhas = defaultdict(list)
+        cgcs_alvo_globais = set()
+        for row in todas_linhas_row:
+            l = row.FatoIbpGranular
+            if l.cgc: cgcs_alvo_globais.add(l.cgc)
+
+            if payload.visao == 'portfolio':
+                mapa_linhas[(l.mes_projetado, l.sku)].append(l)
+            else:
+                co = row.coord.strip().upper() if row.coord else 'SEM COORDENADOR'
+                ve = row.vend.strip().upper() if row.vend else 'SEM VENDEDOR'
+                cl = row.cli.strip().upper() if row.cli else l.cgc
+                mapa_linhas[(l.mes_projetado, co, ve, cl, l.sku)].append(l)
+
+        # 4. SELECT único do Histórico de Vendas (Apenas se precisar ratear)
+        peso_map_global = {}
+        if skus_alvos:
+            q_hist = db.query(FatoVendas.cgc, FatoVendas.sku, func.sum(FatoVendas.qt_pedido).label('vol_hist'))\
+                       .filter(FatoVendas.sku.in_(skus_alvos), FatoVendas.data_pedido >= data_hist)
+            if len(cgcs_alvo_globais) < 3000:
+                q_hist = q_hist.filter(FatoVendas.cgc.in_(list(cgcs_alvo_globais)))
+            for r in q_hist.group_by(FatoVendas.cgc, FatoVendas.sku).all():
+                if r.vol_hist and r.vol_hist > 0:
+                    peso_map_global[(r.cgc, r.sku)] = float(r.vol_hist)
+
+        # 5. Aplicar Matemática diretamente nos objetos da memória
         for ajuste in payload.ajustes:
             dt = parse_date_safe(ajuste.mes_projetado)
-            partes_chave = ajuste.chave.split('|')
-            q = get_truth_query(db, ciclo, dt, dt)
+            linhas = []
+            if payload.visao == 'portfolio':
+                sku = ajuste.chave.split('|')[-1].strip()
+                linhas = mapa_linhas.get((dt, sku), [])
+            else:
+                partes = ajuste.chave.split('|')
+                if len(partes) == 4:
+                    linhas = mapa_linhas.get((dt, partes[0].upper(), partes[1].upper(), partes[2].upper(), partes[3].strip()), [])
 
-            if ajuste.nivel == 'carteira':
-                if usuario['funcao'] == 'Gerente' and usuario.get('gerente_nome'):
-                    q = q.filter(func.upper(func.trim(DimCliente.gerente_nome)) == usuario['gerente_nome'].strip().upper())
-                if locked_coords:
-                    q = q.filter(~func.upper(cx).in_(locked_coords))
-                if len(partes_chave) >= 1: q = q.filter(func.upper(cx) == partes_chave[0].upper())
-                if len(partes_chave) >= 2: q = q.filter(func.upper(vx) == partes_chave[1].upper())
-                if len(partes_chave) >= 3: q = q.filter(func.upper(clx) == partes_chave[2].upper())
-                if len(partes_chave) >= 4: q = q.filter(FatoIbpGranular.sku == partes_chave[3].strip())
-            
-            elif ajuste.nivel == 'portfolio':
-                if locked_coords:
-                    q = q.filter(~func.upper(cx).in_(locked_coords))
-                q = q.filter(FatoIbpGranular.sku == partes_chave[-1].strip())
-
-            linhas = q.all()
             if not linhas: continue
 
-            skus_alvo = list({linha.sku for linha in linhas if linha.sku})
-            cgcs_alvo = list({linha.cgc for linha in linhas if linha.cgc})
-
-            hist_data = db.query(FatoVendas.cgc, FatoVendas.sku, func.sum(FatoVendas.qt_pedido).label('vol_hist')).filter(
-                FatoVendas.sku.in_(skus_alvo), FatoVendas.cgc.in_(cgcs_alvo), FatoVendas.data_pedido >= data_hist
-            ).group_by(FatoVendas.cgc, FatoVendas.sku).all()
-
-            peso_map = {}
-            total_hist_no = sum(float(r.vol_hist or 0) for r in hist_data if r.vol_hist)
-            for r in hist_data:
-                if (r.vol_hist or 0) > 0: peso_map[(r.cgc, r.sku)] = r.vol_hist / total_hist_no
-
-            total_bu_atual = sum(linha.vol_bottomup for linha in linhas)
+            total_bu_atual = sum(l.vol_bottomup or 0 for l in linhas)
             delta = ajuste.novo_volume - total_bu_atual
-            linhas.sort(key=lambda x: peso_map.get((x.cgc, x.sku), 0), reverse=True)
 
-            if delta != 0:
-                for i, linha in enumerate(linhas):
-                    p_val = peso_map.get((linha.cgc, linha.sku), 1/len(linhas) if total_hist_no == 0 else 0)
-                    inc = int(round(delta * p_val))
-                    if i == len(linhas) - 1:
-                        inc = delta - sum(int(round(delta * peso_map.get((x.cgc, x.sku), 1/len(linhas) if total_hist_no == 0 else 0))) for x in linhas[:-1])
-                    linha.vol_bottomup = max(0, linha.vol_bottomup + inc)
+            if delta == 0: continue
 
+            total_hist_no = sum(peso_map_global.get((l.cgc, l.sku), 0) for l in linhas)
+            linhas.sort(key=lambda x: peso_map_global.get((x.cgc, x.sku), 0), reverse=True)
+
+            for i, linha in enumerate(linhas):
+                peso_bruto = peso_map_global.get((linha.cgc, linha.sku), 0)
+                p_val = peso_bruto / total_hist_no if total_hist_no > 0 else 1.0 / len(linhas)
+                inc = int(round(delta * p_val))
+
+                if i == len(linhas) - 1:
+                    allocated = sum(
+                        int(round(delta * (peso_map_global.get((x.cgc, x.sku), 0) / total_hist_no if total_hist_no > 0 else 1.0 / len(linhas))))
+                        for x in linhas[:-1]
+                    )
+                    inc = delta - allocated
+
+                linha.vol_bottomup = max(0, (linha.vol_bottomup or 0) + inc)
+
+        # 6. Um único COMMIT hiper veloz
         db.commit()
-        return {"status": "success", "message": "Proposta Comercial consolidada."}
+        return {"status": "success", "message": "Proposta Comercial consolidada na base de dados."}
+
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=repr(e))

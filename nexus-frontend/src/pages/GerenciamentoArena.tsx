@@ -157,21 +157,34 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     } catch (e: any) { alert("Erro ao alterar trava da regional: " + e.message); }
   };
 
-  const handleSalvarRascunho = async () => {
-    if (Object.keys(celulasEditadas).length === 0) return alert("Nenhuma alteração para salvar.");
-    try {
-      const payload = {
-        origem_ajuste: "Gerência Comercial (Bottom-Up)",
+  // OTIMIZAÇÃO: Filtramos para enviar APENAS as folhas (Produtos) para evitar explosão de rede
+  const gerarPayloadFolhas = (origemNome: string) => {
+    const leafEdits = Object.entries(celulasEditadas).filter(([chave]) => {
+        const parts = chave.split('|').length;
+        // No nível carteira: Coord|Vend|Cli|SKU (4 partes)
+        // No nível portfólio: Cat|Seg|SKU (3 partes)
+        return visaoAtiva === 'carteira' ? parts === 4 : parts === 3;
+    });
+
+    return {
+        origem_ajuste: origemNome,
         visao: visaoAtiva,
-        ajustes: Object.entries(celulasEditadas).flatMap(([chave, meses]: any) => 
+        ajustes: leafEdits.flatMap(([chave, meses]: any) => 
           Object.entries(meses).map(([mes_projetado, val]: any) => ({
-              nivel: visaoAtiva,
               chave,
               mes_projetado,
               novo_volume: parseInt(val.novo_volume, 10)
           }))
         )
-      };
+    };
+  };
+
+  const handleSalvarRascunho = async () => {
+    if (Object.keys(celulasEditadas).length === 0) return alert("Nenhuma alteração para salvar.");
+    const payload = gerarPayloadFolhas("Gerência Comercial (Bottom-Up)");
+    if (payload.ajustes.length === 0) return alert("Nenhuma edição detectada na granularidade de SKU.");
+    
+    try {
       await axios.post(`/api/v1/consensus/gerenciamento/salvar`, payload);
       alert(visaoAtiva === 'portfolio' ? "Rateio Global do Portfólio salvo com sucesso!" : "Rateio da Carteira salvo com sucesso (Rascunho atualizado).");
       fetchData();
@@ -180,19 +193,9 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
   const handleCongelar = async () => {
     if (!confirm("Atenção: Esta ação confirmará a sua meta e passará o bastão oficial para a Fábrica (Supply Review). A Janela será trancada. Deseja prosseguir?")) return;
+    const payload = gerarPayloadFolhas("Gerência Comercial (Bottom-Up Final)");
+    
     try {
-      const payload = {
-        origem_ajuste: "Gerência Comercial (Bottom-Up Final)",
-        visao: visaoAtiva,
-        ajustes: Object.entries(celulasEditadas).flatMap(([chave, meses]: any) => 
-          Object.entries(meses).map(([mes_projetado, val]: any) => ({
-              nivel: visaoAtiva,
-              chave,
-              mes_projetado,
-              novo_volume: parseInt(val.novo_volume, 10)
-          }))
-        )
-      };
       await axios.post(`/api/v1/consensus/gerenciamento/congelar`, payload);
       alert("Gestão Comercial Finalizada! Bastão passado com sucesso para a Fábrica.");
       fetchData();
@@ -218,9 +221,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     return processados;
   }, [dadosBrutos, busca]);
 
-  // =========================================================================
-  // LEITURA RECURSIVA COM EDIÇÕES EM MEMÓRIA
-  // =========================================================================
   const getDynamicVol = useCallback((row: any, mesBanco: string): number => {
     if (row.tipo === 'produto') {
       const edicao = celulasEditadas[row.chave_matriz]?.[mesBanco];
@@ -240,16 +240,12 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     return (row.subRows || []).reduce((acc: number, child: any) => acc + getDynamicRec(child, mesBanco), 0);
   }, [getDynamicVol]);
 
-  // =========================================================================
-  // MATEMÁTICA DA ÂNCORA (Base mutável dependendo da aba ativa)
-  // =========================================================================
   const totaisAncoraBanco = useMemo(() => {
     const totais: Record<string, { vol: number, fat: number }> = {};
     colunasData?.forEach((m: any) => {
       let vol = 0; let fat = 0;
       dadosBrutos.forEach((node: any) => {
         const mesData = node.meses?.find((x: any) => x.mes_banco === m.mes_banco);
-        
         if (visaoAtiva === 'portfolio') {
             vol += (mesData?.vol_base || 0); 
             fat += (mesData?.receita_base || 0);
@@ -278,7 +274,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
   const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
     if (!isTopDownFechado) return;
-    
     if (visaoAtiva === 'carteira') {
         const coordRoot = chaveStr.split('|')[0];
         const nodeCoord = dadosBase.carteira.find(c => c.nome === coordRoot);
@@ -367,9 +362,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     }
   };
 
-  // =========================================================================
-  // PAINEL DE SAUDABILIDADE (RECHARTS)
-  // =========================================================================
   const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
     const chave = rowData.chave_matriz;
     const chartData = dadosGraficoCache[chave];
@@ -534,7 +526,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
           {colunasData?.map((m: any, idx: number) => {
             const mBase = row.meses?.find((x: any) => x.mes_banco === m.mes_banco);
             
-            // INTELIGÊNCIA DA BASE ATUAL (CÉLULA)
             const volBase = visaoAtiva === 'portfolio' ? (mBase?.vol_base || 0) : (mBase?.vol_ajustado || 0);
             const recBase = visaoAtiva === 'portfolio' ? (mBase?.receita_base || 0) : (mBase?.receita || 0);
 
@@ -546,7 +537,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
             return (
               <React.Fragment key={idx}>
-                {/* 1. SUBCOLUNA: BASE ATUAL (O que está salvo no BD) */}
                 <td className="p-3 border-r border-slate-200 bg-slate-50/80 align-middle">
                    <div className="flex flex-col items-end opacity-70">
                       <span className="text-xs font-bold text-slate-600">{formatVolume(volBase)} cx</span>
@@ -554,7 +544,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                    </div>
                 </td>
 
-                {/* 2. SUBCOLUNA: SIMULAÇÃO (Onde as edições/rascunhos acontecem) */}
                 <td className={`p-0 border-l border-slate-100 align-top border-r-2 border-r-slate-200 ${isRowFechado || !isTopDownFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/40' : 'bg-white'}`}>
                   
                   {visaoAtiva === 'carteira' && depth === 0 ? (
@@ -623,7 +612,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
               <h1 className="text-3xl font-black text-slate-800 tracking-tight flex items-center gap-3">
                   <Users className="w-8 h-8 text-blue-600" /> Macrociclo <span className="text-blue-600">Comercial</span>
               </h1>
-              <p className="text-slate-500 mt-1 font-medium">Gestão Bottom-Up (Top-Down Herança e RLS Regional)</p>
+              <p className="text-slate-500 mt-1 font-medium">Gestão Bottom-Up (Top-Down Herança e Captura de Demanda)</p>
             </div>
 
             <div className="flex items-center gap-4">
@@ -636,7 +625,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                   </button>
               </div>
 
-              {/* BOTÃO 1: SALVAR RASCUNHO / RATEIO (Sem Trava Matemática) */}
+              {/* BOTÃO 1: SALVAR RASCUNHO */}
               <button 
                  onClick={handleSalvarRascunho} 
                  disabled={!isTopDownFechado || isAllClosed} 
@@ -646,7 +635,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                   Salvar Rascunho / Rateio
               </button>
 
-              {/* BOTÃO 2: FINALIZAR E ABRIR A FÁBRICA (Ativado apenas quando todos os cadeados estão fechados) */}
+              {/* BOTÃO 2: FINALIZAR E ABRIR A FÁBRICA */}
               <button 
                  onClick={handleCongelar} 
                  disabled={!isTopDownFechado || !isAllClosed} 
