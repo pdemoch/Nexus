@@ -131,6 +131,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
+  // Extração Dinâmica Recursiva (Direto na Válvula)
   const getDynamicVol = useCallback((row: any, mesBanco: string): number => {
     if (row.tipo === 'produto') {
       const ed = celulasEditadas[row.chave_matriz]?.[mesBanco];
@@ -161,14 +162,13 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     }, { vol: 0, rec: 0, metaRec: 0 });
   }, []);
 
-  // Lógica Corrigida: Rateio desce diretamente para as folhas (SKUs), ignorando divisões iguais de Segmento
+  // O Motor de Rateio Perfeito (Desce direto para a folha e extirpa fracionamentos de segmento)
   const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
     if (!isTopDownFechado) return;
 
     setCelulasEditadas((currentEdits: any) => {
       const nextEdits = { ...currentEdits };
 
-      // Encontra o nó exato que foi alterado
       const findNode = (nodes: any[]): any => {
         for (const n of nodes) {
           if (n.chave_matriz === chaveStr) return n;
@@ -183,7 +183,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
       const targetNode = findNode(dadosBase);
       if (!targetNode) return nextEdits;
 
-      // Recolhe todos os SKUs debaixo deste nó
       const leaves: any[] = [];
       const getLeaves = (n: any) => {
         if (n.tipo === 'produto') leaves.push(n);
@@ -191,10 +190,8 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
       };
       getLeaves(targetNode);
 
-      // Soma o peso histórico real apenas dos SKUs
       const totalHist = leaves.reduce((sum, leaf) => sum + (leaf.vol_historico_mix || 1), 0);
 
-      // Distribui o novo volume diretamente pelos SKUs, evitando fracionamentos nos segmentos
       let allocated = 0;
       leaves.forEach((leaf, idx) => {
         let leafTarget = 0;
@@ -204,7 +201,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
           const weight = leaf.vol_historico_mix || 1;
           leafTarget = Math.round((weight / totalHist) * novoValor);
         }
-        allocated += leafTarget;
+        allocated += Math.max(0, leafTarget);
 
         if (!nextEdits[leaf.chave_matriz]) nextEdits[leaf.chave_matriz] = {};
         nextEdits[leaf.chave_matriz][mesBanco] = { novo_volume: Math.max(0, leafTarget) };
@@ -256,6 +253,9 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   }, [dadosBase, getDynamicVol, getDynamicRec, getStaticTD, colunasData]);
 
 
+  // =========================================================================
+  // DOSSIÊ DE EXPANSÃO (O Gráfico Perfeito)
+  // =========================================================================
   const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
     const chave = rowData.chave_matriz;
     const chartData = dadosGraficoCache[chave];
@@ -277,12 +277,14 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
       return { recBU, recIA, recTD, recMeta, volBU, pmvMedio: count > 0 ? (pmvAcc / count) : 0 };
     }, [rowData, celulasEditadas, getDynamicVol]);
 
+    // O MATCH DINÂMICO QUE CORRIGE O SALTO DE VALOR NO GRÁFICO
     const chartDataDynamic = useMemo(() => {
         if (!chartData) return [];
         return chartData.map((d: any) => {
             let dynamicBU = d.BottomUpBase;
             if (d.TopDown !== null) {
-               const m = rowData.meses?.find((x: any) => x.mes_str === d.name);
+               // O Match acontece via data_iso vs mes_banco
+               const m = rowData.meses?.find((x: any) => x.mes_banco === d.data_iso);
                if (m) dynamicBU = getDynamicVol(rowData, m.mes_banco);
             }
             return { ...d, BottomUp: dynamicBU };
@@ -357,7 +359,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
           const hasChildren = row.getCanExpand();
           const isProduto = row.original.tipo === 'produto';
 
-          // Calculando o PMV Médio para ser exibido abaixo do nome
           let pmvAcc = 0; let pmvCount = 0;
           (row.original.meses || []).forEach((m: any) => {
              if (m.pmv && m.pmv > 0) { pmvAcc += m.pmv; pmvCount++; }
@@ -387,7 +388,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                 <span className={`text-sm pr-4 truncate max-w-[300px] ${chartExpanded === row.original.chave_matriz ? 'text-blue-700 font-black' : !isProduto ? 'font-black text-slate-800' : 'font-semibold text-slate-600'}`}>
                   {getValue() as string}
                 </span>
-                {/* Exibição do PMV diretamente abaixo do nome */}
                 {pmvMedioNode > 0 && (
                   <span className="text-[10px] text-slate-400 font-bold mt-0.5 tracking-widest uppercase">
                     PMV Médio: {formatMoeda(pmvMedioNode)}

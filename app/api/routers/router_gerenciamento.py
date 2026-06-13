@@ -96,6 +96,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             if seg not in arvore_port[cat]["segmentos"]: arvore_port[cat]["segmentos"][seg] = {"nome": seg, "tipo": "segmento", "meses": {m: criar_meses() for m in meses_alvo}, "produtos": {}}
             if sk not in arvore_port[cat]["segmentos"][seg]["produtos"]: arvore_port[cat]["segmentos"][seg]["produtos"][sk] = {"nome": de, "produto": sk, "tipo": "produto", "meses": {m: criar_meses() for m in meses_alvo}}
 
+        # Injetar volumes projetados
         for r in resultados_port:
             cat, seg, sk, ms = r.cat or 'SEM CATEGORIA', r.seg or 'SEM SEGMENTO', str(r.sku).strip(), str(r.mes_projetado)
             if ms in meses_alvo and cat in arvore_port and seg in arvore_port[cat]["segmentos"] and sk in arvore_port[cat]["segmentos"][seg]["produtos"]:
@@ -152,7 +153,7 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
             for r in q_hist.group_by(FatoVendas.cgc, FatoVendas.sku).all():
                 if r.vol_hist and r.vol_hist > 0: peso_map_global[(r.cgc, r.sku)] = float(r.vol_hist)
 
-        # Rateio Absoluto do vol_bu - Com Otimização Brutal de Gravação
+        # Rateio Absoluto do vol_bu
         for ajuste in payload.ajustes:
             dt = parse_date_safe(ajuste.mes_projetado)
             sku = ajuste.chave.split('|')[-1].strip()
@@ -171,8 +172,6 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
                 inc = target_volume - allocated if i == len(linhas) - 1 else int(round(target_volume * p_val))
                 
                 novo_valor_calculado = max(0, inc)
-                # OTIMIZAÇÃO DE PERFORMANCE: Só altera o objeto SQLAlchemy se houver mudança real
-                # Evita "sujar" milhares de linhas no banco, reduzindo o tempo de commit em 90%.
                 if linha.vol_bottomup != novo_valor_calculado:
                     linha.vol_bottomup = novo_valor_calculado
                 
@@ -227,8 +226,15 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
         # 1. Busca TODO o Histórico de Vendas (2 Anos)
         q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('realizado')).join(DimProduto, FatoVendas.sku == DimProduto.sku).filter(FatoVendas.data_pedido >= inicio_hist)
         
-        # 2. Busca TODAS as Projeções já feitas no IBP
-        q_proj = db.query(func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes_ano'), FatoIbpGranular.ciclo_sop, func.sum(FatoIbpGranular.vol_topdown).label('td'), func.sum(FatoIbpGranular.vol_bottomup).label('bu'), func.sum(FatoIbpGranular.vol_ia).label('ia'), func.sum(FatoIbpGranular.vol_final).label('final')).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)
+        # 2. Busca TODAS as Projeções já feitas no IBP (SEM FILTRO DE CICLO - MÁQUINA DO TEMPO ATIVA)
+        q_proj = db.query(
+            func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes_ano'), 
+            FatoIbpGranular.ciclo_sop, 
+            func.sum(FatoIbpGranular.vol_topdown).label('td'), 
+            func.sum(FatoIbpGranular.vol_bottomup).label('bu'), 
+            func.sum(FatoIbpGranular.vol_ia).label('ia'), 
+            func.sum(FatoIbpGranular.vol_final).label('final')
+        ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)
         
         if chave_matriz != 'ROOT':
             partes_chave = chave_matriz.split('|')
@@ -249,12 +255,11 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
         for row in q_proj.group_by('mes_ano', FatoIbpGranular.ciclo_sop).all():
             proj_por_mes[row.mes_ano][row.ciclo_sop] = {"td": int(row.td or 0), "bu": int(row.bu or 0), "ia": int(row.ia or 0), "final": int(row.final or 0)}
 
-        # 3. Máquina do Tempo do S&OP (O Transbordo Histórico)
+        # 3. Transbordo Histórico do S&OP (Lead Time M-2)
         for ms in calendario.keys():
             mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
 
             if ms in proj_por_mes:
-                # Regra A: Para o M2, M3 e M4 do ciclo vigente
                 if mes_dt >= m2_comercial:
                     if ciclo_atual in proj_por_mes[ms]:
                         calendario[ms]["TopDown"] = proj_por_mes[ms][ciclo_atual]["td"]
@@ -262,28 +267,29 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
                         calendario[ms]["IA"] = proj_por_mes[ms][ciclo_atual]["ia"]
                     if ciclo_anterior in proj_por_mes[ms]:
                         calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_anterior]["final"]
-                
-                # Regra B: Para os meses congelados no passado (A Cauda Histórica de Projeção)
                 else:
-                    if mes_dt >= inicio_projeto: # Aplica a regra só a partir de 04/2026
+                    if mes_dt >= inicio_projeto:
                         ciclo_origem_dt = mes_dt - relativedelta(months=2)
-                        
                         if ciclo_origem_dt < inicio_projeto:
                             ciclo_origem_dt = inicio_projeto
-                            
                         ciclo_origem_str = f"{ciclo_origem_dt.month:02d}/{ciclo_origem_dt.year}"
                         
                         if ciclo_origem_str in proj_por_mes[ms]:
                             calendario[ms]["IA"] = proj_por_mes[ms][ciclo_origem_str]["ia"]
                             calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_origem_str]["final"]
 
+        meses_pt = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
         timeline = []
         for ms, v in sorted(calendario.items()):
             mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
-            mostrar_ia_lag = mes_dt >= inicio_projeto 
+            mostrar_ia_lag = mes_dt >= inicio_projeto
+            
+            # Eixo X Formatação Dashboard (Ex: "Ago/26") para bater o Match Dinâmico
+            nome_formatado = f"{meses_pt[mes_dt.month - 1]}/{mes_dt.strftime('%y')}"
             
             timeline.append({
-                "name": ms, "data_iso": f"{ms}-01",
+                "name": nome_formatado,
+                "data_iso": f"{ms}-01",
                 "Realizado": None if mes_dt >= hoje else (v["Realizado"] or 0),
                 "IA": v["IA"] if mostrar_ia_lag else None,
                 "CicloAnterior": v["CicloAnterior"] if mostrar_ia_lag else None,

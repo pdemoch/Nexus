@@ -163,11 +163,14 @@ async def topdown_status(db: Session = Depends(get_db)):
     reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down Arena').first()
     return {"is_fechado": reg.status == 'Fechado' if reg else False}
 
+
 @router.post("/salvar")
 async def salvar_rascunho_topdown(payload: PayloadAprovarTopDown, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     check_global_lock(db, get_current_cycle(db))
     try:
         ciclo = get_current_cycle(db)
+        
+        # Processa apenas os ajustes manuais enviados pela tela
         for ajuste in payload.ajustes:
             data_alvo = parse_date_safe(ajuste.mes_projetado)
             volume_alvo = int(ajuste.novo_volume)
@@ -176,12 +179,8 @@ async def salvar_rascunho_topdown(payload: PayloadAprovarTopDown, db: Session = 
             linhas = query.all()
             if not linhas: continue
 
-            base_total_bu = sum([float(l.vol_bottomup or 0) for l in linhas])
-            base_total_sp = sum([float(l.vol_supply or 0) for l in linhas])
-            
-            usar_base_sp = base_total_bu <= 0
-            total_base = base_total_sp if usar_base_sp else base_total_bu
-            
+            # Rateio Inteligente: Usa o vol_ia como peso (mantém a proporção exata entre os clientes)
+            base_total_ia = sum([float(l.vol_ia or 0) for l in linhas])
             soma_dist = 0
             total_clientes = len(linhas)
             
@@ -189,17 +188,13 @@ async def salvar_rascunho_topdown(payload: PayloadAprovarTopDown, db: Session = 
                 if i == total_clientes - 1:
                     rateado = volume_alvo - soma_dist 
                 else:
-                    vol_referencia = float(l.vol_supply or 0) if usar_base_sp else float(l.vol_bottomup or 0)
-                    peso = vol_referencia / total_base if total_base > 0 else 1.0 / total_clientes
+                    peso = float(l.vol_ia or 0) / base_total_ia if base_total_ia > 0 else 1.0 / total_clientes
                     rateado = int(round(volume_alvo * peso))
                     soma_dist += rateado
                 
-                # A CASCATA: Rascunho também passa o bastão para as fases seguintes
-                l.vol_topdown = rateado
-                l.vol_bottomup = rateado
-                l.vol_supply = rateado
-                l.vol_final = rateado
-                l.vol_meta = rateado
+                # OTIMIZAÇÃO: Apenas altera a linha se o valor for efetivamente diferente
+                if l.vol_topdown != rateado:
+                    l.vol_topdown = rateado
 
         db.commit()
         return {"status": "success", "message": "Rascunho salvo com sucesso."}
@@ -207,52 +202,65 @@ async def salvar_rascunho_topdown(payload: PayloadAprovarTopDown, db: Session = 
         db.rollback()
         raise HTTPException(500, repr(e))
 
+
 @router.post("/congelar")
 async def congelar_ratear_topdown(payload: PayloadAprovarTopDown, db: Session = Depends(get_db), usuario: dict = Depends(require_admin)):
     ciclo = get_current_cycle(db)
     check_global_lock(db, ciclo)
     try:
-        for ajuste in payload.ajustes:
-            data_alvo = parse_date_safe(ajuste.mes_projetado)
-            volume_alvo = int(ajuste.novo_volume)
-            
-            query = get_truth_query(db, ciclo, data_alvo, data_alvo).filter(FatoIbpGranular.sku == ajuste.sku)
-            linhas = query.all()
-            if not linhas: continue
-
-            total_base_antigo = sum([float(l.vol_final or 0) for l in linhas])
-            base_total_bu = sum([float(l.vol_bottomup or 0) for l in linhas])
-            base_total_sp = sum([float(l.vol_supply or 0) for l in linhas])
-            
-            usar_base_sp = base_total_bu <= 0
-            total_base = base_total_sp if usar_base_sp else base_total_bu
-            
-            soma_dist = 0
-            total_clientes = len(linhas)
-            
-            for i, l in enumerate(linhas):
-                if i == total_clientes - 1:
-                    rateado = volume_alvo - soma_dist 
-                else:
-                    vol_referencia = float(l.vol_supply or 0) if usar_base_sp else float(l.vol_bottomup or 0)
-                    peso = vol_referencia / total_base if total_base > 0 else 1.0 / total_clientes
-                    rateado = int(round(volume_alvo * peso))
-                    soma_dist += rateado
+        nome_user = usuario.get('nome', usuario.get('email', 'Desconhecido'))
+        
+        # 1. SALVAR OS AJUSTES MANUAIS (Com log de auditoria)
+        if payload.ajustes:
+            for ajuste in payload.ajustes:
+                data_alvo = parse_date_safe(ajuste.mes_projetado)
+                volume_alvo = int(ajuste.novo_volume)
                 
-                # A CASCATA: Congelar garante a transferência da Meta
-                l.vol_topdown = rateado
-                l.vol_bottomup = rateado
-                l.vol_supply = rateado
-                l.vol_final = rateado
-                l.vol_meta = rateado
+                linhas = get_truth_query(db, ciclo, data_alvo, data_alvo).filter(FatoIbpGranular.sku == ajuste.sku).all()
+                if not linhas: continue
+                
+                total_base_antigo = sum([float(l.vol_topdown or l.vol_ia or 0) for l in linhas])
+                base_total_ia = sum([float(l.vol_ia or 0) for l in linhas])
+                soma_dist = 0
+                
+                for i, l in enumerate(linhas):
+                    if i == len(linhas) - 1:
+                        rateado = volume_alvo - soma_dist 
+                    else:
+                        peso = float(l.vol_ia or 0) / base_total_ia if base_total_ia > 0 else 1.0 / len(linhas)
+                        rateado = int(round(volume_alvo * peso))
+                        soma_dist += rateado
+                    
+                    if l.vol_topdown != rateado:
+                        l.vol_topdown = rateado
 
-            nome_user = usuario.get('nome', usuario.get('email', 'Desconhecido'))
-            registrar_log_auditoria(
-                db=db, ciclo=ciclo, origem="Top-Down Arena",
-                usuario=nome_user, sku=ajuste.sku, cliente="TODOS_OS_CLIENTES",
-                mes=data_alvo, v_antigo=int(total_base_antigo), v_novo=volume_alvo
-            )
+                registrar_log_auditoria(
+                    db=db, ciclo=ciclo, origem="Top-Down Arena",
+                    usuario=nome_user, sku=ajuste.sku, cliente="TODOS_OS_CLIENTES",
+                    mes=data_alvo, v_antigo=int(total_base_antigo), v_novo=volume_alvo
+                )
 
+        # 2. TRANSBORDO UNIVERSAL: Cobre os "SKUs Ignorados"
+        # Tudo que a Diretoria não alterou (NULL no Top-Down) herda automaticamente o volume da IA
+        db.query(FatoIbpGranular).filter(
+            FatoIbpGranular.ciclo_sop == ciclo,
+            FatoIbpGranular.vol_topdown.is_(None)
+        ).update({
+            FatoIbpGranular.vol_topdown: FatoIbpGranular.vol_ia
+        }, synchronize_session=False)
+
+        # 3. A CASCATA DE BASTÃO
+        # A meta fixada pela Diretoria é imediatamente passada para o Bottom-Up e processos seguintes
+        db.query(FatoIbpGranular).filter(
+            FatoIbpGranular.ciclo_sop == ciclo
+        ).update({
+            FatoIbpGranular.vol_bottomup: FatoIbpGranular.vol_topdown,
+            FatoIbpGranular.vol_supply: FatoIbpGranular.vol_topdown,
+            FatoIbpGranular.vol_final: FatoIbpGranular.vol_topdown,
+            FatoIbpGranular.vol_meta: FatoIbpGranular.vol_topdown
+        }, synchronize_session=False)
+
+        # 4. TRANCAR A ETAPA
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down Arena').first()
         if not registro:
             db.add(ControleCiclo(ciclo_sop=ciclo, origem='Top-Down Arena', status='Fechado'))
@@ -260,7 +268,7 @@ async def congelar_ratear_topdown(payload: PayloadAprovarTopDown, db: Session = 
             registro.status = 'Fechado'
 
         db.commit()
-        return {"status": "success", "message": "Estratégia Macro Congelada com Sucesso."}
+        return {"status": "success", "message": "Estratégia Macro Congelada e Transbordada com Sucesso."}
     except Exception as e:
         db.rollback()
         raise HTTPException(500, repr(e))
