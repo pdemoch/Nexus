@@ -59,12 +59,10 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         data_fim = hoje + relativedelta(months=4)
         meses_alvo = [(hoje + relativedelta(months=i)).strftime("%Y-%m-%d") for i in range(2, 5)]
 
-        # Rateio pelo histórico recente (4 meses)
         data_hist_inicio = hoje - relativedelta(months=4)
         q_peso = db.query(FatoVendas.sku, func.sum(FatoVendas.qt_pedido).label('v')).filter(FatoVendas.data_pedido >= data_hist_inicio).group_by(FatoVendas.sku).all()
         peso_hist_dict = {str(r.sku).strip(): int(r.v or 0) for r in q_peso}
 
-        # EXTRAÇÃO DO ORÇAMENTO EXATO
         orc_query = db.execute(text("""
             SELECT sku, mes_projetado, receita_orcamento 
             FROM fato_orcamento 
@@ -75,7 +73,6 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         for o in orc_query:
             orc_dict[f"{o.sku}|{o.mes_projetado}"] = float(o.receita_orcamento or 0)
 
-        # QUERY PORTFÓLIO GLOBAL
         q_port = get_truth_query(db, ciclo, data_ini, data_fim)
         resultados_port = q_port.with_entities(
             DimProduto.categoria.label('cat'), DimProduto.segmento.label('seg'),
@@ -96,7 +93,6 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             if seg not in arvore_port[cat]["segmentos"]: arvore_port[cat]["segmentos"][seg] = {"nome": seg, "tipo": "segmento", "meses": {m: criar_meses() for m in meses_alvo}, "produtos": {}}
             if sk not in arvore_port[cat]["segmentos"][seg]["produtos"]: arvore_port[cat]["segmentos"][seg]["produtos"][sk] = {"nome": de, "produto": sk, "tipo": "produto", "meses": {m: criar_meses() for m in meses_alvo}}
 
-        # Injetar volumes projetados
         for r in resultados_port:
             cat, seg, sk, ms = r.cat or 'SEM CATEGORIA', r.seg or 'SEM SEGMENTO', str(r.sku).strip(), str(r.mes_projetado)
             if ms in meses_alvo and cat in arvore_port and seg in arvore_port[cat]["segmentos"] and sk in arvore_port[cat]["segmentos"][seg]["produtos"]:
@@ -153,7 +149,7 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
             for r in q_hist.group_by(FatoVendas.cgc, FatoVendas.sku).all():
                 if r.vol_hist and r.vol_hist > 0: peso_map_global[(r.cgc, r.sku)] = float(r.vol_hist)
 
-        # Rateio Absoluto do vol_bu
+        # Rateio Absoluto Matemático (Método de Hare-Niemeyer / Maior Resto)
         for ajuste in payload.ajustes:
             dt = parse_date_safe(ajuste.mes_projetado)
             sku = ajuste.chave.split('|')[-1].strip()
@@ -161,21 +157,31 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
             if not linhas: continue
 
             total_hist_no = sum(peso_map_global.get((l.cgc, l.sku), 0) for l in linhas)
-            linhas.sort(key=lambda x: peso_map_global.get((x.cgc, x.sku), 0), reverse=True)
-
             target_volume = ajuste.novo_volume
-            allocated = 0
-
-            for i, linha in enumerate(linhas):
+            
+            fractional_parts = []
+            for linha in linhas:
                 peso_bruto = peso_map_global.get((linha.cgc, linha.sku), 0)
                 p_val = peso_bruto / total_hist_no if total_hist_no > 0 else 1.0 / len(linhas)
-                inc = target_volume - allocated if i == len(linhas) - 1 else int(round(target_volume * p_val))
-                
-                novo_valor_calculado = max(0, inc)
+                exact_val = target_volume * p_val
+                int_val = int(math.floor(exact_val))
+                rem = exact_val - int_val
+                fractional_parts.append({'linha': linha, 'int_val': int_val, 'rem': rem})
+            
+            allocated = sum(item['int_val'] for item in fractional_parts)
+            remainder_to_allocate = int(target_volume - allocated)
+            
+            # Distribui o que falta pelos maiores restos
+            fractional_parts.sort(key=lambda x: x['rem'], reverse=True)
+            for i in range(remainder_to_allocate):
+                if i < len(fractional_parts):
+                    fractional_parts[i]['int_val'] += 1
+                    
+            for item in fractional_parts:
+                linha = item['linha']
+                novo_valor_calculado = item['int_val']
                 if linha.vol_bottomup != novo_valor_calculado:
                     linha.vol_bottomup = novo_valor_calculado
-                
-                allocated += inc
 
         db.commit()
         return {"status": "success", "message": "Proposta de Portfólio consolidada na base de dados."}
@@ -189,7 +195,6 @@ async def aprovar_gerencia(payload: PayloadAprovarGerente, db: Session = Depends
         if payload.ajustes: await salvar_rascunho_gerencia(payload, db, usuario)
         ciclo = get_current_cycle(db)
         
-        # A Mágica do Transbordo: vol_bu esmaga os volumes seguintes
         db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo).update({
             FatoIbpGranular.vol_supply: FatoIbpGranular.vol_bottomup,
             FatoIbpGranular.vol_final: FatoIbpGranular.vol_bottomup,
@@ -213,7 +218,7 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
         _mes_str, _ano_str = ciclo_atual.split('/')
         hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
         
-        inicio_projeto = datetime.date(2026, 4, 1) # Início do projeto Nexus (Gênese)
+        inicio_projeto = datetime.date(2026, 4, 1) # Início do projeto Nexus
         inicio_hist = hoje - relativedelta(months=24) # 2 Anos
         m2_comercial = hoje + relativedelta(months=2) # Os 3 meses da simulação atual
 
@@ -223,18 +228,8 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
             calendario[curr.strftime('%Y-%m')] = {"Realizado": None, "TopDown": None, "BottomUpBase": None, "IA": None, "CicloAnterior": None}
             curr += relativedelta(months=1)
 
-        # 1. Busca TODO o Histórico de Vendas (2 Anos)
         q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('realizado')).join(DimProduto, FatoVendas.sku == DimProduto.sku).filter(FatoVendas.data_pedido >= inicio_hist)
-        
-        # 2. Busca TODAS as Projeções já feitas no IBP (SEM FILTRO DE CICLO - MÁQUINA DO TEMPO ATIVA)
-        q_proj = db.query(
-            func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes_ano'), 
-            FatoIbpGranular.ciclo_sop, 
-            func.sum(FatoIbpGranular.vol_topdown).label('td'), 
-            func.sum(FatoIbpGranular.vol_bottomup).label('bu'), 
-            func.sum(FatoIbpGranular.vol_ia).label('ia'), 
-            func.sum(FatoIbpGranular.vol_final).label('final')
-        ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)
+        q_proj = db.query(func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes_ano'), FatoIbpGranular.ciclo_sop, func.sum(FatoIbpGranular.vol_topdown).label('td'), func.sum(FatoIbpGranular.vol_bottomup).label('bu'), func.sum(FatoIbpGranular.vol_ia).label('ia'), func.sum(FatoIbpGranular.vol_final).label('final')).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)
         
         if chave_matriz != 'ROOT':
             partes_chave = chave_matriz.split('|')
@@ -255,7 +250,6 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
         for row in q_proj.group_by('mes_ano', FatoIbpGranular.ciclo_sop).all():
             proj_por_mes[row.mes_ano][row.ciclo_sop] = {"td": int(row.td or 0), "bu": int(row.bu or 0), "ia": int(row.ia or 0), "final": int(row.final or 0)}
 
-        # 3. Transbordo Histórico do S&OP (Lead Time M-2)
         for ms in calendario.keys():
             mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
 
@@ -283,8 +277,6 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
         for ms, v in sorted(calendario.items()):
             mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
             mostrar_ia_lag = mes_dt >= inicio_projeto
-            
-            # Eixo X Formatação Dashboard (Ex: "Ago/26") para bater o Match Dinâmico
             nome_formatado = f"{meses_pt[mes_dt.month - 1]}/{mes_dt.strftime('%y')}"
             
             timeline.append({
