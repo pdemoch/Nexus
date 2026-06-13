@@ -5,7 +5,7 @@ import {
 } from '@tanstack/react-table';
 import { 
   ChevronRight, ChevronDown, Package, Boxes, LayoutGrid, 
-  Target, Save, Shield, ShieldAlert, BarChart3, Activity, Wand2, TrendingUp, TrendingDown
+  Target, Save, Shield, ShieldAlert, BarChart3, Activity, Wand2, TrendingUp, TrendingDown, ShieldCheck
 } from 'lucide-react';
 import { 
   ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
@@ -107,6 +107,7 @@ const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo
 export default function GerenciamentoArena({ usuarioSessao }: any) {
   const [dadosBase, setDadosBase] = useState<any[]>([]);
   const [isTopDownFechado, setIsTopDownFechado] = useState(true);
+  const [isDemandFechado, setIsDemandFechado] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   
   const [celulasEditadas, setCelulasEditadas] = useState<any>({});
@@ -124,6 +125,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
       const res = await axios.get('/api/v1/consensus/gerenciamento', { params: { nocache: new Date().getTime() } });
       setDadosBase(res.data.dados.portfolio || []);
       setIsTopDownFechado(res.data.is_topdown_fechado);
+      setIsDemandFechado(res.data.is_demand_fechado); 
       setCelulasEditadas({});
     } catch (e) { console.error("Erro ao carregar:", e); } 
     finally { setIsLoading(false); }
@@ -131,7 +133,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // Extração Dinâmica Recursiva (Direto na Válvula)
   const getDynamicVol = useCallback((row: any, mesBanco: string): number => {
     if (row.tipo === 'produto') {
       const ed = celulasEditadas[row.chave_matriz]?.[mesBanco];
@@ -162,9 +163,8 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     }, { vol: 0, rec: 0, metaRec: 0 });
   }, []);
 
-  // O Motor de Rateio Perfeito (Desce direto para a folha e extirpa fracionamentos de segmento)
   const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
-    if (!isTopDownFechado) return;
+    if (!isTopDownFechado || isDemandFechado) return;
 
     setCelulasEditadas((currentEdits: any) => {
       const nextEdits = { ...currentEdits };
@@ -192,19 +192,24 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
       const totalHist = leaves.reduce((sum, leaf) => sum + (leaf.vol_historico_mix || 1), 0);
 
-      let allocated = 0;
-      leaves.forEach((leaf, idx) => {
-        let leafTarget = 0;
-        if (idx === leaves.length - 1) {
-          leafTarget = novoValor - allocated;
-        } else {
+      const fractions = leaves.map(leaf => {
           const weight = leaf.vol_historico_mix || 1;
-          leafTarget = Math.round((weight / totalHist) * novoValor);
-        }
-        allocated += Math.max(0, leafTarget);
+          const exact = (weight / totalHist) * novoValor;
+          const intVal = Math.floor(exact);
+          return { leaf, intVal, rem: exact - intVal };
+      });
 
-        if (!nextEdits[leaf.chave_matriz]) nextEdits[leaf.chave_matriz] = {};
-        nextEdits[leaf.chave_matriz][mesBanco] = { novo_volume: Math.max(0, leafTarget) };
+      let allocated = fractions.reduce((sum, item) => sum + item.intVal, 0);
+      let remainder = novoValor - allocated;
+
+      fractions.sort((a, b) => b.rem - a.rem);
+      for (let i = 0; i < remainder; i++) {
+          if (i < fractions.length) fractions[i].intVal++;
+      }
+
+      fractions.forEach(item => {
+          if (!nextEdits[item.leaf.chave_matriz]) nextEdits[item.leaf.chave_matriz] = {};
+          nextEdits[item.leaf.chave_matriz][mesBanco] = { novo_volume: item.intVal };
       });
 
       return nextEdits;
@@ -253,17 +258,13 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   }, [dadosBase, getDynamicVol, getDynamicRec, getStaticTD, colunasData]);
 
 
-  // =========================================================================
-  // DOSSIÊ DE EXPANSÃO (O Gráfico Perfeito)
-  // =========================================================================
   const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
     const chave = rowData.chave_matriz;
     const chartData = dadosGraficoCache[chave];
 
     const kpis = useMemo(() => {
       let recBU = 0; let recIA = 0; let recTD = 0; let recMeta = 0; let volBU = 0;
-      let pmvAcc = 0; let count = 0;
-
+      
       (rowData?.meses || []).forEach((m: any) => {
           const vBU = getDynamicVol(rowData, m.mes_banco);
           volBU += vBU;
@@ -271,19 +272,17 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
           recIA += (m.vol_ia || 0) * (m.pmv || 0);
           recTD += (m.vol_td || 0) * (m.pmv || 0);
           recMeta += (m.receita_meta || 0);
-
-          if(m.pmv) { pmvAcc += m.pmv; count++; }
       });
-      return { recBU, recIA, recTD, recMeta, volBU, pmvMedio: count > 0 ? (pmvAcc / count) : 0 };
+      
+      const pmvMedio = volBU > 0 ? (recBU / volBU) : 0;
+      return { recBU, recIA, recTD, recMeta, volBU, pmvMedio };
     }, [rowData, celulasEditadas, getDynamicVol]);
 
-    // O MATCH DINÂMICO QUE CORRIGE O SALTO DE VALOR NO GRÁFICO
     const chartDataDynamic = useMemo(() => {
         if (!chartData) return [];
         return chartData.map((d: any) => {
             let dynamicBU = d.BottomUpBase;
             if (d.TopDown !== null) {
-               // O Match acontece via data_iso vs mes_banco
                const m = rowData.meses?.find((x: any) => x.mes_banco === d.data_iso);
                if (m) dynamicBU = getDynamicVol(rowData, m.mes_banco);
             }
@@ -359,11 +358,13 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
           const hasChildren = row.getCanExpand();
           const isProduto = row.original.tipo === 'produto';
 
-          let pmvAcc = 0; let pmvCount = 0;
+          // Exibe o PMV Médio Ponderado no frontend (Rec / Vol)
+          let vTotal = 0; let rTotal = 0;
           (row.original.meses || []).forEach((m: any) => {
-             if (m.pmv && m.pmv > 0) { pmvAcc += m.pmv; pmvCount++; }
+             vTotal += m.vol_bu;
+             rTotal += m.vol_bu * m.pmv;
           });
-          const pmvMedioNode = pmvCount > 0 ? pmvAcc / pmvCount : 0;
+          const pmvMedioNode = vTotal > 0 ? (rTotal / vTotal) : ((row.original.meses && row.original.meses[0]?.pmv) || 0);
 
           return (
             <div style={{ paddingLeft: `${depth * 1.5}rem` }} className="flex items-center gap-3 py-2">
@@ -417,8 +418,8 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                  <Target className="w-3 h-3 text-slate-300" /> TD: {formatVolume(tdData.vol)}
               </div>
               
-              <div className={`w-full max-w-[120px] border rounded-lg px-2 py-1.5 shadow-sm transition-colors focus-within:ring-2 focus-within:ring-blue-500/50 focus-within:border-blue-500 ${!isTopDownFechado ? 'bg-slate-50 border-slate-200' : 'bg-white border-blue-200 hover:border-blue-400'}`}>
-                 <SmartInput value={vBU} onChange={(val) => handleEditCell(row.original.chave_matriz, mes.mes_banco, val)} disabled={!isTopDownFechado} />
+              <div className={`w-full max-w-[120px] border rounded-lg px-2 py-1.5 shadow-sm transition-colors focus-within:ring-2 focus-within:ring-blue-500/50 focus-within:border-blue-500 ${!isTopDownFechado || isDemandFechado ? 'bg-slate-50 border-slate-200' : 'bg-white border-blue-200 hover:border-blue-400'}`}>
+                 <SmartInput value={vBU} onChange={(val) => handleEditCell(row.original.chave_matriz, mes.mes_banco, val)} disabled={!isTopDownFechado || isDemandFechado} />
               </div>
 
               <div className="flex items-center gap-1.5 mt-1.5">
@@ -438,7 +439,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     });
 
     return cols;
-  }, [colunasData, celulasEditadas, chartExpanded, isTopDownFechado]);
+  }, [colunasData, celulasEditadas, chartExpanded, isTopDownFechado, isDemandFechado]);
 
   const table = useReactTable({
     data: dadosBase,
@@ -491,10 +492,10 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             </div>
 
             <div className="flex items-center gap-4">
-              <button onClick={handleSalvarRascunho} disabled={!isTopDownFechado} className="px-5 py-2.5 font-bold rounded-xl transition-all flex items-center gap-2 border bg-white text-slate-700 border-slate-300 hover:bg-slate-50 disabled:opacity-50">
+              <button onClick={handleSalvarRascunho} disabled={!isTopDownFechado || isDemandFechado} className="px-5 py-2.5 font-bold rounded-xl transition-all flex items-center gap-2 border bg-white text-slate-700 border-slate-300 hover:bg-slate-50 disabled:opacity-50">
                   <Save className="w-4 h-4" /> Salvar Rascunho
               </button>
-              <button onClick={handleCongelar} disabled={!isTopDownFechado} className="px-6 py-2.5 font-bold rounded-xl shadow-lg transition-all flex items-center gap-2 text-white bg-blue-600 hover:bg-blue-500 shadow-blue-900/20 disabled:opacity-50">
+              <button onClick={handleCongelar} disabled={!isTopDownFechado || isDemandFechado} className="px-6 py-2.5 font-bold rounded-xl shadow-lg transition-all flex items-center gap-2 text-white bg-blue-600 hover:bg-blue-500 shadow-blue-900/20 disabled:opacity-50">
                   <Shield className="w-4 h-4" /> Travar e Enviar Volumes
               </button>
             </div>
@@ -504,6 +505,13 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             <div className="bg-amber-50 border border-amber-200 text-amber-800 p-5 rounded-xl flex items-center gap-4 shadow-sm">
                 <ShieldAlert className="w-6 h-6 text-amber-500" />
                 <div><h3 className="font-bold uppercase text-xs">Bloqueio de Ciclo</h3><p className="text-sm">O modelo Bottom-Up aguarda a formalização Top-Down pela Diretoria.</p></div>
+            </div>
+        )}
+
+        {isDemandFechado && !isLoading && (
+            <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 p-5 rounded-xl flex items-center gap-4 shadow-sm">
+                <ShieldCheck className="w-6 h-6 text-emerald-500" />
+                <div><h3 className="font-bold uppercase text-xs">Etapa Concluída</h3><p className="text-sm">O modelo Bottom-Up foi cravado e os volumes já foram transmitidos para a etapa de Supply.</p></div>
             </div>
         )}
 
