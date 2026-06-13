@@ -341,3 +341,24 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
         return {"status": "success", "dados": timeline}
     except Exception as e:
         raise HTTPException(status_code=500, detail=repr(e))
+
+@router.get("/filtros")
+async def obter_filtros_gerenciamento(db: Session = Depends(get_db)):
+    """
+    Fornece as listas únicas de categorias e segmentos para os dropdowns 
+    de filtro do Frontend (Global/Layout).
+    """
+    try:
+        # Busca valores únicos ignorando os nulos
+        categorias = db.query(DimProduto.categoria).filter(DimProduto.categoria.isnot(None)).distinct().all()
+        segmentos = db.query(DimProduto.segmento).filter(DimProduto.segmento.isnot(None)).distinct().all()
+        
+        return {
+            "status": "success",
+            "dados": {
+                "categorias": sorted([c[0] for c in categorias]),
+                "segmentos": sorted([s[0] for s in segmentos])
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=repr(e))
