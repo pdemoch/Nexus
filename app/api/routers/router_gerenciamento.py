@@ -64,7 +64,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         q_peso = db.query(FatoVendas.sku, func.sum(FatoVendas.qt_pedido).label('v')).filter(FatoVendas.data_pedido >= data_hist_inicio).group_by(FatoVendas.sku).all()
         peso_hist_dict = {str(r.sku).strip(): int(r.v or 0) for r in q_peso}
 
-        # EXTRAÇÃO DO ORÇAMENTO EXATO (Dashboard Style)
+        # EXTRAÇÃO DO ORÇAMENTO EXATO (A Cópia do Dashboard)
         orc_query = db.execute(text("""
             SELECT sku, mes_projetado, receita_orcamento 
             FROM fato_orcamento 
@@ -96,7 +96,6 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             if seg not in arvore_port[cat]["segmentos"]: arvore_port[cat]["segmentos"][seg] = {"nome": seg, "tipo": "segmento", "meses": {m: criar_meses() for m in meses_alvo}, "produtos": {}}
             if sk not in arvore_port[cat]["segmentos"][seg]["produtos"]: arvore_port[cat]["segmentos"][seg]["produtos"][sk] = {"nome": de, "produto": sk, "tipo": "produto", "meses": {m: criar_meses() for m in meses_alvo}}
 
-        # Injetar volumes projetados
         for r in resultados_port:
             cat, seg, sk, ms = r.cat or 'SEM CATEGORIA', r.seg or 'SEM SEGMENTO', str(r.sku).strip(), str(r.mes_projetado)
             if ms in meses_alvo and cat in arvore_port and seg in arvore_port[cat]["segmentos"] and sk in arvore_port[cat]["segmentos"][seg]["produtos"]:
@@ -209,9 +208,9 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
         _mes_str, _ano_str = ciclo_atual.split('/')
         hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
         
-        inicio_projeto = datetime.date(2026, 4, 1) # Início do projeto Nexus
-        inicio_hist = hoje - relativedelta(months=24)
-        m2_comercial = hoje + relativedelta(months=2)
+        inicio_projeto = datetime.date(2026, 4, 1) # Início do projeto Nexus (Gênese)
+        inicio_hist = hoje - relativedelta(months=24) # 2 Anos
+        m2_comercial = hoje + relativedelta(months=2) # Os 3 meses da simulação atual
 
         calendario = {}
         curr = inicio_hist
@@ -219,9 +218,10 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
             calendario[curr.strftime('%Y-%m')] = {"Realizado": None, "TopDown": None, "BottomUpBase": None, "IA": None, "CicloAnterior": None}
             curr += relativedelta(months=1)
 
+        # 1. Busca TODO o Histórico de Vendas (2 Anos)
         q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('realizado')).join(DimProduto, FatoVendas.sku == DimProduto.sku).filter(FatoVendas.data_pedido >= inicio_hist)
         
-        # HISTÓRICO COMPLETO DA FATO_IBP_GRANULAR
+        # 2. Busca TODAS as Projeções já feitas no IBP (Sem filtro de ciclo, trazendo todo o passado)
         q_proj = db.query(func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes_ano'), FatoIbpGranular.ciclo_sop, func.sum(FatoIbpGranular.vol_topdown).label('td'), func.sum(FatoIbpGranular.vol_bottomup).label('bu'), func.sum(FatoIbpGranular.vol_ia).label('ia'), func.sum(FatoIbpGranular.vol_final).label('final')).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)
         
         if chave_matriz != 'ROOT':
@@ -243,27 +243,41 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
         for row in q_proj.group_by('mes_ano', FatoIbpGranular.ciclo_sop).all():
             proj_por_mes[row.mes_ano][row.ciclo_sop] = {"td": int(row.td or 0), "bu": int(row.bu or 0), "ia": int(row.ia or 0), "final": int(row.final or 0)}
 
+        # 3. Máquina do Tempo do S&OP (O Transbordo Histórico)
         for ms in calendario.keys():
+            mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
+
             if ms in proj_por_mes:
-                if ciclo_atual in proj_por_mes[ms]:
-                    calendario[ms]["TopDown"] = proj_por_mes[ms][ciclo_atual]["td"]
-                    calendario[ms]["BottomUpBase"] = proj_por_mes[ms][ciclo_atual]["bu"]
-                    calendario[ms]["IA"] = proj_por_mes[ms][ciclo_atual]["ia"]
+                # Regra A: Para o M2, M3 e M4 do ciclo vigente
+                if mes_dt >= m2_comercial:
+                    if ciclo_atual in proj_por_mes[ms]:
+                        calendario[ms]["TopDown"] = proj_por_mes[ms][ciclo_atual]["td"]
+                        calendario[ms]["BottomUpBase"] = proj_por_mes[ms][ciclo_atual]["bu"]
+                        calendario[ms]["IA"] = proj_por_mes[ms][ciclo_atual]["ia"]
+                    if ciclo_anterior in proj_por_mes[ms]:
+                        calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_anterior]["final"]
                 
-                # Resgata o plano congelado do ciclo imediatamente anterior ao mês projetado
-                mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
-                ciclo_alvo_ant_dt = mes_dt - relativedelta(months=1)
-                ciclo_alvo_str = ciclo_alvo_ant_dt.strftime('%m/%Y')
-                
-                if ciclo_alvo_str in proj_por_mes[ms]:
-                    calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_alvo_str]["final"]
-                elif ciclo_anterior in proj_por_mes[ms]:
-                    calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_anterior]["final"]
+                # Regra B: Para os meses congelados no passado (A Cauda Histórica de Projeção)
+                else:
+                    if mes_dt >= inicio_projeto: # Aplica a regra só a partir de 04/2026
+                        # Acha o ciclo onde este mês foi M2 (mes_alvo - 2 meses)
+                        ciclo_origem_dt = mes_dt - relativedelta(months=2)
+                        
+                        # Se M-2 der antes de 04/2026, bate na trava da Gênese (04/2026)
+                        if ciclo_origem_dt < inicio_projeto:
+                            ciclo_origem_dt = inicio_projeto
+                            
+                        ciclo_origem_str = f"{ciclo_origem_dt.month:02d}/{ciclo_origem_dt.year}"
+                        
+                        if ciclo_origem_str in proj_por_mes[ms]:
+                            calendario[ms]["IA"] = proj_por_mes[ms][ciclo_origem_str]["ia"]
+                            calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_origem_str]["final"]
 
         timeline = []
         for ms, v in sorted(calendario.items()):
             mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
-            mostrar_ia_lag = mes_dt >= inicio_projeto # Começa a desenhar IA/Lag a partir de Abril
+            mostrar_ia_lag = mes_dt >= inicio_projeto # Desenha a linha de IA e Lag a partir de Abril
+            
             timeline.append({
                 "name": ms, "data_iso": f"{ms}-01",
                 "Realizado": None if mes_dt >= hoje else (v["Realizado"] or 0),

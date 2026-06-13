@@ -45,9 +45,6 @@ const VarBadge = ({ atual = 0, anterior = 0, dark = false }: { atual?: number, a
   );
 };
 
-// =========================================================================
-// COMPONENTES AUXILIARES
-// =========================================================================
 const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (val: number) => void, disabled: boolean }) => {
   const [localVal, setLocalVal] = useState(value !== undefined && value !== null ? formatVolume(value) : '0');
   const [isFocused, setIsFocused] = useState(false);
@@ -107,9 +104,6 @@ const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo
   );
 };
 
-// =========================================================================
-// COMPONENTE PRINCIPAL
-// =========================================================================
 export default function GerenciamentoArena({ usuarioSessao }: any) {
   const [dadosBase, setDadosBase] = useState<any[]>([]);
   const [isTopDownFechado, setIsTopDownFechado] = useState(true);
@@ -137,9 +131,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // =========================================================================
-  // LÓGICA DE RATEIO HISTÓRICO E EXTRAÇÃO DINÂMICA
-  // =========================================================================
   const getDynamicVol = useCallback((row: any, mesBanco: string): number => {
     if (row.tipo === 'produto') {
       const ed = celulasEditadas[row.chave_matriz]?.[mesBanco];
@@ -232,9 +223,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     }
   };
 
-  // =========================================================================
-  // CALCULO DO RODAPÉ (TOTALIZADOR)
-  // =========================================================================
   const totalSKUs = useMemo(() => {
     let count = 0;
     const countLeaves = (nodes: any[]) => {
@@ -262,9 +250,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   }, [dadosBase, getDynamicVol, getDynamicRec, getStaticTD, colunasData]);
 
 
-  // =========================================================================
-  // O DOSSIÊ EXPANSÍVEL DA LINHA (Estilo Executivo Dashboard)
-  // =========================================================================
   const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
     const chave = rowData.chave_matriz;
     const chartData = dadosGraficoCache[chave];
@@ -305,7 +290,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
           <h3 className="font-bold text-lg text-white">Dossiê Analítico: <span className="text-slate-400 font-normal">{rowData.nome}</span></h3>
         </div>
 
-        {/* 4 CARDS DE RECEITA */}
         <div className="grid grid-cols-4 gap-4 mb-6">
           <div className="bg-blue-900/30 border border-blue-500/50 p-4 rounded-xl shadow-[0_0_15px_rgba(59,130,246,0.15)]">
             <div className="text-[10px] font-black text-blue-400 mb-1 uppercase tracking-widest">Sua Proposta (Vol_BU)</div>
@@ -338,13 +322,13 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                   <Tooltip contentStyle={{backgroundColor: '#0f172a', borderColor: '#334155', color: '#fff'}} itemStyle={{color: '#fff'}} />
                   <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} />
                   
-                  {/* TODAS AS 5 CURVAS 100% EM LINHAS */}
-                  <Line type="monotone" dataKey="CicloAnterior" name="Lag 1 (Ciclo Passado)" stroke="#eab308" strokeDasharray="5 5" strokeWidth={2} dot={false} connectNulls={false} />
-                  <Line type="monotone" dataKey="IA" name="Modelo IA (Baseline)" stroke="#ec4899" strokeDasharray="5 5" strokeWidth={2} dot={false} connectNulls={false} />
-                  <Line type="monotone" dataKey="Realizado" name="Realizado (Histórico)" stroke="#64748b" strokeWidth={3} dot={false} connectNulls={false} />
+                  {/* Linhas conectando nulls para varrer o histórico inteiro até M4 */}
+                  <Line type="monotone" dataKey="CicloAnterior" name="Lag 1 (Ciclo Passado)" stroke="#eab308" strokeDasharray="5 5" strokeWidth={2} dot={false} connectNulls={true} />
+                  <Line type="monotone" dataKey="IA" name="Modelo IA (Baseline)" stroke="#ec4899" strokeDasharray="5 5" strokeWidth={2} dot={false} connectNulls={true} />
+                  <Line type="monotone" dataKey="Realizado" name="Realizado (Histórico)" stroke="#64748b" strokeWidth={3} dot={false} connectNulls={true} />
                   
-                  <Line type="monotone" dataKey="BottomUp" name="Sua Proposta Dinâmica (BU)" stroke="#3b82f6" strokeWidth={4} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
-                  <Line type="monotone" dataKey="TopDown" name="Top-Down (Meta Fixo)" stroke="#cbd5e1" strokeDasharray="5 5" strokeWidth={2} dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="BottomUp" name="Sua Proposta Dinâmica (BU)" stroke="#3b82f6" strokeWidth={4} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={true} />
+                  <Line type="monotone" dataKey="TopDown" name="Top-Down (Meta Fixo)" stroke="#cbd5e1" strokeDasharray="5 5" strokeWidth={2} dot={false} connectNulls={true} />
                 </LineChart>
               </ResponsiveContainer>
             ) : null}
@@ -357,9 +341,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     );
   };
 
-  // =========================================================================
-  // COLUNAS TANSTACK TABLE (Apenas M2, M3 e M4)
-  // =========================================================================
   const columns = useMemo<ColumnDef<any>[]>(() => {
     const cols: ColumnDef<any>[] = [
       {
@@ -379,7 +360,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                 </button>
               ) : <div className="w-6" />}
               
-              {/* BOTÃO DO GRÁFICO - ACIONA O DOSSIÊ DA LINHA */}
               <button 
                  onClick={(e) => { e.stopPropagation(); toggleChart(row.original); }} 
                  className={`p-1.5 rounded-lg border transition-colors ${chartExpanded === row.original.chave_matriz ? 'bg-blue-100 text-blue-600 border-blue-200' : 'bg-white hover:bg-slate-100 text-slate-400'}`}
@@ -421,7 +401,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                  <SmartInput value={vBU} onChange={(val) => handleEditCell(row.original.chave_matriz, mes.mes_banco, val)} disabled={!isTopDownFechado} />
               </div>
 
-              {/* Faturamento Dinâmico da Simulação com Comparativo de Orçamento */}
               <div className="flex items-center gap-1.5 mt-1.5">
                  <span className="text-[11px] font-bold text-blue-600 bg-blue-50/50 px-2 py-0.5 rounded tracking-tight border border-blue-100">
                     {formatMoeda(rBU)}
@@ -429,7 +408,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                  {rMeta > 0 && <VarBadge atual={rBU} anterior={rMeta} />}
               </div>
 
-              {/* ORÇAMENTO NA COLUNA */}
               <div className="flex flex-col items-center mt-1.5 pt-1.5 border-t border-slate-100 w-full">
                  <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Orç: {formatMoeda(rMeta)}</span>
               </div>
@@ -452,9 +430,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     getExpandedRowModel: getExpandedRowModel(),
   });
 
-  // =========================================================================
-  // ACTIONS API
-  // =========================================================================
   const gerarPayloadFolhas = () => {
     const leafEdits = Object.entries(celulasEditadas).filter(([chave]) => chave.split('|').length === 3);
     return {
@@ -487,7 +462,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     <div className="min-h-screen bg-slate-50 p-8 pb-32 font-sans">
       <div className="max-w-[1400px] mx-auto mb-8 flex flex-col gap-6">
         
-        {/* HEADER LIMPO (Sem Cards) */}
         <div className="flex items-center justify-between mb-4">
             <div>
               <h1 className="text-3xl font-black text-slate-800 tracking-tight flex items-center gap-3">
@@ -513,7 +487,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
             </div>
         )}
 
-        {/* TANSTACK TABLE - VISÃO ÚNICA */}
         <div className="bg-white rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-200 overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse whitespace-nowrap">
@@ -542,7 +515,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                           </td>
                         ))}
                       </tr>
-                      {/* DOSSIÊ NA LINHA (COM GRÁFICO 100% LINHAS) */}
                       {chartExpanded === row.original.chave_matriz && (
                         <tr>
                           <td colSpan={columns.length} className="p-0 border-b-2 border-blue-500">
@@ -555,7 +527,6 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                 )}
               </tbody>
 
-              {/* O NOVO TOTALIZADOR DE RODAPÉ (FOOTER) */}
               {dadosBase.length > 0 && (
                 <tfoot className="bg-slate-900 sticky bottom-0 z-20 shadow-[0_-10px_40px_rgba(0,0,0,0.1)] border-t border-slate-800">
                   <tr>
