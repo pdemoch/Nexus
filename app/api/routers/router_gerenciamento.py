@@ -59,11 +59,10 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         data_fim = hoje + relativedelta(months=4)
         meses_alvo = [(hoje + relativedelta(months=i)).strftime("%Y-%m-%d") for i in range(2, 5)]
 
-        data_hist_inicio = hoje - relativedelta(months=24) # Mix histórico
+        data_hist_inicio = hoje - relativedelta(months=4) # Tendência Recente
         q_peso = db.query(FatoVendas.sku, func.sum(FatoVendas.qt_pedido).label('v')).filter(FatoVendas.data_pedido >= data_hist_inicio).group_by(FatoVendas.sku).all()
         peso_hist_dict = {str(r.sku).strip(): int(r.v or 0) for r in q_peso}
 
-        # QUERY PORTFÓLIO GLOBAL COM IA E META (Orçamento) PARA O DOSSIÊ
         q_port = get_truth_query(db, ciclo, data_ini, data_fim)
         resultados_port = q_port.with_entities(
             DimProduto.categoria.label('cat'), DimProduto.segmento.label('seg'),
@@ -85,7 +84,6 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             if seg not in arvore_port[cat]["segmentos"]: arvore_port[cat]["segmentos"][seg] = {"nome": seg, "tipo": "segmento", "meses": {m: criar_meses() for m in meses_alvo}, "produtos": {}}
             if sk not in arvore_port[cat]["segmentos"][seg]["produtos"]: arvore_port[cat]["segmentos"][seg]["produtos"][sk] = {"nome": de, "produto": sk, "tipo": "produto", "meses": {m: criar_meses() for m in meses_alvo}}
 
-        # Injetar volumes projetados
         for r in resultados_port:
             cat, seg, sk, ms = r.cat or 'SEM CATEGORIA', r.seg or 'SEM SEGMENTO', str(r.sku).strip(), str(r.mes_projetado)
             if ms in meses_alvo and cat in arvore_port and seg in arvore_port[cat]["segmentos"] and sk in arvore_port[cat]["segmentos"][seg]["produtos"]:
@@ -125,7 +123,7 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
         check_topdown_lock(db, ciclo)
 
         hoje = datetime.date.today()
-        data_hist = hoje - relativedelta(months=12)
+        data_hist = hoje - relativedelta(months=4)
 
         if not payload.ajustes: return {"status": "success", "message": "Nenhuma alteração enviada."}
 
@@ -142,7 +140,7 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
             for r in q_hist.group_by(FatoVendas.cgc, FatoVendas.sku).all():
                 if r.vol_hist and r.vol_hist > 0: peso_map_global[(r.cgc, r.sku)] = float(r.vol_hist)
 
-        # Rateio Absoluto do vol_bu (Exclusivamente BU)
+        # Rateio Absoluto do vol_bu
         for ajuste in payload.ajustes:
             dt = parse_date_safe(ajuste.mes_projetado)
             sku = ajuste.chave.split('|')[-1].strip()
@@ -159,13 +157,11 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
                 peso_bruto = peso_map_global.get((linha.cgc, linha.sku), 0)
                 p_val = peso_bruto / total_hist_no if total_hist_no > 0 else 1.0 / len(linhas)
                 inc = target_volume - allocated if i == len(linhas) - 1 else int(round(target_volume * p_val))
-                
-                # Apenas altera o vol_bottomup
                 linha.vol_bottomup = max(0, inc)
                 allocated += inc
 
         db.commit()
-        return {"status": "success", "message": "Proposta de Portfólio (BU) consolidada na base de dados."}
+        return {"status": "success", "message": "Proposta de Portfólio consolidada na base de dados."}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=repr(e))
@@ -200,7 +196,7 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
         _mes_str, _ano_str = ciclo_atual.split('/')
         hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
         
-        # Histórico de 2 anos (24 meses) e corte IA desde Abril
+        inicio_projeto = datetime.date(2026, 4, 1) # Início do projeto Nexus
         inicio_hist = hoje - relativedelta(months=24)
         m2_comercial = hoje + relativedelta(months=2)
 
@@ -244,12 +240,12 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
         timeline = []
         for ms, v in sorted(calendario.items()):
             mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
-            mostrar_projecoes = mes_dt >= hoje
+            mostrar_ia_lag = mes_dt >= inicio_projeto # Começa a desenhar IA/Lag a partir de Abril
             timeline.append({
                 "name": ms, "data_iso": f"{ms}-01",
-                "Realizado": None if mostrar_projecoes else (v["Realizado"] or 0),
-                "IA": v["IA"] if mostrar_projecoes else None,
-                "CicloAnterior": v["CicloAnterior"] if mostrar_projecoes else None,
+                "Realizado": None if mes_dt >= hoje else (v["Realizado"] or 0),
+                "IA": v["IA"] if mostrar_ia_lag else None,
+                "CicloAnterior": v["CicloAnterior"] if mostrar_ia_lag else None,
                 "TopDown": v["TopDown"] if mes_dt >= m2_comercial else None,
                 "BottomUpBase": v["BottomUpBase"] if mes_dt >= m2_comercial else None 
             })
