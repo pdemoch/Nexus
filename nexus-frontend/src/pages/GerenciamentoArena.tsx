@@ -8,7 +8,7 @@ import {
   Target, Save, Shield, ShieldAlert, BarChart3, Activity, Wand2, TrendingUp, TrendingDown
 } from 'lucide-react';
 import { 
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
+  ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
 } from 'recharts';
 
 const formatVolume = (val: any) => {
@@ -161,49 +161,55 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     }, { vol: 0, rec: 0, metaRec: 0 });
   }, []);
 
+  // Lógica Corrigida: Rateio desce diretamente para as folhas (SKUs), ignorando divisões iguais de Segmento
   const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
     if (!isTopDownFechado) return;
+
     setCelulasEditadas((currentEdits: any) => {
       const nextEdits = { ...currentEdits };
 
-      const distributeDown = (node: any, targetVolume: number) => {
-        if (!nextEdits[node.chave_matriz]) nextEdits[node.chave_matriz] = {};
-        nextEdits[node.chave_matriz][mesBanco] = { novo_volume: targetVolume };
-
-        if (node.subRows && node.subRows.length > 0) {
-           const totalHist = node.subRows.reduce((acc: number, child: any) => acc + (child.vol_historico_mix || 1), 0);
-           node.subRows.forEach((child: any, idx: number) => {
-             let childTarget = 0;
-             if (idx === node.subRows.length - 1) {
-               const allocatedSoFar = node.subRows.slice(0, idx).reduce((sum: number, c: any) => sum + (nextEdits[c.chave_matriz]?.[mesBanco]?.novo_volume || 0), 0);
-               childTarget = targetVolume - allocatedSoFar;
-             } else {
-               childTarget = Math.round(((child.vol_historico_mix || 1) / totalHist) * targetVolume);
-             }
-             distributeDown(child, Math.max(0, childTarget));
-           });
-        }
-      };
-
-      const rollupUp = (treeNodes: any[]): boolean => {
-        for (const node of treeNodes) {
-          if (node.chave_matriz === chaveStr) {
-            distributeDown(node, novoValor);
-            return true;
-          }
-          if (node.subRows && node.subRows.length > 0) {
-            if (rollupUp(node.subRows)) {
-              const newTotal = node.subRows.reduce((acc: number, child: any) => acc + getDynamicVol(child, mesBanco), 0);
-              if (!nextEdits[node.chave_matriz]) nextEdits[node.chave_matriz] = {};
-              nextEdits[node.chave_matriz][mesBanco] = { novo_volume: newTotal };
-              return true;
-            }
+      // Encontra o nó exato que foi alterado
+      const findNode = (nodes: any[]): any => {
+        for (const n of nodes) {
+          if (n.chave_matriz === chaveStr) return n;
+          if (n.subRows) {
+            const found = findNode(n.subRows);
+            if (found) return found;
           }
         }
-        return false;
+        return null;
       };
 
-      rollupUp(dadosBase);
+      const targetNode = findNode(dadosBase);
+      if (!targetNode) return nextEdits;
+
+      // Recolhe todos os SKUs debaixo deste nó
+      const leaves: any[] = [];
+      const getLeaves = (n: any) => {
+        if (n.tipo === 'produto') leaves.push(n);
+        else if (n.subRows) n.subRows.forEach(getLeaves);
+      };
+      getLeaves(targetNode);
+
+      // Soma o peso histórico real apenas dos SKUs
+      const totalHist = leaves.reduce((sum, leaf) => sum + (leaf.vol_historico_mix || 1), 0);
+
+      // Distribui o novo volume diretamente pelos SKUs, evitando fracionamentos nos segmentos
+      let allocated = 0;
+      leaves.forEach((leaf, idx) => {
+        let leafTarget = 0;
+        if (idx === leaves.length - 1) {
+          leafTarget = novoValor - allocated;
+        } else {
+          const weight = leaf.vol_historico_mix || 1;
+          leafTarget = Math.round((weight / totalHist) * novoValor);
+        }
+        allocated += leafTarget;
+
+        if (!nextEdits[leaf.chave_matriz]) nextEdits[leaf.chave_matriz] = {};
+        nextEdits[leaf.chave_matriz][mesBanco] = { novo_volume: Math.max(0, leafTarget) };
+      });
+
       return nextEdits;
     });
   };
@@ -264,7 +270,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
           recBU += vBU * (m.pmv || 0);
           recIA += (m.vol_ia || 0) * (m.pmv || 0);
           recTD += (m.vol_td || 0) * (m.pmv || 0);
-          recMeta += (m.vol_meta || 0) * (m.pmv || 0);
+          recMeta += (m.receita_meta || 0);
 
           if(m.pmv) { pmvAcc += m.pmv; count++; }
       });
@@ -315,21 +321,20 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
               <div className="h-full flex items-center justify-center text-slate-500 font-bold animate-pulse">Extraindo inteligência temporal...</div>
             ) : chartDataDynamic.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartDataDynamic} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                <ComposedChart data={chartDataDynamic} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
                   <XAxis dataKey="name" tick={{fill: '#94a3b8', fontSize: 12}} tickMargin={10} axisLine={false} />
                   <YAxis tickFormatter={(val) => formatVolume(val)} tick={{fill: '#94a3b8', fontSize: 12}} tickLine={false} axisLine={false} />
                   <Tooltip contentStyle={{backgroundColor: '#0f172a', borderColor: '#334155', color: '#fff'}} itemStyle={{color: '#fff'}} />
                   <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} />
                   
-                  {/* Linhas conectando nulls para varrer o histórico inteiro até M4 */}
-                  <Line type="monotone" dataKey="CicloAnterior" name="Lag 1 (Ciclo Passado)" stroke="#eab308" strokeDasharray="5 5" strokeWidth={2} dot={false} connectNulls={true} />
-                  <Line type="monotone" dataKey="IA" name="Modelo IA (Baseline)" stroke="#ec4899" strokeDasharray="5 5" strokeWidth={2} dot={false} connectNulls={true} />
-                  <Line type="monotone" dataKey="Realizado" name="Realizado (Histórico)" stroke="#64748b" strokeWidth={3} dot={false} connectNulls={true} />
+                  <Line type="monotone" dataKey="CicloAnterior" name="Lag 1 (Ciclo Passado)" stroke="#a855f7" strokeDasharray="4 4" strokeWidth={2} dot={false} connectNulls={true} />
+                  <Line type="monotone" dataKey="IA" name="Modelo IA (Baseline)" stroke="#64748b" strokeDasharray="5 5" strokeWidth={2} dot={false} connectNulls={true} />
+                  <Line type="monotone" dataKey="Realizado" name="Realizado (Histórico)" stroke="#94a3b8" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} connectNulls={true} />
                   
                   <Line type="monotone" dataKey="BottomUp" name="Sua Proposta Dinâmica (BU)" stroke="#3b82f6" strokeWidth={4} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={true} />
-                  <Line type="monotone" dataKey="TopDown" name="Top-Down (Meta Fixo)" stroke="#cbd5e1" strokeDasharray="5 5" strokeWidth={2} dot={false} connectNulls={true} />
-                </LineChart>
+                  <Line type="monotone" dataKey="TopDown" name="Top-Down (Meta Fixo)" stroke="#cbd5e1" strokeDasharray="6 4" strokeWidth={2} dot={false} connectNulls={true} />
+                </ComposedChart>
               </ResponsiveContainer>
             ) : null}
           </div>
@@ -352,6 +357,13 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
           const hasChildren = row.getCanExpand();
           const isProduto = row.original.tipo === 'produto';
 
+          // Calculando o PMV Médio para ser exibido abaixo do nome
+          let pmvAcc = 0; let pmvCount = 0;
+          (row.original.meses || []).forEach((m: any) => {
+             if (m.pmv && m.pmv > 0) { pmvAcc += m.pmv; pmvCount++; }
+          });
+          const pmvMedioNode = pmvCount > 0 ? pmvAcc / pmvCount : 0;
+
           return (
             <div style={{ paddingLeft: `${depth * 1.5}rem` }} className="flex items-center gap-3 py-2">
               {hasChildren ? (
@@ -371,9 +383,17 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                 {depth === 0 ? <LayoutGrid className="w-3.5 h-3.5" /> : depth === 1 ? <Boxes className="w-3.5 h-3.5" /> : <Package className="w-3.5 h-3.5" />}
               </div>
               
-              <span className={`text-sm pr-4 truncate max-w-[300px] ${chartExpanded === row.original.chave_matriz ? 'text-blue-700 font-black' : !isProduto ? 'font-black text-slate-800' : 'font-semibold text-slate-600'}`}>
-                {getValue() as string}
-              </span>
+              <div className="flex flex-col overflow-hidden">
+                <span className={`text-sm pr-4 truncate max-w-[300px] ${chartExpanded === row.original.chave_matriz ? 'text-blue-700 font-black' : !isProduto ? 'font-black text-slate-800' : 'font-semibold text-slate-600'}`}>
+                  {getValue() as string}
+                </span>
+                {/* Exibição do PMV diretamente abaixo do nome */}
+                {pmvMedioNode > 0 && (
+                  <span className="text-[10px] text-slate-400 font-bold mt-0.5 tracking-widest uppercase">
+                    PMV Médio: {formatMoeda(pmvMedioNode)}
+                  </span>
+                )}
+              </div>
             </div>
           );
         },

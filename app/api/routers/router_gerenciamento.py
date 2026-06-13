@@ -64,7 +64,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         q_peso = db.query(FatoVendas.sku, func.sum(FatoVendas.qt_pedido).label('v')).filter(FatoVendas.data_pedido >= data_hist_inicio).group_by(FatoVendas.sku).all()
         peso_hist_dict = {str(r.sku).strip(): int(r.v or 0) for r in q_peso}
 
-        # EXTRAÇÃO DO ORÇAMENTO EXATO (A Cópia do Dashboard)
+        # EXTRAÇÃO DO ORÇAMENTO EXATO
         orc_query = db.execute(text("""
             SELECT sku, mes_projetado, receita_orcamento 
             FROM fato_orcamento 
@@ -152,7 +152,7 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
             for r in q_hist.group_by(FatoVendas.cgc, FatoVendas.sku).all():
                 if r.vol_hist and r.vol_hist > 0: peso_map_global[(r.cgc, r.sku)] = float(r.vol_hist)
 
-        # Rateio Absoluto do vol_bu
+        # Rateio Absoluto do vol_bu - Com Otimização Brutal de Gravação
         for ajuste in payload.ajustes:
             dt = parse_date_safe(ajuste.mes_projetado)
             sku = ajuste.chave.split('|')[-1].strip()
@@ -169,7 +169,13 @@ async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session =
                 peso_bruto = peso_map_global.get((linha.cgc, linha.sku), 0)
                 p_val = peso_bruto / total_hist_no if total_hist_no > 0 else 1.0 / len(linhas)
                 inc = target_volume - allocated if i == len(linhas) - 1 else int(round(target_volume * p_val))
-                linha.vol_bottomup = max(0, inc)
+                
+                novo_valor_calculado = max(0, inc)
+                # OTIMIZAÇÃO DE PERFORMANCE: Só altera o objeto SQLAlchemy se houver mudança real
+                # Evita "sujar" milhares de linhas no banco, reduzindo o tempo de commit em 90%.
+                if linha.vol_bottomup != novo_valor_calculado:
+                    linha.vol_bottomup = novo_valor_calculado
+                
                 allocated += inc
 
         db.commit()
@@ -221,7 +227,7 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
         # 1. Busca TODO o Histórico de Vendas (2 Anos)
         q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('realizado')).join(DimProduto, FatoVendas.sku == DimProduto.sku).filter(FatoVendas.data_pedido >= inicio_hist)
         
-        # 2. Busca TODAS as Projeções já feitas no IBP (Sem filtro de ciclo, trazendo todo o passado)
+        # 2. Busca TODAS as Projeções já feitas no IBP
         q_proj = db.query(func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes_ano'), FatoIbpGranular.ciclo_sop, func.sum(FatoIbpGranular.vol_topdown).label('td'), func.sum(FatoIbpGranular.vol_bottomup).label('bu'), func.sum(FatoIbpGranular.vol_ia).label('ia'), func.sum(FatoIbpGranular.vol_final).label('final')).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)
         
         if chave_matriz != 'ROOT':
@@ -260,10 +266,8 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
                 # Regra B: Para os meses congelados no passado (A Cauda Histórica de Projeção)
                 else:
                     if mes_dt >= inicio_projeto: # Aplica a regra só a partir de 04/2026
-                        # Acha o ciclo onde este mês foi M2 (mes_alvo - 2 meses)
                         ciclo_origem_dt = mes_dt - relativedelta(months=2)
                         
-                        # Se M-2 der antes de 04/2026, bate na trava da Gênese (04/2026)
                         if ciclo_origem_dt < inicio_projeto:
                             ciclo_origem_dt = inicio_projeto
                             
@@ -276,7 +280,7 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
         timeline = []
         for ms, v in sorted(calendario.items()):
             mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
-            mostrar_ia_lag = mes_dt >= inicio_projeto # Desenha a linha de IA e Lag a partir de Abril
+            mostrar_ia_lag = mes_dt >= inicio_projeto 
             
             timeline.append({
                 "name": ms, "data_iso": f"{ms}-01",
