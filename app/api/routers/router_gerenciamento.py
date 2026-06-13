@@ -6,7 +6,7 @@ from collections import defaultdict
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, text
 
 from app.core.database import get_db
 from app.models.domain_models import DimProduto, FatoIbpGranular, ControleCiclo, FatoVendas
@@ -59,10 +59,23 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
         data_fim = hoje + relativedelta(months=4)
         meses_alvo = [(hoje + relativedelta(months=i)).strftime("%Y-%m-%d") for i in range(2, 5)]
 
-        data_hist_inicio = hoje - relativedelta(months=4) # Tendência Recente
+        # Rateio pelo histórico recente (4 meses)
+        data_hist_inicio = hoje - relativedelta(months=4)
         q_peso = db.query(FatoVendas.sku, func.sum(FatoVendas.qt_pedido).label('v')).filter(FatoVendas.data_pedido >= data_hist_inicio).group_by(FatoVendas.sku).all()
         peso_hist_dict = {str(r.sku).strip(): int(r.v or 0) for r in q_peso}
 
+        # EXTRAÇÃO DO ORÇAMENTO EXATO (Dashboard Style)
+        orc_query = db.execute(text("""
+            SELECT sku, mes_projetado, receita_orcamento 
+            FROM fato_orcamento 
+            WHERE mes_projetado >= :m2 AND mes_projetado <= :m4
+        """), {"m2": data_ini, "m4": data_fim}).fetchall()
+        
+        orc_dict = {}
+        for o in orc_query:
+            orc_dict[f"{o.sku}|{o.mes_projetado}"] = float(o.receita_orcamento or 0)
+
+        # QUERY PORTFÓLIO GLOBAL
         q_port = get_truth_query(db, ciclo, data_ini, data_fim)
         resultados_port = q_port.with_entities(
             DimProduto.categoria.label('cat'), DimProduto.segmento.label('seg'),
@@ -70,12 +83,11 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
             func.sum(FatoIbpGranular.vol_topdown).label('v_td'),  
-            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'), 
-            func.sum(FatoIbpGranular.vol_meta).label('v_meta'),
+            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'),
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
         ).group_by(DimProduto.categoria, DimProduto.segmento, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all()
 
-        def criar_meses(): return {"vol_td":0, "receita_td":0, "vol_bu":0, "receita_bu":0, "vol_ia":0, "receita_ia":0, "vol_meta":0, "receita_meta":0, "pmv":0.0}
+        def criar_meses(): return {"vol_td":0, "receita_td":0, "vol_bu":0, "receita_bu":0, "vol_ia":0, "receita_ia":0, "receita_meta":0, "pmv":0.0}
 
         arvore_port = {}
         for p in db.query(DimProduto).all():
@@ -84,14 +96,16 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
             if seg not in arvore_port[cat]["segmentos"]: arvore_port[cat]["segmentos"][seg] = {"nome": seg, "tipo": "segmento", "meses": {m: criar_meses() for m in meses_alvo}, "produtos": {}}
             if sk not in arvore_port[cat]["segmentos"][seg]["produtos"]: arvore_port[cat]["segmentos"][seg]["produtos"][sk] = {"nome": de, "produto": sk, "tipo": "produto", "meses": {m: criar_meses() for m in meses_alvo}}
 
+        # Injetar volumes projetados
         for r in resultados_port:
             cat, seg, sk, ms = r.cat or 'SEM CATEGORIA', r.seg or 'SEM SEGMENTO', str(r.sku).strip(), str(r.mes_projetado)
             if ms in meses_alvo and cat in arvore_port and seg in arvore_port[cat]["segmentos"] and sk in arvore_port[cat]["segmentos"][seg]["produtos"]:
                 v_bu = int(r.v_bu or 0)
                 v_td = int(r.v_td or 0)
                 v_ia = int(r.v_ia or 0)
-                v_meta = int(r.v_meta or 0)
                 pmv_b = float(r.pmv or 0)
+                v_orcamento_rec = orc_dict.get(f"{sk}|{ms}", 0.0)
+
                 for nivel in [arvore_port[cat]["meses"][ms], arvore_port[cat]["segmentos"][seg]["meses"][ms], arvore_port[cat]["segmentos"][seg]["produtos"][sk]["meses"][ms]]:
                     nivel["vol_td"] += v_td
                     nivel["receita_td"] += (v_td * pmv_b)
@@ -99,8 +113,7 @@ async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = De
                     nivel["receita_bu"] += (v_bu * pmv_b)
                     nivel["vol_ia"] += v_ia
                     nivel["receita_ia"] += (v_ia * pmv_b)
-                    nivel["vol_meta"] += v_meta
-                    nivel["receita_meta"] += (v_meta * pmv_b)
+                    nivel["receita_meta"] += v_orcamento_rec
                     nivel["pmv"] = (nivel["receita_bu"] / nivel["vol_bu"]) if nivel["vol_bu"] > 0 else pmv_b
 
         final_portfolio = []
@@ -207,7 +220,9 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
             curr += relativedelta(months=1)
 
         q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('realizado')).join(DimProduto, FatoVendas.sku == DimProduto.sku).filter(FatoVendas.data_pedido >= inicio_hist)
-        q_proj = db.query(func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes_ano'), FatoIbpGranular.ciclo_sop, func.sum(FatoIbpGranular.vol_topdown).label('td'), func.sum(FatoIbpGranular.vol_bottomup).label('bu'), func.sum(FatoIbpGranular.vol_ia).label('ia'), func.sum(FatoIbpGranular.vol_final).label('final')).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku).filter(FatoIbpGranular.ciclo_sop.in_([ciclo_atual, ciclo_anterior]))
+        
+        # HISTÓRICO COMPLETO DA FATO_IBP_GRANULAR
+        q_proj = db.query(func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes_ano'), FatoIbpGranular.ciclo_sop, func.sum(FatoIbpGranular.vol_topdown).label('td'), func.sum(FatoIbpGranular.vol_bottomup).label('bu'), func.sum(FatoIbpGranular.vol_ia).label('ia'), func.sum(FatoIbpGranular.vol_final).label('final')).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)
         
         if chave_matriz != 'ROOT':
             partes_chave = chave_matriz.split('|')
@@ -234,7 +249,15 @@ async def grafico_gerenciamento(chave_matriz: str = 'ROOT', db: Session = Depend
                     calendario[ms]["TopDown"] = proj_por_mes[ms][ciclo_atual]["td"]
                     calendario[ms]["BottomUpBase"] = proj_por_mes[ms][ciclo_atual]["bu"]
                     calendario[ms]["IA"] = proj_por_mes[ms][ciclo_atual]["ia"]
-                if ciclo_anterior in proj_por_mes[ms]:
+                
+                # Resgata o plano congelado do ciclo imediatamente anterior ao mês projetado
+                mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
+                ciclo_alvo_ant_dt = mes_dt - relativedelta(months=1)
+                ciclo_alvo_str = ciclo_alvo_ant_dt.strftime('%m/%Y')
+                
+                if ciclo_alvo_str in proj_por_mes[ms]:
+                    calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_alvo_str]["final"]
+                elif ciclo_anterior in proj_por_mes[ms]:
                     calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_anterior]["final"]
 
         timeline = []

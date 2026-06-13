@@ -5,7 +5,7 @@ import {
 } from '@tanstack/react-table';
 import { 
   ChevronRight, ChevronDown, Package, Boxes, LayoutGrid, 
-  Target, Save, Shield, ShieldAlert, BarChart3, Activity, Wand2
+  Target, Save, Shield, ShieldAlert, BarChart3, Activity, Wand2, TrendingUp, TrendingDown
 } from 'lucide-react';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
@@ -21,6 +21,28 @@ const formatMoeda = (val: any) => {
   const num = Number(val);
   if (isNaN(num)) return 'R$ 0,00';
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(num));
+};
+
+const calcVar = (atual: number, anterior: number) => anterior > 0 ? ((atual - anterior) / anterior) * 100 : 0;
+
+const VarBadge = ({ atual = 0, anterior = 0, dark = false }: { atual?: number, anterior?: number, dark?: boolean }) => {
+  const v = calcVar(atual, anterior);
+  if (v === 0 || anterior === 0) return null;
+  const isPos = v >= 0;
+  
+  if (dark) {
+    return (
+      <span className={`text-[9px] font-black flex items-center gap-0.5 px-1 py-0.5 rounded ${isPos ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
+        {isPos ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />} {Math.abs(v).toFixed(1)}%
+      </span>
+    );
+  }
+  
+  return (
+    <span className={`text-[9px] font-black flex items-center gap-0.5 px-1.5 py-0.5 rounded ${isPos ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+      {isPos ? <TrendingUp className="w-2.5 h-2.5" /> : <TrendingDown className="w-2.5 h-2.5" />} {Math.abs(v).toFixed(1)}%
+    </span>
+  );
 };
 
 // =========================================================================
@@ -47,7 +69,7 @@ const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (v
     <input
       type="text" value={localVal} disabled={disabled} onFocus={handleFocus} onBlur={handleBlur} onKeyDown={handleKeyDown} onChange={(e) => setLocalVal(e.target.value)}
       className={`w-full bg-transparent border-none text-center outline-none text-sm
-        ${disabled ? 'text-slate-400 font-medium cursor-not-allowed' : 'text-emerald-700 font-black'}`}
+        ${disabled ? 'text-slate-400 font-medium cursor-not-allowed' : 'text-blue-700 font-black'}`}
     />
   );
 };
@@ -241,23 +263,27 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
 
   // =========================================================================
-  // O DOSSIÊ EXPANSÍVEL (Sem o Orçamento nos Cards)
+  // O DOSSIÊ EXPANSÍVEL DA LINHA (Estilo Executivo Dashboard)
   // =========================================================================
   const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
     const chave = rowData.chave_matriz;
     const chartData = dadosGraficoCache[chave];
 
     const kpis = useMemo(() => {
-      let recBU = 0; let recIA = 0; let recTD = 0; let volBU = 0; let pmvAcc = 0; let count = 0;
+      let recBU = 0; let recIA = 0; let recTD = 0; let recMeta = 0; let volBU = 0;
+      let pmvAcc = 0; let count = 0;
+
       (rowData?.meses || []).forEach((m: any) => {
           const vBU = getDynamicVol(rowData, m.mes_banco);
           volBU += vBU;
           recBU += vBU * (m.pmv || 0);
           recIA += (m.vol_ia || 0) * (m.pmv || 0);
           recTD += (m.vol_td || 0) * (m.pmv || 0);
+          recMeta += (m.vol_meta || 0) * (m.pmv || 0);
+
           if(m.pmv) { pmvAcc += m.pmv; count++; }
       });
-      return { recBU, recIA, recTD, volBU, pmvMedio: count > 0 ? (pmvAcc / count) : 0 };
+      return { recBU, recIA, recTD, recMeta, volBU, pmvMedio: count > 0 ? (pmvAcc / count) : 0 };
     }, [rowData, celulasEditadas, getDynamicVol]);
 
     const chartDataDynamic = useMemo(() => {
@@ -273,30 +299,34 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
     }, [chartData, rowData, celulasEditadas, getDynamicVol]);
 
     return (
-      <div className="w-full bg-slate-900 shadow-inner px-8 py-8 border-y border-slate-800">
+      <div className="w-full bg-[#1e2336] shadow-inner px-8 py-8 border-y border-slate-800">
         <div className="flex items-center gap-2 mb-6">
           <Activity className="w-5 h-5 text-blue-400" />
           <h3 className="font-bold text-lg text-white">Dossiê Analítico: <span className="text-slate-400 font-normal">{rowData.nome}</span></h3>
         </div>
 
-        {/* 3 CARDS DE RECEITA */}
-        <div className="grid grid-cols-3 gap-4 mb-6">
-          <div className="bg-emerald-900/30 border border-emerald-500/50 p-4 rounded-xl shadow-[0_0_15px_rgba(16,185,129,0.15)]">
-            <div className="text-[10px] font-black text-emerald-400 mb-1 uppercase tracking-widest">Sua Proposta (Vol_BU)</div>
-            <div className="text-xl font-black text-white">{formatMoeda(kpis.recBU)}</div>
+        {/* 4 CARDS DE RECEITA */}
+        <div className="grid grid-cols-4 gap-4 mb-6">
+          <div className="bg-blue-900/30 border border-blue-500/50 p-4 rounded-xl shadow-[0_0_15px_rgba(59,130,246,0.15)]">
+            <div className="text-[10px] font-black text-blue-400 mb-1 uppercase tracking-widest">Sua Proposta (Vol_BU)</div>
+            <div className="text-2xl font-black text-white">{formatMoeda(kpis.recBU)}</div>
           </div>
-          <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
+          <div className="bg-[#2a3045] border border-slate-700 p-4 rounded-xl">
             <div className="text-[10px] font-black text-slate-400 mb-1 uppercase tracking-widest">Sinal de IA</div>
-            <div className="text-xl font-black text-slate-300">{formatMoeda(kpis.recIA)}</div>
+            <div className="text-2xl font-black text-slate-300">{formatMoeda(kpis.recIA)}</div>
           </div>
-          <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
+          <div className="bg-[#2a3045] border border-slate-700 p-4 rounded-xl">
             <div className="text-[10px] font-black text-slate-400 mb-1 uppercase tracking-widest">Âncora Diretoria (TD)</div>
-            <div className="text-xl font-black text-slate-300">{formatMoeda(kpis.recTD)}</div>
+            <div className="text-2xl font-black text-slate-300">{formatMoeda(kpis.recTD)}</div>
+          </div>
+          <div className="bg-[#2a3045] border border-slate-700 p-4 rounded-xl">
+            <div className="text-[10px] font-black text-slate-400 mb-1 uppercase tracking-widest">Orçamento/Budget Oficial</div>
+            <div className="text-2xl font-black text-slate-300">{formatMoeda(kpis.recMeta)}</div>
           </div>
         </div>
 
         <div className="grid grid-cols-3 gap-6">
-          <div className="col-span-2 bg-slate-800 border border-slate-700 p-4 rounded-xl h-[340px]">
+          <div className="col-span-2 bg-[#23283d] border border-slate-700 p-4 rounded-xl h-[340px]">
             {loadingGrafico === chave ? (
               <div className="h-full flex items-center justify-center text-slate-500 font-bold animate-pulse">Extraindo inteligência temporal...</div>
             ) : chartDataDynamic.length > 0 ? (
@@ -309,12 +339,12 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                   <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} />
                   
                   {/* TODAS AS 5 CURVAS 100% EM LINHAS */}
-                  <Line type="monotone" dataKey="Realizado" name="Realizado (Histórico)" stroke="#94a3b8" strokeWidth={2} dot={false} connectNulls={false} />
-                  <Line type="monotone" dataKey="IA" name="Modelo IA" stroke="#ec4899" strokeDasharray="3 3" strokeWidth={2} dot={false} connectNulls={false} />
-                  <Line type="monotone" dataKey="CicloAnterior" name="Lag 1 (Mês Passado)" stroke="#f59e0b" strokeWidth={2} dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="CicloAnterior" name="Lag 1 (Ciclo Passado)" stroke="#eab308" strokeDasharray="5 5" strokeWidth={2} dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="IA" name="Modelo IA (Baseline)" stroke="#ec4899" strokeDasharray="5 5" strokeWidth={2} dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="Realizado" name="Realizado (Histórico)" stroke="#64748b" strokeWidth={3} dot={false} connectNulls={false} />
                   
-                  <Line type="monotone" dataKey="TopDown" name="Top-Down (Meta Fixo)" stroke="#64748b" strokeDasharray="6 4" strokeWidth={2} dot={false} connectNulls={false} />
-                  <Line type="monotone" dataKey="BottomUp" name="Sua Proposta Dinâmica (BU)" stroke="#10b981" strokeWidth={4} dot={{r: 5, fill: '#10b981', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
+                  <Line type="monotone" dataKey="BottomUp" name="Sua Proposta Dinâmica (BU)" stroke="#3b82f6" strokeWidth={4} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
+                  <Line type="monotone" dataKey="TopDown" name="Top-Down (Meta Fixo)" stroke="#cbd5e1" strokeDasharray="5 5" strokeWidth={2} dot={false} connectNulls={false} />
                 </LineChart>
               </ResponsiveContainer>
             ) : null}
@@ -328,7 +358,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
   };
 
   // =========================================================================
-  // COLUNAS TANSTACK TABLE (Apenas M2, M3 e M4 com Orçamento na Coluna)
+  // COLUNAS TANSTACK TABLE (Apenas M2, M3 e M4)
   // =========================================================================
   const columns = useMemo<ColumnDef<any>[]>(() => {
     const cols: ColumnDef<any>[] = [
@@ -387,13 +417,17 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                  <Target className="w-3 h-3 text-slate-300" /> TD: {formatVolume(tdData.vol)}
               </div>
               
-              <div className={`w-full max-w-[120px] border rounded-lg px-2 py-1.5 shadow-sm transition-colors focus-within:ring-2 focus-within:ring-emerald-500/50 focus-within:border-emerald-500 ${!isTopDownFechado ? 'bg-slate-50 border-slate-200' : 'bg-white border-emerald-200 hover:border-emerald-400'}`}>
+              <div className={`w-full max-w-[120px] border rounded-lg px-2 py-1.5 shadow-sm transition-colors focus-within:ring-2 focus-within:ring-blue-500/50 focus-within:border-blue-500 ${!isTopDownFechado ? 'bg-slate-50 border-slate-200' : 'bg-white border-blue-200 hover:border-blue-400'}`}>
                  <SmartInput value={vBU} onChange={(val) => handleEditCell(row.original.chave_matriz, mes.mes_banco, val)} disabled={!isTopDownFechado} />
               </div>
 
-              <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50/50 px-2 py-0.5 rounded mt-1.5 tracking-tight border border-emerald-100">
-                 {formatMoeda(rBU)}
-              </span>
+              {/* Faturamento Dinâmico da Simulação com Comparativo de Orçamento */}
+              <div className="flex items-center gap-1.5 mt-1.5">
+                 <span className="text-[11px] font-bold text-blue-600 bg-blue-50/50 px-2 py-0.5 rounded tracking-tight border border-blue-100">
+                    {formatMoeda(rBU)}
+                 </span>
+                 {rMeta > 0 && <VarBadge atual={rBU} anterior={rMeta} />}
+              </div>
 
               {/* ORÇAMENTO NA COLUNA */}
               <div className="flex flex-col items-center mt-1.5 pt-1.5 border-t border-slate-100 w-full">
@@ -501,7 +535,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                 ) : (
                   table.getRowModel().rows.map(row => (
                     <React.Fragment key={row.id}>
-                      <tr className={`border-b border-slate-100 transition-colors hover:bg-emerald-50/50 ${chartExpanded === row.original.chave_matriz ? 'bg-emerald-50/80' : row.depth === 0 ? 'bg-slate-50/50' : 'bg-white'}`}>
+                      <tr className={`border-b border-slate-100 transition-colors hover:bg-blue-50/50 ${chartExpanded === row.original.chave_matriz ? 'bg-blue-50/80' : row.depth === 0 ? 'bg-slate-50/50' : 'bg-white'}`}>
                         {row.getVisibleCells().map((cell, idx) => (
                           <td key={cell.id} className={`align-middle ${idx === 0 ? 'border-r border-slate-100' : 'border-l border-slate-100'}`}>
                             {flexRender(cell.column.columnDef.cell, cell.getContext())}
@@ -511,7 +545,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                       {/* DOSSIÊ NA LINHA (COM GRÁFICO 100% LINHAS) */}
                       {chartExpanded === row.original.chave_matriz && (
                         <tr>
-                          <td colSpan={columns.length} className="p-0 border-b-2 border-emerald-500">
+                          <td colSpan={columns.length} className="p-0 border-b-2 border-blue-500">
                              <PainelSaudabilidade rowData={row.original} />
                           </td>
                         </tr>
@@ -542,9 +576,14 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                               <span className="font-black text-white text-base">
                                 {formatVolume(simuladoVol)} <span className="text-[10px] text-slate-400 font-medium ml-0.5">cx</span>
                               </span>
-                              <span className="font-bold text-emerald-400 text-xs tracking-tight bg-emerald-400/10 px-2 py-0.5 rounded mt-1">
-                                {formatMoeda(simuladoFat)}
-                              </span>
+                              
+                              <div className="flex items-center gap-1.5 mt-1">
+                                 <span className="font-bold text-blue-400 text-xs tracking-tight bg-blue-400/10 px-2 py-0.5 rounded">
+                                   {formatMoeda(simuladoFat)}
+                                 </span>
+                                 {orcamentoFat > 0 && <VarBadge atual={simuladoFat} anterior={orcamentoFat} dark />}
+                              </div>
+
                               <div className="flex items-center justify-center gap-1 mt-1.5 pt-1.5 border-t border-slate-800 w-full">
                                 <span className="text-[9px] text-slate-500 font-bold tracking-widest uppercase">Orç: {formatMoeda(orcamentoFat)}</span>
                               </div>
