@@ -9,7 +9,6 @@ from sqlalchemy import func, text
 import pandas as pd
 import numpy as np
 
-# Ajuste os imports para o caminho exato do seu projeto
 from app.core.database import get_db
 from app.models.domain_models import DimProduto, FatoIbpGranular, ControleCiclo, FatoVendas, DimCliente
 from app.api.routers.router_auth import get_current_user
@@ -28,6 +27,12 @@ class AjusteCarteira(BaseModel):
 class PayloadAprovarCarteira(BaseModel):
     origem_ajuste: str
     ajustes: List[AjusteCarteira]
+
+# Função utilitária para cravar o ciclo dinâmico diretamente da tabela Fato
+def obter_ciclo_real(engine):
+    with engine.connect() as conn:
+        ciclo = conn.execute(text("SELECT MAX(ciclo_sop) FROM fato_ibp_granular")).scalar()
+        return ciclo or "N/A"
 
 @router.get("/filtros")
 async def filtros_micro(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
@@ -57,9 +62,10 @@ def get_dados_carteira(
     usuario: dict = Depends(get_current_user)
 ):
     try:
-        ciclo_atual = get_current_cycle(db)
+        engine = db.get_bind()
+        # Forçamos a buscar o ciclo que TEM dados, exatamente igual ao seu teste no terminal
+        ciclo_atual = obter_ciclo_real(engine)
 
-        # SQL BLINDADO: Traz Fato + Clientes + Produtos + CTE de PMV Histórico
         sql = """
             WITH pmv_historico_4m AS (
                 SELECT 
@@ -88,7 +94,6 @@ def get_dados_carteira(
               AND f.cgc IS NOT NULL AND TRIM(f.cgc) != ''
         """
         
-        engine = db.get_bind()
         df = pd.read_sql(text(sql), engine, params={"ciclo_atual": ciclo_atual})
 
         if df.empty: return {"dados": [], "is_fechado": False, "is_portfolio_fechado": True}
@@ -150,8 +155,8 @@ def get_dados_carteira(
 @router.post("/congelar")
 async def congelar_carteira(payload: PayloadAprovarCarteira, db: Session = Depends(get_db)):
     try:
-        ciclo_atual = get_current_cycle(db)
         engine = db.get_bind()
+        ciclo_atual = obter_ciclo_real(engine)
 
         for ajuste in payload.ajustes:
             partes = ajuste.chave.split('|')
@@ -206,7 +211,8 @@ async def congelar_carteira(payload: PayloadAprovarCarteira, db: Session = Depen
 @router.get("/grafico")
 def get_grafico_soe(chave_matriz: str, db: Session = Depends(get_db)):
     try:
-        ciclo_atual = get_current_cycle(db)
+        engine = db.get_bind()
+        ciclo_atual = obter_ciclo_real(engine)
         ciclo_anterior = get_previous_cycle(db) 
 
         partes = chave_matriz.split('|')
@@ -224,7 +230,6 @@ def get_grafico_soe(chave_matriz: str, db: Session = Depends(get_db)):
         elif tipo_no == 'P' and len(partes) >= 5:
             filtro_fato, filtro_vendas, params['razao'], params['sku'] = " AND TRIM(c.razaosocial) = :razao AND TRIM(f.sku) = :sku", " AND TRIM(c.razaosocial) = :razao AND TRIM(v.sku) = :sku", partes[3], partes[4]
 
-        # QUERY BIPOLAR: Extrai Métricas separadas em CX (Volume) e RS (Faturamento)
         sql = f"""
             WITH meses AS (
                 SELECT TO_CHAR(meses, 'YYYY-MM') AS data_iso, TO_CHAR(meses, 'Mon') AS name
@@ -260,7 +265,6 @@ def get_grafico_soe(chave_matriz: str, db: Session = Depends(get_db)):
             ORDER BY m.data_iso;
         """
         
-        engine = db.get_bind()
         df = pd.read_sql(text(sql), engine, params=params)
         df['name'] = df['name'].map({'Jan':'Jan', 'Feb':'Fev', 'Mar':'Mar', 'Apr':'Abr', 'May':'Mai', 'Jun':'Jun', 'Jul':'Jul', 'Aug':'Ago', 'Sep':'Set', 'Oct':'Out', 'Nov':'Nov', 'Dec':'Dez'}).fillna(df['name'])
         df = df.replace({np.nan: None})
