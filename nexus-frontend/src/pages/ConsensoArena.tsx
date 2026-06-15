@@ -109,11 +109,13 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   const [opcoesBusca, setOpcoesBusca] = useState<{vendedores: string[], coordenadores: string[]}>({vendedores: [], coordenadores: []});
   const [nomeResponsavel, setNomeResponsavel] = useState('');
 
-  const colunasData = dadosBrutos.length > 0 ? dadosBrutos[0].meses : [];
+  // BLINDAGEM: Garantimos que sempre será um array, mesmo que dadosBrutos[0] venha malformado da API.
+  const colunasData = dadosBrutos?.length > 0 ? (dadosBrutos[0]?.meses || []) : [];
 
   useEffect(() => {
     axios.get('/api/v1/consensus/micro/filtros')
-         .then(res => setOpcoesBusca(res.data)).catch(console.error);
+         .then(res => setOpcoesBusca(res.data || {vendedores: [], coordenadores: []}))
+         .catch(console.error);
   }, []);
 
   const fetchData = useCallback(async () => {
@@ -197,7 +199,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
       const fractions = leaves.map(leaf => {
           const weight = leaf.peso_fat || 1;
           const target_RS = totalPesoFat > 0 ? (weight / totalPesoFat) * novoValorRS : (1 / leaves.length) * novoValorRS;
-          const pmv = leaf.meses.find((m: any) => m.mes_banco === mesBanco)?.pmv || 1;
+          const pmv = leaf.meses?.find((m: any) => m.mes_banco === mesBanco)?.pmv || 1;
           
           const exactBoxes = target_RS / pmv;
           const intVal = Math.floor(exactBoxes);
@@ -225,7 +227,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
 
   // VALIDADOR: REGRA DOS 99% - 101%
   const isSaveBlocked = useMemo(() => {
-    if (dadosBrutos.length === 0) return false;
+    if (!dadosBrutos || dadosBrutos.length === 0) return false;
     for (const m of colunasData) {
       let totalMetaRS = 0;
       let totalSimRS = 0;
@@ -241,12 +243,13 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     return false;
   }, [dadosBrutos, colunasData, celulasEditadas, getStaticMeta, getDynamicRec]);
 
-  // FILTRO DA BARRA DE PESQUISA (Original Restaurado)
+  // FILTRO DA BARRA DE PESQUISA (Original Restaurado e Blindado)
   const dadosFiltrados = useMemo(() => {
-    if (!busca) return dadosBrutos;
+    if (!busca) return dadosBrutos || [];
     const term = busca.toLowerCase();
     
-    return dadosBrutos.map(raiz => {
+    // BLINDAGEM: (dadosBrutos || []).map previne crash se for undefined
+    return (dadosBrutos || []).map(raiz => {
       if (raiz.nome.toLowerCase().includes(term)) return raiz;
       
       const sub1Filtrados = (raiz.subRows || []).map((s1: any) => {
@@ -272,10 +275,10 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
 
   const totaisGerais = useMemo(() => {
     const totais: Record<string, {vol: number, fat: number, orc: number}> = {};
-    colunasData.forEach((m: any) => totais[m.mes_banco] = {vol: 0, fat: 0, orc: 0});
+    (colunasData || []).forEach((m: any) => totais[m.mes_banco] = {vol: 0, fat: 0, orc: 0});
     
-    dadosFiltrados.forEach(root => {
-      colunasData.forEach((m: any) => {
+    (dadosFiltrados || []).forEach(root => {
+      (colunasData || []).forEach((m: any) => {
         totais[m.mes_banco].vol += getDynamicVol(root, m.mes_banco);
         totais[m.mes_banco].fat += getDynamicRec(root, m.mes_banco);
         totais[m.mes_banco].orc += getStaticMeta(root, m.mes_banco);
@@ -303,9 +306,9 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                    "RAZÃO SOCIAL": currentPath.CLIENTE || '-',
                    "CÓDIGO SKU": n.produto,
                    "DESCRIÇÃO": n.nome,
-                   "PMV APLICADO (R$)": n.meses[0]?.pmv || 0
+                   "PMV APLICADO (R$)": n.meses?.[0]?.pmv || 0
                 };
-                n.meses.forEach((m: any) => {
+                (n.meses || []).forEach((m: any) => {
                     const volFinal = getDynamicVol(n, m.mes_banco);
                     linha[`${m.mes_str} - TETO META (R$)`] = Math.round(m.rec_meta || 0);
                     linha[`${m.mes_str} - SIMULADO (R$)`] = Math.round(volFinal * m.pmv);
@@ -336,14 +339,14 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
       setLoadingGrafico(chave);
       try {
         const res = await axios.get('/api/v1/consensus/micro/grafico', { params: { chave_matriz: chave } });
-        setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
+        setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados || [] }));
       } catch (e) { console.error(e); }
       finally { setLoadingGrafico(null); }
     }
   };
 
   const columns = useMemo(() => {
-    if (dadosFiltrados.length === 0) return [];
+    if (!dadosFiltrados || dadosFiltrados.length === 0) return [];
     
     const baseCols: any[] = [
       {
@@ -379,7 +382,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                  {isProduto && (
                    <div className="flex items-center gap-2 mt-1">
                      <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">{produto}</span>
-                     <span className="text-[9px] text-emerald-600 font-black uppercase tracking-widest bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100">PMV: {formatMoeda(row.original.meses[0]?.pmv || 0)}</span>
+                     <span className="text-[9px] text-emerald-600 font-black uppercase tracking-widest bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100">PMV: {formatMoeda(row.original.meses?.[0]?.pmv || 0)}</span>
                    </div>
                  )}
               </div>
@@ -389,7 +392,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
       }
     ];
 
-    colunasData.forEach((m: any) => {
+    (colunasData || []).forEach((m: any) => {
       baseCols.push({
         id: `mes_${m.mes_banco}`, header: m.mes_str,
         accessorFn: (row: any) => getDynamicRec(row, m.mes_banco),
@@ -435,7 +438,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
       });
     });
     return baseCols;
-  }, [dadosFiltrados, chartExpanded, celulasEditadas, isFechado]);
+  }, [dadosFiltrados, chartExpanded, celulasEditadas, isFechado, colunasData]);
 
   const table = useReactTable({
     data: dadosFiltrados, columns, state: { expanded, sorting },
@@ -530,7 +533,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
             </div>
         )}
 
-        {/* CONTROLES E BUSCA (Original Restaurado) */}
+        {/* CONTROLES E BUSCA (Original Restaurado e Blindado) */}
         <div className="flex flex-col md:flex-row gap-4 mb-6">
             <div className="flex items-center gap-4 bg-white p-3 rounded-[24px] shadow-sm border border-slate-100 flex-shrink-0 px-6">
                 <span className="text-xs font-black text-slate-500 uppercase tracking-widest">Filtro de Equipa:</span>
@@ -540,7 +543,10 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                     className="bg-slate-50 border border-slate-200 p-2.5 rounded-xl text-sm font-bold text-slate-700 outline-none cursor-pointer"
                 >
                     <option value="">-- Toda a Equipa --</option>
-                    {isGerenteOrAdmin ? opcoesBusca.coordenadores.map(opt => <option key={opt} value={opt}>{opt}</option>) : opcoesBusca.vendedores.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                    {/* BLINDAGEM: Usando Optional Chaining para iterar apenas se o Array existir */}
+                    {isGerenteOrAdmin 
+                        ? (opcoesBusca?.coordenadores || []).map(opt => <option key={opt} value={opt}>{opt}</option>) 
+                        : (opcoesBusca?.vendedores || []).map(opt => <option key={opt} value={opt}>{opt}</option>)}
                 </select>
                 <button 
                   onClick={fetchData} 
@@ -611,7 +617,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                       ))}
                     </tr>
                     
-                    {/* DOSSIÊ EXECUTIVO TEMA ESCURO (Original Restaurado) */}
+                    {/* DOSSIÊ EXECUTIVO TEMA ESCURO */}
                     {chartExpanded === row.original.chave_matriz && (
                       <tr>
                         <td colSpan={table.getAllColumns().length} className="bg-slate-900 p-8 border-b border-slate-800">
@@ -667,7 +673,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                                  <AiInsightBox 
                                     alvo={row.original.nome} 
                                     tipo={row.original.tipo} 
-                                    pmv={row.original.meses[0]?.pmv || 0}
+                                    pmv={row.original.meses?.[0]?.pmv || 0}
                                  />
                                </div>
                             </div>
@@ -682,7 +688,8 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
               
               <tfoot className="bg-slate-900 text-white">
                 <tr>
-                  {table.getHeaderGroups()[0].headers.map(header => {
+                  {/* BLINDAGEM: ?.headers?.map garante que o React Table não quebre a UI se perder as colunas no estado inicial */}
+                  {table.getHeaderGroups()[0]?.headers?.map(header => {
                     if (header.id === 'nome') return (
                       <td key={header.id} className="px-8 py-5 text-right border-r border-slate-800">
                         <div className="flex flex-col"><span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Totalização</span><span className="font-bold text-sm text-white">EQUIPA COMERCIAL</span></div>
