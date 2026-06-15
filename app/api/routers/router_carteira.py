@@ -9,10 +9,11 @@ from sqlalchemy import func, text
 import pandas as pd
 import numpy as np
 
+# Ajuste os imports para o caminho exato do seu projeto
 from app.core.database import get_db
 from app.models.domain_models import DimProduto, FatoIbpGranular, ControleCiclo, FatoVendas, DimCliente
 from app.api.routers.router_auth import get_current_user
-from app.api.routers.shared_ibp import get_current_cycle, parse_date_safe, get_previous_cycle
+from app.api.routers.shared_ibp import get_previous_cycle
 
 router = APIRouter(
     prefix="/api/v1/consensus/micro", 
@@ -28,11 +29,14 @@ class PayloadAprovarCarteira(BaseModel):
     origem_ajuste: str
     ajustes: List[AjusteCarteira]
 
-# Função utilitária para cravar o ciclo dinâmico diretamente da tabela Fato
-def obter_ciclo_real(engine):
+# ==========================================
+# CORREÇÃO DEFINITIVA: Buscar Sempre o Ciclo Mais Recente na Fato
+# Evita ler ciclos "Fantasmas" da tabela de configuração
+# ==========================================
+def obter_ciclo_real_fato(engine):
     with engine.connect() as conn:
         ciclo = conn.execute(text("SELECT MAX(ciclo_sop) FROM fato_ibp_granular")).scalar()
-        return ciclo or "N/A"
+        return ciclo or "06/2026"
 
 @router.get("/filtros")
 async def filtros_micro(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
@@ -63,8 +67,7 @@ def get_dados_carteira(
 ):
     try:
         engine = db.get_bind()
-        # Forçamos a buscar o ciclo que TEM dados, exatamente igual ao seu teste no terminal
-        ciclo_atual = obter_ciclo_real(engine)
+        ciclo_atual = obter_ciclo_real_fato(engine)
 
         sql = """
             WITH pmv_historico_4m AS (
@@ -150,13 +153,14 @@ def get_dados_carteira(
 
         return {"dados": arvore, "is_fechado": is_fechado, "is_portfolio_fechado": is_portfolio_fechado}
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Erro interno.")
+        print(f"Erro no GET Carteira: {e}")
+        raise HTTPException(status_code=500, detail="Erro interno ao extrair a matriz comercial.")
 
 @router.post("/congelar")
 async def congelar_carteira(payload: PayloadAprovarCarteira, db: Session = Depends(get_db)):
     try:
         engine = db.get_bind()
-        ciclo_atual = obter_ciclo_real(engine)
+        ciclo_atual = obter_ciclo_real_fato(engine)
 
         for ajuste in payload.ajustes:
             partes = ajuste.chave.split('|')
@@ -206,13 +210,14 @@ async def congelar_carteira(payload: PayloadAprovarCarteira, db: Session = Depen
         return {"status": "success", "mensagem": "Convertido em caixas e consolidado nas lojas com sucesso!"}
     except Exception as e:
         db.rollback()
+        print(f"Erro no POST Congelar: {e}")
         raise HTTPException(500, detail="Falha no rateio por CNPJ.")
 
 @router.get("/grafico")
 def get_grafico_soe(chave_matriz: str, db: Session = Depends(get_db)):
     try:
         engine = db.get_bind()
-        ciclo_atual = obter_ciclo_real(engine)
+        ciclo_atual = obter_ciclo_real_fato(engine)
         ciclo_anterior = get_previous_cycle(db) 
 
         partes = chave_matriz.split('|')
@@ -270,4 +275,5 @@ def get_grafico_soe(chave_matriz: str, db: Session = Depends(get_db)):
         df = df.replace({np.nan: None})
         return {"dados": df.to_dict(orient="records")}
     except Exception as e:
+        print(f"Erro no GET Grafico: {e}")
         return {"dados": []}
