@@ -1,19 +1,23 @@
 import datetime
 import math
-from typing import List
+from typing import List, Optional
 from dateutil.relativedelta import relativedelta
-from collections import defaultdict
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, text
+import pandas as pd
+import numpy as np
 
 from app.core.database import get_db
 from app.models.domain_models import DimProduto, FatoIbpGranular, ControleCiclo, FatoVendas, DimCliente
 from app.api.routers.router_auth import get_current_user
-from app.api.routers.shared_ibp import get_current_cycle, parse_date_safe
+from app.api.routers.shared_ibp import get_current_cycle, parse_date_safe, get_previous_cycle
 
-router = APIRouter(prefix="/api/v1/consensus/micro", tags=["Consenso Carteira (Bottom-Up)"])
+router = APIRouter(
+    prefix="/api/v1/consensus/micro", 
+    tags=["Consenso Carteira (Bottom-Up)"]
+)
 
 class AjusteCarteira(BaseModel):
     chave: str
@@ -26,202 +30,235 @@ class PayloadAprovarCarteira(BaseModel):
 
 @router.get("/filtros")
 async def filtros_micro(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
-    funcao = usuario.get('funcao')
-    nome = usuario.get('nome')
-    
-    q = db.query(DimCliente.coordenador, DimCliente.vendedor).filter(DimCliente.coordenador.isnot(None), DimCliente.vendedor.isnot(None))
-    
-    if funcao == 'Gerente':
-        q = q.filter(DimCliente.gerente == nome)
-    elif funcao == 'Coordenador':
-        q = q.filter(DimCliente.coordenador == nome)
-    elif funcao == 'Vendedor':
-        q = q.filter(DimCliente.vendedor == nome)
-        
-    res = q.distinct().all()
-    coords = sorted(list(set([r.coordenador for r in res])))
-    vends = sorted(list(set([r.vendedor for r in res])))
-    
-    return {"coordenadores": coords, "vendedores": vends}
+    try:
+        sql = """
+            SELECT DISTINCT 
+                c.supervisor_nome AS coordenador, 
+                f.vendedor_nome AS vendedor
+            FROM fato_ibp_granular f
+            INNER JOIN dim_clientes c ON f.cgc = c.cgc
+            WHERE f.ciclo_sop = (SELECT MAX(ciclo_sop) FROM fato_ibp_granular)
+              AND c.supervisor_nome IS NOT NULL 
+              AND f.vendedor_nome IS NOT NULL;
+        """
+        engine = db.get_bind()
+        df = pd.read_sql(text(sql), engine)
+        coordenadores = sorted(df['coordenador'].dropna().unique().tolist())
+        vendedores = sorted(df['vendedor'].dropna().unique().tolist())
+        return {"vendedores": vendedores, "coordenadores": coordenadores}
+    except Exception as e:
+        return {"vendedores": [], "coordenadores": []}
 
 @router.get("")
-async def carregar_carteira(nome_responsavel: str = '', db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+def get_dados_carteira(
+    nome_responsavel: Optional[str] = Query(None), 
+    db: Session = Depends(get_db),
+    usuario: dict = Depends(get_current_user)
+):
     try:
-        ciclo = get_current_cycle(db)
-        funcao = usuario.get('funcao')
-        nome_usuario = usuario.get('nome')
+        ciclo_atual = get_current_cycle(db)
 
-        hoje = datetime.date.today()
-        data_ini = hoje + relativedelta(months=2)
-        data_fim = hoje + relativedelta(months=4)
-        meses_alvo = [(hoje + relativedelta(months=i)).strftime("%Y-%m-%d") for i in range(2, 5)]
-
-        # 1. Pega o Histórico de FATURAMENTO (R$) dos últimos 4 meses para Rateio Proporcional
-        data_hist_inicio = hoje - relativedelta(months=4)
-        q_hist = db.query(
-            FatoVendas.cgc, FatoVendas.sku, 
-            func.sum(FatoVendas.qt_pedido * FatoVendas.vl_pedido).label('fat_hist')
-        ).filter(FatoVendas.data_pedido >= data_hist_inicio).group_by(FatoVendas.cgc, FatoVendas.sku).all()
-        peso_fat_dict = {f"{r.cgc}|{r.sku}": float(r.fat_hist or 0) for r in q_hist}
-
-        # 2. Query Principal: Teto (vol_meta) e Base Atual (vol_bottomup)
-        query = db.query(
-            DimCliente.gerente, DimCliente.coordenador, DimCliente.vendedor, DimCliente.razaosocial, DimCliente.cgc,
-            FatoIbpGranular.sku, DimProduto.descricao,
-            FatoIbpGranular.mes_projetado,
-            FatoIbpGranular.vol_meta,     
-            FatoIbpGranular.vol_bottomup, 
-            FatoIbpGranular.pmv_aplicado
-        ).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku)\
-         .join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)\
-         .filter(FatoIbpGranular.ciclo_sop == ciclo, FatoIbpGranular.mes_projetado >= data_ini, FatoIbpGranular.mes_projetado <= data_fim)
-
-        # RLS (Row Level Security) e Filtro da Tela
-        if funcao == 'Gerente':
-            query = query.filter(DimCliente.gerente == nome_usuario)
-            if nome_responsavel: query = query.filter(DimCliente.coordenador == nome_responsavel)
-        elif funcao == 'Coordenador':
-            query = query.filter(DimCliente.coordenador == nome_usuario)
-            if nome_responsavel: query = query.filter(DimCliente.vendedor == nome_responsavel)
-        elif funcao == 'Vendedor':
-            query = query.filter(DimCliente.vendedor == nome_usuario)
-
-        resultados = query.all()
-
-        # 3. Construção da Árvore Mutante (Adapta-se ao Perfil logado)
-        arvore = {}
-        for r in resultados:
-            coord = r.coordenador or 'SEM COORDENADOR'
-            vend = r.vendedor or 'SEM VENDEDOR'
-            cli = r.razaosocial or 'CLIENTE INDEFINIDO'
-            cgc = r.cgc
-            sku = r.sku
-            ms = str(r.mes_projetado)
-            peso_fat = peso_fat_dict.get(f"{cgc}|{sku}", 0)
-
-            niveis = []
-
-            if funcao in ['Administrador', 'Diretoria', 'Gerente']:
-                if coord not in arvore: arvore[coord] = {"id": coord, "chave_matriz": coord, "nome": coord, "tipo": "coordenador", "meses_map": {}, "subRows": {}}
-                n1 = arvore[coord]
-                
-                k2 = f"{coord}|{vend}"
-                if k2 not in n1["subRows"]: n1["subRows"][k2] = {"id": k2, "chave_matriz": k2, "nome": vend, "tipo": "vendedor", "meses_map": {}, "subRows": {}}
-                n2 = n1["subRows"][k2]
-                
-                k3 = f"{k2}|{cgc}"
-                if k3 not in n2["subRows"]: n2["subRows"][k3] = {"id": k3, "chave_matriz": k3, "nome": cli, "tipo": "cliente", "meses_map": {}, "subRows": {}}
-                n3 = n2["subRows"][k3]
-                
-                k4 = f"{k3}|{sku}"
-                if k4 not in n3["subRows"]: n3["subRows"][k4] = {"id": k4, "chave_matriz": k4, "nome": r.descricao, "produto": sku, "tipo": "produto", "meses_map": {}, "peso_fat": peso_fat}
-                n4 = n3["subRows"][k4]
-                
-                niveis = [n1, n2, n3, n4]
-
-            elif funcao == 'Coordenador':
-                if vend not in arvore: arvore[vend] = {"id": vend, "chave_matriz": vend, "nome": vend, "tipo": "vendedor", "meses_map": {}, "subRows": {}}
-                n1 = arvore[vend]
-                
-                k2 = f"{vend}|{cgc}"
-                if k2 not in n1["subRows"]: n1["subRows"][k2] = {"id": k2, "chave_matriz": k2, "nome": cli, "tipo": "cliente", "meses_map": {}, "subRows": {}}
-                n2 = n1["subRows"][k2]
-                
-                k3 = f"{k2}|{sku}"
-                if k3 not in n2["subRows"]: n2["subRows"][k3] = {"id": k3, "chave_matriz": k3, "nome": r.descricao, "produto": sku, "tipo": "produto", "meses_map": {}, "peso_fat": peso_fat}
-                n3 = n2["subRows"][k3]
-                
-                niveis = [n1, n2, n3]
-
-            else: # Vendedor
-                cli_id = f"{cgc}"
-                if cli_id not in arvore: arvore[cli_id] = {"id": cli_id, "chave_matriz": cli_id, "nome": cli, "tipo": "cliente", "meses_map": {}, "subRows": {}}
-                n1 = arvore[cli_id]
-                
-                k2 = f"{cli_id}|{sku}"
-                if k2 not in n1["subRows"]: n1["subRows"][k2] = {"id": k2, "chave_matriz": k2, "nome": r.descricao, "produto": sku, "tipo": "produto", "meses_map": {}, "peso_fat": peso_fat}
-                n2 = n1["subRows"][k2]
-                
-                niveis = [n1, n2]
-
-            vol_meta = int(r.vol_meta or 0)
-            vol_sim = int(r.vol_bottomup or 0)
-            pmv = float(r.pmv_aplicado or 0)
-
-            for n in niveis:
-                if ms not in n["meses_map"]:
-                    n["meses_map"][ms] = {"mes_banco": ms, "vol_meta": 0, "rec_meta": 0, "vol_sim": 0, "rec_sim": 0, "pmv": pmv}
-                
-                n["meses_map"][ms]["vol_meta"] += vol_meta
-                n["meses_map"][ms]["rec_meta"] += (vol_meta * pmv)
-                n["meses_map"][ms]["vol_sim"] += vol_sim
-                n["meses_map"][ms]["rec_sim"] += (vol_sim * pmv)
-                
-                if n["meses_map"][ms]["vol_sim"] > 0:
-                    n["meses_map"][ms]["pmv"] = n["meses_map"][ms]["rec_sim"] / n["meses_map"][ms]["vol_sim"]
-
-        def processar_no(node):
-            node["meses"] = sorted(list(node["meses_map"].values()), key=lambda x: x["mes_banco"])
-            del node["meses_map"]
-            if "subRows" in node:
-                node["subRows"] = list(node["subRows"].values())
-                for sub in node["subRows"]: processar_no(sub)
-
-        for raiz in arvore.values(): processar_no(raiz)
-
-        # Travas de Etapa
-        reg_demand = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Demand-Review').first()
-        is_portfolio_fechado = reg_demand.status == 'Fechado' if reg_demand else False
+        sql = """
+            WITH pmv_historico_4m AS (
+                SELECT 
+                    cgc, sku, 
+                    SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv_real_4m
+                FROM fato_vendas
+                WHERE data_pedido >= CURRENT_DATE - INTERVAL '4 months'
+                GROUP BY cgc, sku
+            )
+            SELECT 
+                COALESCE(c.supervisor_nome, 'SEM COORDENADOR') AS coordenador,
+                COALESCE(f.vendedor_nome, 'SEM VENDEDOR') AS vendedor,
+                COALESCE(c.razaosocial, 'SEM RAZAO SOCIAL') AS razao_social,
+                f.sku,
+                COALESCE(p.categoria, 'SEM CATEGORIA') AS categoria,
+                COALESCE(p.segmento, 'SEM SEGMENTO') AS segmento,
+                TO_CHAR(f.mes_projetado, 'YYYY-MM') AS mes_banco,
+                COALESCE(f.vol_meta, 0) AS vol_meta,
+                COALESCE(hist.pmv_real_4m, f.pmv_aplicado, 0) AS pmv_aplicado
+            FROM fato_ibp_granular f
+            LEFT JOIN dim_clientes c ON f.cgc = c.cgc
+            LEFT JOIN dim_produtos p ON f.sku = p.sku
+            LEFT JOIN pmv_historico_4m hist ON hist.cgc = f.cgc AND hist.sku = f.sku
+            WHERE f.ciclo_sop = :ciclo_atual
+        """
         
-        reg_carteira = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Carteira-Vendas').first()
-        is_carteira_fechada = reg_carteira.status == 'Fechado' if reg_carteira else False
+        engine = db.get_bind()
+        df = pd.read_sql(text(sql), engine, params={"ciclo_atual": ciclo_atual})
 
-        return {"status": "success", "is_portfolio_fechado": is_portfolio_fechado, "is_fechado": is_carteira_fechada, "dados": list(arvore.values())}
+        if df.empty: return {"dados": [], "is_fechado": False, "is_portfolio_fechado": True}
+
+        if nome_responsavel:
+            df = df[(df['vendedor'] == nome_responsavel) | (df['coordenador'] == nome_responsavel)]
+
+        df['receita_bruta'] = df['vol_meta'] * df['pmv_aplicado']
+
+        df_grouped = df.groupby(['coordenador', 'vendedor', 'razao_social', 'categoria', 'segmento', 'sku', 'mes_banco']).agg(
+            vol_meta=pd.NamedAgg(column='vol_meta', aggfunc='sum'),
+            receita_total=pd.NamedAgg(column='receita_bruta', aggfunc='sum')
+        ).reset_index()
+
+        df_grouped['pmv_ponderado'] = np.where(df_grouped['vol_meta'] > 0, df_grouped['receita_total'] / df_grouped['vol_meta'], 0)
+        df_grouped['rec_meta'] = df_grouped['vol_meta'] * df_grouped['pmv_ponderado']
+        df_grouped['vol_sim'] = df_grouped['vol_meta']
+
+        meses_nomes = {'01':'Jan', '02':'Fev', '03':'Mar', '04':'Abr', '05':'Mai', '06':'Jun', '07':'Jul', '08':'Ago', '09':'Set', '10':'Out', '11':'Nov', '12':'Dez'}
+
+        arvore = []
+        for coord_name, df_coord in df_grouped.groupby('coordenador'):
+            no_coord = {"chave_matriz": f"C|{coord_name}", "nome": coord_name, "tipo": "coordenador", "subRows": []}
+            for vend_name, df_vend in df_coord.groupby('vendedor'):
+                no_vend = {"chave_matriz": f"V|{coord_name}|{vend_name}", "nome": vend_name, "tipo": "vendedor", "subRows": []}
+                for razao_name, df_razao in df_vend.groupby('razao_social'):
+                    no_cliente = {"chave_matriz": f"R|{coord_name}|{vend_name}|{razao_name}", "nome": razao_name, "tipo": "cliente", "subRows": []}
+                    
+                    for sku_name, df_sku in df_razao.groupby('sku'):
+                        cat_val = df_sku['categoria'].iloc[0]
+                        seg_val = df_sku['segmento'].iloc[0]
+                        meses_list = []
+                        for _, row in df_sku.iterrows():
+                            ano, mes = str(row['mes_banco']).split('-')
+                            meses_list.append({
+                                "mes_banco": row['mes_banco'], "mes_str": f"{meses_nomes.get(mes, mes)}/{ano[2:]}", 
+                                "pmv": float(row['pmv_ponderado']), "rec_meta": float(row['rec_meta']),
+                                "vol_meta": float(row['vol_meta']), "vol_sim": float(row['vol_sim'])
+                            })
+                        
+                        no_cliente["subRows"].append({
+                            "chave_matriz": f"P|{coord_name}|{vend_name}|{razao_name}|{sku_name}",
+                            "nome": sku_name, "produto": sku_name, "tipo": "produto",
+                            "categoria": cat_val, "segmento": seg_val,
+                            "peso_fat": float(df_sku['receita_total'].sum()), "meses": meses_list
+                        })
+                    no_vend["subRows"].append(no_cliente)
+                no_coord["subRows"].append(no_vend)
+            arvore.append(no_coord)
+
+        is_portfolio_fechado = True  
+        lock_carteira = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo_atual, ControleCiclo.origem == 'Carteira_BottomUp', ControleCiclo.status == 'Fechado').first()
+        is_fechado = True if lock_carteira else False
+
+        return {"dados": arvore, "is_fechado": is_fechado, "is_portfolio_fechado": is_portfolio_fechado}
     except Exception as e:
-        raise HTTPException(500, repr(e))
-
-@router.post("/salvar")
-async def salvar_rascunho_carteira(payload: PayloadAprovarCarteira, db: Session = Depends(get_db)):
-    try:
-        ciclo = get_current_cycle(db)
-        
-        for ajuste in payload.ajustes:
-            dt = parse_date_safe(ajuste.mes_projetado)
-            sku = ajuste.chave.split('|')[-1].strip()
-            
-            # Cuidado: a chave no backend de cliente é sempre pelo CGC que está antes do SKU na string
-            # Formatos possíveis de folha: coord|vend|cgc|sku, vend|cgc|sku, cgc|sku
-            partes = ajuste.chave.split('|')
-            cgc = partes[-2].strip() if len(partes) >= 2 else None
-
-            query = db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo, FatoIbpGranular.mes_projetado == dt, FatoIbpGranular.sku == sku, FatoIbpGranular.cgc == cgc).first()
-            
-            if query and query.vol_bottomup != ajuste.novo_volume:
-                query.vol_bottomup = ajuste.novo_volume
-
-        db.commit()
-        return {"status": "success"}
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(500, repr(e))
+        raise HTTPException(status_code=500, detail="Erro interno.")
 
 @router.post("/congelar")
 async def congelar_carteira(payload: PayloadAprovarCarteira, db: Session = Depends(get_db)):
     try:
-        if payload.ajustes: await salvar_rascunho_carteira(payload, db)
-        ciclo = get_current_cycle(db)
-        
-        db.query(FatoIbpGranular).filter(FatoIbpGranular.ciclo_sop == ciclo).update({
-            FatoIbpGranular.vol_supply: FatoIbpGranular.vol_bottomup,
-            FatoIbpGranular.vol_final: FatoIbpGranular.vol_bottomup
-        }, synchronize_session=False)
-            
-        reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Carteira-Vendas').first()
-        if not reg: db.add(ControleCiclo(ciclo_sop=ciclo, origem='Carteira-Vendas', status='Fechado'))
-        else: reg.status = 'Fechado'
-        
+        ciclo_atual = get_current_cycle(db)
+        engine = db.get_bind()
+
+        for ajuste in payload.ajustes:
+            partes = ajuste.chave.split('|')
+            if len(partes) != 5: continue
+            razao_social, sku, mes_banco, novo_volume_total_razao = partes[3], partes[4], ajuste.mes_projetado, int(ajuste.novo_volume)
+
+            query_cgc = text("""
+                WITH cgc_historico AS (
+                    SELECT f.id AS fato_id, f.cgc, COALESCE(SUM(v.qt_pedido), 0) AS peso_historico
+                    FROM fato_ibp_granular f
+                    JOIN dim_clientes c ON f.cgc = c.cgc
+                    LEFT JOIN fato_vendas v ON v.cgc = f.cgc AND v.sku = f.sku AND v.data_pedido >= CURRENT_DATE - INTERVAL '4 months'
+                    WHERE f.ciclo_sop = :ciclo AND TO_CHAR(f.mes_projetado, 'YYYY-MM') = :mes AND f.sku = :sku AND c.razaosocial = :razao
+                    GROUP BY f.id, f.cgc
+                )
+                SELECT fato_id, cgc, peso_historico, SUM(peso_historico) OVER() AS peso_total_razao, COUNT(*) OVER() AS qtd_lojas FROM cgc_historico
+            """)
+
+            with engine.connect() as conn:
+                result = conn.execute(query_cgc, {"ciclo": ciclo_atual, "mes": mes_banco, "sku": sku, "razao": razao_social}).fetchall()
+
+            if not result: continue
+
+            volume_restante = novo_volume_total_razao
+            atualizacoes = []
+
+            for idx, row in enumerate(result):
+                fato_id, peso_historico, peso_total_razao, qtd_lojas = row[0], row[2], row[3], row[4]
+                if idx == len(result) - 1:
+                    vol_cnpj = volume_restante
+                else:
+                    proporcao = peso_historico / peso_total_razao if peso_total_razao > 0 else 1.0 / qtd_lojas
+                    vol_cnpj = round(novo_volume_total_razao * proporcao)
+                    volume_restante -= vol_cnpj
+                atualizacoes.append({"b_id": fato_id, "b_vol": vol_cnpj})
+
+            if atualizacoes:
+                stmt = text("UPDATE fato_ibp_granular SET vol_bottomup = :b_vol WHERE id = :b_id")
+                with engine.begin() as conn:
+                    for upd in atualizacoes: conn.execute(stmt, upd)
+
+        check_lock = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo_atual, ControleCiclo.origem == 'Carteira_BottomUp').first()
+        if not check_lock: db.add(ControleCiclo(ciclo_sop=ciclo_atual, origem='Carteira_BottomUp', status='Fechado'))
+        else: check_lock.status = 'Fechado'
         db.commit()
-        return {"status": "success"}
+
+        return {"status": "success", "mensagem": "Convertido em caixas e consolidado nas lojas com sucesso!"}
     except Exception as e:
         db.rollback()
-        raise HTTPException(500, repr(e))
+        raise HTTPException(500, detail="Falha no rateio por CNPJ.")
+
+@router.get("/grafico")
+def get_grafico_soe(chave_matriz: str, db: Session = Depends(get_db)):
+    try:
+        ciclo_atual = get_current_cycle(db)
+        ciclo_anterior = get_previous_cycle(db) 
+
+        partes = chave_matriz.split('|')
+        tipo_no = partes[0]
+        
+        filtro_fato, filtro_vendas = "", ""
+        params = {"ciclo_atual": ciclo_atual, "ciclo_anterior": ciclo_anterior}
+
+        if tipo_no == 'C' and len(partes) >= 2:
+            filtro_fato, filtro_vendas, params['coord'] = " AND c.supervisor_nome = :coord", " AND c.supervisor_nome = :coord", partes[1]
+        elif tipo_no == 'V' and len(partes) >= 3:
+            filtro_fato, filtro_vendas, params['coord'], params['vend'] = " AND c.supervisor_nome = :coord AND f.vendedor_nome = :vend", " AND c.supervisor_nome = :coord AND v.vendedor_nome = :vend", partes[1], partes[2]
+        elif tipo_no == 'R' and len(partes) >= 4:
+            filtro_fato, filtro_vendas, params['razao'] = " AND c.razaosocial = :razao", " AND c.razaosocial = :razao", partes[3]
+        elif tipo_no == 'P' and len(partes) >= 5:
+            filtro_fato, filtro_vendas, params['razao'], params['sku'] = " AND c.razaosocial = :razao AND f.sku = :sku", " AND c.razaosocial = :razao AND v.sku = :sku", partes[3], partes[4]
+
+        sql = f"""
+            WITH meses AS (
+                SELECT TO_CHAR(meses, 'YYYY-MM') AS data_iso, TO_CHAR(meses, 'Mon') AS name
+                FROM generate_series(DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '3 months', DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '3 months', INTERVAL '1 month') AS meses
+            ),
+            realizado AS (
+                SELECT TO_CHAR(v.data_pedido, 'YYYY-MM') AS mes, SUM(v.qt_pedido) AS vol_real, SUM(v.vl_pedido) AS rec_real
+                FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc WHERE 1=1 {filtro_vendas} GROUP BY 1
+            ),
+            consenso_atual AS (
+                SELECT TO_CHAR(f.mes_projetado, 'YYYY-MM') AS mes, 
+                       SUM(f.vol_ia) AS vol_ia, SUM(f.vol_ia * f.pmv_aplicado) AS rec_ia,
+                       SUM(f.vol_bottomup) AS vol_consenso, SUM(f.vol_bottomup * f.pmv_aplicado) AS rec_consenso,
+                       SUM(f.vol_meta) AS vol_meta, SUM(f.vol_meta * f.pmv_aplicado) AS rec_meta
+                FROM fato_ibp_granular f JOIN dim_clientes c ON f.cgc = c.cgc WHERE f.ciclo_sop = :ciclo_atual {filtro_fato} GROUP BY 1
+            ),
+            consenso_anterior AS (
+                SELECT TO_CHAR(f.mes_projetado, 'YYYY-MM') AS mes, 
+                       SUM(f.vol_final) AS vol_ant, SUM(f.vol_final * f.pmv_aplicado) AS rec_ant
+                FROM fato_ibp_granular f JOIN dim_clientes c ON f.cgc = c.cgc WHERE f.ciclo_sop = :ciclo_anterior {filtro_fato} GROUP BY 1
+            )
+            SELECT 
+                m.data_iso, m.name,
+                r.vol_real AS "Realizado_CX", r.rec_real AS "Realizado_RS",
+                ca.vol_ia AS "IA_CX", ca.rec_ia AS "IA_RS",
+                ca.vol_meta AS "MetaBU_CX", ca.rec_meta AS "MetaBU_RS",
+                ca.vol_consenso AS "Consenso_CX", ca.rec_consenso AS "Consenso_RS",
+                can.vol_ant AS "CicloAnterior_CX", can.rec_ant AS "CicloAnterior_RS"
+            FROM meses m
+            LEFT JOIN realizado r ON m.data_iso = r.mes
+            LEFT JOIN consenso_atual ca ON m.data_iso = ca.mes
+            LEFT JOIN consenso_anterior can ON m.data_iso = can.mes
+            ORDER BY m.data_iso;
+        """
+        
+        engine = db.get_bind()
+        df = pd.read_sql(text(sql), engine, params=params)
+        df['name'] = df['name'].map({'Jan':'Jan', 'Feb':'Fev', 'Mar':'Mar', 'Apr':'Abr', 'May':'Mai', 'Jun':'Jun', 'Jul':'Jul', 'Aug':'Ago', 'Sep':'Set', 'Oct':'Out', 'Nov':'Nov', 'Dec':'Dez'}).fillna(df['name'])
+        df = df.replace({np.nan: None})
+        return {"dados": df.to_dict(orient="records")}
+    except Exception as e:
+        return {"dados": []}
