@@ -84,6 +84,24 @@ async def reabrir_ciclo(origem: str, db: Session = Depends(get_db), usuario_loga
         
     ciclo_atual = get_current_cycle(db)
     try:
+        # 1. Lógica especial para o Gerenciamento (Destranca todos os vendedores)
+        if origem.strip().upper() == "GERENCIAMENTO":
+            # Apaga qualquer cadeado que NÃO seja as 3 etapas globais
+            # (Ou seja, vai apagar as travas de "Ricardo", "João", etc.)
+            deletados = db.query(ControleCiclo).filter(
+                ControleCiclo.ciclo_sop == ciclo_atual,
+                ~func.upper(func.trim(ControleCiclo.origem)).in_([
+                    'TOP-DOWN ARENA', 'SUPPLY REVIEW', 'S&OP-FINAL'
+                ])
+            ).delete(synchronize_session=False)
+            
+            db.commit()
+            
+            if deletados > 0:
+                return {"status": "success", "message": f"Todos os {deletados} bloqueios de Vendedores foram removidos!"}
+            return {"status": "success", "message": "A tela de Gerenciamento já se encontra aberta."}
+
+        # 2. Lógica padrão para as etapas globais (Top-Down, Supply, Dashboard)
         cadeado = db.query(ControleCiclo).filter(
             ControleCiclo.ciclo_sop == ciclo_atual, 
             func.upper(func.trim(ControleCiclo.origem)) == origem.strip().upper()
@@ -95,10 +113,11 @@ async def reabrir_ciclo(origem: str, db: Session = Depends(get_db), usuario_loga
             return {"status": "success", "message": f"O cadeado de '{origem}' foi removido com sucesso!"}
             
         return {"status": "success", "message": f"A tela de '{origem}' já se encontra aberta."}
+        
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
-
+    
 @router.get("/exportar-base")
 async def exportar_base_granular(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
     if usuario_logado.get('funcao') != 'Administrador':
