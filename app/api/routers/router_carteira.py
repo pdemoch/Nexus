@@ -30,8 +30,8 @@ class PayloadAprovarCarteira(BaseModel):
     ajustes: List[AjusteCarteira]
 
 # ==========================================
-# CORREÇÃO DEFINITIVA: Buscar Sempre o Ciclo Mais Recente na Fato
-# Evita ler ciclos "Fantasmas" da tabela de configuração
+# CORREÇÃO DEFINITIVA: O Caçador de Ciclos 
+# (Lê sempre o ciclo MAX que tem dados na Fato, nunca um fantasma)
 # ==========================================
 def obter_ciclo_real_fato(engine):
     with engine.connect() as conn:
@@ -67,9 +67,10 @@ def get_dados_carteira(
 ):
     try:
         engine = db.get_bind()
+        # Lemos o ciclo exato onde sabemos que a base de dados tem as 80.670 linhas!
         ciclo_atual = obter_ciclo_real_fato(engine)
 
-        sql = """
+        sql = f"""
             WITH pmv_historico_4m AS (
                 SELECT 
                     TRIM(cgc) AS cgc, TRIM(sku) AS sku, 
@@ -92,18 +93,22 @@ def get_dados_carteira(
             LEFT JOIN dim_clientes c ON TRIM(f.cgc) = TRIM(c.cgc)
             LEFT JOIN dim_produtos p ON TRIM(f.sku) = TRIM(p.sku)
             LEFT JOIN pmv_historico_4m hist ON hist.cgc = TRIM(f.cgc) AND hist.sku = TRIM(f.sku)
-            WHERE f.ciclo_sop = :ciclo_atual
+            WHERE f.ciclo_sop = '{ciclo_atual}'
               AND f.sku IS NOT NULL AND TRIM(f.sku) != ''
-              AND f.cgc IS NOT NULL AND TRIM(f.cgc) != ''
         """
         
-        df = pd.read_sql(text(sql), engine, params={"ciclo_atual": ciclo_atual})
+        df = pd.read_sql(text(sql), engine)
 
-        if df.empty: return {"dados": [], "is_fechado": False, "is_portfolio_fechado": True}
+        if df.empty: 
+            return {"dados": [], "is_fechado": False, "is_portfolio_fechado": True}
 
+        # Aplicamos o filtro. Se for Admin, ele tem obrigatoriamente de ter selecionado um.
         if nome_responsavel:
             df = df[(df['vendedor'] == nome_responsavel) | (df['coordenador'] == nome_responsavel)]
 
+        # Segurança de Conversão Numérica
+        df['vol_meta'] = pd.to_numeric(df['vol_meta'], errors='coerce').fillna(0)
+        df['pmv_aplicado'] = pd.to_numeric(df['pmv_aplicado'], errors='coerce').fillna(0)
         df['receita_bruta'] = df['vol_meta'] * df['pmv_aplicado']
 
         df_grouped = df.groupby(['coordenador', 'vendedor', 'razao_social', 'categoria', 'segmento', 'sku', 'mes_banco']).agg(
@@ -114,32 +119,38 @@ def get_dados_carteira(
         df_grouped['pmv_ponderado'] = np.where(df_grouped['vol_meta'] > 0, df_grouped['receita_total'] / df_grouped['vol_meta'], 0)
         df_grouped['rec_meta'] = df_grouped['vol_meta'] * df_grouped['pmv_ponderado']
         df_grouped['vol_sim'] = df_grouped['vol_meta']
+        
+        # BLINDAGEM CONTRA NULOS (Isto evita que o JSON vá vazio para o React)
+        df_grouped.fillna(0, inplace=True)
 
         meses_nomes = {'01':'Jan', '02':'Fev', '03':'Mar', '04':'Abr', '05':'Mai', '06':'Jun', '07':'Jul', '08':'Ago', '09':'Set', '10':'Out', '11':'Nov', '12':'Dez'}
 
         arvore = []
         for coord_name, df_coord in df_grouped.groupby('coordenador'):
-            no_coord = {"chave_matriz": f"C|{coord_name}", "nome": coord_name, "tipo": "coordenador", "subRows": []}
+            no_coord = {"chave_matriz": f"C|{coord_name}", "nome": str(coord_name), "tipo": "coordenador", "subRows": []}
             for vend_name, df_vend in df_coord.groupby('vendedor'):
-                no_vend = {"chave_matriz": f"V|{coord_name}|{vend_name}", "nome": vend_name, "tipo": "vendedor", "subRows": []}
+                no_vend = {"chave_matriz": f"V|{coord_name}|{vend_name}", "nome": str(vend_name), "tipo": "vendedor", "subRows": []}
                 for razao_name, df_razao in df_vend.groupby('razao_social'):
-                    no_cliente = {"chave_matriz": f"R|{coord_name}|{vend_name}|{razao_name}", "nome": razao_name, "tipo": "cliente", "subRows": []}
+                    no_cliente = {"chave_matriz": f"R|{coord_name}|{vend_name}|{razao_name}", "nome": str(razao_name), "tipo": "cliente", "subRows": []}
                     
                     for sku_name, df_sku in df_razao.groupby('sku'):
-                        cat_val = df_sku['categoria'].iloc[0]
-                        seg_val = df_sku['segmento'].iloc[0]
+                        cat_val = str(df_sku['categoria'].iloc[0])
+                        seg_val = str(df_sku['segmento'].iloc[0])
                         meses_list = []
                         for _, row in df_sku.iterrows():
                             ano, mes = str(row['mes_banco']).split('-')
                             meses_list.append({
-                                "mes_banco": row['mes_banco'], "mes_str": f"{meses_nomes.get(mes, mes)}/{ano[2:]}", 
-                                "pmv": float(row['pmv_ponderado']), "rec_meta": float(row['rec_meta']),
-                                "vol_meta": float(row['vol_meta']), "vol_sim": float(row['vol_sim'])
+                                "mes_banco": str(row['mes_banco']), 
+                                "mes_str": f"{meses_nomes.get(mes, mes)}/{ano[2:]}", 
+                                "pmv": float(row['pmv_ponderado']), 
+                                "rec_meta": float(row['rec_meta']),
+                                "vol_meta": float(row['vol_meta']), 
+                                "vol_sim": float(row['vol_sim'])
                             })
                         
                         no_cliente["subRows"].append({
                             "chave_matriz": f"P|{coord_name}|{vend_name}|{razao_name}|{sku_name}",
-                            "nome": sku_name, "produto": sku_name, "tipo": "produto",
+                            "nome": str(sku_name), "produto": str(sku_name), "tipo": "produto",
                             "categoria": cat_val, "segmento": seg_val,
                             "peso_fat": float(df_sku['receita_total'].sum()), "meses": meses_list
                         })
@@ -147,13 +158,13 @@ def get_dados_carteira(
                 no_coord["subRows"].append(no_vend)
             arvore.append(no_coord)
 
-        is_portfolio_fechado = True  
         lock_carteira = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo_atual, ControleCiclo.origem == 'Carteira_BottomUp', ControleCiclo.status == 'Fechado').first()
         is_fechado = True if lock_carteira else False
 
-        return {"dados": arvore, "is_fechado": is_fechado, "is_portfolio_fechado": is_portfolio_fechado}
+        return {"dados": arvore, "is_fechado": is_fechado, "is_portfolio_fechado": True}
     except Exception as e:
-        print(f"Erro no GET Carteira: {e}")
+        import traceback
+        print(f"ERRO API CARTEIRA: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Erro interno ao extrair a matriz comercial.")
 
 @router.post("/congelar")
@@ -210,7 +221,6 @@ async def congelar_carteira(payload: PayloadAprovarCarteira, db: Session = Depen
         return {"status": "success", "mensagem": "Convertido em caixas e consolidado nas lojas com sucesso!"}
     except Exception as e:
         db.rollback()
-        print(f"Erro no POST Congelar: {e}")
         raise HTTPException(500, detail="Falha no rateio por CNPJ.")
 
 @router.get("/grafico")
@@ -275,5 +285,4 @@ def get_grafico_soe(chave_matriz: str, db: Session = Depends(get_db)):
         df = df.replace({np.nan: None})
         return {"dados": df.to_dict(orient="records")}
     except Exception as e:
-        print(f"Erro no GET Grafico: {e}")
         return {"dados": []}

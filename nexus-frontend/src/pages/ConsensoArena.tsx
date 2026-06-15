@@ -6,7 +6,6 @@ import {
 } from 'lucide-react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import * as XLSX from 'xlsx';
 
 const formatMoeda = (valor: number | string | undefined | null) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Number(valor) || 0);
 const formatVolume = (val: number | string | undefined | null) => Math.round(Number(val) || 0).toLocaleString('pt-BR');
@@ -39,7 +38,9 @@ const SmartCurrencyInput = ({ value, onChange, disabled, blocked }: { value: num
 };
 
 export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }) {
-  const isGerenteOrAdmin = ['Administrador', 'Diretoria', 'Gerente'].includes(usuarioSessao?.funcao);
+  // Verificação de perfil flexível para evitar erros de case/formatação
+  const role = (usuarioSessao?.funcao || '').toLowerCase();
+  const isGerenteOrAdmin = role.includes('admin') || role.includes('diretoria') || role.includes('gerente');
 
   const [viewMode, setViewMode] = useState<'carteira' | 'portfolio'>('carteira');
   const [chartMode, setChartMode] = useState<'CX' | 'RS'>('RS');
@@ -65,44 +66,64 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   const colunasData = dadosBrutos?.length > 0 ? (dadosBrutos[0]?.meses || []) : [];
 
   useEffect(() => {
-    axios.get('/api/v1/consensus/micro/filtros').then(res => setOpcoesBusca(res.data || {vendedores: [], coordenadores: []})).catch(console.error);
-  }, []);
+    axios.get('/api/v1/consensus/micro/filtros').then(res => {
+        const opcoes = res.data || {vendedores: [], coordenadores: []};
+        setOpcoesBusca(opcoes);
+        // PROTEÇÃO CONTRA COLAPSO DE MEMÓRIA (Auto-seleciona para Admin não carregar 80k linhas)
+        if (isGerenteOrAdmin && opcoes.coordenadores?.length > 0) {
+            setNomeResponsavel(opcoes.coordenadores[0]);
+        } else if (!isGerenteOrAdmin && opcoes.vendedores?.length > 0) {
+            setNomeResponsavel(opcoes.vendedores[0]);
+        }
+    }).catch(console.error);
+  }, [isGerenteOrAdmin]);
 
   const fetchData = useCallback(async () => {
+    // Evita o disparo da API se for Admin e ainda não tiver auto-selecionado a equipa
+    if (isGerenteOrAdmin && !nomeResponsavel) return; 
+    
     setIsLoading(true);
     try {
       const res = await axios.get('/api/v1/consensus/micro', { params: { nome_responsavel: nomeResponsavel }});
-      setDadosBrutos(res.data.dados || []);
-      setIsFechado(res.data.is_fechado);
-      setIsPortfolioFechado(res.data.is_portfolio_fechado);
+      setDadosBrutos(res.data?.dados || []);
+      setIsFechado(res.data?.is_fechado || false);
+      setIsPortfolioFechado(res.data?.is_portfolio_fechado ?? true);
       setCelulasEditadas({}); setExpanded({}); setChartExpanded(null); setViewMode('carteira');
-    } catch (e) { console.error(e); } finally { setIsLoading(false); }
-  }, [nomeResponsavel]);
+    } catch (e) { 
+      console.error("Erro na API:", e); 
+      setDadosBrutos([]); 
+    } finally { 
+      setIsLoading(false); 
+    }
+  }, [nomeResponsavel, isGerenteOrAdmin]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
   const getDynamicVol = useCallback((row: any, mesBanco: string): number => {
-    if (row.tipo === 'produto') {
+    if (!row) return 0;
+    if (row.tipo === 'produto' || row.tipo === 'produto_macro') {
       const ed = celulasEditadas[row.chave_matriz]?.[mesBanco];
       if (ed !== undefined) return ed.novo_volume;
-      const m = row.meses?.find((x: any) => x.mes_banco === mesBanco);
+      const m = (row.meses || []).find((x: any) => x.mes_banco === mesBanco);
       return m?.vol_sim || 0;
     }
     return (row.subRows || []).reduce((acc: number, child: any) => acc + getDynamicVol(child, mesBanco), 0);
   }, [celulasEditadas]);
 
   const getDynamicRec = useCallback((row: any, mesBanco: string): number => {
-    if (row.tipo === 'produto') {
+    if (!row) return 0;
+    if (row.tipo === 'produto' || row.tipo === 'produto_macro') {
       const vol = getDynamicVol(row, mesBanco);
-      const m = row.meses?.find((x: any) => x.mes_banco === mesBanco);
+      const m = (row.meses || []).find((x: any) => x.mes_banco === mesBanco);
       return vol * (m?.pmv || 0);
     }
     return (row.subRows || []).reduce((acc: number, child: any) => acc + getDynamicRec(child, mesBanco), 0);
   }, [getDynamicVol]);
 
   const getStaticMeta = useCallback((row: any, mesBanco: string): number => {
-    if (row.tipo === 'produto') {
-      const m = row.meses?.find((x: any) => x.mes_banco === mesBanco);
+    if (!row) return 0;
+    if (row.tipo === 'produto' || row.tipo === 'produto_macro') {
+      const m = (row.meses || []).find((x: any) => x.mes_banco === mesBanco);
       return m?.rec_meta || 0;
     }
     return (row.subRows || []).reduce((acc: number, child: any) => acc + getStaticMeta(child, mesBanco), 0);
@@ -113,7 +134,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     setCelulasEditadas((currentEdits: any) => {
       const nextEdits = { ...currentEdits };
       const findNode = (nodes: any[]): any => {
-        for (const n of nodes) {
+        for (const n of (nodes || [])) {
           if (n.chave_matriz === chaveStr) return n;
           if (n.subRows) { const f = findNode(n.subRows); if (f) return f; }
         }
@@ -123,14 +144,14 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
       if (!targetNode) return nextEdits;
 
       const leaves: any[] = [];
-      const getLeaves = (n: any) => { if (n.tipo === 'produto') leaves.push(n); else if (n.subRows) n.subRows.forEach(getLeaves); };
+      const getLeaves = (n: any) => { if (n.tipo === 'produto') leaves.push(n); else if (n.subRows) (n.subRows || []).forEach(getLeaves); };
       getLeaves(targetNode);
 
       const totalPesoFat = leaves.reduce((sum, leaf) => sum + (leaf.peso_fat || 1), 0);
       const fractions = leaves.map(leaf => {
           const weight = leaf.peso_fat || 1;
           const target_RS = totalPesoFat > 0 ? (weight / totalPesoFat) * novoValorRS : (1 / leaves.length) * novoValorRS;
-          const pmv = leaf.meses?.find((m: any) => m.mes_banco === mesBanco)?.pmv || 1;
+          const pmv = (leaf.meses || []).find((m: any) => m.mes_banco === mesBanco)?.pmv || 1;
           const exactBoxes = target_RS / pmv;
           const intVal = Math.floor(exactBoxes);
           return { leaf, intVal, pmv, remRS: (exactBoxes - intVal) * pmv };
@@ -177,7 +198,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
       if (viewMode !== 'portfolio') return [];
       const folhas: any[] = [];
       const extract = (nodes: any[]) => {
-          nodes.forEach(n => { if (n.tipo === 'produto') folhas.push(n); else if (n.subRows) extract(n.subRows); });
+          (nodes || []).forEach(n => { if (n.tipo === 'produto') folhas.push(n); else if (n.subRows) extract(n.subRows); });
       };
       extract(dadosFiltrados);
 
@@ -188,18 +209,18 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           if (!mapa[cat]) mapa[cat] = { tipo: 'categoria', nome: cat, subRows: {}, chave_matriz: `CAT|${cat}` };
           if (!mapa[cat].subRows[seg]) mapa[cat].subRows[seg] = { tipo: 'segmento', nome: seg, subRows: [], chave_matriz: `SEG|${cat}|${seg}` };
 
-          let skuNode = mapa[cat].subRows[seg].subRows.find((s:any) => s.produto === f.produto);
+          let skuNode = (mapa[cat].subRows[seg].subRows || []).find((s:any) => s.produto === f.produto);
           if (!skuNode) {
               skuNode = {
                   tipo: 'produto_macro', nome: f.nome, produto: f.produto, chave_matriz: `MACRO|${f.produto}`,
-                  meses: colunasData.map((m:any) => ({ mes_banco: m.mes_banco, mes_str: m.mes_str, vol_meta: 0, vol_sim: 0 }))
+                  meses: (colunasData || []).map((m:any) => ({ mes_banco: m.mes_banco, mes_str: m.mes_str, vol_meta: 0, vol_sim: 0 }))
               };
               mapa[cat].subRows[seg].subRows.push(skuNode);
           }
 
-          colunasData.forEach((m:any) => {
-              const mesIdx = skuNode.meses.findIndex((x:any) => x.mes_banco === m.mes_banco);
-              const originalMes = f.meses?.find((x:any) => x.mes_banco === m.mes_banco);
+          (colunasData || []).forEach((m:any) => {
+              const mesIdx = (skuNode.meses || []).findIndex((x:any) => x.mes_banco === m.mes_banco);
+              const originalMes = (f.meses || []).find((x:any) => x.mes_banco === m.mes_banco);
               if (mesIdx !== -1 && originalMes) {
                   skuNode.meses[mesIdx].vol_meta += (originalMes.vol_meta || 0);
                   skuNode.meses[mesIdx].vol_sim += getDynamicVol(f, m.mes_banco);
@@ -207,7 +228,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           });
       });
 
-      return Object.values(mapa).map((cat: any) => ({ ...cat, subRows: Object.values(cat.subRows) }));
+      return Object.values(mapa).map((cat: any) => ({ ...cat, subRows: Object.values(cat.subRows || {}) }));
   }, [dadosFiltrados, viewMode, colunasData, getDynamicVol]);
 
   const totaisGerais = useMemo(() => {
@@ -225,7 +246,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
 
   const isSaveBlocked = useMemo(() => {
     if (!dadosBrutos || dadosBrutos.length === 0) return false;
-    for (const m of colunasData) {
+    for (const m of (colunasData || [])) {
       if (totaisGerais[m.mes_banco]?.orc > 0) {
         const percent = (totaisGerais[m.mes_banco].fat / totaisGerais[m.mes_banco].orc) * 100;
         if (percent < 99 || percent > 101) return true; 
@@ -242,7 +263,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
       setLoadingGrafico(chave);
       try {
         const res = await axios.get('/api/v1/consensus/micro/grafico', { params: { chave_matriz: chave } });
-        setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados || [] }));
+        setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data?.dados || [] }));
       } catch (e) { console.error(e); } finally { setLoadingGrafico(null); }
     }
   };
@@ -325,7 +346,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                 </div>
               );
           } else {
-              const mesData = row.meses?.find((x:any) => x.mes_banco === mBanco) || { vol_meta: 0, vol_sim: 0 };
+              const mesData = (row.meses || []).find((x:any) => x.mes_banco === mBanco) || { vol_meta: 0, vol_sim: 0 };
               const meta = mesData.vol_meta;
               const sim = mesData.vol_sim;
               const dif = sim - meta;
@@ -369,7 +390,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     finally { setIsProcessing(false); }
   };
 
-  if (isPortfolioFechado === null) return <div className="h-screen w-full flex justify-center items-center"><Loader2 className="animate-spin text-indigo-500 w-8 h-8" /></div>;
+  if (isPortfolioFechado === null) return <div className="h-screen w-full flex flex-col justify-center items-center"><Loader2 className="animate-spin text-indigo-500 w-8 h-8 mb-4" /><span className="text-xs font-black tracking-widest text-slate-400 uppercase">A Ler Base de Dados...</span></div>;
 
   return (
     <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
@@ -407,7 +428,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
             {viewMode === 'carteira' && (
                 <div className="flex items-center gap-4 bg-white p-2 rounded-[20px] shadow-sm border border-slate-100 px-4 flex-shrink-0">
                     <select value={nomeResponsavel} onChange={e => setNomeResponsavel(e.target.value)} className="bg-transparent text-sm font-bold text-slate-700 outline-none cursor-pointer">
-                        <option value="">Toda a Equipa</option>
+                        <option value="">-- Selecione uma Equipa --</option>
                         {isGerenteOrAdmin ? (opcoesBusca?.coordenadores || []).map(opt => <option key={opt} value={opt}>{opt}</option>) : (opcoesBusca?.vendedores || []).map(opt => <option key={opt} value={opt}>{opt}</option>)}
                     </select>
                     <button onClick={fetchData} className="bg-indigo-50 text-indigo-600 px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-indigo-100 transition"><Filter className="w-4 h-4 inline"/></button>
@@ -420,9 +441,9 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           <div className="overflow-x-auto pb-4">
             <table className="w-full text-left border-collapse">
               <thead className="bg-white border-b-2 border-slate-100 shadow-sm">
-                {table.getHeaderGroups().map(hg => (
+                {(table.getHeaderGroups() || []).map(hg => (
                   <tr key={hg.id}>
-                    {hg.headers.map(header => (
+                    {(hg.headers || []).map(header => (
                       <th key={header.id} className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">
                         {flexRender(header.column.columnDef.header, header.getContext())}
                       </th>
@@ -432,10 +453,10 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
               </thead>
               
               <tbody>
-                {table.getRowModel().rows.map(row => (
+                {(table.getRowModel().rows || []).map(row => (
                   <Fragment key={row.id}>
                     <tr className={`border-b border-slate-50 transition-colors ${row.getIsExpanded() ? 'bg-indigo-50/20' : row.depth === 0 ? 'bg-slate-50' : 'hover:bg-slate-50'}`}>
-                      {row.getVisibleCells().map(cell => (<td key={cell.id} className="px-8 py-3">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>))}
+                      {(row.getVisibleCells() || []).map(cell => (<td key={cell.id} className="px-8 py-3">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>))}
                     </tr>
                     
                     {/* DOSSIÊ EXECUTIVO COM TOGGLE (CX vs R$) */}
@@ -480,7 +501,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
               
               <tfoot className="bg-slate-900 text-white">
                 <tr>
-                  {table.getHeaderGroups()[0]?.headers?.map(header => {
+                  {(table.getHeaderGroups()[0]?.headers || []).map(header => {
                     if (header.id === 'nome') return (<td key={header.id} className="px-8 py-5 text-right border-r border-slate-800"><div className="flex flex-col"><span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Totalização</span><span className="font-bold text-sm text-white">EQUIPA COMERCIAL</span></div></td>);
                     if (header.id.startsWith('mes_')) {
                       const m = header.id.replace('mes_', '');
