@@ -21,7 +21,6 @@ export default function AdminPanel() {
   const [usuariosAtivos, setUsuariosAtivos] = useState<any[]>([]);
   
   // ESTADOS DO DESCONGELAMENTO E MÁQUINA DO TEMPO
-  const [vendedores, setVendedores] = useState<string[]>([]);
   const [origemDesbloqueio, setOrigemDesbloqueio] = useState('');
   const [isUnlocking, setIsUnlocking] = useState(false);
   const [cicloAtivo, setCicloAtivo] = useState('');
@@ -58,20 +57,14 @@ export default function AdminPanel() {
         setUsuariosAtivos(ativosRes.data.dados || []);
       } catch(e) {}
 
-      // 3. Vendedores para Desbloqueio
-      try {
-        const filtrosRes = await axios.get('/api/v1/consensus/gerenciamento/filtros');
-        setVendedores(filtrosRes.data.vendedores || []);
-      } catch(e) {}
-
-      // 4. Ciclo Ativo
+      // 3. Ciclo Ativo
       try {
         const cicloRes = await axios.get('/api/v1/admin/ciclo-ativo');
         setCicloAtivo(cicloRes.data.ciclo_ativo);
         setNovoCicloInput(cicloRes.data.ciclo_ativo);
       } catch(e) {}
 
-      // 5. Logs de Auditoria
+      // 4. Logs de Auditoria
       try {
         const auditRes = await axios.get('/api/v1/admin/auditoria/logs');
         setLogsAuditoria(auditRes.data.dados || []);
@@ -141,7 +134,6 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
     } catch (e: any) { alert(e.response?.data?.detail || "Erro ao resetar a senha."); }
   };
 
-  // NOVA FUNÇÃO: Excluir Utilizador do Sistema
   const handleDeleteUser = async (id: number, nome: string) => {
     if (!window.confirm(`⚠️ EXCLUSÃO PERMANENTE: Deseja realmente remover o utilizador "${nome}" do Nexus? \n\nEsta ação não pode ser desfeita.`)) return;
     try {
@@ -195,9 +187,6 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
       setIsChangingCiclo(false);
     }
   };
-
-  const isGlobalSelected = ['Top-Down', 'Supply Review', 'S&OP-Final'].includes(origemDesbloqueio);
-  const isVendedorSelected = !isGlobalSelected && origemDesbloqueio !== '';
 
   const auditoriaFiltrada = useMemo(() => {
     if (!buscaAuditoria) return logsAuditoria;
@@ -302,15 +291,16 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
                             <p className="text-xs font-medium text-slate-500 leading-relaxed">
                             Force a reabertura de uma etapa do S&OP que já foi assinada e congelada <strong className="text-slate-800">no ciclo ativo ({cicloAtivo})</strong>.
                             </p>
-                            <select value={isGlobalSelected ? origemDesbloqueio : ''} onChange={(e) => setOrigemDesbloqueio(e.target.value)} className="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-xl focus:ring-amber-500 focus:border-amber-500 block w-full p-3 font-bold outline-none cursor-pointer">
-                                <option value="">Selecione um nível global...</option>
+                            <select 
+                                value={origemDesbloqueio} 
+                                onChange={(e) => setOrigemDesbloqueio(e.target.value)} 
+                                className="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-xl focus:ring-amber-500 focus:border-amber-500 block w-full p-3 font-bold outline-none cursor-pointer"
+                            >
+                                <option value="">Selecione uma etapa...</option>
+                                <option value="Gerenciamento">Gerenciamento (Consenso Equipa)</option>
                                 <option value="Top-Down Arena">Visão Gerencial (Top-Down)</option>
                                 <option value="Supply Review">Fábrica (Supply Review)</option>
                                 <option value="S&OP-Final">S&OP Global (Dashboard Final)</option>
-                            </select>
-                            <select value={isVendedorSelected ? origemDesbloqueio : ''} onChange={(e) => setOrigemDesbloqueio(e.target.value)} className="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-xl focus:ring-amber-500 focus:border-amber-500 block w-full p-3 font-bold outline-none cursor-pointer">
-                                <option value="">Ou selecione a carteira de um Vendedor...</option>
-                                {vendedores.map(v => <option key={v} value={v}>{v}</option>)}
                             </select>
                             <button onClick={handleDescongelar} disabled={isUnlocking || !origemDesbloqueio} className="mt-2 w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 text-white py-3.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-md shadow-amber-500/20 disabled:opacity-50">
                                 {isUnlocking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Unlock className="w-4 h-4" />} Forçar Reabertura

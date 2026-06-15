@@ -289,10 +289,10 @@ export default function GlobalDashboard() {
 
     return [
       { id: 'ia', label: 'Baseline IA', v: t_ia, r: r_ia, bV: 0, orc: r_orc, icon: <Bot className="w-5 h-5 opacity-70" /> },
-      { id: 'td', label: 'Meta Global', v: t_td, r: r_td, bV: t_ia, orc: r_orc, icon: <Globe className="w-5 h-5 opacity-70" /> },
-      { id: 'bu', label: 'Proposta Comercial', v: t_bu, r: r_bu, bV: t_td, orc: r_orc, icon: <TrendingUp className="w-5 h-5 opacity-70" /> },
-      { id: 'sp', label: 'Restrição Supply', v: t_sp, r: r_sp, bV: t_bu, orc: r_orc, icon: <AlertTriangle className="w-5 h-5 opacity-70" /> },
-      { id: 'final', label: 'Plano S&OP Consolidado', v: t_final, r: r_final, bV: t_sp, orc: r_orc, icon: <Check className="w-5 h-5 opacity-70" /> }
+      { id: 'td', label: 'Marketing', v: t_td, r: r_td, bV: t_ia, orc: r_orc, icon: <Globe className="w-5 h-5 opacity-70" /> },
+      { id: 'bu', label: 'Comercial', v: t_bu, r: r_bu, bV: t_td, orc: r_orc, icon: <TrendingUp className="w-5 h-5 opacity-70" /> },
+      { id: 'sp', label: 'Supply', v: t_sp, r: r_sp, bV: t_bu, orc: r_orc, icon: <AlertTriangle className="w-5 h-5 opacity-70" /> },
+      { id: 'final', label: 'Plano Final', v: t_final, r: r_final, bV: t_sp, orc: r_orc, icon: <Check className="w-5 h-5 opacity-70" /> }
     ];
   }, [arvoreDados, getDynamicRowVol]);
 

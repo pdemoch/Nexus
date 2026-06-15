@@ -299,19 +299,19 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
 
         <div className="grid grid-cols-4 gap-4 mb-6">
           <div className="bg-blue-900/30 border border-blue-500/50 p-4 rounded-xl shadow-[0_0_15px_rgba(59,130,246,0.15)]">
-            <div className="text-[10px] font-black text-blue-400 mb-1 uppercase tracking-widest">Sua Proposta (Vol_BU)</div>
+            <div className="text-[10px] font-black text-blue-400 mb-1 uppercase tracking-widest">Fat. Comercial</div>
             <div className="text-2xl font-black text-white">{formatMoeda(kpis.recBU)}</div>
           </div>
           <div className="bg-[#2a3045] border border-slate-700 p-4 rounded-xl">
-            <div className="text-[10px] font-black text-slate-400 mb-1 uppercase tracking-widest">Sinal de IA</div>
+            <div className="text-[10px] font-black text-slate-400 mb-1 uppercase tracking-widest">Fat. IA</div>
             <div className="text-2xl font-black text-slate-300">{formatMoeda(kpis.recIA)}</div>
           </div>
           <div className="bg-[#2a3045] border border-slate-700 p-4 rounded-xl">
-            <div className="text-[10px] font-black text-slate-400 mb-1 uppercase tracking-widest">Âncora Diretoria (TD)</div>
+            <div className="text-[10px] font-black text-slate-400 mb-1 uppercase tracking-widest">Fat. Marketing</div>
             <div className="text-2xl font-black text-slate-300">{formatMoeda(kpis.recTD)}</div>
           </div>
           <div className="bg-[#2a3045] border border-slate-700 p-4 rounded-xl">
-            <div className="text-[10px] font-black text-slate-400 mb-1 uppercase tracking-widest">Orçamento/Budget Oficial</div>
+            <div className="text-[10px] font-black text-slate-400 mb-1 uppercase tracking-widest">Orçamento</div>
             <div className="text-2xl font-black text-slate-300">{formatMoeda(kpis.recMeta)}</div>
           </div>
         </div>
@@ -329,12 +329,12 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
                   <Tooltip contentStyle={{backgroundColor: '#0f172a', borderColor: '#334155', color: '#fff'}} itemStyle={{color: '#fff'}} />
                   <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} />
                   
-                  <Line type="monotone" dataKey="CicloAnterior" name="Lag 1 (Ciclo Passado)" stroke="#a855f7" strokeDasharray="4 4" strokeWidth={2} dot={false} connectNulls={true} />
-                  <Line type="monotone" dataKey="IA" name="Modelo IA (Baseline)" stroke="#64748b" strokeDasharray="5 5" strokeWidth={2} dot={false} connectNulls={true} />
-                  <Line type="monotone" dataKey="Realizado" name="Realizado (Histórico)" stroke="#94a3b8" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} connectNulls={true} />
+                  <Line type="monotone" dataKey="CicloAnterior" name="Ciclo Passado" stroke="#a855f7" strokeDasharray="4 4" strokeWidth={2} dot={false} connectNulls={true} />
+                  <Line type="monotone" dataKey="IA" name="Modelo IA" stroke="#64748b" strokeDasharray="5 5" strokeWidth={2} dot={false} connectNulls={true} />
+                  <Line type="monotone" dataKey="Realizado" name="Realizado" stroke="#94a3b8" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} connectNulls={true} />
                   
-                  <Line type="monotone" dataKey="BottomUp" name="Sua Proposta Dinâmica (BU)" stroke="#3b82f6" strokeWidth={4} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={true} />
-                  <Line type="monotone" dataKey="TopDown" name="Top-Down (Meta Fixo)" stroke="#cbd5e1" strokeDasharray="6 4" strokeWidth={2} dot={false} connectNulls={true} />
+                  <Line type="monotone" dataKey="BottomUp" name="Comercial" stroke="#3b82f6" strokeWidth={4} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={true} />
+                  <Line type="monotone" dataKey="TopDown" name="Marketing" stroke="#a2711d" strokeDasharray="6 4" strokeWidth={2} dot={false} connectNulls={true} />
                 </ComposedChart>
               </ResponsiveContainer>
             ) : null}
@@ -415,7 +415,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
           return (
             <div className="flex flex-col items-center justify-center p-1.5 min-w-[140px]">
               <div className="flex items-center gap-1 text-[10px] font-black text-slate-400 mb-1.5">
-                 <Target className="w-3 h-3 text-slate-300" /> TD: {formatVolume(tdData.vol)}
+                 <Target className="w-3 h-3 text-slate-300" /> Marketing: {formatVolume(tdData.vol)}
               </div>
               
               <div className={`w-full max-w-[120px] border rounded-lg px-2 py-1.5 shadow-sm transition-colors focus-within:ring-2 focus-within:ring-blue-500/50 focus-within:border-blue-500 ${!isTopDownFechado || isDemandFechado ? 'bg-slate-50 border-slate-200' : 'bg-white border-blue-200 hover:border-blue-400'}`}>
@@ -488,7 +488,7 @@ export default function GerenciamentoArena({ usuarioSessao }: any) {
               <h1 className="text-3xl font-black text-slate-800 tracking-tight flex items-center gap-3">
                   <BarChart3 className="w-8 h-8 text-blue-600" /> S&OP <span className="text-blue-600">Comercial</span>
               </h1>
-              <p className="text-slate-500 mt-1 font-medium">Modelagem e Decisão de Portfólio Global (Apenas Vol_BU)</p>
+              <p className="text-slate-500 mt-1 font-medium">Proposta Comercial</p>
             </div>
 
             <div className="flex items-center gap-4">
