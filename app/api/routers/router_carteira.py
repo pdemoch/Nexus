@@ -9,6 +9,7 @@ from sqlalchemy import func, text
 import pandas as pd
 import numpy as np
 
+# Ajuste os imports para o caminho exato do seu projeto
 from app.core.database import get_db
 from app.models.domain_models import DimProduto, FatoIbpGranular, ControleCiclo, FatoVendas, DimCliente
 from app.api.routers.router_auth import get_current_user
@@ -33,10 +34,10 @@ async def filtros_micro(db: Session = Depends(get_db), usuario: dict = Depends(g
     try:
         sql = """
             SELECT DISTINCT 
-                c.supervisor_nome AS coordenador, 
-                f.vendedor_nome AS vendedor
+                TRIM(c.supervisor_nome) AS coordenador, 
+                TRIM(f.vendedor_nome) AS vendedor
             FROM fato_ibp_granular f
-            INNER JOIN dim_clientes c ON f.cgc = c.cgc
+            INNER JOIN dim_clientes c ON TRIM(f.cgc) = TRIM(c.cgc)
             WHERE f.ciclo_sop = (SELECT MAX(ciclo_sop) FROM fato_ibp_granular)
               AND c.supervisor_nome IS NOT NULL 
               AND f.vendedor_nome IS NOT NULL;
@@ -58,30 +59,33 @@ def get_dados_carteira(
     try:
         ciclo_atual = get_current_cycle(db)
 
+        # SQL BLINDADO: Traz Fato + Clientes + Produtos + CTE de PMV Histórico
         sql = """
             WITH pmv_historico_4m AS (
                 SELECT 
-                    cgc, sku, 
+                    TRIM(cgc) AS cgc, TRIM(sku) AS sku, 
                     SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv_real_4m
                 FROM fato_vendas
                 WHERE data_pedido >= CURRENT_DATE - INTERVAL '4 months'
-                GROUP BY cgc, sku
+                GROUP BY TRIM(cgc), TRIM(sku)
             )
             SELECT 
-                COALESCE(c.supervisor_nome, 'SEM COORDENADOR') AS coordenador,
-                COALESCE(f.vendedor_nome, 'SEM VENDEDOR') AS vendedor,
-                COALESCE(c.razaosocial, 'SEM RAZAO SOCIAL') AS razao_social,
-                f.sku,
-                COALESCE(p.categoria, 'SEM CATEGORIA') AS categoria,
-                COALESCE(p.segmento, 'SEM SEGMENTO') AS segmento,
+                COALESCE(NULLIF(TRIM(c.supervisor_nome), ''), NULLIF(TRIM(c.gerente_nome), ''), 'SEM COORDENADOR') AS coordenador,
+                COALESCE(NULLIF(TRIM(c.vendedor_nome), ''), NULLIF(TRIM(f.vendedor_nome), ''), 'SEM VENDEDOR') AS vendedor,
+                COALESCE(NULLIF(TRIM(c.razaosocial), ''), 'SEM RAZAO SOCIAL') AS razao_social,
+                TRIM(f.sku) AS sku,
+                COALESCE(NULLIF(TRIM(p.categoria), ''), 'SEM CATEGORIA') AS categoria,
+                COALESCE(NULLIF(TRIM(p.segmento), ''), 'SEM SEGMENTO') AS segmento,
                 TO_CHAR(f.mes_projetado, 'YYYY-MM') AS mes_banco,
                 COALESCE(f.vol_meta, 0) AS vol_meta,
                 COALESCE(hist.pmv_real_4m, f.pmv_aplicado, 0) AS pmv_aplicado
             FROM fato_ibp_granular f
-            LEFT JOIN dim_clientes c ON f.cgc = c.cgc
-            LEFT JOIN dim_produtos p ON f.sku = p.sku
-            LEFT JOIN pmv_historico_4m hist ON hist.cgc = f.cgc AND hist.sku = f.sku
+            LEFT JOIN dim_clientes c ON TRIM(f.cgc) = TRIM(c.cgc)
+            LEFT JOIN dim_produtos p ON TRIM(f.sku) = TRIM(p.sku)
+            LEFT JOIN pmv_historico_4m hist ON hist.cgc = TRIM(f.cgc) AND hist.sku = TRIM(f.sku)
             WHERE f.ciclo_sop = :ciclo_atual
+              AND f.sku IS NOT NULL AND TRIM(f.sku) != ''
+              AND f.cgc IS NOT NULL AND TRIM(f.cgc) != ''
         """
         
         engine = db.get_bind()
@@ -158,9 +162,9 @@ async def congelar_carteira(payload: PayloadAprovarCarteira, db: Session = Depen
                 WITH cgc_historico AS (
                     SELECT f.id AS fato_id, f.cgc, COALESCE(SUM(v.qt_pedido), 0) AS peso_historico
                     FROM fato_ibp_granular f
-                    JOIN dim_clientes c ON f.cgc = c.cgc
-                    LEFT JOIN fato_vendas v ON v.cgc = f.cgc AND v.sku = f.sku AND v.data_pedido >= CURRENT_DATE - INTERVAL '4 months'
-                    WHERE f.ciclo_sop = :ciclo AND TO_CHAR(f.mes_projetado, 'YYYY-MM') = :mes AND f.sku = :sku AND c.razaosocial = :razao
+                    JOIN dim_clientes c ON TRIM(f.cgc) = TRIM(c.cgc)
+                    LEFT JOIN fato_vendas v ON TRIM(v.cgc) = TRIM(f.cgc) AND TRIM(v.sku) = TRIM(f.sku) AND v.data_pedido >= CURRENT_DATE - INTERVAL '4 months'
+                    WHERE f.ciclo_sop = :ciclo AND TO_CHAR(f.mes_projetado, 'YYYY-MM') = :mes AND TRIM(f.sku) = :sku AND TRIM(c.razaosocial) = :razao
                     GROUP BY f.id, f.cgc
                 )
                 SELECT fato_id, cgc, peso_historico, SUM(peso_historico) OVER() AS peso_total_razao, COUNT(*) OVER() AS qtd_lojas FROM cgc_historico
@@ -212,14 +216,15 @@ def get_grafico_soe(chave_matriz: str, db: Session = Depends(get_db)):
         params = {"ciclo_atual": ciclo_atual, "ciclo_anterior": ciclo_anterior}
 
         if tipo_no == 'C' and len(partes) >= 2:
-            filtro_fato, filtro_vendas, params['coord'] = " AND c.supervisor_nome = :coord", " AND c.supervisor_nome = :coord", partes[1]
+            filtro_fato, filtro_vendas, params['coord'] = " AND TRIM(c.supervisor_nome) = :coord", " AND TRIM(c.supervisor_nome) = :coord", partes[1]
         elif tipo_no == 'V' and len(partes) >= 3:
-            filtro_fato, filtro_vendas, params['coord'], params['vend'] = " AND c.supervisor_nome = :coord AND f.vendedor_nome = :vend", " AND c.supervisor_nome = :coord AND v.vendedor_nome = :vend", partes[1], partes[2]
+            filtro_fato, filtro_vendas, params['coord'], params['vend'] = " AND TRIM(c.supervisor_nome) = :coord AND TRIM(f.vendedor_nome) = :vend", " AND TRIM(c.supervisor_nome) = :coord AND TRIM(v.vendedor_nome) = :vend", partes[1], partes[2]
         elif tipo_no == 'R' and len(partes) >= 4:
-            filtro_fato, filtro_vendas, params['razao'] = " AND c.razaosocial = :razao", " AND c.razaosocial = :razao", partes[3]
+            filtro_fato, filtro_vendas, params['razao'] = " AND TRIM(c.razaosocial) = :razao", " AND TRIM(c.razaosocial) = :razao", partes[3]
         elif tipo_no == 'P' and len(partes) >= 5:
-            filtro_fato, filtro_vendas, params['razao'], params['sku'] = " AND c.razaosocial = :razao AND f.sku = :sku", " AND c.razaosocial = :razao AND v.sku = :sku", partes[3], partes[4]
+            filtro_fato, filtro_vendas, params['razao'], params['sku'] = " AND TRIM(c.razaosocial) = :razao AND TRIM(f.sku) = :sku", " AND TRIM(c.razaosocial) = :razao AND TRIM(v.sku) = :sku", partes[3], partes[4]
 
+        # QUERY BIPOLAR: Extrai Métricas separadas em CX (Volume) e RS (Faturamento)
         sql = f"""
             WITH meses AS (
                 SELECT TO_CHAR(meses, 'YYYY-MM') AS data_iso, TO_CHAR(meses, 'Mon') AS name
@@ -227,19 +232,19 @@ def get_grafico_soe(chave_matriz: str, db: Session = Depends(get_db)):
             ),
             realizado AS (
                 SELECT TO_CHAR(v.data_pedido, 'YYYY-MM') AS mes, SUM(v.qt_pedido) AS vol_real, SUM(v.vl_pedido) AS rec_real
-                FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc WHERE 1=1 {filtro_vendas} GROUP BY 1
+                FROM fato_vendas v JOIN dim_clientes c ON TRIM(v.cgc) = TRIM(c.cgc) WHERE 1=1 {filtro_vendas} GROUP BY 1
             ),
             consenso_atual AS (
                 SELECT TO_CHAR(f.mes_projetado, 'YYYY-MM') AS mes, 
                        SUM(f.vol_ia) AS vol_ia, SUM(f.vol_ia * f.pmv_aplicado) AS rec_ia,
                        SUM(f.vol_bottomup) AS vol_consenso, SUM(f.vol_bottomup * f.pmv_aplicado) AS rec_consenso,
                        SUM(f.vol_meta) AS vol_meta, SUM(f.vol_meta * f.pmv_aplicado) AS rec_meta
-                FROM fato_ibp_granular f JOIN dim_clientes c ON f.cgc = c.cgc WHERE f.ciclo_sop = :ciclo_atual {filtro_fato} GROUP BY 1
+                FROM fato_ibp_granular f JOIN dim_clientes c ON TRIM(f.cgc) = TRIM(c.cgc) WHERE f.ciclo_sop = :ciclo_atual {filtro_fato} GROUP BY 1
             ),
             consenso_anterior AS (
                 SELECT TO_CHAR(f.mes_projetado, 'YYYY-MM') AS mes, 
                        SUM(f.vol_final) AS vol_ant, SUM(f.vol_final * f.pmv_aplicado) AS rec_ant
-                FROM fato_ibp_granular f JOIN dim_clientes c ON f.cgc = c.cgc WHERE f.ciclo_sop = :ciclo_anterior {filtro_fato} GROUP BY 1
+                FROM fato_ibp_granular f JOIN dim_clientes c ON TRIM(f.cgc) = TRIM(c.cgc) WHERE f.ciclo_sop = :ciclo_anterior {filtro_fato} GROUP BY 1
             )
             SELECT 
                 m.data_iso, m.name,

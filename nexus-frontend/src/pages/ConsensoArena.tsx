@@ -8,8 +8,8 @@ import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import * as XLSX from 'xlsx';
 
-const formatMoeda = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(valor || 0);
-const formatVolume = (val: number) => Math.round(val || 0).toLocaleString('pt-BR');
+const formatMoeda = (valor: number | string | undefined | null) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Number(valor) || 0);
+const formatVolume = (val: number | string | undefined | null) => Math.round(Number(val) || 0).toLocaleString('pt-BR');
 
 const SmartCurrencyInput = ({ value, onChange, disabled, blocked }: { value: number, onChange: (val: number) => void, disabled: boolean, blocked: boolean }) => {
   const [localVal, setLocalVal] = useState(value !== undefined ? formatMoeda(value).replace('R$', '').trim() : '0');
@@ -457,9 +457,8 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
                                     <LineChart data={dadosGraficoCache[row.original.chave_matriz] || []} margin={{ top: 20, right: 30, left: 20, bottom: 10 }}>
                                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
                                       <XAxis dataKey="name" tick={{fontSize: 10, fontWeight: 900, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                                      {/* O "any" abaixo corrige o erro de tipagem estrita do TypeScript */}
-                                      <YAxis tickFormatter={(val: any) => chartMode === 'RS' ? formatMoeda(Number(val)) : formatVolume(Number(val))} tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} tickLine={false} />
-                                      <Tooltip formatter={(value: any) => chartMode === 'RS' ? formatMoeda(Number(value)) : formatVolume(Number(value))} contentStyle={{borderRadius: '20px', backgroundColor: '#0f172a', border: '1px solid #1e293b', color: '#fff'}} />
+                                      <YAxis tickFormatter={(val: any) => chartMode === 'RS' ? formatMoeda(val) : formatVolume(val)} tick={{fontSize: 10, fill: '#64748b'}} axisLine={false} tickLine={false} />
+                                      <Tooltip formatter={(value: any) => [chartMode === 'RS' ? formatMoeda(value) : formatVolume(value), ""]} contentStyle={{borderRadius: '20px', backgroundColor: '#0f172a', border: '1px solid #1e293b', color: '#fff'}} />
                                       <Legend iconType="circle" wrapperStyle={{paddingTop: '20px', fontSize: '11px', fontWeight: '900', color: '#cbd5e1'}} />
                                       
                                       <Line type="monotone" dataKey={`CicloAnterior_${chartMode}`} name="Lag 1 (Ciclo Passado)" stroke="#f59e0b" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={true} />
