@@ -1,5 +1,6 @@
 import datetime
 import io
+import csv
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
@@ -12,8 +13,8 @@ import numpy as np
 from app.core.database import get_db
 from app.models.domain_models import ControleCiclo
 from app.api.routers.router_auth import get_current_user
+from app.api.routers.shared_ibp import get_projection_window  # IMPORTADO PARA FILTRAR M0 e M1
 
-# ATENÇÃO: Rota mantida em /micro para não quebrar a chamada do Frontend
 router = APIRouter(
     prefix="/api/v1/consensus/micro", 
     tags=["Metas da Equipe (Cascata)"]
@@ -26,7 +27,7 @@ class AjusteMeta(BaseModel):
 
 class PayloadSalvarMetas(BaseModel):
     origem_ajuste: str
-    finalizar_etapa: bool # Se True, trava o cadeado global. Se False, é só Rascunho.
+    finalizar_etapa: bool
     ajustes: List[AjusteMeta]
 
 def obter_ciclo_real_fato(engine):
@@ -34,21 +35,18 @@ def obter_ciclo_real_fato(engine):
         ciclo = conn.execute(text("SELECT MAX(ciclo_sop) FROM fato_ibp_granular")).scalar()
         return ciclo or "06/2026"
 
-# ==========================================
-# 1. FILTROS (Extração Leve de Pessoas)
-# ==========================================
 @router.get("/filtros")
 async def filtros_micro(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
         sql = """
             SELECT DISTINCT 
-                c.gerente_nome AS gerente,
-                c.supervisor_nome AS coordenador, 
-                f.vendedor_nome AS vendedor
+                TRIM(c.gerente_nome) AS gerente,
+                TRIM(c.supervisor_nome) AS coordenador, 
+                TRIM(f.vendedor_nome) AS vendedor
             FROM fato_ibp_granular f
             JOIN dim_clientes c ON f.cgc = c.cgc
             WHERE f.ciclo_sop = (SELECT MAX(ciclo_sop) FROM fato_ibp_granular)
-              AND c.gerente_nome IS NOT NULL AND c.gerente_nome != ''
+              AND c.gerente_nome IS NOT NULL AND TRIM(c.gerente_nome) != ''
         """
         engine = db.get_bind()
         df = pd.read_sql(text(sql), engine)
@@ -61,23 +59,23 @@ async def filtros_micro(db: Session = Depends(get_db), usuario: dict = Depends(g
     except Exception as e:
         return {"gerentes": [], "coordenadores": [], "vendedores": []}
 
-# ==========================================
-# 2. DADOS PRINCIPAIS (A Árvore de Faturamento)
-# ==========================================
 @router.get("")
 def get_dados_metas(nome_responsavel: Optional[str] = Query(None), db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
         engine = db.get_bind()
         ciclo_atual = obter_ciclo_real_fato(engine)
+        
+        # Filtra os meses: Remove M0 e M1 (Traz apenas o que importa para a Meta)
+        data_ini, data_fim = get_projection_window(db)
 
-        params = {"ciclo_atual": ciclo_atual}
+        params = {"ciclo_atual": ciclo_atual, "data_ini": data_ini, "data_fim": data_fim}
         filtro_responsavel = ""
         
         if nome_responsavel:
             filtro_responsavel = " AND (c.gerente_nome = :resp OR c.supervisor_nome = :resp OR f.vendedor_nome = :resp) "
             params["resp"] = nome_responsavel
 
-        # Utilizamos f.vol_bottomup (coluna real) como a herança financeira base
+        # O TRIM aqui no SELECT limpa os espaços vazios e mostra os nomes no Frontend (Performance 100% segura)
         sql = f"""
             WITH pmv_historico_4m AS (
                 SELECT cgc, sku, SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv_real_4m
@@ -86,13 +84,13 @@ def get_dados_metas(nome_responsavel: Optional[str] = Query(None), db: Session =
                 GROUP BY cgc, sku
             )
             SELECT 
-                COALESCE(NULLIF(c.gerente_nome, ''), 'SEM GERENTE') AS gerente,
-                COALESCE(NULLIF(c.supervisor_nome, ''), 'SEM COORDENADOR') AS coordenador,
-                COALESCE(NULLIF(f.vendedor_nome, ''), 'SEM VENDEDOR') AS vendedor,
-                COALESCE(NULLIF(c.razaosocial, ''), 'SEM RAZAO SOCIAL') AS razao_social,
-                f.sku,
-                COALESCE(NULLIF(p.categoria, ''), 'SEM CATEGORIA') AS categoria,
-                COALESCE(NULLIF(p.segmento, ''), 'SEM SEGMENTO') AS segmento,
+                COALESCE(NULLIF(TRIM(c.gerente_nome), ''), 'SEM GERENTE') AS gerente,
+                COALESCE(NULLIF(TRIM(c.supervisor_nome), ''), 'SEM COORDENADOR') AS coordenador,
+                COALESCE(NULLIF(TRIM(f.vendedor_nome), ''), 'SEM VENDEDOR') AS vendedor,
+                COALESCE(NULLIF(TRIM(c.razaosocial), ''), 'SEM RAZAO SOCIAL') AS razao_social,
+                TRIM(f.sku) AS sku,
+                COALESCE(NULLIF(TRIM(p.categoria), ''), 'SEM CATEGORIA') AS categoria,
+                COALESCE(NULLIF(TRIM(p.segmento), ''), 'SEM SEGMENTO') AS segmento,
                 TO_CHAR(f.mes_projetado, 'YYYY-MM') AS mes_banco,
                 COALESCE(f.vol_bottomup, 0) AS vol_base_herdado,
                 COALESCE(hist.pmv_real_4m, f.pmv_aplicado, 0) AS pmv_aplicado,
@@ -102,6 +100,8 @@ def get_dados_metas(nome_responsavel: Optional[str] = Query(None), db: Session =
             JOIN dim_produtos p ON f.sku = p.sku
             LEFT JOIN pmv_historico_4m hist ON hist.cgc = f.cgc AND hist.sku = f.sku
             WHERE f.ciclo_sop = :ciclo_atual
+              AND f.mes_projetado >= :data_ini
+              AND f.mes_projetado <= :data_fim
               AND f.sku IS NOT NULL AND f.sku != ''
               {filtro_responsavel}
         """
@@ -111,8 +111,6 @@ def get_dados_metas(nome_responsavel: Optional[str] = Query(None), db: Session =
 
         df['vol_base_herdado'] = pd.to_numeric(df['vol_base_herdado'], errors='coerce').fillna(0)
         df['vol_meta_salvo'] = pd.to_numeric(df['vol_meta_salvo'], errors='coerce').fillna(0)
-        
-        # A Receita Base que serve de âncora para a distribuição (%)
         df['receita_base'] = df['vol_base_herdado'] * df['pmv_aplicado']
 
         df_grouped = df.groupby(['gerente', 'coordenador', 'vendedor', 'razao_social', 'categoria', 'segmento', 'sku', 'mes_banco']).agg(
@@ -143,8 +141,6 @@ def get_dados_metas(nome_responsavel: Optional[str] = Query(None), db: Session =
                             meses_list = []
                             for _, row in df_sku.iterrows():
                                 ano, mes = str(row['mes_banco']).split('-')
-                                
-                                # Se já tem vol_meta salvo, o volume simulado é ele. Se não, começa igual à base herdada.
                                 vol_simulado_inicial = row['vol_meta_salvo'] if row['vol_meta_salvo'] > 0 else row['vol_base_herdado']
 
                                 meses_list.append({
@@ -174,9 +170,6 @@ def get_dados_metas(nome_responsavel: Optional[str] = Query(None), db: Session =
         print(f"ERRO API METAS CASCATA: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Erro interno: {e}")
 
-# ==========================================
-# 3. SALVAR (Explosão CNPJ -> Update vol_meta)
-# ==========================================
 @router.post("/salvar")
 async def salvar_metas(payload: PayloadSalvarMetas, db: Session = Depends(get_db)):
     try:
@@ -234,9 +227,6 @@ async def salvar_metas(payload: PayloadSalvarMetas, db: Session = Depends(get_db
         db.rollback()
         raise HTTPException(500, detail="Falha ao gravar metas.")
 
-# ==========================================
-# 4. EXPORTAÇÃO CSV 
-# ==========================================
 @router.get("/exportar")
 def exportar_csv(db: Session = Depends(get_db)):
     try:
