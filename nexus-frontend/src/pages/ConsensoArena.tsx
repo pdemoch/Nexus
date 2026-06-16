@@ -9,17 +9,18 @@ const formatMoeda = (valor: number | string | undefined | null) => new Intl.Numb
 const formatVolume = (val: number | string | undefined | null) => Math.round(Number(val) || 0).toLocaleString('pt-BR');
 
 // COMPONENTE DUAL INPUT (% e R$)
-const DualInput = ({ baseRS, currentRS, onChange, disabled }: any) => {
+// Agora ele calcula a % com base na referência do PAI (refRS)
+const DualInput = ({ refRS, currentRS, onChange, disabled }: any) => {
   const [valRS, setValRS] = useState(formatMoeda(currentRS).replace('R$', '').trim());
-  const [valPerc, setValPerc] = useState(baseRS > 0 ? ((currentRS / baseRS) * 100).toFixed(1) : '0');
+  const [valPerc, setValPerc] = useState(refRS > 0 ? ((currentRS / refRS) * 100).toFixed(1) : '0');
   const [isFocused, setIsFocused] = useState<'RS'|'PERC'|null>(null);
 
   useEffect(() => {
     if (!isFocused) {
       setValRS(formatMoeda(currentRS).replace('R$', '').trim());
-      setValPerc(baseRS > 0 ? ((currentRS / baseRS) * 100).toFixed(1) : '0');
+      setValPerc(refRS > 0 ? ((currentRS / refRS) * 100).toFixed(1) : '0');
     }
-  }, [currentRS, baseRS, isFocused]);
+  }, [currentRS, refRS, isFocused]);
 
   const handleBlurRS = () => {
     setIsFocused(null);
@@ -30,7 +31,7 @@ const DualInput = ({ baseRS, currentRS, onChange, disabled }: any) => {
   const handleBlurPerc = () => {
     setIsFocused(null);
     const perc = parseFloat(valPerc.replace(',', '.')) || 0;
-    const num = (perc / 100) * baseRS;
+    const num = (perc / 100) * refRS;
     onChange(num);
   };
 
@@ -42,6 +43,7 @@ const DualInput = ({ baseRS, currentRS, onChange, disabled }: any) => {
           type="text" value={valPerc} disabled={disabled}
           onFocus={() => setIsFocused('PERC')} onBlur={handleBlurPerc} onChange={e => setValPerc(e.target.value)}
           className={`w-full pl-6 pr-1 py-1.5 rounded-lg text-center text-xs font-black outline-none transition-all ${disabled ? 'bg-transparent text-slate-400 cursor-not-allowed' : 'bg-white text-indigo-700 shadow-sm focus:ring-1 ring-indigo-400'}`}
+          title="% Baseado no Teto da Etapa Superior"
         />
       </div>
       <div className="relative flex-1 flex items-center">
@@ -65,10 +67,13 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   const [isLoading, setIsLoading] = useState(false);
   const [celulasEditadas, setCelulasEditadas] = useState<any>({});
   const [expanded, setExpanded] = useState({});
-  const [lockedNodes, setLockedNodes] = useState<Set<string>>(new Set());
   const [isFechado, setIsFechado] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   
+  // OS DOIS ESTADOS DE TRAVA
+  const [lockedNodes, setLockedNodes] = useState<Set<string>>(new Set());
+  const [lockedTargets, setLockedTargets] = useState<Record<string, Record<string, number>>>({}); // Guarda o Cheque travado
+
   const [opcoesBusca, setOpcoesBusca] = useState<{gerentes: string[], coordenadores: string[], vendedores: string[]}>({gerentes: [], coordenadores: [], vendedores: []});
   const [nomeResponsavel, setNomeResponsavel] = useState('');
 
@@ -93,11 +98,24 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
       const res = await axios.get('/api/v1/consensus/micro', { params: { nome_responsavel: nomeResponsavel }});
       setDadosBrutos(res.data?.dados || []);
       setIsFechado(res.data?.is_fechado || false);
-      setCelulasEditadas({}); setLockedNodes(new Set()); setExpanded({}); setViewMode('carteira');
+      setCelulasEditadas({}); setLockedNodes(new Set()); setLockedTargets({}); setExpanded({}); setViewMode('carteira');
     } catch (e) { console.error(e); } finally { setIsLoading(false); }
   }, [nomeResponsavel, isGerenteOrAdmin]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  // MAPA O(1) para buscar o NÓ PAI rapidamente sem loops pesados
+  const nodeMap = useMemo(() => {
+    const map: any = {};
+    const traverse = (nodes: any[]) => {
+      for (const n of nodes) {
+        map[n.chave_matriz] = n;
+        if (n.subRows) traverse(n.subRows);
+      }
+    };
+    traverse(dadosBrutos);
+    return map;
+  }, [dadosBrutos]);
 
   const getSimulations = useCallback((node: any, mes: string) => {
     if (node.tipo === 'produto' || node.tipo === 'produto_macro') {
@@ -118,14 +136,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     if (isFechado) return;
     setCelulasEditadas((prev: any) => {
       const next = { ...prev };
-      const findNode = (nodes: any[]): any => {
-        for (const n of nodes) {
-          if (n.chave_matriz === chaveNode) return n;
-          if (n.subRows) { const f = findNode(n.subRows); if (f) return f; }
-        }
-        return null;
-      };
-      const target = findNode(dadosBrutos);
+      const target = nodeMap[chaveNode];
       if (!target) return next;
 
       const leaves: any[] = [];
@@ -159,11 +170,24 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     });
   };
 
-  const toggleLock = (chave: string, isValid: boolean) => {
-    if (!isValid) return alert("Erro de Tolerância! Ajuste entre 99% e 101% da meta base antes de travar.");
+  const toggleLock = (row: any, isOk: boolean) => {
+    if (!isOk) return alert("Erro de Tolerância! A soma total da equipe superior não está em 100%. Equilibre os valores antes de travar a etapa.");
+    
     setLockedNodes(prev => {
         const next = new Set(prev);
-        next.has(chave) ? next.delete(chave) : next.add(chave);
+        const chave = row.chave_matriz;
+        
+        if (next.has(chave)) {
+            next.delete(chave);
+        } else {
+            next.add(chave);
+            // Salva o alvo (Cheque) de todos os meses para este Coordenador
+            const targets: any = {};
+            colunasData.forEach((m: any) => {
+                targets[m.mes_banco] = getSimulations(row, m.mes_banco).rs;
+            });
+            setLockedTargets(lt => ({ ...lt, [chave]: targets }));
+        }
         return next;
     });
   };
@@ -221,13 +245,29 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     });
   }, [dadosBrutos, viewMode, colunasData, getSimulations]);
 
+  // BLOQUEIO GLOBAL
+  const isSaveBlocked = useMemo(() => {
+    if (!dadosBrutos || dadosBrutos.length === 0) return false;
+    for (const m of (colunasData || [])) {
+      let rs_total = 0; let base_total = 0;
+      dadosBrutos.forEach(ger => {
+          const sim = getSimulations(ger, m.mes_banco);
+          rs_total += sim.rs; base_total += sim.base_rs;
+      });
+      if (base_total > 0) {
+        const percent = (rs_total / base_total) * 100;
+        if (percent < 99 || percent > 101) return true; 
+      }
+    }
+    return false;
+  }, [dadosBrutos, colunasData, getSimulations]);
+
   const columns = useMemo(() => {
     if (dadosBrutos.length === 0) return [];
     
     const baseCols: any[] = [{
       id: 'nome', 
       header: viewMode === 'carteira' ? 'Árvore Comercial (Cascata)' : 'Mix de Portfólio (Leitura)',
-      // ESTA LINHA FALTAVA: accessorKey ensina o React Table onde ir buscar o valor da coluna 'nome'
       accessorKey: 'nome', 
       cell: (info: any) => {
         const r = info.row; const t = r.original.tipo;
@@ -247,46 +287,86 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
         id: `m_${m.mes_banco}`, header: m.mes_str,
         cell: (info: any) => {
           const row = info.row.original; const mStr = m.mes_banco;
+          
           if (viewMode === 'portfolio') {
               const d = (row.meses || []).find((x:any)=>x.mes_banco===mStr);
               return <div className="text-right"><div className="font-black text-slate-800">{formatVolume(d?.vol_sim)} cx</div><div className="text-[10px] text-slate-400">Meta: {formatVolume(d?.vol_meta)} cx</div></div>;
           }
 
           const { cx, rs, base_rs } = getSimulations(row, mStr);
-          const percent = base_rs > 0 ? (rs / base_rs) * 100 : 100;
-          const isOk = percent >= 99 && percent <= 101;
-          const isLocked = lockedNodes.has(row.chave_matriz);
+          
+          // LÓGICA CORE DA CASCATA: Quem é o Pai? Qual é a Meta dele?
+          let parentRefRS = base_rs; 
+          let isOk = false;
 
+          if (row.tipo === 'gerente') {
+              const p = base_rs > 0 ? (rs / base_rs) * 100 : 100;
+              isOk = p >= 99 && p <= 101;
+          } 
+          else if (row.tipo === 'coordenador') {
+              const parts = row.chave_matriz.split('|');
+              const parentKey = `G|${parts[1]}`;
+              const parentNode = nodeMap[parentKey];
+              if (parentNode) {
+                  const parentSim = getSimulations(parentNode, mStr);
+                  parentRefRS = parentSim.base_rs; // O % inputado é sobre os 20M do Gerente Matheus
+                  const p = parentSim.base_rs > 0 ? (parentSim.rs / parentSim.base_rs) * 100 : 100;
+                  isOk = p >= 99 && p <= 101; // Só fica verde se os 20M baterem
+              }
+          } 
+          else if (row.tipo === 'vendedor') {
+              const parts = row.chave_matriz.split('|');
+              const parentKey = `C|${parts[1]}|${parts[2]}`;
+              const parentNode = nodeMap[parentKey];
+              if (parentNode) {
+                  if (lockedNodes.has(parentKey)) {
+                      const target = lockedTargets[parentKey]?.[mStr] || getSimulations(parentNode, mStr).base_rs;
+                      parentRefRS = target; // O % inputado é sobre a Meta Travada (ex: 12M do João)
+                      const parentSim = getSimulations(parentNode, mStr);
+                      const p = target > 0 ? (parentSim.rs / target) * 100 : 100;
+                      isOk = p >= 99 && p <= 101;
+                  } else {
+                      parentRefRS = getSimulations(parentNode, mStr).base_rs;
+                  }
+              }
+          }
+
+          const isLocked = lockedNodes.has(row.chave_matriz);
           const isEditableType = row.tipo === 'coordenador' || row.tipo === 'vendedor';
+          
+          // TRAVA INTELIGENTE
           let canEdit = false;
           if (!isFechado && isEditableType) {
              if (row.tipo === 'coordenador' && !isLocked) canEdit = true;
              if (row.tipo === 'vendedor') {
-                 const paiChave = row.chave_matriz.split('|').slice(0, 3).join('|'); 
-                 if (lockedNodes.has(paiChave) && !isLocked) canEdit = true;
+                 const parts = row.chave_matriz.split('|');
+                 const parentKey = `C|${parts[1]}|${parts[2]}`;
+                 if (lockedNodes.has(parentKey) && !isLocked) canEdit = true;
              }
           }
 
           return (
             <div className="flex flex-col items-center w-36">
                 <div className="flex w-full justify-between items-center mb-1 px-1">
-                    <span className="text-[9px] text-slate-400 font-bold uppercase tracking-widest">Base: {formatMoeda(base_rs)}</span>
+                    <span className="text-[9px] text-slate-400 font-bold uppercase tracking-widest" title="Histórico Base Real">
+                        Hist: {formatMoeda(base_rs)}
+                    </span>
                     {isEditableType && (
-                        <button onClick={()=>toggleLock(row.chave_matriz, isOk)} className={`p-1 rounded ${isLocked ? 'bg-rose-100 text-rose-600' : isOk ? 'bg-emerald-100 text-emerald-600 hover:bg-emerald-200' : 'bg-slate-100 text-slate-300 cursor-not-allowed'}`}>
+                        <button onClick={()=>toggleLock(row, isOk)} className={`p-1 rounded ${isLocked ? 'bg-rose-100 text-rose-600' : isOk ? 'bg-emerald-100 text-emerald-600 hover:bg-emerald-200 shadow-sm shadow-emerald-400/50' : 'bg-slate-100 text-slate-300 cursor-not-allowed'}`} title={isLocked ? "Desbloquear" : isOk ? "Travar Valor" : "Ajuste o Rateio do nível superior para fechar 100%"}>
                             {isLocked ? <Lock className="w-3 h-3"/> : <LockOpen className="w-3 h-3"/>}
                         </button>
                     )}
                 </div>
                 
                 {isEditableType ? (
-                    <DualInput baseRS={base_rs} currentRS={rs} disabled={!canEdit} onChange={(val: number) => handleEditCascade(row.chave_matriz, mStr, val)} />
+                    <DualInput refRS={parentRefRS} currentRS={rs} disabled={!canEdit} onChange={(val: number) => handleEditCascade(row.chave_matriz, mStr, val)} />
                 ) : (
                     <div className="w-full text-center py-2 bg-slate-50 rounded-xl border font-black text-slate-700 text-sm shadow-inner">{formatMoeda(rs)}</div>
                 )}
                 
                 <div className="mt-1.5 w-full flex flex-col items-center">
                     <span className="text-[10px] font-black text-slate-500">{formatVolume(cx)} CX</span>
-                    <div className={`mt-1 h-1 w-[80%] rounded-full ${isOk ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+                    <div className={`mt-1 h-1 w-[80%] rounded-full transition-colors duration-500 ${isOk ? 'bg-emerald-400' : 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.5)]'}`} />
                 </div>
             </div>
           );
@@ -294,18 +374,19 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
       });
     });
     return baseCols;
-  }, [viewMode, colunasData, getSimulations, lockedNodes, isFechado]);
+  }, [viewMode, colunasData, getSimulations, lockedNodes, isFechado, nodeMap, lockedTargets]);
 
   const table = useReactTable({ data: viewMode === 'carteira' ? dadosBrutos : dadosPortfolio, columns, state: { expanded }, onExpandedChange: setExpanded, getSubRows: r => r.subRows, getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel() });
 
   const handleSalvar = async (finalizar: boolean) => {
+    if (finalizar && isSaveBlocked) return alert("Erro Crítico: Você possui desvios na meta global. Corrija o rateio para o Teto Original antes de publicar para Supply.");
     setIsProcessing(true);
     const leafEdits = Object.entries(celulasEditadas).filter(([chave]) => chave.split('|').length === 6); 
     const ajustes = leafEdits.flatMap(([chave, meses]: any) => Object.entries(meses).map(([m, v]: any) => ({ chave, mes_projetado: m, novo_volume: v.novo_volume })));
     
     try {
       await axios.post(`/api/v1/consensus/micro/salvar`, { origem_ajuste: 'Metas_Equipe', finalizar_etapa: finalizar, ajustes });
-      alert(finalizar ? "✅ Metas publicadas com sucesso!" : "💾 Rascunho gravado.");
+      alert(finalizar ? "✅ Metas publicadas com sucesso! Supply Chain notificado." : "💾 Rascunho gravado e mix de caixas atualizado na Fato.");
       fetchData(); 
     } catch (e: any) { alert("Erro ao salvar."); }
     finally { setIsProcessing(false); }
@@ -338,7 +419,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           <div className="flex items-center gap-3">
              <button onClick={handleExportCSV} className="flex items-center gap-2 text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-5 py-3 rounded-2xl text-xs font-black tracking-widest uppercase transition-all"><Download className="w-4 h-4" /> Exportar CSV</button>
              {!isFechado && <button onClick={() => handleSalvar(false)} disabled={isProcessing} className="flex items-center gap-2 text-slate-600 bg-slate-100 hover:bg-slate-200 px-5 py-3 rounded-2xl text-xs font-black tracking-widest uppercase transition-all"><Save className="w-4 h-4" /> Rascunho</button>}
-             {!isFechado && <button onClick={() => handleSalvar(true)} disabled={isProcessing} className="flex items-center gap-2 text-white bg-slate-900 hover:bg-black px-6 py-3 rounded-2xl text-sm font-black tracking-widest uppercase transition-all shadow-lg">{isProcessing ? <Loader2 className="w-4 h-4 animate-spin"/> : <Check className="w-4 h-4" />} Publicar (Supply)</button>}
+             {!isFechado && <button onClick={() => handleSalvar(true)} disabled={isProcessing || isSaveBlocked} className={`flex items-center gap-2 text-white px-6 py-3 rounded-2xl text-sm font-black tracking-widest uppercase transition-all shadow-lg ${isSaveBlocked ? 'bg-slate-300 cursor-not-allowed' : 'bg-slate-900 hover:bg-black'}`}>{isProcessing ? <Loader2 className="w-4 h-4 animate-spin"/> : <Check className="w-4 h-4" />} Publicar (Supply)</button>}
           </div>
         </div>
 
