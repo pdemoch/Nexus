@@ -1,6 +1,5 @@
 import datetime
 import io
-import csv
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
@@ -14,6 +13,7 @@ from app.core.database import get_db
 from app.models.domain_models import ControleCiclo
 from app.api.routers.router_auth import get_current_user
 
+# ATENÇÃO: Rota mantida em /micro para não quebrar a chamada do Frontend
 router = APIRouter(
     prefix="/api/v1/consensus/micro", 
     tags=["Metas da Equipe (Cascata)"]
@@ -34,15 +34,51 @@ def obter_ciclo_real_fato(engine):
         ciclo = conn.execute(text("SELECT MAX(ciclo_sop) FROM fato_ibp_granular")).scalar()
         return ciclo or "06/2026"
 
+# ==========================================
+# 1. FILTROS (Extração Leve de Pessoas)
+# ==========================================
+@router.get("/filtros")
+async def filtros_micro(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+    try:
+        sql = """
+            SELECT DISTINCT 
+                c.gerente_nome AS gerente,
+                c.supervisor_nome AS coordenador, 
+                f.vendedor_nome AS vendedor
+            FROM fato_ibp_granular f
+            JOIN dim_clientes c ON f.cgc = c.cgc
+            WHERE f.ciclo_sop = (SELECT MAX(ciclo_sop) FROM fato_ibp_granular)
+              AND c.gerente_nome IS NOT NULL AND c.gerente_nome != ''
+        """
+        engine = db.get_bind()
+        df = pd.read_sql(text(sql), engine)
+        
+        return {
+            "gerentes": sorted(df['gerente'].dropna().unique().tolist()),
+            "coordenadores": sorted(df['coordenador'].dropna().unique().tolist()),
+            "vendedores": sorted(df['vendedor'].dropna().unique().tolist())
+        }
+    except Exception as e:
+        return {"gerentes": [], "coordenadores": [], "vendedores": []}
+
+# ==========================================
+# 2. DADOS PRINCIPAIS (A Árvore de Faturamento)
+# ==========================================
 @router.get("")
-def get_dados_metas(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+def get_dados_metas(nome_responsavel: Optional[str] = Query(None), db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
         engine = db.get_bind()
         ciclo_atual = obter_ciclo_real_fato(engine)
 
-        # SQL OTIMIZADO AWS: Traz a Árvore de Pessoas (Gerente > Coord > Vend > RS > SKU)
-        # Lê o vol_bu (herança da fase anterior) para servir de base.
-        sql = """
+        params = {"ciclo_atual": ciclo_atual}
+        filtro_responsavel = ""
+        
+        if nome_responsavel:
+            filtro_responsavel = " AND (c.gerente_nome = :resp OR c.supervisor_nome = :resp OR f.vendedor_nome = :resp) "
+            params["resp"] = nome_responsavel
+
+        # Utilizamos f.vol_bottomup (coluna real) como a herança financeira base
+        sql = f"""
             WITH pmv_historico_4m AS (
                 SELECT cgc, sku, SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv_real_4m
                 FROM fato_vendas
@@ -58,24 +94,30 @@ def get_dados_metas(db: Session = Depends(get_db), usuario: dict = Depends(get_c
                 COALESCE(NULLIF(p.categoria, ''), 'SEM CATEGORIA') AS categoria,
                 COALESCE(NULLIF(p.segmento, ''), 'SEM SEGMENTO') AS segmento,
                 TO_CHAR(f.mes_projetado, 'YYYY-MM') AS mes_banco,
-                COALESCE(f.vol_bu, 0) AS vol_base_herdado,
-                COALESCE(hist.pmv_real_4m, f.pmv_aplicado, 0) AS pmv_aplicado
+                COALESCE(f.vol_bottomup, 0) AS vol_base_herdado,
+                COALESCE(hist.pmv_real_4m, f.pmv_aplicado, 0) AS pmv_aplicado,
+                COALESCE(f.vol_meta, 0) AS vol_meta_salvo
             FROM fato_ibp_granular f
             JOIN dim_clientes c ON f.cgc = c.cgc
             JOIN dim_produtos p ON f.sku = p.sku
             LEFT JOIN pmv_historico_4m hist ON hist.cgc = f.cgc AND hist.sku = f.sku
             WHERE f.ciclo_sop = :ciclo_atual
               AND f.sku IS NOT NULL AND f.sku != ''
+              {filtro_responsavel}
         """
         
-        df = pd.read_sql(text(sql), engine, params={"ciclo_atual": ciclo_atual})
+        df = pd.read_sql(text(sql), engine, params=params)
         if df.empty: return {"dados": [], "is_fechado": False}
 
         df['vol_base_herdado'] = pd.to_numeric(df['vol_base_herdado'], errors='coerce').fillna(0)
+        df['vol_meta_salvo'] = pd.to_numeric(df['vol_meta_salvo'], errors='coerce').fillna(0)
+        
+        # A Receita Base que serve de âncora para a distribuição (%)
         df['receita_base'] = df['vol_base_herdado'] * df['pmv_aplicado']
 
         df_grouped = df.groupby(['gerente', 'coordenador', 'vendedor', 'razao_social', 'categoria', 'segmento', 'sku', 'mes_banco']).agg(
             vol_base_herdado=pd.NamedAgg(column='vol_base_herdado', aggfunc='sum'),
+            vol_meta_salvo=pd.NamedAgg(column='vol_meta_salvo', aggfunc='sum'),
             receita_total=pd.NamedAgg(column='receita_base', aggfunc='sum')
         ).reset_index()
 
@@ -101,13 +143,17 @@ def get_dados_metas(db: Session = Depends(get_db), usuario: dict = Depends(get_c
                             meses_list = []
                             for _, row in df_sku.iterrows():
                                 ano, mes = str(row['mes_banco']).split('-')
+                                
+                                # Se já tem vol_meta salvo, o volume simulado é ele. Se não, começa igual à base herdada.
+                                vol_simulado_inicial = row['vol_meta_salvo'] if row['vol_meta_salvo'] > 0 else row['vol_base_herdado']
+
                                 meses_list.append({
                                     "mes_banco": str(row['mes_banco']), 
                                     "mes_str": f"{meses_nomes.get(mes, mes)}/{ano[2:]}", 
                                     "pmv": float(row['pmv_ponderado']), 
                                     "rec_base": float(row['receita_total']),
                                     "vol_base": float(row['vol_base_herdado']), 
-                                    "vol_meta": float(row['vol_base_herdado']) # Simulado começa igual à base
+                                    "vol_meta": float(vol_simulado_inicial) 
                                 })
                             
                             no_cliente["subRows"].append({
@@ -124,8 +170,13 @@ def get_dados_metas(db: Session = Depends(get_db), usuario: dict = Depends(get_c
         lock_db = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo_atual, ControleCiclo.origem == 'Metas_Equipe', ControleCiclo.status == 'Fechado').first()
         return {"dados": arvore, "is_fechado": True if lock_db else False}
     except Exception as e:
+        import traceback
+        print(f"ERRO API METAS CASCATA: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Erro interno: {e}")
 
+# ==========================================
+# 3. SALVAR (Explosão CNPJ -> Update vol_meta)
+# ==========================================
 @router.post("/salvar")
 async def salvar_metas(payload: PayloadSalvarMetas, db: Session = Depends(get_db)):
     try:
@@ -137,7 +188,6 @@ async def salvar_metas(payload: PayloadSalvarMetas, db: Session = Depends(get_db
             if len(partes) != 6: continue
             razao_social, sku, mes_banco, novo_volume = partes[4], partes[5], ajuste.mes_projetado, int(ajuste.novo_volume)
 
-            # RATEIO EXPLOSÃO CNPJ
             query_cgc = text("""
                 WITH cgc_historico AS (
                     SELECT f.id AS fato_id, f.cgc, COALESCE(SUM(v.qt_pedido), 0) AS peso_historico
@@ -169,7 +219,6 @@ async def salvar_metas(payload: PayloadSalvarMetas, db: Session = Depends(get_db
                 atualizacoes.append({"b_id": fato_id, "b_vol": vol_cnpj})
 
             if atualizacoes:
-                # GRAVAÇÃO OFICIAL NO VOL_META
                 stmt = text("UPDATE fato_ibp_granular SET vol_meta = :b_vol WHERE id = :b_id")
                 with engine.begin() as conn:
                     for upd in atualizacoes: conn.execute(stmt, upd)
@@ -186,7 +235,7 @@ async def salvar_metas(payload: PayloadSalvarMetas, db: Session = Depends(get_db
         raise HTTPException(500, detail="Falha ao gravar metas.")
 
 # ==========================================
-# EXPORTAÇÃO CSV 
+# 4. EXPORTAÇÃO CSV 
 # ==========================================
 @router.get("/exportar")
 def exportar_csv(db: Session = Depends(get_db)):
