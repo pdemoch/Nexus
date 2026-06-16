@@ -8,7 +8,7 @@ from app.api.routers import (
     router_dashboard, 
     router_npd, 
     router_topdown, 
-    router_bottomup, 
+    router_carteira, 
     router_gerenciamento,
     router_soe,
     router_supply,
@@ -60,7 +60,7 @@ app.include_router(router_admin.router)
 app.include_router(router_dashboard.router)
 app.include_router(router_npd.router)
 app.include_router(router_topdown.router)
-app.include_router(router_bottomup.router)
+app.include_router(router_carteira.router)
 app.include_router(router_gerenciamento.router)
 app.include_router(router_supply.router)
 app.include_router(router_soe.router)
