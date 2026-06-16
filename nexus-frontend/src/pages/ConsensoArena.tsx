@@ -168,7 +168,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     });
   };
 
-  // MÁGICA: Reconstrução Dinâmica e Segura da Visão Portfólio (Evita Erro map/find)
   const dadosPortfolio = useMemo(() => {
     if (viewMode !== 'portfolio') return [];
     const folhas: any[] = [];
@@ -197,7 +196,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
         });
     });
 
-    // Agora consolida as sublinhas e cria um array de "meses" seguro para as categorias e segmentos
     return Object.values(mapa).map((cat: any) => {
         const catMesesMapa: any = {};
         cat.subRows = Object.values(cat.subRows).map((seg: any) => {
@@ -225,13 +223,17 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
 
   const columns = useMemo(() => {
     if (dadosBrutos.length === 0) return [];
+    
     const baseCols: any[] = [{
-      id: 'nome', header: viewMode === 'carteira' ? 'Árvore Comercial (Cascata)' : 'Mix de Portfólio (Leitura)',
+      id: 'nome', 
+      header: viewMode === 'carteira' ? 'Árvore Comercial (Cascata)' : 'Mix de Portfólio (Leitura)',
+      // ESTA LINHA FALTAVA: accessorKey ensina o React Table onde ir buscar o valor da coluna 'nome'
+      accessorKey: 'nome', 
       cell: (info: any) => {
         const r = info.row; const t = r.original.tipo;
         const icon = t === 'gerente' ? <Target className="w-5 h-5 text-purple-600"/> : t === 'coordenador' ? <Users className="w-4 h-4 text-indigo-600"/> : t === 'vendedor' ? <Users className="w-4 h-4 text-blue-500"/> : t === 'cliente' ? <Store className="w-4 h-4 text-slate-500"/> : <Package className="w-4 h-4 text-slate-400"/>;
         return (
-          <div style={{ paddingLeft: `${r.depth * 2}rem` }} className="flex items-center gap-3 py-2">
+          <div style={{ paddingLeft: `${r.depth * 2}rem` }} className="flex items-center gap-3 py-2 min-w-[250px]">
             {r.getCanExpand() ? (<button onClick={r.getToggleExpandedHandler()} className="p-1.5 text-slate-400 hover:bg-slate-100 rounded-lg">{r.getIsExpanded() ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}</button>) : <div className="w-7"/>}
             <div className="w-8 h-8 rounded-full bg-slate-50 flex items-center justify-center border shadow-sm shrink-0">{icon}</div>
             <span className={`text-sm ${t==='gerente'?'font-black uppercase': t==='coordenador'?'font-bold':'font-medium text-slate-600'} truncate max-w-[200px]`}>{info.getValue()}</span>
@@ -255,7 +257,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           const isOk = percent >= 99 && percent <= 101;
           const isLocked = lockedNodes.has(row.chave_matriz);
 
-          // PROTEÇÃO RÍGIDA: Apenas Coordenadores e Vendedores ganham Inputs
           const isEditableType = row.tipo === 'coordenador' || row.tipo === 'vendedor';
           let canEdit = false;
           if (!isFechado && isEditableType) {
