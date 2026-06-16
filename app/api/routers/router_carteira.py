@@ -1,6 +1,5 @@
 import datetime
 import io
-import csv
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
@@ -13,7 +12,7 @@ import numpy as np
 from app.core.database import get_db
 from app.models.domain_models import ControleCiclo
 from app.api.routers.router_auth import get_current_user
-from app.api.routers.shared_ibp import get_projection_window  # IMPORTADO PARA FILTRAR M0 e M1
+from app.api.routers.shared_ibp import get_projection_window
 
 router = APIRouter(
     prefix="/api/v1/consensus/micro", 
@@ -27,7 +26,7 @@ class AjusteMeta(BaseModel):
 
 class PayloadSalvarMetas(BaseModel):
     origem_ajuste: str
-    finalizar_etapa: bool
+    finalizar_etapa: bool 
     ajustes: List[AjusteMeta]
 
 def obter_ciclo_real_fato(engine):
@@ -64,8 +63,6 @@ def get_dados_metas(nome_responsavel: Optional[str] = Query(None), db: Session =
     try:
         engine = db.get_bind()
         ciclo_atual = obter_ciclo_real_fato(engine)
-        
-        # Filtra os meses: Remove M0 e M1 (Traz apenas o que importa para a Meta)
         data_ini, data_fim = get_projection_window(db)
 
         params = {"ciclo_atual": ciclo_atual, "data_ini": data_ini, "data_fim": data_fim}
@@ -75,7 +72,7 @@ def get_dados_metas(nome_responsavel: Optional[str] = Query(None), db: Session =
             filtro_responsavel = " AND (c.gerente_nome = :resp OR c.supervisor_nome = :resp OR f.vendedor_nome = :resp) "
             params["resp"] = nome_responsavel
 
-        # O TRIM aqui no SELECT limpa os espaços vazios e mostra os nomes no Frontend (Performance 100% segura)
+        # O SELECT AGORA PUXA A DESCRIÇÃO DO SKU (p.descricao)
         sql = f"""
             WITH pmv_historico_4m AS (
                 SELECT cgc, sku, SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv_real_4m
@@ -89,6 +86,7 @@ def get_dados_metas(nome_responsavel: Optional[str] = Query(None), db: Session =
                 COALESCE(NULLIF(TRIM(f.vendedor_nome), ''), 'SEM VENDEDOR') AS vendedor,
                 COALESCE(NULLIF(TRIM(c.razaosocial), ''), 'SEM RAZAO SOCIAL') AS razao_social,
                 TRIM(f.sku) AS sku,
+                COALESCE(NULLIF(TRIM(p.descricao), ''), 'SEM DESCRICAO') AS descricao_sku,
                 COALESCE(NULLIF(TRIM(p.categoria), ''), 'SEM CATEGORIA') AS categoria,
                 COALESCE(NULLIF(TRIM(p.segmento), ''), 'SEM SEGMENTO') AS segmento,
                 TO_CHAR(f.mes_projetado, 'YYYY-MM') AS mes_banco,
@@ -113,7 +111,8 @@ def get_dados_metas(nome_responsavel: Optional[str] = Query(None), db: Session =
         df['vol_meta_salvo'] = pd.to_numeric(df['vol_meta_salvo'], errors='coerce').fillna(0)
         df['receita_base'] = df['vol_base_herdado'] * df['pmv_aplicado']
 
-        df_grouped = df.groupby(['gerente', 'coordenador', 'vendedor', 'razao_social', 'categoria', 'segmento', 'sku', 'mes_banco']).agg(
+        # A DESCRIÇÃO ENTRA NO GROUPBY PARA VIAJAR ATÉ AO JSON
+        df_grouped = df.groupby(['gerente', 'coordenador', 'vendedor', 'razao_social', 'categoria', 'segmento', 'sku', 'descricao_sku', 'mes_banco']).agg(
             vol_base_herdado=pd.NamedAgg(column='vol_base_herdado', aggfunc='sum'),
             vol_meta_salvo=pd.NamedAgg(column='vol_meta_salvo', aggfunc='sum'),
             receita_total=pd.NamedAgg(column='receita_base', aggfunc='sum')
@@ -154,9 +153,14 @@ def get_dados_metas(nome_responsavel: Optional[str] = Query(None), db: Session =
                             
                             no_cliente["subRows"].append({
                                 "chave_matriz": f"P|{ger_name}|{coord_name}|{vend_name}|{razao_name}|{sku_name}",
-                                "nome": str(sku_name), "produto": str(sku_name), "tipo": "produto",
-                                "categoria": str(df_sku['categoria'].iloc[0]), "segmento": str(df_sku['segmento'].iloc[0]),
-                                "peso_fat": float(df_sku['receita_total'].sum()), "meses": meses_list
+                                "nome": str(sku_name), 
+                                "produto": str(sku_name),
+                                "descricao": str(df_sku['descricao_sku'].iloc[0]), # A DESCRIÇÃO É INSERIDA AQUI
+                                "tipo": "produto",
+                                "categoria": str(df_sku['categoria'].iloc[0]), 
+                                "segmento": str(df_sku['segmento'].iloc[0]),
+                                "peso_fat": float(df_sku['receita_total'].sum()), 
+                                "meses": meses_list
                             })
                         no_vend["subRows"].append(no_cliente)
                     no_coord["subRows"].append(no_vend)

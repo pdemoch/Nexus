@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback, Fragment } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { useReactTable, getCoreRowModel, flexRender, getExpandedRowModel } from '@tanstack/react-table';
 import { 
   Check, TrendingUp, Filter, Loader2, ChevronDown, ChevronRight, Lock, LockOpen, Search, X, Store, Package, Users, Download, Activity, Target, ShieldCheck, PieChart, LayoutList, Save
@@ -8,8 +8,7 @@ import axios from 'axios';
 const formatMoeda = (valor: number | string | undefined | null) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Number(valor) || 0);
 const formatVolume = (val: number | string | undefined | null) => Math.round(Number(val) || 0).toLocaleString('pt-BR');
 
-// COMPONENTE DUAL INPUT (% e R$)
-// Agora ele calcula a % com base na referência do PAI (refRS)
+// COMPONENTE DUAL INPUT LARGURA AMPLIADA
 const DualInput = ({ refRS, currentRS, onChange, disabled }: any) => {
   const [valRS, setValRS] = useState(formatMoeda(currentRS).replace('R$', '').trim());
   const [valPerc, setValPerc] = useState(refRS > 0 ? ((currentRS / refRS) * 100).toFixed(1) : '0');
@@ -36,22 +35,22 @@ const DualInput = ({ refRS, currentRS, onChange, disabled }: any) => {
   };
 
   return (
-    <div className="flex items-center gap-1 w-full bg-slate-50 p-1 rounded-xl border border-slate-200 shadow-inner">
-      <div className="relative flex-1 flex items-center">
-        <span className="absolute left-2 text-[9px] font-black text-slate-400">%</span>
+    <div className="flex items-center gap-1.5 w-full bg-slate-50 p-1.5 rounded-xl border border-slate-200 shadow-inner">
+      <div className="relative flex-[0.8] flex items-center">
+        <span className="absolute left-1.5 text-[9px] font-black text-slate-400">%</span>
         <input 
           type="text" value={valPerc} disabled={disabled}
           onFocus={() => setIsFocused('PERC')} onBlur={handleBlurPerc} onChange={e => setValPerc(e.target.value)}
-          className={`w-full pl-6 pr-1 py-1.5 rounded-lg text-center text-xs font-black outline-none transition-all ${disabled ? 'bg-transparent text-slate-400 cursor-not-allowed' : 'bg-white text-indigo-700 shadow-sm focus:ring-1 ring-indigo-400'}`}
+          className={`w-full pl-5 pr-1 py-1.5 rounded-lg text-center text-sm font-black outline-none transition-all ${disabled ? 'bg-transparent text-slate-400 cursor-not-allowed' : 'bg-white text-indigo-700 shadow-sm focus:ring-1 ring-indigo-400'}`}
           title="% Baseado no Teto da Etapa Superior"
         />
       </div>
-      <div className="relative flex-1 flex items-center">
-        <span className="absolute left-2 text-[9px] font-black text-slate-400">R$</span>
+      <div className="relative flex-[1.2] flex items-center">
+        <span className="absolute left-1.5 text-[9px] font-black text-slate-400">R$</span>
         <input 
           type="text" value={valRS} disabled={disabled}
           onFocus={() => {setIsFocused('RS'); setValRS(valRS.replace(/\./g, ''));}} onBlur={handleBlurRS} onChange={e => setValRS(e.target.value)}
-          className={`w-full pl-6 pr-1 py-1.5 rounded-lg text-center text-xs font-black outline-none transition-all ${disabled ? 'bg-transparent text-slate-400 cursor-not-allowed' : 'bg-white text-emerald-700 shadow-sm focus:ring-1 ring-emerald-400'}`}
+          className={`w-full pl-6 pr-1 py-1.5 rounded-lg text-center text-sm font-black outline-none transition-all ${disabled ? 'bg-transparent text-slate-400 cursor-not-allowed' : 'bg-white text-emerald-700 shadow-sm focus:ring-1 ring-emerald-400'}`}
         />
       </div>
     </div>
@@ -65,14 +64,15 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   const [viewMode, setViewMode] = useState<'carteira' | 'portfolio'>('carteira');
   const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isInitializing, setIsInitializing] = useState(true); 
+  
   const [celulasEditadas, setCelulasEditadas] = useState<any>({});
   const [expanded, setExpanded] = useState({});
   const [isFechado, setIsFechado] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   
-  // OS DOIS ESTADOS DE TRAVA
   const [lockedNodes, setLockedNodes] = useState<Set<string>>(new Set());
-  const [lockedTargets, setLockedTargets] = useState<Record<string, Record<string, number>>>({}); // Guarda o Cheque travado
+  const [lockedTargets, setLockedTargets] = useState<Record<string, Record<string, number>>>({}); 
 
   const [opcoesBusca, setOpcoesBusca] = useState<{gerentes: string[], coordenadores: string[], vendedores: string[]}>({gerentes: [], coordenadores: [], vendedores: []});
   const [nomeResponsavel, setNomeResponsavel] = useState('');
@@ -88,7 +88,8 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
         } else if (!isGerenteOrAdmin && opcoes.coordenadores?.length > 0) {
             setNomeResponsavel(opcoes.coordenadores[0]);
         }
-    }).catch(console.error);
+    }).catch(console.error)
+    .finally(() => setIsInitializing(false));
   }, [isGerenteOrAdmin]);
 
   const fetchData = useCallback(async () => {
@@ -104,7 +105,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // MAPA O(1) para buscar o NÓ PAI rapidamente sem loops pesados
   const nodeMap = useMemo(() => {
     const map: any = {};
     const traverse = (nodes: any[]) => {
@@ -181,7 +181,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
             next.delete(chave);
         } else {
             next.add(chave);
-            // Salva o alvo (Cheque) de todos os meses para este Coordenador
             const targets: any = {};
             colunasData.forEach((m: any) => {
                 targets[m.mes_banco] = getSimulations(row, m.mes_banco).rs;
@@ -192,6 +191,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     });
   };
 
+  // Visão Macro (Atualizada para guardar a descrição do SKU)
   const dadosPortfolio = useMemo(() => {
     if (viewMode !== 'portfolio') return [];
     const folhas: any[] = [];
@@ -207,7 +207,8 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
 
         let skuNode = mapa[cat].subRows[seg].subRows[f.produto];
         if (!skuNode) {
-            skuNode = { tipo: 'produto_macro', nome: f.nome, produto: f.produto, chave_matriz: `MACRO|${f.produto}`, meses: colunasData.map((m:any) => ({ mes_banco: m.mes_banco, mes_str: m.mes_str, vol_meta: 0, vol_sim: 0 })) };
+            // Repassamos a propriedade descricao
+            skuNode = { tipo: 'produto_macro', nome: f.nome, produto: f.produto, descricao: f.descricao, chave_matriz: `MACRO|${f.produto}`, meses: colunasData.map((m:any) => ({ mes_banco: m.mes_banco, mes_str: m.mes_str, vol_meta: 0, vol_sim: 0 })) };
             mapa[cat].subRows[seg].subRows[f.produto] = skuNode;
         }
         colunasData.forEach((m:any) => {
@@ -245,7 +246,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     });
   }, [dadosBrutos, viewMode, colunasData, getSimulations]);
 
-  // BLOQUEIO GLOBAL
   const isSaveBlocked = useMemo(() => {
     if (!dadosBrutos || dadosBrutos.length === 0) return false;
     for (const m of (colunasData || [])) {
@@ -273,10 +273,22 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
         const r = info.row; const t = r.original.tipo;
         const icon = t === 'gerente' ? <Target className="w-5 h-5 text-purple-600"/> : t === 'coordenador' ? <Users className="w-4 h-4 text-indigo-600"/> : t === 'vendedor' ? <Users className="w-4 h-4 text-blue-500"/> : t === 'cliente' ? <Store className="w-4 h-4 text-slate-500"/> : <Package className="w-4 h-4 text-slate-400"/>;
         return (
-          <div style={{ paddingLeft: `${r.depth * 2}rem` }} className="flex items-center gap-3 py-2 min-w-[250px]">
-            {r.getCanExpand() ? (<button onClick={r.getToggleExpandedHandler()} className="p-1.5 text-slate-400 hover:bg-slate-100 rounded-lg">{r.getIsExpanded() ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}</button>) : <div className="w-7"/>}
-            <div className="w-8 h-8 rounded-full bg-slate-50 flex items-center justify-center border shadow-sm shrink-0">{icon}</div>
-            <span className={`text-sm ${t==='gerente'?'font-black uppercase': t==='coordenador'?'font-bold':'font-medium text-slate-600'} truncate max-w-[200px]`}>{info.getValue()}</span>
+          // Largura da primeira coluna expandida para acomodar as descrições (min-w-[350px])
+          <div style={{ paddingLeft: `${r.depth * 2}rem` }} className="flex items-start gap-3 py-2 min-w-[350px]">
+            {r.getCanExpand() ? (<button onClick={r.getToggleExpandedHandler()} className="mt-0.5 p-1.5 text-slate-400 hover:bg-slate-100 rounded-lg">{r.getIsExpanded() ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}</button>) : <div className="w-7"/>}
+            <div className="w-8 h-8 rounded-full bg-slate-50 flex items-center justify-center border shadow-sm shrink-0 mt-0.5">{icon}</div>
+            
+            {/* Lógica condicional: Se for SKU (produto), mostra o código e a descrição por baixo */}
+            <div className="flex flex-col">
+              {t === 'produto' || t === 'produto_macro' ? (
+                 <>
+                   <span className="text-sm font-black text-slate-700">{r.original.produto}</span>
+                   <span className="text-[10px] font-bold text-slate-400 mt-0.5 whitespace-normal leading-tight max-w-[280px]">{r.original.descricao}</span>
+                 </>
+              ) : (
+                 <span className={`text-sm ${t==='gerente'?'font-black uppercase': t==='coordenador'?'font-bold':'font-medium text-slate-600'} truncate max-w-[280px]`}>{info.getValue()}</span>
+              )}
+            </div>
           </div>
         );
       }
@@ -290,12 +302,10 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           
           if (viewMode === 'portfolio') {
               const d = (row.meses || []).find((x:any)=>x.mes_banco===mStr);
-              return <div className="text-right"><div className="font-black text-slate-800">{formatVolume(d?.vol_sim)} cx</div><div className="text-[10px] text-slate-400">Meta: {formatVolume(d?.vol_meta)} cx</div></div>;
+              return <div className="text-right w-44"><div className="font-black text-slate-800">{formatVolume(d?.vol_sim)} cx</div><div className="text-[10px] text-slate-400">Meta: {formatVolume(d?.vol_meta)} cx</div></div>;
           }
 
           const { cx, rs, base_rs } = getSimulations(row, mStr);
-          
-          // LÓGICA CORE DA CASCATA: Quem é o Pai? Qual é a Meta dele?
           let parentRefRS = base_rs; 
           let isOk = false;
 
@@ -309,9 +319,9 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
               const parentNode = nodeMap[parentKey];
               if (parentNode) {
                   const parentSim = getSimulations(parentNode, mStr);
-                  parentRefRS = parentSim.base_rs; // O % inputado é sobre os 20M do Gerente Matheus
+                  parentRefRS = parentSim.base_rs; 
                   const p = parentSim.base_rs > 0 ? (parentSim.rs / parentSim.base_rs) * 100 : 100;
-                  isOk = p >= 99 && p <= 101; // Só fica verde se os 20M baterem
+                  isOk = p >= 99 && p <= 101; 
               }
           } 
           else if (row.tipo === 'vendedor') {
@@ -321,7 +331,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
               if (parentNode) {
                   if (lockedNodes.has(parentKey)) {
                       const target = lockedTargets[parentKey]?.[mStr] || getSimulations(parentNode, mStr).base_rs;
-                      parentRefRS = target; // O % inputado é sobre a Meta Travada (ex: 12M do João)
+                      parentRefRS = target; 
                       const parentSim = getSimulations(parentNode, mStr);
                       const p = target > 0 ? (parentSim.rs / target) * 100 : 100;
                       isOk = p >= 99 && p <= 101;
@@ -334,7 +344,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           const isLocked = lockedNodes.has(row.chave_matriz);
           const isEditableType = row.tipo === 'coordenador' || row.tipo === 'vendedor';
           
-          // TRAVA INTELIGENTE
           let canEdit = false;
           if (!isFechado && isEditableType) {
              if (row.tipo === 'coordenador' && !isLocked) canEdit = true;
@@ -346,7 +355,8 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           }
 
           return (
-            <div className="flex flex-col items-center w-36">
+            // A largura das colunas mensais saltou de w-36 para w-52
+            <div className="flex flex-col items-center w-52">
                 <div className="flex w-full justify-between items-center mb-1 px-1">
                     <span className="text-[9px] text-slate-400 font-bold uppercase tracking-widest" title="Histórico Base Real">
                         Hist: {formatMoeda(base_rs)}
@@ -393,6 +403,15 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
   };
 
   const handleExportCSV = () => window.open('/api/v1/consensus/micro/exportar', '_blank');
+
+  if (isInitializing || (isGerenteOrAdmin && !nomeResponsavel && opcoesBusca.gerentes.length > 0)) {
+      return (
+          <div className="h-screen w-full flex flex-col justify-center items-center bg-[#f8fafc]">
+              <Loader2 className="w-12 h-12 text-purple-600 animate-spin mb-4" />
+              <h2 className="text-sm font-black text-slate-400 uppercase tracking-widest">Sincronizando com a Fonte da Verdade...</h2>
+          </div>
+      );
+  }
 
   if (dadosBrutos.length === 0 && !isLoading) {
       return (
