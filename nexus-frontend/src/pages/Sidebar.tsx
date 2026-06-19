@@ -1,8 +1,7 @@
-import { BarChart3, Users, LayoutDashboard, Settings, Rocket, LogOut, UserCircle, ShieldAlert, Factory, Activity, Crosshair } from 'lucide-react';
+import { BarChart3, Users, LayoutDashboard, Settings, Rocket, LogOut, UserCircle, ShieldAlert, Factory, Activity, Crosshair, Database } from 'lucide-react'; // <-- Database adicionado
 
 export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout }: any) {
   
-  // Definição das permissões de cada ecrã (Ordem Lógica do S&OP)
   const allNavItems = [
     { id: 'dashboard', label: 'Plano de Demanda', icon: LayoutDashboard, roles: ['Administrador', 'Gerente', 'Supply Chain', 'Marketing', 'C-Level'] },
     { id: 'soe-radar', label: 'S&OE', icon: Activity, roles: ['Administrador'] },
@@ -12,7 +11,8 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
     { id: 'npd', label: 'Inovações', icon: Rocket, roles: ['Administrador', 'Marketing'] },
     { id: 'supply', label: 'Supply Review', icon: Factory, roles: ['Administrador', 'Supply Chain'] },
     { id: 'consenso', label: 'Metas da Equipe', icon: Users, roles: ['Administrador', 'Gerente'] },
-    { id: 'gerenciamento', label: 'Gestão de Carteiras', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },    
+    { id: 'gerenciamento', label: 'Gestão de Carteiras', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },
+    { id: 'datalake', label: 'Data Lake AWS', icon: Database, roles: ['Administrador'] }, 
     { id: 'admin', label: 'Painel de Controle', icon: Settings, roles: ['Administrador'] },
   ];
 

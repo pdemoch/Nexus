@@ -3,7 +3,11 @@ import aiohttp
 import polars as pl
 import os
 import glob
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
+import calendar
+from dateutil.relativedelta import relativedelta
+import boto3
+from botocore.exceptions import ClientError
 from pathlib import Path
 from typing import Optional, Any
 from app.core.config import settings 
@@ -134,7 +138,6 @@ class GobiExtractor:
             caminho = Path(caminho_arquivo)
             if caminho.exists():
                 import pandas as pd
-                # Blindagem: Lê a coluna Produto estritamente como String (Texto)
                 df_pd = pd.read_excel(caminho_arquivo, dtype={"Produto": str})
                 df = pl.from_pandas(df_pd)
                 return df
@@ -153,3 +156,125 @@ class GobiExtractor:
         
         lf_150, lf_188 = await asyncio.gather(tarefa_150, tarefa_188)
         return lf_150, lf_188, df_seg, df_orc
+
+
+class MtrixExtractor:
+    def __init__(self, bucket_name: str = "nexus-datalake-linea-prd", data_dir: str = "data/mtrix"):
+        self.base_url = "http://172.20.2.172:8008"
+        self.username = "Phillipe"
+        self.password = "Phillipe123@"
+        self.bucket_name = bucket_name
+        self.s3_prefix = "mtrix/"
+        
+        # Boto3 captura as credenciais de forma nativa e invisível através da IAM Role do seu EC2
+        self.s3_client = boto3.client('s3') 
+        
+        self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.tabelas_data = ["sellout", "forca_vendas", "estoque"]
+        self.tabelas_estaticas = ["produtos", "distribuidores", "clientes"]
+        self.timeout = aiohttp.ClientTimeout(total=60)
+
+    def _verificar_primeira_carga(self) -> bool:
+        """Checa se o arquivo colunar principal já existe na AWS."""
+        try:
+            self.s3_client.head_object(Bucket=self.bucket_name, Key=f"{self.s3_prefix}sellout_sellout.parquet")
+            return False 
+        except ClientError:
+            return True 
+
+    def _calcular_janela_temporal(self, primeira_carga: bool):
+        """Aplica a Regra de Negócio do M-2 (Exclui M-1)."""
+        hoje = datetime.now()
+        mes_alvo = hoje - relativedelta(months=2) 
+        ultimo_dia = calendar.monthrange(mes_alvo.year, mes_alvo.month)[1]
+        
+        data_fim = datetime(mes_alvo.year, mes_alvo.month, ultimo_dia)
+        
+        if primeira_carga:
+            data_inicio = mes_alvo - relativedelta(years=3)
+            data_inicio = data_inicio.replace(day=1)
+            modo = "HISTÓRICA (3 Anos)"
+        else:
+            data_inicio = mes_alvo - relativedelta(months=3)
+            data_inicio = data_inicio.replace(day=1)
+            modo = "ROTINA (3 Meses)"
+            
+        return data_inicio.strftime("%Y-%m-%d"), data_fim.strftime("%Y-%m-%d"), modo
+
+    async def _autenticar(self, session: aiohttp.ClientSession):
+        url = f"{self.base_url}/auth/login"
+        payload = {"username": self.username, "password": self.password}
+        async with session.post(url, json=payload, timeout=self.timeout) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+            return data.get("access_token")
+
+    async def _extrair_tabela(self, session: aiohttp.ClientSession, token: str, tabela: str, data_inicio: str, data_fim: str, log_callback):
+        url = f"{self.base_url}/data/tabelas/{tabela}"
+        headers = {"Authorization": f"Bearer {token}"}
+        params = {"limit": 500, "page": 1}
+        
+        if tabela in self.tabelas_data:
+            params["start_date"] = data_inicio
+            params["end_date"] = data_fim
+
+        async with session.get(url, headers=headers, params=params, timeout=self.timeout) as resp:
+            if resp.status != 200: return None
+            data = await resp.json()
+            
+        registros = data.get("dados", [])
+        total_paginas = data.get("pagination", {}).get("total_pages", 1)
+
+        if total_paginas > 1:
+            async def fetch_page(page_num):
+                p = params.copy()
+                p["page"] = page_num
+                for _ in range(3): 
+                    try:
+                        async with session.get(url, headers=headers, params=p, timeout=self.timeout) as r:
+                            if r.status == 200: return (await r.json()).get("dados", [])
+                    except Exception:
+                        await asyncio.sleep(2)
+                return []
+
+            tasks = [fetch_page(pag) for pag in range(2, total_paginas + 1)]
+            resultados = await asyncio.gather(*tasks)
+            for res in resultados: registros.extend(res)
+
+        if not registros: return None
+
+        # Estrutura com Polars (Força cast textual para evitar quebras por tipos ambíguos)
+        df = pl.DataFrame(registros).cast(pl.Utf8) 
+        nome_arquivo = f"sellout_{tabela}.parquet"
+        caminho_local = str(self.data_dir / nome_arquivo)
+        
+        df.write_parquet(caminho_local, compression="snappy")
+        
+        # Despacha o dump compactado direto para o S3 da AWS
+        await asyncio.to_thread(self.s3_client.upload_file, caminho_local, self.bucket_name, f"{self.s3_prefix}{nome_arquivo}")
+        
+        log_callback(f"   ✅ [S3] MTRIX: Tabela '{tabela}' extraída e sincronizada na AWS ({len(registros)} linhas).")
+        return caminho_local
+
+    async def executar_extracao(self, log_callback):
+        log_callback("🔎 [MTRIX] Verificando infraestrutura S3 para decidir estratégia de carga...")
+        
+        primeira_carga = await asyncio.to_thread(self._verificar_primeira_carga)
+        data_inicio, data_fim, modo = self._calcular_janela_temporal(primeira_carga)
+        
+        log_callback(f"🚀 [MTRIX] Ingestão Ativada: Modo {modo} ({data_inicio} até {data_fim})")
+        
+        # Carga inteligente: se já existir o histórico, poupa a API puxando apenas tabelas com data
+        tabelas_alvo = self.tabelas_data
+        if primeira_carga:
+            tabelas_alvo = self.tabelas_data + self.tabelas_estaticas
+
+        async with aiohttp.ClientSession() as session:
+            try:
+                token = await self._autenticar(session)
+                for tabela in tabelas_alvo:
+                    await self._extrair_tabela(session, token, tabela, data_inicio, data_fim, log_callback)
+            except Exception as e:
+                log_callback(f"❌ [MTRIX] Erro crítico no pipeline de ingestão MTRIX: {e}")

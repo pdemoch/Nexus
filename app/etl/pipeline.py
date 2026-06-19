@@ -9,7 +9,7 @@ from sqlalchemy import func
 from app.core.state import AppState
 from app.core.database import SessionLocal
 from app.models.domain_models import FatoVendas, FatoIbpGranular
-from app.etl.extractor import GobiExtractor
+from app.etl.extractor import GobiExtractor, MtrixExtractor
 from app.etl.transformer import NexusTransformer
 from app.etl.loader import NexusLoader
 from app.ml.forecaster import NexusForecaster
@@ -30,6 +30,16 @@ async def executar_pipeline_nexus():
         
         log("🚀 [SYSTEM] Iniciando Nexus Engine 4.0 (Arquitetura Delta/Upsert com Orçamento Base)...")
 
+        # =========================================================================
+        # 1. FASE DE INGESTÃO DO DATA LAKE (MTRIX -> AWS S3)
+        # =========================================================================
+        log("📥 [EXTRACT] Iniciando Ingestão de Dados de Distribuidores (MTRIX)...")
+        mtrix = MtrixExtractor(bucket_name="nexus-datalake-linea-prd")
+        await mtrix.executar_extracao(log_callback=log)
+
+        # =========================================================================
+        # 2. FASE DE EXTRAÇÃO DO ERP INTERNO (GOBI ERP)
+        # =========================================================================
         extractor = GobiExtractor()
         data_inicio = date(2026, 4, 1)
 
@@ -41,8 +51,10 @@ async def executar_pipeline_nexus():
             AppState.pipeline_rodando = False
             return
 
+        # =========================================================================
+        # 3. FASE DE TRANSFORMAÇÃO (POLARS SILVER LAYER)
+        # =========================================================================
         transformer = NexusTransformer()
-        
         lf_silver, lf_clientes, df_orc_final = transformer.processar_camada_silver(lf_150, lf_188, df_seg, df_orc)
 
         if lf_silver is None or lf_clientes is None:
@@ -50,6 +62,9 @@ async def executar_pipeline_nexus():
             AppState.pipeline_rodando = False
             return
 
+        # =========================================================================
+        # 4. FASE DE INJEÇÃO (POSTGRESQL RELACIONAL)
+        # =========================================================================
         loader = NexusLoader()
         
         log("   -> Executando processamento em memória (Polars)...")
@@ -60,13 +75,14 @@ async def executar_pipeline_nexus():
         await asyncio.to_thread(loader.executar_carga_silver, df_silver_coletado, log_callback=log)
         await asyncio.to_thread(loader.atualizar_hierarquia_historica, lf_clientes, log_callback=log)
 
-        # INJEÇÃO DO ORÇAMENTO NO BANCO
+        # Ingestão de Orçamento Financeiro
         if df_orc_final is not None and not df_orc_final.is_empty():
             df_orc_coletado = await asyncio.to_thread(df_orc_final.collect) if isinstance(df_orc_final, pl.LazyFrame) else df_orc_final
             await asyncio.to_thread(loader.executar_carga_orcamento, df_orc_coletado, log_callback=log)
 
-        hoje = date.today()
-        ciclo_atual = hoje.strftime("%m/%Y")
+        # Verificação de Bloqueio do Ciclo S&OP
+        hoje_dt = date.today()
+        ciclo_atual = hoje_dt.strftime("%m/%Y")
         ciclo_existe = False
         with SessionLocal() as db:
             trava = db.query(func.count(FatoIbpGranular.id)).filter(FatoIbpGranular.ciclo_sop == ciclo_atual).scalar()
@@ -74,6 +90,9 @@ async def executar_pipeline_nexus():
         
         log(f"   ⏳ Tempo Total FASE 1 (ETL): {time.time() - tempo_inicio_total:.2f}s.")
 
+        # =========================================================================
+        # 5. FASE PREDITIVA (ML MACHINE LEARNING ARENA & RATEIO)
+        # =========================================================================
         if ciclo_existe:
             log(f"⏸️ [S&OP] O ciclo {ciclo_atual} já existe no banco de dados.")
             log("   -> A IA e o Rateio foram ignorados para manter ESTÁTICOS os ajustes do Top-Down e Bottom-Up.")
@@ -87,7 +106,6 @@ async def executar_pipeline_nexus():
 
             t0 = time.time()
             log("⏳ [LOAD] Rateando e injetando as metas S&OP no Banco...")
-            
             await asyncio.to_thread(loader.executar_carga_forecast, df_forecast, ciclo_atual, log_callback=log) 
             log(f"✅ [LOAD] Metas atomizadas com sucesso em {time.time() - t0:.2f}s.")
 

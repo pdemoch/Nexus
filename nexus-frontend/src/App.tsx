@@ -14,6 +14,7 @@ import GerenciamentoArena from './pages/GerenciamentoArena';
 import SoeDashboard from './pages/SoeDashboard';
 import InboundArena from './pages/InboundArena';
 import AuditoriaArena from './pages/AuditoriaArena';
+import DataLakeArena from './pages/DataLakeArena'; // <-- NOVA IMPORTAÇÃO AQUI
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
@@ -53,18 +54,17 @@ export default function App() {
     if (token && savedUser) {
       const parsedUser = JSON.parse(savedUser);
       setUser(parsedUser);
-      // REGRAS DE ROTA INICIAL POR CARGO (ATUALIZADO PARA COORDENADOR)
+      // REGRAS DE ROTA INICIAL POR CARGO
       if (parsedUser.funcao === 'Coordenador') setCurrentRoute('consenso');
-      else setCurrentRoute('dashboard'); // Administrador, Gerente, Supply, Marketing e C-Level caem aqui!
+      else setCurrentRoute('dashboard'); 
     }
   }, []);
 
   const handleLoginSuccess = (userData: any) => {
     setUser(userData);
     localStorage.setItem('nexus_user', JSON.stringify(userData)); 
-    // REGRAS DE ROTA INICIAL POR CARGO (ATUALIZADO PARA COORDENADOR)
     if (userData.funcao === 'Coordenador') setCurrentRoute('consenso');
-    else setCurrentRoute('dashboard'); // Todos os outros caem no dashboard
+    else setCurrentRoute('dashboard'); 
   };
 
   const handleLogout = () => {
@@ -85,9 +85,10 @@ export default function App() {
       case 'gerenciamento': return <GerenciamentoArena usuarioSessao={user} />;
       case 'admin': return <AdminPanel />;
       
-      // ROTAS DO NOVO MÓDULO S&OE
+      // ROTAS DO NOVO MÓDULO S&OE E DATA LAKE
       case 'soe-radar': return <SoeDashboard />;
       case 'inbound': return <InboundArena />;
+      case 'datalake': return <DataLakeArena />; // <-- NOVA ROTA INJETADA AQUI
 
       // ROTA DO NOSSO NOVO MÓDULO DE AUDITORIA DE IA
       case 'auditoria': return <AuditoriaArena />;
