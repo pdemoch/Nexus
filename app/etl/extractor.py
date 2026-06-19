@@ -3,6 +3,7 @@ import aiohttp
 import polars as pl
 import os
 import glob
+import traceback
 from datetime import date, timedelta, datetime
 import calendar
 from dateutil.relativedelta import relativedelta
@@ -166,26 +167,25 @@ class MtrixExtractor:
         self.bucket_name = bucket_name
         self.s3_prefix = "mtrix/"
         
-        # Boto3 captura as credenciais de forma nativa e invisível através da IAM Role do seu EC2
         self.s3_client = boto3.client('s3') 
-        
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         
         self.tabelas_data = ["sellout", "forca_vendas", "estoque"]
         self.tabelas_estaticas = ["produtos", "distribuidores", "clientes"]
-        self.timeout = aiohttp.ClientTimeout(total=60)
+        
+        # Aumentamos o timeout global e a tolerância de conexão
+        self.timeout = aiohttp.ClientTimeout(total=600, connect=60)
 
     def _verificar_primeira_carga(self) -> bool:
-        """Checa se o arquivo colunar principal já existe na AWS."""
+        """Verifica se há QUALQUER arquivo de sellout no bucket para definir a estratégia."""
         try:
-            self.s3_client.head_object(Bucket=self.bucket_name, Key=f"{self.s3_prefix}sellout_sellout.parquet")
-            return False 
-        except ClientError:
+            response = self.s3_client.list_objects_v2(Bucket=self.bucket_name, Prefix=f"{self.s3_prefix}sellout_sellout_")
+            return 'Contents' not in response or len(response['Contents']) == 0
+        except Exception:
             return True 
 
     def _calcular_janela_temporal(self, primeira_carga: bool):
-        """Aplica a Regra de Negócio do M-2 (Exclui M-1)."""
         hoje = datetime.now()
         mes_alvo = hoje - relativedelta(months=2) 
         ultimo_dia = calendar.monthrange(mes_alvo.year, mes_alvo.month)[1]
@@ -195,13 +195,32 @@ class MtrixExtractor:
         if primeira_carga:
             data_inicio = mes_alvo - relativedelta(years=3)
             data_inicio = data_inicio.replace(day=1)
-            modo = "HISTÓRICA (3 Anos)"
+            modo = "HISTÓRICA (3 Anos Particionados)"
         else:
             data_inicio = mes_alvo - relativedelta(months=3)
             data_inicio = data_inicio.replace(day=1)
-            modo = "ROTINA (3 Meses)"
+            modo = "ROTINA (Últimos 3 Meses)"
             
         return data_inicio.strftime("%Y-%m-%d"), data_fim.strftime("%Y-%m-%d"), modo
+
+    def _gerar_meses(self, start_date: str, end_date: str):
+        """Quebra o período de extração em janelas estritas de 1 mês."""
+        start = datetime.strptime(start_date, "%Y-%m-%d")
+        end = datetime.strptime(end_date, "%Y-%m-%d")
+        meses = []
+        current = start.replace(day=1)
+        
+        while current <= end:
+            next_month = current + relativedelta(months=1)
+            last_day = next_month - timedelta(days=1)
+            if last_day > end:
+                last_day = end
+            
+            # Retorna: Data Início, Data Fim, e o Sufixo para o arquivo (ex: 2024_05)
+            meses.append((current.strftime("%Y-%m-%d"), last_day.strftime("%Y-%m-%d"), current.strftime("%Y_%m")))
+            current = next_month
+            
+        return meses
 
     async def _autenticar(self, session: aiohttp.ClientSession):
         url = f"{self.base_url}/auth/login"
@@ -211,12 +230,12 @@ class MtrixExtractor:
             data = await resp.json()
             return data.get("access_token")
 
-    async def _extrair_tabela(self, session: aiohttp.ClientSession, token: str, tabela: str, data_inicio: str, data_fim: str, log_callback):
+    async def _extrair_tabela(self, session: aiohttp.ClientSession, token: str, tabela: str, data_inicio: str, data_fim: str, log_callback, sufixo_nome: str = ""):
         url = f"{self.base_url}/data/tabelas/{tabela}"
         headers = {"Authorization": f"Bearer {token}"}
         params = {"limit": 500, "page": 1}
         
-        if tabela in self.tabelas_data:
+        if data_inicio and data_fim:
             params["start_date"] = data_inicio
             params["end_date"] = data_fim
 
@@ -243,19 +262,18 @@ class MtrixExtractor:
             resultados = await asyncio.gather(*tasks)
             for res in resultados: registros.extend(res)
 
-        if not registros: return None
+        if not registros: 
+            return None
 
-        # Estrutura com Polars (Força cast textual para evitar quebras por tipos ambíguos)
         df = pl.DataFrame(registros).cast(pl.Utf8) 
-        nome_arquivo = f"sellout_{tabela}.parquet"
+        
+        # Constrói o nome do arquivo dinâmico (ex: sellout_sellout_2024_05.parquet ou sellout_produtos.parquet)
+        nome_arquivo = f"sellout_{tabela}{sufixo_nome}.parquet"
         caminho_local = str(self.data_dir / nome_arquivo)
         
         df.write_parquet(caminho_local, compression="snappy")
         
-        # Despacha o dump compactado direto para o S3 da AWS
         await asyncio.to_thread(self.s3_client.upload_file, caminho_local, self.bucket_name, f"{self.s3_prefix}{nome_arquivo}")
-        
-        log_callback(f"   ✅ [S3] MTRIX: Tabela '{tabela}' extraída e sincronizada na AWS ({len(registros)} linhas).")
         return caminho_local
 
     async def executar_extracao(self, log_callback):
@@ -266,15 +284,30 @@ class MtrixExtractor:
         
         log_callback(f"🚀 [MTRIX] Ingestão Ativada: Modo {modo} ({data_inicio} até {data_fim})")
         
-        # Carga inteligente: se já existir o histórico, poupa a API puxando apenas tabelas com data
-        tabelas_alvo = self.tabelas_data
-        if primeira_carga:
-            tabelas_alvo = self.tabelas_data + self.tabelas_estaticas
-
-        async with aiohttp.ClientSession() as session:
+        meses_para_extrair = self._gerar_meses(data_inicio, data_fim)
+        
+        connector = aiohttp.TCPConnector(limit=10, keepalive_timeout=60)
+        async with aiohttp.ClientSession(connector=connector) as session:
             try:
                 token = await self._autenticar(session)
-                for tabela in tabelas_alvo:
-                    await self._extrair_tabela(session, token, tabela, data_inicio, data_fim, log_callback)
+                
+                # 1. Extração das Tabelas Dinâmicas (MÊS A MÊS)
+                for tabela in self.tabelas_data:
+                    for dt_ini, dt_fim, mes_str in meses_para_extrair:
+                        log_callback(f"   -> [MTRIX] Extraindo '{tabela}' (Competência: {mes_str})...")
+                        resultado = await self._extrair_tabela(session, token, tabela, dt_ini, dt_fim, log_callback, sufixo_nome=f"_{mes_str}")
+                        if not resultado:
+                            log_callback(f"      ⚠️ Sem dados de '{tabela}' para o mês {mes_str}.")
+                
+                # 2. Extração das Tabelas Estáticas (Sem particionamento por mês)
+                if primeira_carga:
+                    for tabela in self.tabelas_estaticas:
+                        log_callback(f"   -> [MTRIX] Extraindo cadastro estático: '{tabela}'...")
+                        await self._extrair_tabela(session, token, tabela, None, None, log_callback)
+
+                log_callback(f"✅ [S3] Upload de Data Lake finalizado com sucesso!")
+                        
             except Exception as e:
-                log_callback(f"❌ [MTRIX] Erro crítico no pipeline de ingestão MTRIX: {e}")
+                erro_detalhado = traceback.format_exc()
+                log_callback(f"❌ [MTRIX] Erro crítico no pipeline de ingestão: {str(e)}")
+                print(f"Detalhes do erro MTRIX: \n{erro_detalhado}")
