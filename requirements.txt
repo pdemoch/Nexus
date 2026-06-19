@@ -28,3 +28,5 @@ neuralforecast==1.7.0
 langchain==0.1.16
 langchain-google-genai==1.0.3
 langchain-community==0.0.34
+boto3
+pyarrow
