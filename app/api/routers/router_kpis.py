@@ -79,8 +79,7 @@ async def carregar_auditoria_cpfr(
                     FROM dim_produtos p
                     LEFT JOIN Vendas v ON p.sku = v.sku
                     LEFT JOIN Planejamento i ON p.sku = i.sku
-                    WHERE 1=1 {clausula_filtro}
-                      AND (COALESCE(v.vol_real, 0) > 0 OR COALESCE(i.vol_ia_congelado, 0) > 0 OR COALESCE(i.vol_comercial_congelado, 0) > 0)
+                    WHERE (v.vol_real > 0 OR i.vol_ia_congelado > 0 OR i.vol_comercial_congelado > 0)
                 """)
             else:
                 # BLINDAGEM DE VOLUMES MTRIX (Sem espaços nos nomes!)
