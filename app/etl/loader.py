@@ -363,11 +363,11 @@ class NexusLoader:
             # =================================================================
             log_callback("      • Cruzando matrizes de Distribuição com ERP Linea...")
             
-            # Une Estoque com M-1
-            df_snap = df_estoque.join(df_sellout_m1, on=["DISTRIBUTOR_CODE", "PRODUCT_CODE"], how="full", coalesce=True).fill_null(0.0)
+            # Une Estoque com M-1 (Sem usar coalesce explícito para suportar versões antigas do Polars)
+            df_snap = df_estoque.join(df_sellout_m1, on=["DISTRIBUTOR_CODE", "PRODUCT_CODE"], how="outer").fill_null(0.0)
             
-            # Traz as descrições limpas (SKU e CNPJ)
-            df_snap = df_snap.join(df_prod, on="PRODUCT_CODE", how="left", coalesce=True).join(df_dist, on="DISTRIBUTOR_CODE", how="left", coalesce=True)
+            # Traz as descrições limpas (SKU e CNPJ) usando join padrão
+            df_snap = df_snap.join(df_prod, on="PRODUCT_CODE", how="left").join(df_dist, on="DISTRIBUTOR_CODE", how="left")
             df_snap = df_snap.drop_nulls(subset=["sku", "cgc"])
             
             # Calcula Dias de Cobertura de forma segura
@@ -378,7 +378,7 @@ class NexusLoader:
                 .alias("dias_cobertura")
             )
 
-            df_hist = df_sellout_mensal.join(df_prod, on="PRODUCT_CODE", how="left", coalesce=True).join(df_dist, on="DISTRIBUTOR_CODE", how="left", coalesce=True)
+            df_hist = df_sellout_mensal.join(df_prod, on="PRODUCT_CODE", how="left").join(df_dist, on="DISTRIBUTOR_CODE", how="left")
             df_hist = df_hist.drop_nulls(subset=["sku", "cgc"])
 
             # =================================================================
