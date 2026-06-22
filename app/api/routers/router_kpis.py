@@ -13,11 +13,6 @@ from app.api.routers.router_auth import get_current_user
 router = APIRouter(prefix="/api/v1/kpis", tags=["Auditoria e KPIs"])
 
 def calcular_ciclo_baseline(mes_alvo: str) -> str:
-    """
-    Mapeamento de Congelamento S&OP (Regra de Negócio Linea):
-    - 04/2026, 05/2026 e 06/2026 congelados no Baseline (04/2026)
-    - 07/2026 em diante = Lag 2 (Mês Alvo - 2 Meses)
-    """
     mes, ano = mes_alvo.split('/')
     dt_alvo = date(int(ano), int(mes), 1)
     dt_limite_baseline = date(2026, 6, 1)
@@ -42,8 +37,6 @@ async def carregar_auditoria_cpfr(
 
         for mes_str in meses_horizonte:
             mes_sql = f"{mes_str.split('/')[1]}-{mes_str.split('/')[0]}" # "2026-04"
-            
-            # O Roteamento de Ciclo (A Regra de Ouro)
             ciclo_congelado = calcular_ciclo_baseline(mes_str)
 
             clausula_filtro = ""
@@ -57,46 +50,60 @@ async def carregar_auditoria_cpfr(
                 params_query["segmento"] = segmento
 
             if lente == "sellin":
-                # LENTE FÁBRICA: Foco total no vol_final vs qt_pedido
+                # BLINDAGEM DE VOLUMES COM CTEs (Impede explosão cartesiana)
                 query = text(f"""
+                    WITH Vendas Agrupadas AS (
+                        SELECT sku, SUM(qt_pedido) AS vol_real
+                        FROM fato_vendas
+                        WHERE TO_CHAR(data_pedido, 'YYYY-MM') = :mes_sql
+                        GROUP BY sku
+                    ),
+                    Planejamento Agrupado AS (
+                        SELECT sku, SUM(vol_ia) AS vol_ia_congelado, SUM(vol_final) AS vol_comercial_congelado
+                        FROM fato_ibp_granular
+                        WHERE TO_CHAR(mes_projetado, 'YYYY-MM') = :mes_sql 
+                          AND ciclo_sop = :ciclo_congelado
+                        GROUP BY sku
+                    )
                     SELECT 
                         p.sku, p.descricao, p.categoria, p.segmento,
                         :mes_str AS mes_ano,
-                        COALESCE(SUM(v.qt_pedido), 0) AS vol_real,
-                        COALESCE(SUM(i.vol_ia), 0) AS vol_ia_congelado,
-                        COALESCE(SUM(i.vol_final), 0) AS vol_comercial_congelado
+                        COALESCE(v.vol_real, 0) AS vol_real,
+                        COALESCE(i.vol_ia_congelado, 0) AS vol_ia_congelado,
+                        COALESCE(i.vol_comercial_congelado, 0) AS vol_comercial_congelado
                     FROM dim_produtos p
-                    LEFT JOIN fato_vendas v 
-                           ON p.sku = v.sku 
-                          AND TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql
-                    LEFT JOIN fato_ibp_granular i 
-                           ON p.sku = i.sku 
-                          AND TO_CHAR(i.mes_projetado, 'YYYY-MM') = :mes_sql 
-                          AND i.ciclo_sop = :ciclo_congelado
+                    LEFT JOIN Vendas v ON p.sku = v.sku
+                    LEFT JOIN Planejamento i ON p.sku = i.sku
                     WHERE 1=1 {clausula_filtro}
-                    GROUP BY p.sku, p.descricao, p.categoria, p.segmento
-                    HAVING SUM(v.qt_pedido) > 0 OR SUM(i.vol_ia) > 0 OR SUM(i.vol_final) > 0
+                      AND (COALESCE(v.vol_real, 0) > 0 OR COALESCE(i.vol_ia_congelado, 0) > 0 OR COALESCE(i.vol_comercial_congelado, 0) > 0)
                 """)
             else:
-                # LENTE CANAL: Foco total no Sell-out MTRIX vs Snapshot da IA Beta
+                # BLINDAGEM DE VOLUMES MTRIX
                 query = text(f"""
+                    WITH Sellout Agrupado AS (
+                        SELECT sku, SUM(volume_sellout) AS vol_real
+                        FROM fato_mtrix_historico_mensal
+                        WHERE mes_ano = :mes_sql
+                        GROUP BY sku
+                    ),
+                    Snapshot Agrupada AS (
+                        SELECT sku, MAX(previsao_sellout_m0) AS vol_ia_congelado, SUM(estoque_atual_caixas) AS estoque_canal, AVG(dias_cobertura) AS dias_cobertura
+                        FROM fato_mtrix_snapshot
+                        WHERE ciclo_sop = :ciclo_congelado
+                        GROUP BY sku
+                    )
                     SELECT 
                         p.sku, p.descricao, p.categoria, p.segmento,
                         :mes_str AS mes_ano,
-                        COALESCE(SUM(h.volume_sellout), 0) AS vol_real,
-                        COALESCE(MAX(s.previsao_sellout_m0), 0) AS vol_ia_congelado,
-                        COALESCE(SUM(s.estoque_atual_caixas), 0) AS estoque_canal,
-                        COALESCE(AVG(s.dias_cobertura), 0) AS dias_cobertura
+                        COALESCE(h.vol_real, 0) AS vol_real,
+                        COALESCE(s.vol_ia_congelado, 0) AS vol_ia_congelado,
+                        COALESCE(s.estoque_canal, 0) AS estoque_canal,
+                        COALESCE(s.dias_cobertura, 0) AS dias_cobertura
                     FROM dim_produtos p
-                    LEFT JOIN fato_mtrix_historico_mensal h 
-                           ON p.sku = h.sku 
-                          AND h.mes_ano = :mes_sql
-                    LEFT JOIN fato_mtrix_snapshot s 
-                           ON p.sku = s.sku 
-                          AND s.ciclo_sop = :ciclo_congelado
+                    LEFT JOIN Sellout h ON p.sku = h.sku
+                    LEFT JOIN Snapshot s ON p.sku = s.sku
                     WHERE 1=1 {clausula_filtro}
-                    GROUP BY p.sku, p.descricao, p.categoria, p.segmento
-                    HAVING SUM(h.volume_sellout) > 0 OR MAX(s.previsao_sellout_m0) > 0
+                      AND (COALESCE(h.vol_real, 0) > 0 OR COALESCE(s.vol_ia_congelado, 0) > 0)
                 """)
 
             df_mes = pd.read_sql(query, db.bind, params=params_query)
