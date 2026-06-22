@@ -14,8 +14,10 @@ const formatPct = (val: number) => new Intl.NumberFormat('pt-BR', { style: 'perc
 
 export default function AuditoriaArena() {
   const [lente, setLente] = useState<'sellin' | 'sellout'>('sellin');
-  const [mesesDisponiveis] = useState(['07/2026', '08/2026', '09/2026', '10/2026']);
-  const [mesesSelecionados, setMesesSelecionados] = useState<string[]>(['07/2026']);
+  
+  // Meses fixos correspondendo ao seu escopo inicial (Baseline + Projetados)
+  const [mesesDisponiveis] = useState(['04/2026', '05/2026', '06/2026', '07/2026', '08/2026']);
+  const [mesesSelecionados, setMesesSelecionados] = useState<string[]>(['04/2026']);
   
   // Estados para Filtros Hierárquicos alimentados pelo Backend
   const [categoriaSel, setCategoriaSel] = useState('Todas');
@@ -39,7 +41,7 @@ export default function AuditoriaArena() {
     }
   };
 
-  // CONEXÃO AXIOS COM O ROUTER REFORMULADO
+  // CONEXÃO AXIOS COM O ROUTER
   const carregarDadosAuditoria = async () => {
     setCarregando(true);
     try {
@@ -112,7 +114,7 @@ export default function AuditoriaArena() {
             onClick={() => toggleMes(mes)}
             className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all border ${mesesSelecionados.includes(mes) ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/80 shadow-inner' : 'bg-slate-950 text-slate-400 border-slate-800 hover:bg-slate-800'}`}
           >
-            {mes} {idx === 0 ? '(M0)' : `(M${idx})`}
+            {mes}
           </button>
         ))}
       </div>
@@ -147,7 +149,7 @@ export default function AuditoriaArena() {
       {/* KPI INDICATORS DE EXIBIÇÃO CLÍNICA */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-indigo-500 shadow-md">
-          <div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">Acurácia IA (Lag 2)</div>
+          <div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">Acurácia IA</div>
           <div className="text-3xl font-black text-white">{formatPct(kpisGlobais.acc_ia)}</div>
         </div>
         
@@ -231,10 +233,10 @@ export default function AuditoriaArena() {
                   <th className="px-6 py-4">Estrutura de Portfólio (SKU)</th>
                   <th className="px-4 py-4 text-right">Realizado</th>
                   <th className="px-4 py-4 text-right">
-                    <span className="text-indigo-400">IA</span> (Frozen M-2)
+                    <span className="text-indigo-400">IA</span> (Frozen)
                   </th>
                   <th className="px-4 py-4 text-right">
-                    {lente === 'sellin' ? <span className="text-sky-400">Humano</span> : <span className="text-amber-400">Estoque</span>} {lente === 'sellin' ? '(Frozen M-2)' : 'Canal'}
+                    {lente === 'sellin' ? <span className="text-sky-400">Humano</span> : <span className="text-amber-400">Estoque</span>} {lente === 'sellin' ? '(Frozen)' : 'Canal'}
                   </th>
                   {lente === 'sellout' && <th className="px-4 py-4 text-right">Giro (Cobertura)</th>}
                   <th className="px-4 py-4 text-right border-l border-slate-800">Acurácia IA</th>
@@ -272,9 +274,9 @@ export default function AuditoriaArena() {
                     <td className="px-6 py-3.5 text-right bg-slate-950/20">
                       {lente === 'sellin' ? (
                         row.fva > 0 ? (
-                          <span className="bg-emerald-500/10 text-emerald-400 px-2.5 py-1 rounded font-black tracking-wider uppercase text-[10px]">+ {formatPct(row.fva)}</span>
+                          <span className="bg-emerald-500/10 text-emerald-400 px-2.5 py-1 rounded font-black tracking-wider uppercase text-[10px]">+ {formatPct(row.fva)} FVA</span>
                         ) : row.fva < 0 ? (
-                          <span className="bg-rose-500/10 text-rose-400 px-2.5 py-1 rounded font-black tracking-wider uppercase text-[10px]">{formatPct(row.fva)}</span>
+                          <span className="bg-rose-500/10 text-rose-400 px-2.5 py-1 rounded font-black tracking-wider uppercase text-[10px]">{formatPct(row.fva)} FVA</span>
                         ) : (
                           <span className="text-slate-500 font-bold uppercase text-[10px]">Neutro</span>
                         )
