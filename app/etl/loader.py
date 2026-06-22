@@ -294,7 +294,7 @@ class NexusLoader:
                 df_dist = pl.read_parquet(f"{bucket_path}/sellout_distribuidores.parquet")
                 df_dist = df_dist.select([
                     pl.col("DISTRIBUTOR_CODE").cast(pl.Utf8),
-                    pl.col("CGC").cast(pl.Utf8).str.replace_all(r"\D", "").str.zfill(14).alias("cgc")
+                    pl.col("DISTRIBUTOR_ID").cast(pl.Utf8).str.replace_all(r"\D", "").str.zfill(14).alias("cgc")
                 ])
             except Exception as e:
                 log_callback(f"      ⚠️ Aviso Dist S3: {e}")
@@ -365,12 +365,13 @@ class NexusLoader:
             # =================================================================
             log_callback("      • Cruzando matrizes de Distribuição com ERP Linea...")
             
-            # O schema forçado em cima garante que este join NUNCA vai quebrar por causa do f32
             df_snap = df_estoque.join(df_sellout_m1, on=["DISTRIBUTOR_CODE", "PRODUCT_CODE"], how="outer").fill_null(0.0)
-            
             df_snap = df_snap.join(df_prod, on="PRODUCT_CODE", how="left").join(df_dist, on="DISTRIBUTOR_CODE", how="left")
+            
+            # Como agora temos o CNPJ real via DISTRIBUTOR_ID, garantimos dados limpos
             df_snap = df_snap.drop_nulls(subset=["sku", "cgc"])
             
+            # Calcula Dias de Cobertura de forma segura
             df_snap = df_snap.with_columns(
                 pl.when(pl.col("sellout_m1_caixas") > 0)
                 .then((pl.col("estoque_atual_caixas") / pl.col("sellout_m1_caixas")) * 30.0)
