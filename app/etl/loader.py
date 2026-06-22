@@ -270,46 +270,47 @@ class NexusLoader:
         from app.models.domain_models import FatoMtrixSnapshot, FatoMtrixHistoricoMensal
         from sqlalchemy import text
         import polars as pl
-        import s3fs 
 
         log_callback(f"   -> [MTRIX] Iniciando Data Cleansing e sumarização do S3 (Ciclo {ciclo_alvo})...")
 
         try:
-            fs = s3fs.S3FileSystem()
             bucket_path = "s3://nexus-datalake-linea-prd/mtrix"
 
             # =================================================================
             # 1. CARREGAR E HIGIENIZAR DIMENSÕES (DE/PARA)
             # =================================================================
             try:
-                # Limpeza: Remove espaços invisíveis do SKU digitado errado
-                df_prod = pl.read_parquet(f"{bucket_path}/sellout_produtos.parquet", storage_options={"s3": fs})
+                # O Polars nativamente identifica o IAM Role da AWS, sem precisar de s3fs
+                df_prod = pl.read_parquet(f"{bucket_path}/sellout_produtos.parquet")
                 df_prod = df_prod.select([
                     pl.col("PRODUCT_CODE").cast(pl.Utf8),
                     pl.col("PRODUCT_SKU_CODE").cast(pl.Utf8).str.strip_chars().alias("sku")
                 ])
-            except Exception:
-                df_prod = pl.DataFrame({"PRODUCT_CODE": [], "sku": []}).cast(pl.Utf8)
+            except Exception as e:
+                log_callback(f"      ⚠️ Aviso Prod S3: {e}")
+                df_prod = pl.DataFrame(schema={"PRODUCT_CODE": pl.Utf8, "sku": pl.Utf8})
 
             try:
-                # Limpeza: Remove pontuação do CNPJ e garante 14 dígitos (zeros à esquerda)
-                df_dist = pl.read_parquet(f"{bucket_path}/sellout_distribuidores.parquet", storage_options={"s3": fs})
+                df_dist = pl.read_parquet(f"{bucket_path}/sellout_distribuidores.parquet")
                 df_dist = df_dist.select([
                     pl.col("DISTRIBUTOR_CODE").cast(pl.Utf8),
                     pl.col("CGC").cast(pl.Utf8).str.replace_all(r"\D", "").str.zfill(14).alias("cgc")
                 ])
-            except Exception:
-                df_dist = pl.DataFrame({"DISTRIBUTOR_CODE": [], "cgc": []}).cast(pl.Utf8)
+            except Exception as e:
+                log_callback(f"      ⚠️ Aviso Dist S3: {e}")
+                df_dist = pl.DataFrame(schema={"DISTRIBUTOR_CODE": pl.Utf8, "cgc": pl.Utf8})
 
             # =================================================================
             # 2. PROCESSAR ESTOQUE (USANDO QTY_CONV2 PARA CAIXAS)
             # =================================================================
             log_callback("      • Mapeando posições de estoque no canal (Lendo QTY_CONV2)...")
             try:
-                lf_estoque = pl.scan_parquet(f"{bucket_path}/sellout_estoque_*.parquet", storage_options={"s3": fs})
+                lf_estoque = pl.scan_parquet(f"{bucket_path}/sellout_estoque_*.parquet")
                 df_estoque = (
                     lf_estoque
                     .with_columns([
+                        pl.col("DISTRIBUTOR_CODE").cast(pl.Utf8),
+                        pl.col("PRODUCT_CODE").cast(pl.Utf8),
                         pl.col("QTY_CONV2").cast(pl.Float64, strict=False).fill_null(0.0),
                         pl.col("STOCK_DATE").cast(pl.Utf8)
                     ])
@@ -319,19 +320,20 @@ class NexusLoader:
                 ).collect()
             except Exception as e:
                 log_callback(f"      ⚠️ Aviso Estoque S3: {e}")
-                df_estoque = pl.DataFrame({"DISTRIBUTOR_CODE": [], "PRODUCT_CODE": [], "estoque_atual_caixas": []}).cast(pl.Utf8)
+                df_estoque = pl.DataFrame(schema={"DISTRIBUTOR_CODE": pl.Utf8, "PRODUCT_CODE": pl.Utf8, "estoque_atual_caixas": pl.Float64})
 
             # =================================================================
             # 3. PROCESSAR SELL-OUT (HISTÓRICO E M-1) - QTY_CONV2
             # =================================================================
             log_callback("      • Sumarizando volume de saída em Caixas (QTY_CONV2)...")
             try:
-                lf_sellout = pl.scan_parquet(f"{bucket_path}/sellout_sellout_*.parquet", storage_options={"s3": fs})
+                lf_sellout = pl.scan_parquet(f"{bucket_path}/sellout_sellout_*.parquet")
                 
                 df_sellout_mensal = (
                     lf_sellout
                     .with_columns([
-                        # Limpeza: Pega apenas "YYYY-MM" das datas formatadas de forma bizarra
+                        pl.col("DISTRIBUTOR_CODE").cast(pl.Utf8),
+                        pl.col("PRODUCT_CODE").cast(pl.Utf8),
                         pl.col("SELLOUT_DATE").cast(pl.Utf8).str.slice(0, 7).alias("mes_ano"),
                         pl.col("QTY_CONV2").cast(pl.Float64, strict=False).fill_null(0.0)
                     ])
@@ -351,26 +353,24 @@ class NexusLoader:
                         ])
                     )
                 else:
-                    df_sellout_m1 = pl.DataFrame({"DISTRIBUTOR_CODE": [], "PRODUCT_CODE": [], "sellout_m1_caixas": []})
+                    df_sellout_m1 = pl.DataFrame(schema={"DISTRIBUTOR_CODE": pl.Utf8, "PRODUCT_CODE": pl.Utf8, "sellout_m1_caixas": pl.Float64})
                     
             except Exception as e:
                 log_callback(f"      ⚠️ Aviso Sell-out S3: {e}")
-                df_sellout_mensal = pl.DataFrame({"DISTRIBUTOR_CODE": [], "PRODUCT_CODE": [], "mes_ano": [], "volume_sellout": []})
-                df_sellout_m1 = pl.DataFrame({"DISTRIBUTOR_CODE": [], "PRODUCT_CODE": [], "sellout_m1_caixas": []})
+                df_sellout_mensal = pl.DataFrame(schema={"DISTRIBUTOR_CODE": pl.Utf8, "PRODUCT_CODE": pl.Utf8, "mes_ano": pl.Utf8, "volume_sellout": pl.Float64})
+                df_sellout_m1 = pl.DataFrame(schema={"DISTRIBUTOR_CODE": pl.Utf8, "PRODUCT_CODE": pl.Utf8, "sellout_m1_caixas": pl.Float64})
 
             # =================================================================
             # 4. HARMONIZAÇÃO E CRUZAMENTO FINAL
             # =================================================================
             log_callback("      • Cruzando matrizes de Distribuição com ERP Linea...")
             
-            # Une Estoque com M-1 (Sem usar coalesce explícito para suportar versões antigas do Polars)
+            # O schema forçado em cima garante que este join NUNCA vai quebrar por causa do f32
             df_snap = df_estoque.join(df_sellout_m1, on=["DISTRIBUTOR_CODE", "PRODUCT_CODE"], how="outer").fill_null(0.0)
             
-            # Traz as descrições limpas (SKU e CNPJ) usando join padrão
             df_snap = df_snap.join(df_prod, on="PRODUCT_CODE", how="left").join(df_dist, on="DISTRIBUTOR_CODE", how="left")
             df_snap = df_snap.drop_nulls(subset=["sku", "cgc"])
             
-            # Calcula Dias de Cobertura de forma segura
             df_snap = df_snap.with_columns(
                 pl.when(pl.col("sellout_m1_caixas") > 0)
                 .then((pl.col("estoque_atual_caixas") / pl.col("sellout_m1_caixas")) * 30.0)

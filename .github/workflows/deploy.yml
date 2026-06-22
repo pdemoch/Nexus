@@ -8,6 +8,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 60  # 1º ESCUDO: Evita que o GitHub Actions mate o job cedo demais
     steps:
       - name: Baixar código no robô
         uses: actions/checkout@v4
@@ -27,6 +28,7 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ubuntu
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          command_timeout: 60m  # <--- A MÁGICA ESTÁ AQUI: Dá 60 minutos para o Docker compilar tudo!
           script: |
             cd ~/Nexus
             
