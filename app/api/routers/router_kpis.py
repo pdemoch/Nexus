@@ -103,7 +103,7 @@ async def carregar_auditoria_cpfr(
                     LEFT JOIN Sellout h ON p.sku = h.sku
                     LEFT JOIN Snapshot s ON p.sku = s.sku
                     WHERE 1=1 {clausula_filtro}
-                      AND (COALESCE(h.vol_real, 0) > 0 OR COALESCE(s.vol_ia_congelado, 0) > 0)
+                      AND (COALESCE(h.vol_real, 0) > 0 OR COALESCE(s.vol_ia_congelado, 0) > 0 OR COALESCE(s.estoque_canal, 0) > 0)
                 """)
 
             df_mes = pd.read_sql(query, db.bind, params=params_query)
