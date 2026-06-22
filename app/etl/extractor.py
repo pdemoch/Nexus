@@ -174,7 +174,6 @@ class MtrixExtractor:
         self.tabelas_data = ["sellout", "forca_vendas", "estoque"]
         self.tabelas_estaticas = ["produtos", "distribuidores", "clientes"]
         
-        # Aumentamos o timeout global e a tolerância de conexão
         self.timeout = aiohttp.ClientTimeout(total=600, connect=60)
 
     def _verificar_primeira_carga(self) -> bool:
@@ -216,7 +215,6 @@ class MtrixExtractor:
             if last_day > end:
                 last_day = end
             
-            # Retorna: Data Início, Data Fim, e o Sufixo para o arquivo (ex: 2024_05)
             meses.append((current.strftime("%Y-%m-%d"), last_day.strftime("%Y-%m-%d"), current.strftime("%Y_%m")))
             current = next_month
             
@@ -267,7 +265,6 @@ class MtrixExtractor:
 
         df = pl.DataFrame(registros).cast(pl.Utf8) 
         
-        # Constrói o nome do arquivo dinâmico (ex: sellout_sellout_2024_05.parquet ou sellout_produtos.parquet)
         nome_arquivo = f"sellout_{tabela}{sufixo_nome}.parquet"
         caminho_local = str(self.data_dir / nome_arquivo)
         
@@ -291,7 +288,6 @@ class MtrixExtractor:
             try:
                 token = await self._autenticar(session)
                 
-                # 1. Extração das Tabelas Dinâmicas (MÊS A MÊS)
                 for tabela in self.tabelas_data:
                     for dt_ini, dt_fim, mes_str in meses_para_extrair:
                         log_callback(f"   -> [MTRIX] Extraindo '{tabela}' (Competência: {mes_str})...")
@@ -299,7 +295,6 @@ class MtrixExtractor:
                         if not resultado:
                             log_callback(f"      ⚠️ Sem dados de '{tabela}' para o mês {mes_str}.")
                 
-                # 2. Extração das Tabelas Estáticas (Sem particionamento por mês)
                 if primeira_carga:
                     for tabela in self.tabelas_estaticas:
                         log_callback(f"   -> [MTRIX] Extraindo cadastro estático: '{tabela}'...")

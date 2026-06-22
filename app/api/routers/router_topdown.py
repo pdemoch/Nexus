@@ -6,7 +6,7 @@ from collections import defaultdict
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, text
 
 from app.core.database import get_db
 from app.models.domain_models import DimProduto, FatoIbpGranular, ControleCiclo, FatoVendas, DimCliente
@@ -38,7 +38,7 @@ def require_admin(usuario: dict = Depends(get_current_user)):
 
 @router.get("")
 async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None, db: Session = Depends(get_db)):
-    """Constrói a árvore de decisão macro limitando estritamente aos meses M2, M3 e M4."""
+    """Constrói a árvore de decisão macro limitando estritamente aos meses M2, M3 e M4 com Orçamento."""
     try:
         ciclo = get_current_cycle(db)
         ciclo_ant = get_previous_cycle(db)
@@ -48,6 +48,22 @@ async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None,
         
         data_ini = ciclo_atual_dt + relativedelta(months=2) # Inicia no M2
         data_fim = ciclo_atual_dt + relativedelta(months=4) # Termina no M4
+
+        # ---------------------------------------------------------
+        # NOVO: EXTRAÇÃO DIRETA DA FATO_ORCAMENTO
+        # ---------------------------------------------------------
+        orc_query = db.execute(text("""
+            SELECT sku, mes_projetado, receita_orcamento 
+            FROM fato_orcamento 
+            WHERE mes_projetado >= :m2 AND mes_projetado <= :m4
+        """), {"m2": data_ini, "m4": data_fim}).fetchall()
+        
+        orc_dict = {}
+        for o in orc_query:
+            ms_iso = str(o.mes_projetado).split()[0]
+            ms_padrao = ms_iso[:-2] + "01"
+            orc_dict[f"{o.sku}|{ms_padrao}"] = float(o.receita_orcamento or 0)
+        # ---------------------------------------------------------
         
         query = db.query(
             DimProduto.categoria, DimProduto.segmento, FatoIbpGranular.sku, DimProduto.descricao,
@@ -117,28 +133,34 @@ async def listar_topdown(categoria_filtro: str = None, valor_filtro: str = None,
             vol_ia = int(r.ia or 0)
             vol_td = int(r.td) if r.td is not None else vol_ia
             pmv = float(r.pmv or 0)
+            
+            # ORÇAMENTO DO SKU
+            vol_orcamento_rec = orc_dict.get(f"{sku}|{mes_banco_str}", 0.0)
 
             arvore[cat]["subRows"][seg]["subRows"][sku]["meses_map"][mes_banco_str] = {
                 "mes_banco": mes_banco_str, "mes_str": mes_pt_str, "vol_ia": vol_ia, 
-                "vol_anterior": vol_ant_val, "vol_ajustado": vol_td, "pmv": pmv
+                "vol_anterior": vol_ant_val, "vol_ajustado": vol_td, "pmv": pmv,
+                "receita_orcamento": vol_orcamento_rec
             }
 
             s_map = arvore[cat]["subRows"][seg]["meses_map"]
             if mes_banco_str not in s_map:
-                s_map[mes_banco_str] = {"mes_banco": mes_banco_str, "mes_str": mes_pt_str, "vol_ia": 0, "vol_anterior": 0, "vol_ajustado": 0, "receita": 0}
+                s_map[mes_banco_str] = {"mes_banco": mes_banco_str, "mes_str": mes_pt_str, "vol_ia": 0, "vol_anterior": 0, "vol_ajustado": 0, "receita": 0, "receita_orcamento": 0.0}
             s_map[mes_banco_str]["vol_ia"] += vol_ia
             s_map[mes_banco_str]["vol_anterior"] += vol_ant_val
             s_map[mes_banco_str]["vol_ajustado"] += vol_td
             s_map[mes_banco_str]["receita"] += (vol_td * pmv)
+            s_map[mes_banco_str]["receita_orcamento"] += vol_orcamento_rec
             s_map[mes_banco_str]["pmv"] = s_map[mes_banco_str]["receita"] / s_map[mes_banco_str]["vol_ajustado"] if s_map[mes_banco_str]["vol_ajustado"] > 0 else 0
 
             c_map = arvore[cat]["meses_map"]
             if mes_banco_str not in c_map:
-                c_map[mes_banco_str] = {"mes_banco": mes_banco_str, "mes_str": mes_pt_str, "vol_ia": 0, "vol_anterior": 0, "vol_ajustado": 0, "receita": 0}
+                c_map[mes_banco_str] = {"mes_banco": mes_banco_str, "mes_str": mes_pt_str, "vol_ia": 0, "vol_anterior": 0, "vol_ajustado": 0, "receita": 0, "receita_orcamento": 0.0}
             c_map[mes_banco_str]["vol_ia"] += vol_ia
             c_map[mes_banco_str]["vol_anterior"] += vol_ant_val
             c_map[mes_banco_str]["vol_ajustado"] += vol_td
             c_map[mes_banco_str]["receita"] += (vol_td * pmv)
+            c_map[mes_banco_str]["receita_orcamento"] += vol_orcamento_rec
             c_map[mes_banco_str]["pmv"] = c_map[mes_banco_str]["receita"] / c_map[mes_banco_str]["vol_ajustado"] if c_map[mes_banco_str]["vol_ajustado"] > 0 else 0
 
         for c in arvore.values():
@@ -163,14 +185,11 @@ async def topdown_status(db: Session = Depends(get_db)):
     reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down Arena').first()
     return {"is_fechado": reg.status == 'Fechado' if reg else False}
 
-
 @router.post("/salvar")
 async def salvar_rascunho_topdown(payload: PayloadAprovarTopDown, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     check_global_lock(db, get_current_cycle(db))
     try:
         ciclo = get_current_cycle(db)
-        
-        # Processa apenas os ajustes manuais enviados pela tela
         for ajuste in payload.ajustes:
             data_alvo = parse_date_safe(ajuste.mes_projetado)
             volume_alvo = int(ajuste.novo_volume)
@@ -179,7 +198,6 @@ async def salvar_rascunho_topdown(payload: PayloadAprovarTopDown, db: Session = 
             linhas = query.all()
             if not linhas: continue
 
-            # Rateio Inteligente: Usa o vol_ia como peso (mantém a proporção exata entre os clientes)
             base_total_ia = sum([float(l.vol_ia or 0) for l in linhas])
             soma_dist = 0
             total_clientes = len(linhas)
@@ -192,7 +210,6 @@ async def salvar_rascunho_topdown(payload: PayloadAprovarTopDown, db: Session = 
                     rateado = int(round(volume_alvo * peso))
                     soma_dist += rateado
                 
-                # OTIMIZAÇÃO: Apenas altera a linha se o valor for efetivamente diferente
                 if l.vol_topdown != rateado:
                     l.vol_topdown = rateado
 
@@ -210,7 +227,6 @@ async def congelar_ratear_topdown(payload: PayloadAprovarTopDown, db: Session = 
     try:
         nome_user = usuario.get('nome', usuario.get('email', 'Desconhecido'))
         
-        # 1. SALVAR OS AJUSTES MANUAIS (Com log de auditoria)
         if payload.ajustes:
             for ajuste in payload.ajustes:
                 data_alvo = parse_date_safe(ajuste.mes_projetado)
@@ -240,8 +256,6 @@ async def congelar_ratear_topdown(payload: PayloadAprovarTopDown, db: Session = 
                     mes=data_alvo, v_antigo=int(total_base_antigo), v_novo=volume_alvo
                 )
 
-        # 2. TRANSBORDO UNIVERSAL: Cobre os "SKUs Ignorados"
-        # Tudo que a Diretoria não alterou (NULL no Top-Down) herda automaticamente o volume da IA
         db.query(FatoIbpGranular).filter(
             FatoIbpGranular.ciclo_sop == ciclo,
             FatoIbpGranular.vol_topdown.is_(None)
@@ -249,8 +263,6 @@ async def congelar_ratear_topdown(payload: PayloadAprovarTopDown, db: Session = 
             FatoIbpGranular.vol_topdown: FatoIbpGranular.vol_ia
         }, synchronize_session=False)
 
-        # 3. A CASCATA DE BASTÃO
-        # A meta fixada pela Diretoria é imediatamente passada para o Bottom-Up e processos seguintes
         db.query(FatoIbpGranular).filter(
             FatoIbpGranular.ciclo_sop == ciclo
         ).update({
@@ -260,7 +272,6 @@ async def congelar_ratear_topdown(payload: PayloadAprovarTopDown, db: Session = 
             FatoIbpGranular.vol_meta: FatoIbpGranular.vol_topdown
         }, synchronize_session=False)
 
-        # 4. TRANCAR A ETAPA
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'Top-Down Arena').first()
         if not registro:
             db.add(ControleCiclo(ciclo_sop=ciclo, origem='Top-Down Arena', status='Fechado'))
@@ -294,12 +305,10 @@ async def grafico_tatico_topdown(chave_matriz: str, nivel_hierarquia: str = 'pro
         ciclo_atual = ciclo_atual_dt.strftime('%m/%Y')
         ciclo_anterior = (ciclo_atual_dt - relativedelta(months=1)).strftime('%m/%Y')
         
-        # 1. Histórico base (2 Anos)
         q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol'))\
                    .join(DimProduto, FatoVendas.sku == DimProduto.sku)\
                    .filter(FatoVendas.data_pedido >= ciclo_atual_dt - relativedelta(years=2))
         
-        # 2. Toda a base IBP
         q_ibp = db.query(
             FatoIbpGranular.ciclo_sop, FatoIbpGranular.mes_projetado,
             func.sum(FatoIbpGranular.vol_ia).label('ia'), 

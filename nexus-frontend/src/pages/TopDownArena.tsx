@@ -19,7 +19,7 @@ const formatVolume = (val: number) => {
 const formatMoeda = (val: number) => {
   const num = Number(val);
   if (isNaN(num)) return 'R$ 0,00';
-  return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(num);
+  return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(num);
 };
 
 const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (val: number) => void, disabled: boolean }) => {
@@ -108,7 +108,6 @@ export default function TopDownArena() {
   const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
 
-  // NOVO: Estado de Ordenação
   const [ordenacao, setOrdenacao] = useState<{ coluna: string | null, direcao: 'asc' | 'desc' }>({ coluna: null, direcao: 'asc' });
 
   const fetchData = useCallback(async () => {
@@ -156,7 +155,6 @@ export default function TopDownArena() {
     });
   }, [chartExpanded, dadosGraficoCache, celulasEditadas, colunasData]);
 
-  // Função auxiliar estática (sem edições em tela) para ordenar corretamente sem pular a linha
   const getStaticVol = (row: any, mesBanco: string): number => {
     if (row.tipo === 'produto') {
       const m = row.meses?.find((x: any) => x.mes_banco === mesBanco);
@@ -165,16 +163,9 @@ export default function TopDownArena() {
     return (row.subRows || []).reduce((acc: number, child: any) => acc + getStaticVol(child, mesBanco), 0);
   };
 
-  // =========================================================================
-  // MOTOR RECURSIVO: PESQUISA E ORDENAÇÃO DE HIERARQUIA
-  // =========================================================================
-  // =========================================================================
-  // MOTOR RECURSIVO: PESQUISA E ORDENAÇÃO DE HIERARQUIA
-  // =========================================================================
   const dadosProcessados = useMemo(() => {
     let processados = dadosBrutos;
 
-    // 1. FILTRAGEM (SKU, Produto ou Categoria)
     if (busca) {
         const lowerTerm = busca.toLowerCase();
         const filtrarArvore = (nodes: any[]): any[] => {
@@ -182,9 +173,7 @@ export default function TopDownArena() {
                 const matchSelf = (node.nome && String(node.nome).toLowerCase().includes(lowerTerm)) ||
                                   (node.produto && String(node.produto).toLowerCase().includes(lowerTerm));
                 
-                // CORREÇÃO TYPESCRIPT: Tipagem explícita para evitar o erro de never[]
                 let childMatches: any[] = []; 
-                
                 if (node.subRows?.length > 0) {
                     childMatches = filtrarArvore(node.subRows);
                 }
@@ -198,7 +187,6 @@ export default function TopDownArena() {
         processados = filtrarArvore(dadosBrutos);
     }
 
-    // 2. ORDENAÇÃO
     if (ordenacao.coluna) {
         const ordenarArvore = (nodes: any[]): any[] => {
             const ordenados = [...nodes].sort((a, b) => {
@@ -228,7 +216,6 @@ export default function TopDownArena() {
   }, [dadosBrutos, busca, ordenacao]);
 
 
-  // Função que busca os dados VIVOS (incluindo edições não salvas do usuário)
   const getDynamicVol = useCallback((row: any, mesBanco: string): number => {
     if (row.tipo === 'produto') {
       const edicao = celulasEditadas[row.chave_matriz]?.[mesBanco];
@@ -257,7 +244,7 @@ export default function TopDownArena() {
             if (prev.direcao === 'desc') return { coluna, direcao: 'asc' };
             return { coluna: null, direcao: 'asc' };
         }
-        return { coluna, direcao: 'desc' }; // Começa ordenando do maior para o menor por padrão
+        return { coluna, direcao: 'desc' };
     });
   };
 
@@ -304,7 +291,7 @@ export default function TopDownArena() {
 
   const handleExportExcel = () => {
     if (dadosBrutos.length === 0) return alert("Não há dados para exportar.");
-    let csv = "Categoria,Segmento,SKU,Descrição,Mês,Projeção IA,Proposta Top-Down,PMV Médio,Receita\n";
+    let csv = "Categoria,Segmento,SKU,Descrição,Mês,Projeção IA,Proposta Top-Down,PMV Médio,Receita,Orcamento\n";
     
     dadosBrutos.forEach(cat => {
       cat.subRows?.forEach((seg: any) => {
@@ -313,7 +300,8 @@ export default function TopDownArena() {
              const edicao = celulasEditadas[prod.chave_matriz]?.[m.mes_banco];
              const volFinal = edicao !== undefined ? Number(edicao.novo_volume) : (m.vol_ajustado || 0);
              const rec = volFinal * (m.pmv || 0);
-             csv += `"${cat.nome}","${seg.nome}","${prod.produto}","${prod.nome}","${m.mes_str}",${m.vol_ia},${volFinal},${m.pmv},${rec}\n`;
+             const orc = m.receita_orcamento || 0;
+             csv += `"${cat.nome}","${seg.nome}","${prod.produto}","${prod.nome}","${m.mes_str}",${m.vol_ia},${volFinal},${m.pmv},${rec},${orc}\n`;
           });
         });
       });
@@ -425,9 +413,9 @@ export default function TopDownArena() {
           <div className="col-span-2 bg-slate-800 border border-slate-700 p-4 rounded-xl h-[340px]">
             {loadingGrafico === chave ? (
               <div className="h-full flex items-center justify-center text-slate-500">Extraindo inteligência temporal...</div>
-            ) : chartData ? (
+            ) : chartDataFinal ? (
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                <LineChart data={chartDataFinal} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
                   <XAxis dataKey="name" tick={{fill: '#94a3b8', fontSize: 12}} tickMargin={10} axisLine={false} />
                   <YAxis tickFormatter={(val) => formatVolume(val)} tick={{fill: '#94a3b8', fontSize: 12}} tickLine={false} axisLine={false} />
@@ -452,14 +440,16 @@ export default function TopDownArena() {
   };
 
   const totaisGerais = useMemo(() => {
-    const totais: Record<string, { vol: number, fat: number }> = {};
+    const totais: Record<string, { vol: number, fat: number, orc: number }> = {};
     colunasData?.forEach((m: any) => {
-      let vol = 0; let fat = 0;
+      let vol = 0; let fat = 0; let orc = 0;
       dadosProcessados.forEach((cat: any) => {
         vol += getDynamicVol(cat, m.mes_banco);
         fat += getDynamicRec(cat, m.mes_banco);
+        const mData = cat.meses?.find((x: any) => x.mes_banco === m.mes_banco);
+        orc += (mData?.receita_orcamento || 0);
       });
-      totais[m.mes_banco] = { vol, fat };
+      totais[m.mes_banco] = { vol, fat, orc };
     });
     return totais;
   }, [dadosProcessados, getDynamicVol, getDynamicRec, colunasData]);
@@ -500,10 +490,13 @@ export default function TopDownArena() {
             const receitaExibicao = getDynamicRec(row, m.mes_banco);
             
             const mData = row.meses?.find((x: any) => x.mes_banco === m.mes_banco) || {};
+            const orcamento = mData.receita_orcamento || 0;
+            const atingimento = orcamento > 0 ? (receitaExibicao / orcamento) * 100 : (receitaExibicao > 0 ? 100 : 0);
+            const corAtingimento = atingimento >= 100 ? 'text-emerald-500' : (atingimento >= 95 ? 'text-amber-500' : 'text-rose-500');
 
             return (
               <td key={idx} className="p-0 border-l border-slate-100 align-top">
-                <div className={`flex flex-col h-full min-h-[76px] ${isFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/40' : 'hover:bg-slate-50'}`}>
+                <div className={`flex flex-col h-full min-h-[90px] ${isFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/40' : 'hover:bg-slate-50'}`}>
                   
                   <div className="px-2 py-1.5 border-b border-slate-100/50 flex justify-center gap-3 items-center bg-slate-50/80">
                     <span className="text-[10px] font-bold text-slate-500 bg-slate-200/50 px-2 py-0.5 rounded whitespace-nowrap" title="Projeção IA Original">
@@ -522,9 +515,21 @@ export default function TopDownArena() {
                         <div className="w-full text-right font-bold text-slate-800 pr-1">{formatVolume(valorExibicao)}</div>
                       )}
                     </div>
-                    <span className="text-[10px] font-bold text-emerald-500 tracking-tight pr-1 mt-0.5" title="Receita (R$) Prevista">
+                    <span className="text-[10px] font-bold text-blue-600 tracking-tight pr-1 mt-0.5" title="Receita (R$) Prevista">
                       {formatMoeda(receitaExibicao)}
                     </span>
+
+                    {/* NOVO: Visão de Orçamento com % de Atingimento */}
+                    {orcamento > 0 && (
+                        <div className="flex flex-col items-end mt-1 w-full border-t border-slate-200/60 pt-1">
+                            <span className="text-[9px] font-bold text-slate-400 tracking-tight" title="Orçamento (R$)">
+                                Orç: {formatMoeda(orcamento)}
+                            </span>
+                            <span className={`text-[9px] font-black ${corAtingimento} tracking-widest bg-slate-100 px-1.5 py-0.5 rounded mt-0.5`} title="% Atingimento vs Orçamento">
+                                {atingimento.toFixed(1)}%
+                            </span>
+                        </div>
+                    )}
                   </div>
 
                 </div>
@@ -576,7 +581,6 @@ export default function TopDownArena() {
 
       <div className="max-w-[1600px] mx-auto bg-white rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-200 overflow-hidden">
         
-        {/* BARRA DE PESQUISA OMNIBOX (Limpa e Funcional) */}
         <div className="bg-slate-50 p-4 border-b border-slate-200 flex items-center justify-between">
             <div className="flex items-center gap-3 w-full max-w-md px-4 py-2.5 bg-white border border-slate-300 rounded-xl shadow-sm transition-all focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-blue-500">
                 <Search className="w-5 h-5 text-slate-400" />
@@ -595,7 +599,6 @@ export default function TopDownArena() {
           <table className="w-full text-left border-collapse">
             <thead>
               <tr>
-                {/* CABEÇALHO CLICÁVEL: HIERARQUIA */}
                 <th className="bg-slate-900 p-0 border-b border-slate-800 w-[400px]">
                   <div 
                     onClick={() => handleSort('nome')}
@@ -606,7 +609,6 @@ export default function TopDownArena() {
                   </div>
                 </th>
 
-                {/* CABEÇALHOS CLICÁVEIS: MESES */}
                 {colunasData?.map((m: any, i: number) => (
                   <th key={i} className="bg-slate-900 p-0 border-b border-slate-800 border-l border-slate-800/50 min-w-[160px]">
                     <div 
@@ -642,18 +644,33 @@ export default function TopDownArena() {
                       <span className="font-bold text-sm text-white">SUMÁRIO GERENCIAL</span>
                     </div>
                   </td>
-                  {colunasData?.map((m: any, i: number) => (
-                    <td key={i} className="px-6 py-5 border-l border-slate-800/50 text-right">
-                      <div className="flex flex-col items-end">
-                        <span className="font-black text-white text-base">
-                          {formatVolume(totaisGerais[m.mes_banco]?.vol || 0)} <span className="text-[10px] text-slate-400 font-medium ml-1">CX</span>
-                        </span>
-                        <span className="font-bold text-emerald-400 text-xs tracking-tight mt-1 bg-emerald-400/10 px-2 py-0.5 rounded">
-                          {formatMoeda(totaisGerais[m.mes_banco]?.fat || 0)}
-                        </span>
-                      </div>
-                    </td>
-                  ))}
+                  {colunasData?.map((m: any, i: number) => {
+                    const t = totaisGerais[m.mes_banco];
+                    const perc = t.orc > 0 ? (t.fat / t.orc) * 100 : 0;
+                    const corPerc = perc >= 100 ? 'text-emerald-400' : 'text-rose-400';
+
+                    return (
+                      <td key={i} className="px-6 py-5 border-l border-slate-800/50 text-right">
+                        <div className="flex flex-col items-end">
+                          <span className="font-black text-white text-base">
+                            {formatVolume(t?.vol || 0)} <span className="text-[10px] text-slate-400 font-medium ml-1">CX</span>
+                          </span>
+                          <span className="font-bold text-blue-400 text-xs tracking-tight mt-1 bg-blue-400/10 px-2 py-0.5 rounded">
+                            {formatMoeda(t?.fat || 0)}
+                          </span>
+                          
+                          {/* SUMÁRIO GLOBAL DO ORÇAMENTO */}
+                          {t.orc > 0 && (
+                            <div className="flex flex-col items-end mt-2 pt-2 border-t border-slate-700/50 w-full">
+                               <span className="text-[9px] text-slate-400 font-bold uppercase tracking-widest">Orçamento</span>
+                               <span className="text-xs font-bold text-slate-300">{formatMoeda(t.orc)}</span>
+                               <span className={`text-[10px] font-black ${corPerc} mt-1 tracking-widest`}>{perc.toFixed(1)}%</span>
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                    );
+                  })}
                 </tr>
               </tfoot>
             )}

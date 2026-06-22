@@ -4,225 +4,213 @@ import polars as pl
 from datetime import date
 from dateutil.relativedelta import relativedelta
 from sqlalchemy import text
-from app.core.database import engine 
+import time
+
+from app.core.database import SessionLocal 
 from app.ml.models_library import (
-    HoltModel, HoltWintersModel, ThetaModelWrapper, CrostonModel, MovingAverageModel, 
-    ProphetModel, AutoArimaModel, calcular_acuracia, LocalMLAutoregressive, DeepLearningForecaster
+    AutoArimaModel, HoltWintersModel, CrostonModel, 
+    LocalMLAutoregressive, calcular_acuracia, limpar_falsos_zeros
 )
 
 class NexusForecaster:
     def __init__(self):
-        self.forecast_horizon = 5
-        self.cv_folds = 3 
+        self.forecast_horizon = 5 # M0, M1, M2, M3, M4
+        self.validation_size = 3  # Meses escondidos para o teste cego (Cross-Validation)
         
-        self.pesos_taticos = np.array([0.5, 2.0, 2.0, 2.0, 0.5])
-        
-        self.especialistas = {
-            'XGBoost_Direct': LocalMLAutoregressive('xgb'),
-            'LightGBM_Direct': LocalMLAutoregressive('lgb'),
-            'CatBoost_Direct': LocalMLAutoregressive('cat'),
-            'RandomForest_Direct': LocalMLAutoregressive('rf'),
-            'Prophet_Agressivo': ProphetModel(),
+        # ---------------------------------------------------------
+        # ARSENAL DE MODELOS
+        # ---------------------------------------------------------
+        self.modelos_disponiveis = {
+            'XGBoost_Multivariado': LocalMLAutoregressive('xgb'),
+            'LightGBM_Multivariado': LocalMLAutoregressive('lgb'),
             'AutoARIMA_Sazonal': AutoArimaModel(),
-            'TiDE_DeepLearning': DeepLearningForecaster('tide'),
-            'TFT_DeepLearning': DeepLearningForecaster('tft'),   
             'HoltWinters_Sazonal': HoltWintersModel(),
-            'Holt_Trend': HoltModel(),
-            'Theta': ThetaModelWrapper(),
-            'Croston_Intermitente': CrostonModel(),
-            'MediaMovel_Fallback': MovingAverageModel(window=3)
+            'Croston_Intermitente': CrostonModel() # Especialista em Zeros/Rupturas
         }
 
-    def executar_arena(self, log_callback=print) -> pl.DataFrame:
-        hoje = date.today()
-        ciclo_atual = hoje.strftime("%m/%Y")
-        mes_atual_str = hoje.strftime("%Y-%m")
-        
-        ciclo_anterior_dt = hoje - relativedelta(months=1)
-        ciclo_anterior = ciclo_anterior_dt.strftime("%m/%Y")
-        
-        log_callback("📥 [ENGINE] Extraindo Catálogo Completo e Histórico de Vendas (INCLUINDO NPIs)...")
-        
-        query_historico = text("""
+    def _obter_dados_alpha(self, db, data_corte: str) -> pd.DataFrame:
+        """
+        MOTOR ALPHA (SELL-IN): Lê o histórico de faturamento da fábrica (Gobi).
+        Visão Nacional por SKU. Univariado (apenas tempo e volume).
+        """
+        query = text("""
             SELECT 
-                p.sku AS produto,
-                p.descricao,
-                TO_CHAR(v.data_pedido, 'YYYY-MM') AS mes_ano,
-                SUM(v.qt_pedido) AS total_qtpedido,
-                CASE 
-                    WHEN SUM(v.qt_pedido) = 0 THEN 0 
-                    ELSE SUM(v.vl_pedido) / SUM(v.qt_pedido) 
-                END AS pmv
-            FROM dim_produtos p
-            LEFT JOIN fato_vendas v ON p.sku = v.sku AND TO_CHAR(v.data_pedido, 'YYYY-MM') < :mes_atual
-            WHERE UPPER(TRIM(p.curva)) != 'DESCONTINUADO'
-            GROUP BY 
-                p.sku, p.descricao, TO_CHAR(v.data_pedido, 'YYYY-MM')
-            ORDER BY produto, mes_ano;
+                sku, 
+                DATE_TRUNC('month', data_pedido) AS mes_data,
+                SUM(qt_pedido) AS volume
+            FROM fato_vendas
+            WHERE data_pedido >= :data_corte
+            GROUP BY sku, DATE_TRUNC('month', data_pedido)
+            ORDER BY sku, mes_data ASC
         """)
-        
-        df = pd.read_sql(query_historico, engine, params={"mes_atual": mes_atual_str})
-        
-        if df.empty: 
-            log_callback("❌ [ENGINE] Banco vazio ou nenhum SKU ativo encontrado. Abortando IA.")
-            return pl.DataFrame()
+        df = pd.read_sql(query, db.bind, params={"data_corte": data_corte})
+        df['mes_data'] = pd.to_datetime(df['mes_data'])
+        return df
 
-        log_callback(f"🧠 [ENGINE] Resgatando Proxy Humano (Ciclo {ciclo_anterior}) para proteção anti-falhas...")
-        query_human = text("""
-            SELECT sku, mes_projetado, SUM(vol_final) as vol_humano
-            FROM fato_ibp_granular
-            WHERE ciclo_sop = :ciclo_ant
-            GROUP BY sku, mes_projetado
+    def _obter_dados_beta(self, db) -> pd.DataFrame:
+        """
+        MOTOR BETA (SELL-OUT): Lê o histórico do Canal Indireto (MTRIX).
+        Visão Nacional por SKU. Multivariado (Tempo, Volume e Variação de Estoque).
+        """
+        query = text("""
+            SELECT 
+                sku, 
+                TO_DATE(mes_ano, 'YYYY-MM') AS mes_data,
+                SUM(volume_sellout) AS volume
+            FROM fato_mtrix_historico_mensal
+            GROUP BY sku, mes_ano
+            ORDER BY sku, mes_data ASC
         """)
-        df_human = pd.read_sql(query_human, engine, params={"ciclo_ant": ciclo_anterior})
+        df = pd.read_sql(query, db.bind)
+        df['mes_data'] = pd.to_datetime(df['mes_data'])
         
-        human_dict = {}
-        for _, r in df_human.iterrows():
-            sku = r['sku']
-            mes_proj = r['mes_projetado'] if isinstance(r['mes_projetado'], date) else r['mes_projetado'].date()
-            if sku not in human_dict: 
-                human_dict[sku] = {}
-            human_dict[sku][mes_proj] = float(r['vol_humano'])
+        # O modelo deteta automaticamente esta coluna se futuramente for preenchida
+        if 'estoque_mensal' in df.columns:
+            df.rename(columns={'estoque_mensal': 'estoque'}, inplace=True)
+            
+        return df
 
-        log_callback("⚙️ [ENGINE] Formatando cronologia e tapando buracos de demanda nula...")
-        df['mes_ano_dt'] = pd.to_datetime(df['mes_ano'])
+    def _torneio_modelos(self, df_sku: pd.DataFrame, is_beta: bool):
+        """
+        O CORAÇÃO DA IA: Treina, testa às cegas, escolhe o Campeão e prevê o futuro.
+        """
+        # 1. Cura Matemática: Remove Zeros antes do lançamento do produto
+        df_limpo = limpar_falsos_zeros(df_sku, 'mes_data', 'volume')
         
-        data_max = hoje.replace(day=1) - pd.DateOffset(months=1)
-        datas_validas = df['mes_ano_dt'].dropna()
-        data_min = datas_validas.min() if not datas_validas.empty else data_max - pd.DateOffset(months=12)
-        idx_completo = pd.date_range(start=data_min, end=data_max, freq='MS')
-        skus = df['produto'].unique()
+        if len(df_limpo) < 6:
+            media = df_limpo['volume'].mean() if len(df_limpo) > 0 else 0.0
+            return np.full(self.forecast_horizon, media), "Media_Movel_Fallback", 0.0
+
+        # O índice tem de ser a data para as regressões temporais
+        df_limpo.set_index('mes_data', inplace=True)
         
-        df_completo_list = []
-        for sku in skus:
-            df_sku = df[(df['produto'] == sku) & (df['mes_ano'].notna())].set_index('mes_ano_dt')
-            df_reidx = df_sku.reindex(idx_completo)
-            df_reidx['produto'] = sku
-            df_reidx['total_qtpedido'] = df_reidx['total_qtpedido'].fillna(0)
-            
-            if 'pmv' in df_reidx.columns: 
-                df_reidx['pmv'] = df_reidx['pmv'].replace(0, np.nan).ffill().bfill()
-            df_reidx['pmv'] = df_reidx['pmv'].fillna(0)
-            
-            df_reidx = df_reidx.reset_index().rename(columns={'index': 'mes_ano_dt'})
-            df_completo_list.append(df_reidx)
-            
-        df_global = pd.concat(df_completo_list)
-
-        log_callback(f"⚔️ [ENGINE] Iniciando Arena Blindada com ENSEMBLE para {len(skus)} SKUs...")
-        resultados_forecast = []
-        contador = 0
-        data_inicio_previsao = data_max + pd.DateOffset(months=1)
-
-        for sku in skus:
-            df_sku = df_global[df_global['produto'] == sku].sort_values('mes_ano_dt')
-            serie = pd.Series(df_sku['total_qtpedido'].values, index=df_sku['mes_ano_dt'])
-            ultimo_pmv = df_sku.iloc[-1].get('pmv', 0)
-            
-            tamanho_serie = len(serie)
-            avaliacoes_cv = {nome: [] for nome in self.especialistas.keys()}
-            
-            sucesso_ml = False
-            previsao_final = []
-            melhor_modelo_nome = "Proxy_Humano_Herdado"
-            maior_acuracia_media = 100.0
-
-            if serie.sum() > 0:
-                folds_aplicaveis = min(self.cv_folds, max(1, tamanho_serie - self.forecast_horizon - 2))
-                
-                if folds_aplicaveis >= 1:
-                    for fold in range(folds_aplicaveis):
-                        corte_teste = self.forecast_horizon + fold
-                        treino_cv = serie.iloc[:-corte_teste]
-                        teste_real_cv = serie.iloc[-corte_teste : -corte_teste + self.forecast_horizon] if fold > 0 else serie.iloc[-corte_teste:]
-                        
-                        if len(treino_cv) < 3 or treino_cv.sum() == 0: 
-                            continue
-
-                        for nome, modelo in self.especialistas.items():
-                            try:
-                                preds_cv = modelo.fit_predict(treino_cv, self.forecast_horizon)
-                                acc_cv = calcular_acuracia(teste_real_cv.values, preds_cv, pesos=self.pesos_taticos)
-                                avaliacoes_cv[nome].append(acc_cv)
-                            except Exception:
-                                pass 
-                else:
-                    for nome in self.especialistas.keys():
-                        avaliacoes_cv[nome] = [1.0]
-
-                ranking = []
-                for nome, acc_lista in avaliacoes_cv.items():
-                    if acc_lista:
-                        ranking.append((nome, np.mean(acc_lista)))
-                
-                ranking.sort(key=lambda item: item[1], reverse=True)
-
-                top_n = 3
-                modelos_sucesso = []
-                previsoes_sucesso = []
-                acuracias_sucesso = []
-
-                for nome_modelo, acc_media in ranking:
-                    if len(modelos_sucesso) >= top_n:
-                        break
-                    try:
-                        modelo_candidato = self.especialistas[nome_modelo]
-                        projecao_tentativa = modelo_candidato.fit_predict(serie, self.forecast_horizon)
-                        
-                        if len(projecao_tentativa) == self.forecast_horizon:
-                            modelos_sucesso.append(nome_modelo)
-                            previsoes_sucesso.append(projecao_tentativa)
-                            acuracias_sucesso.append(acc_media)
-                    except Exception:
-                        continue 
-                
-                if modelos_sucesso:
-                    sucesso_ml = True
-                    soma_acc = sum(acuracias_sucesso)
-                    if soma_acc > 0:
-                        pesos = [acc / soma_acc for acc in acuracias_sucesso]
-                    else:
-                        pesos = [1.0 / len(acuracias_sucesso)] * len(acuracias_sucesso)
-                        
-                    previsao_final = np.zeros(self.forecast_horizon)
-                    for idx_mod, preds in enumerate(previsoes_sucesso):
-                        previsao_final += np.array(preds) * pesos[idx_mod]
+        # 2. Divisão de Treino vs Teste (Esconde os últimos meses)
+        df_treino = df_limpo.iloc[:-self.validation_size]
+        df_teste = df_limpo.iloc[-self.validation_size:]
+        
+        y_real = df_teste['volume'].values
+        
+        melhor_modelo_nome = "Media_Movel_Fallback"
+        menor_erro_wmape = 999.0
+        
+        # 3. A Batalha (Champion/Challenger)
+        for nome_modelo, motor in self.modelos_disponiveis.items():
+            try:
+                # Regras táticas de eliminação
+                if is_beta and nome_modelo == "AutoARIMA_Sazonal": 
+                    continue # ARIMA sofre com muitos zeros do Sell-out
+                if not is_beta and nome_modelo == "Croston_Intermitente":
+                    continue # Croston é exclusivo para o canal ponta (Beta)
                     
-                    nomes_curtos = [n.split('_')[0] for n in modelos_sucesso]
-                    melhor_modelo_nome = f"Ensemble ({'+'.join(nomes_curtos)})"
-                    maior_acuracia_media = np.average(acuracias_sucesso, weights=pesos) if soma_acc > 0 else 0.0
+                if hasattr(motor, '_create_features'):
+                    preds_teste = motor.predict(df_treino, horizon=self.validation_size)
                 else:
-                    sucesso_ml = False
-
-            for i in range(self.forecast_horizon):
-                data_proj = (data_inicio_previsao + pd.DateOffset(months=i)).to_pydatetime().date()
+                    preds_teste = motor.predict(df_treino['volume'], horizon=self.validation_size)
                 
-                if sucesso_ml:
-                    vol_proj = max(0, previsao_final[i])
-                else:
-                    dict_sku = human_dict.get(sku, {})
-                    vol_proj = dict_sku.get(data_proj)
-                    
-                    if vol_proj is None:
-                        if dict_sku:
-                            ultima_data = max(dict_sku.keys())
-                            vol_proj = dict_sku[ultima_data]
-                        else:
-                            vol_proj = 0.0
+                acuracia = calcular_acuracia(y_real, preds_teste)
+                erro_wmape = 100.0 - acuracia
                 
-                resultados_forecast.append({
-                    "ciclo_sop": ciclo_atual, 
-                    "produto": sku, 
-                    "mes_projetado": data_proj,
-                    "vol_ia_global": round(vol_proj, 2), 
-                    "pmv_aplicado": round(ultimo_pmv, 2),
-                    "modelo_vencedor": melhor_modelo_nome, 
-                    "acuracia": round(maior_acuracia_media, 4)  
-                })
+                if erro_wmape < menor_erro_wmape:
+                    menor_erro_wmape = erro_wmape
+                    melhor_modelo_nome = nome_modelo
+            except Exception as e:
+                pass 
+                
+        # 4. A Previsão Oficial (Refit do Campeão com 100% dos dados)
+        motor_campeao = self.modelos_disponiveis.get(melhor_modelo_nome)
+        
+        try:
+            if hasattr(motor_campeao, '_create_features'):
+                futuro = motor_campeao.predict(df_limpo, horizon=self.forecast_horizon)
+            else:
+                futuro = motor_campeao.predict(df_limpo['volume'], horizon=self.forecast_horizon)
+        except:
+            futuro = np.full(self.forecast_horizon, df_limpo['volume'].mean())
             
-            contador += 1
-            if contador % 50 == 0: log_callback(f"   ⏳ Processados {contador}/{len(skus)} SKUs...")
+        acuracia_final = max(0.0, 100.0 - menor_erro_wmape)
+        return futuro, melhor_modelo_nome, acuracia_final
 
-        df_resultados = pl.DataFrame(resultados_forecast)
-        log_callback(f"✅ [ENGINE] {df_resultados.height} projeções geradas com sucesso (Mistura de Especialistas + Proxy Humano)!")
-        return df_resultados
+    def executar_arena(self, ciclo_alvo: str, log_callback=print):
+        """
+        Orquestra a execução independente dos Motores Alpha e Beta.
+        """
+        from datetime import datetime
+        
+        # 1. TRADUZ O CICLO DO ADMIN PARA O "MÊS ZERO" DA IA
+        try:
+            mes_str, ano_str = ciclo_alvo.split('/')
+            data_ancora = date(int(ano_str), int(mes_str), 1)
+        except Exception:
+            data_ancora = date.today().replace(day=1)
+            
+        # Janela de treino (últimos 3 anos a partir da âncora)
+        data_corte = (data_ancora - relativedelta(years=3)).strftime("%Y-%m-%d")
+        
+        db = SessionLocal()
+        resultados_alpha = []
+        
+        try:
+            # =========================================================
+            # 🧠 TREINAMENTO DO MOTOR ALPHA (FÁBRICA / SELL-IN)
+            # =========================================================
+            log_callback(f"      🔬 [MOTOR ALPHA] Puxando histórico Gobi ERP (Ancorado em {ciclo_alvo})...")
+            df_alpha = self._obter_dados_alpha(db, data_corte)
+            skus_alpha = df_alpha['sku'].unique()
+            
+            log_callback(f"      🔬 [MOTOR ALPHA] Iniciando Torneio de Algoritmos para {len(skus_alpha)} SKUs...")
+            
+            for sku in skus_alpha:
+                df_sku = df_alpha[df_alpha['sku'] == sku].copy()
+                
+                # Previsão, Quem Ganhou, e Acurácia
+                previsao, campeao, acuracia = self._torneio_modelos(df_sku, is_beta=False)
+                
+                # Guarda resultados respeitando o esquema que o distributor.py espera
+                for i in range(self.forecast_horizon):
+                    mes_proj = data_ancora + relativedelta(months=i)
+                    resultados_alpha.append({
+                        "ciclo_sop": ciclo_alvo,
+                        "produto": sku,
+                        "mes_projetado": mes_proj,
+                        "vol_ia_global": round(previsao[i], 2),
+                        "pmv_aplicado": 0.0, # Necessário para o Rateio
+                        "modelo_vencedor": campeao,
+                        "acuracia": round(acuracia, 2)
+                    })
+
+            # =========================================================
+            # 🧠 TREINAMENTO DO MOTOR BETA (CANAL / SELL-OUT)
+            # =========================================================
+            log_callback("      🔬 [MOTOR BETA] Puxando histórico de Distribuição (MTRIX)...")
+            df_beta = self._obter_dados_beta(db)
+            skus_beta = df_beta['sku'].unique()
+            
+            if len(skus_beta) > 0:
+                log_callback(f"      🔬 [MOTOR BETA] Iniciando Torneio de Sell-out para {len(skus_beta)} SKUs...")
+                
+                for sku in skus_beta:
+                    df_sku = df_beta[df_beta['sku'] == sku].copy()
+                    
+                    previsao, campeao, acuracia = self._torneio_modelos(df_sku, is_beta=True)
+                    
+                    # Atualiza diretamente a Snapshot do MTRIX com a previsão M0 (Mês atual)
+                    db.execute(text("""
+                        UPDATE fato_mtrix_snapshot 
+                        SET previsao_sellout_m0 = :prev 
+                        WHERE sku = :sku AND ciclo_sop = :ciclo
+                    """), {"prev": round(previsao[0], 2), "sku": sku, "ciclo": ciclo_alvo})
+                
+                db.commit()
+                log_callback("      ✅ [MOTOR BETA] Previsões de esgotamento de prateleira salvas no Dossiê.")
+            else:
+                log_callback("      ⚠️ [MOTOR BETA] Sem dados de Canal Indireto para treinar. Ignorado.")
+
+            # Retorna o Alpha como Polars DataFrame para o Pipeline fazer o Rateio Tático
+            return pl.DataFrame(resultados_alpha)
+
+        except Exception as e:
+            db.rollback()
+            log_callback(f"❌ [ERRO ML] Falha catastrófica na IA: {str(e)}")
+            raise e
+        finally:
+            db.close()

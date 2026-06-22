@@ -264,3 +264,144 @@ class NexusLoader:
             raise e
         finally:
             db.close()
+    
+    def executar_carga_mtrix(self, ciclo_alvo: str, log_callback=print):
+        from app.core.database import SessionLocal
+        from app.models.domain_models import FatoMtrixSnapshot, FatoMtrixHistoricoMensal
+        from sqlalchemy import text
+        import polars as pl
+        import s3fs 
+
+        log_callback(f"   -> [MTRIX] Iniciando Data Cleansing e sumarização do S3 (Ciclo {ciclo_alvo})...")
+
+        try:
+            fs = s3fs.S3FileSystem()
+            bucket_path = "s3://nexus-datalake-linea-prd/mtrix"
+
+            # =================================================================
+            # 1. CARREGAR E HIGIENIZAR DIMENSÕES (DE/PARA)
+            # =================================================================
+            try:
+                # Limpeza: Remove espaços invisíveis do SKU digitado errado
+                df_prod = pl.read_parquet(f"{bucket_path}/sellout_produtos.parquet", storage_options={"s3": fs})
+                df_prod = df_prod.select([
+                    pl.col("PRODUCT_CODE").cast(pl.Utf8),
+                    pl.col("PRODUCT_SKU_CODE").cast(pl.Utf8).str.strip_chars().alias("sku")
+                ])
+            except Exception:
+                df_prod = pl.DataFrame({"PRODUCT_CODE": [], "sku": []}).cast(pl.Utf8)
+
+            try:
+                # Limpeza: Remove pontuação do CNPJ e garante 14 dígitos (zeros à esquerda)
+                df_dist = pl.read_parquet(f"{bucket_path}/sellout_distribuidores.parquet", storage_options={"s3": fs})
+                df_dist = df_dist.select([
+                    pl.col("DISTRIBUTOR_CODE").cast(pl.Utf8),
+                    pl.col("CGC").cast(pl.Utf8).str.replace_all(r"\D", "").str.zfill(14).alias("cgc")
+                ])
+            except Exception:
+                df_dist = pl.DataFrame({"DISTRIBUTOR_CODE": [], "cgc": []}).cast(pl.Utf8)
+
+            # =================================================================
+            # 2. PROCESSAR ESTOQUE (USANDO QTY_CONV2 PARA CAIXAS)
+            # =================================================================
+            log_callback("      • Mapeando posições de estoque no canal (Lendo QTY_CONV2)...")
+            try:
+                lf_estoque = pl.scan_parquet(f"{bucket_path}/sellout_estoque_*.parquet", storage_options={"s3": fs})
+                df_estoque = (
+                    lf_estoque
+                    .with_columns([
+                        pl.col("QTY_CONV2").cast(pl.Float64, strict=False).fill_null(0.0),
+                        pl.col("STOCK_DATE").cast(pl.Utf8)
+                    ])
+                    .sort("STOCK_DATE", descending=True)
+                    .group_by(["DISTRIBUTOR_CODE", "PRODUCT_CODE"])
+                    .agg(pl.col("QTY_CONV2").first().alias("estoque_atual_caixas"))
+                ).collect()
+            except Exception as e:
+                log_callback(f"      ⚠️ Aviso Estoque S3: {e}")
+                df_estoque = pl.DataFrame({"DISTRIBUTOR_CODE": [], "PRODUCT_CODE": [], "estoque_atual_caixas": []}).cast(pl.Utf8)
+
+            # =================================================================
+            # 3. PROCESSAR SELL-OUT (HISTÓRICO E M-1) - QTY_CONV2
+            # =================================================================
+            log_callback("      • Sumarizando volume de saída em Caixas (QTY_CONV2)...")
+            try:
+                lf_sellout = pl.scan_parquet(f"{bucket_path}/sellout_sellout_*.parquet", storage_options={"s3": fs})
+                
+                df_sellout_mensal = (
+                    lf_sellout
+                    .with_columns([
+                        # Limpeza: Pega apenas "YYYY-MM" das datas formatadas de forma bizarra
+                        pl.col("SELLOUT_DATE").cast(pl.Utf8).str.slice(0, 7).alias("mes_ano"),
+                        pl.col("QTY_CONV2").cast(pl.Float64, strict=False).fill_null(0.0)
+                    ])
+                    .group_by(["DISTRIBUTOR_CODE", "PRODUCT_CODE", "mes_ano"])
+                    .agg(pl.col("QTY_CONV2").sum().alias("volume_sellout"))
+                ).collect()
+                
+                if len(df_sellout_mensal) > 0:
+                    ultimo_mes_str = df_sellout_mensal.select(pl.col("mes_ano").max()).item()
+                    df_sellout_m1 = (
+                        df_sellout_mensal
+                        .filter(pl.col("mes_ano") == ultimo_mes_str)
+                        .select([
+                            "DISTRIBUTOR_CODE", 
+                            "PRODUCT_CODE", 
+                            pl.col("volume_sellout").alias("sellout_m1_caixas")
+                        ])
+                    )
+                else:
+                    df_sellout_m1 = pl.DataFrame({"DISTRIBUTOR_CODE": [], "PRODUCT_CODE": [], "sellout_m1_caixas": []})
+                    
+            except Exception as e:
+                log_callback(f"      ⚠️ Aviso Sell-out S3: {e}")
+                df_sellout_mensal = pl.DataFrame({"DISTRIBUTOR_CODE": [], "PRODUCT_CODE": [], "mes_ano": [], "volume_sellout": []})
+                df_sellout_m1 = pl.DataFrame({"DISTRIBUTOR_CODE": [], "PRODUCT_CODE": [], "sellout_m1_caixas": []})
+
+            # =================================================================
+            # 4. HARMONIZAÇÃO E CRUZAMENTO FINAL
+            # =================================================================
+            log_callback("      • Cruzando matrizes de Distribuição com ERP Linea...")
+            
+            # Une Estoque com M-1
+            df_snap = df_estoque.join(df_sellout_m1, on=["DISTRIBUTOR_CODE", "PRODUCT_CODE"], how="full", coalesce=True).fill_null(0.0)
+            
+            # Traz as descrições limpas (SKU e CNPJ)
+            df_snap = df_snap.join(df_prod, on="PRODUCT_CODE", how="left", coalesce=True).join(df_dist, on="DISTRIBUTOR_CODE", how="left", coalesce=True)
+            df_snap = df_snap.drop_nulls(subset=["sku", "cgc"])
+            
+            # Calcula Dias de Cobertura de forma segura
+            df_snap = df_snap.with_columns(
+                pl.when(pl.col("sellout_m1_caixas") > 0)
+                .then((pl.col("estoque_atual_caixas") / pl.col("sellout_m1_caixas")) * 30.0)
+                .otherwise(999.0)
+                .alias("dias_cobertura")
+            )
+
+            df_hist = df_sellout_mensal.join(df_prod, on="PRODUCT_CODE", how="left", coalesce=True).join(df_dist, on="DISTRIBUTOR_CODE", how="left", coalesce=True)
+            df_hist = df_hist.drop_nulls(subset=["sku", "cgc"])
+
+            # =================================================================
+            # 5. INJEÇÃO ATÓMICA NO POSTGRESQL
+            # =================================================================
+            db = SessionLocal()
+            try:
+                db.execute(text("DELETE FROM fato_mtrix_snapshot WHERE ciclo_sop = :c"), {"c": ciclo_alvo})
+                db.execute(text("DELETE FROM fato_mtrix_historico_mensal WHERE ciclo_sop = :c"), {"c": ciclo_alvo})
+                
+                snap_dicts = df_snap.with_columns(pl.lit(ciclo_alvo).alias("ciclo_sop"), pl.lit(0.0).alias("previsao_sellout_m0")).to_dicts()
+                hist_dicts = df_hist.with_columns(pl.lit(ciclo_alvo).alias("ciclo_sop")).to_dicts()
+
+                if snap_dicts: db.bulk_insert_mappings(FatoMtrixSnapshot, snap_dicts)
+                if hist_dicts: db.bulk_insert_mappings(FatoMtrixHistoricoMensal, hist_dicts)
+
+                db.commit()
+                log_callback(f"✅ [MTRIX] Data Lake processado! {len(snap_dicts)} posições e {len(hist_dicts)} meses gravados.")
+            except Exception as e:
+                db.rollback()
+                raise e
+            finally:
+                db.close()
+
+        except Exception as general_e:
+            log_callback(f"❌ [MTRIX] Erro Crítico de Pipeline: {general_e}")

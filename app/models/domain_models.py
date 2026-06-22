@@ -184,3 +184,31 @@ class FatoOrcamento(Base):
     sku = Column(String(255), primary_key=True)
     mes_projetado = Column(Date, primary_key=True)
     receita_orcamento = Column(Numeric(15, 2))
+
+class FatoMtrixSnapshot(Base):
+    """Guarda a fotografia do mês atual (KPIs do Dossiê)"""
+    __tablename__ = 'fato_mtrix_snapshot'
+
+    id = Column(Integer, primary_key=True, index=True)
+    ciclo_sop = Column(String(10), index=True) # Ex: "06/2026"
+    sku = Column(String(255), index=True)
+    cgc = Column(String(255), index=True)
+    
+    estoque_atual_caixas = Column(Float, default=0.0)
+    sellout_m1_caixas = Column(Float, default=0.0)
+    dias_cobertura = Column(Float, default=0.0)
+    
+    # Campo reservado para o Motor Beta da IA preencher depois
+    previsao_sellout_m0 = Column(Float, default=0.0) 
+
+class FatoMtrixHistoricoMensal(Base):
+    """Guarda a agregação mensal limpa para desenhar o gráfico em milissegundos"""
+    __tablename__ = 'fato_mtrix_historico_mensal'
+
+    id = Column(Integer, primary_key=True, index=True)
+    ciclo_sop = Column(String(10), index=True) 
+    sku = Column(String(255), index=True)
+    cgc = Column(String(255), index=True)
+    
+    mes_ano = Column(String(7), index=True) # Ex: "2026-05"
+    volume_sellout = Column(Float, default=0.0)
