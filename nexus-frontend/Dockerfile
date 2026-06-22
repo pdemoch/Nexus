@@ -1,5 +1,5 @@
 # Estágio 1: Build do React (Node.js)
-FROM node:18-alpine as build
+FROM node:20-alpine as build
 WORKDIR /app
 
 # Copia os ficheiros de dependências e instala
