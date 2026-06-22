@@ -13,6 +13,11 @@ from app.api.routers.router_auth import get_current_user
 router = APIRouter(prefix="/api/v1/kpis", tags=["Auditoria e KPIs"])
 
 def calcular_ciclo_baseline(mes_alvo: str) -> str:
+    """
+    Mapeamento de Congelamento S&OP (Regra de Negócio Linea):
+    - 04/2026, 05/2026 e 06/2026 congelados no Baseline (04/2026)
+    - 07/2026 em diante = Lag 2 (Mês Alvo - 2 Meses)
+    """
     mes, ano = mes_alvo.split('/')
     dt_alvo = date(int(ano), int(mes), 1)
     dt_limite_baseline = date(2026, 6, 1)
@@ -50,15 +55,15 @@ async def carregar_auditoria_cpfr(
                 params_query["segmento"] = segmento
 
             if lente == "sellin":
-                # BLINDAGEM DE VOLUMES COM CTEs (Impede explosão cartesiana)
+                # BLINDAGEM DE VOLUMES COM CTEs (Sem espaços nos nomes!)
                 query = text(f"""
-                    WITH Vendas Agrupadas AS (
+                    WITH Vendas AS (
                         SELECT sku, SUM(qt_pedido) AS vol_real
                         FROM fato_vendas
                         WHERE TO_CHAR(data_pedido, 'YYYY-MM') = :mes_sql
                         GROUP BY sku
                     ),
-                    Planejamento Agrupado AS (
+                    Planejamento AS (
                         SELECT sku, SUM(vol_ia) AS vol_ia_congelado, SUM(vol_final) AS vol_comercial_congelado
                         FROM fato_ibp_granular
                         WHERE TO_CHAR(mes_projetado, 'YYYY-MM') = :mes_sql 
@@ -78,15 +83,15 @@ async def carregar_auditoria_cpfr(
                       AND (COALESCE(v.vol_real, 0) > 0 OR COALESCE(i.vol_ia_congelado, 0) > 0 OR COALESCE(i.vol_comercial_congelado, 0) > 0)
                 """)
             else:
-                # BLINDAGEM DE VOLUMES MTRIX
+                # BLINDAGEM DE VOLUMES MTRIX (Sem espaços nos nomes!)
                 query = text(f"""
-                    WITH Sellout Agrupado AS (
+                    WITH Sellout AS (
                         SELECT sku, SUM(volume_sellout) AS vol_real
                         FROM fato_mtrix_historico_mensal
                         WHERE mes_ano = :mes_sql
                         GROUP BY sku
                     ),
-                    Snapshot Agrupada AS (
+                    Snapshot AS (
                         SELECT sku, MAX(previsao_sellout_m0) AS vol_ia_congelado, SUM(estoque_atual_caixas) AS estoque_canal, AVG(dias_cobertura) AS dias_cobertura
                         FROM fato_mtrix_snapshot
                         WHERE ciclo_sop = :ciclo_congelado
