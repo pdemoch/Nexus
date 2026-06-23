@@ -90,12 +90,12 @@ async def carregar_auditoria_cpfr(
                 query = text(f"""
                     WITH Ultimo_Ciclo_Mtrix AS (SELECT MAX(ciclo_sop) as max_ciclo FROM fato_mtrix_historico_mensal WHERE mes_ano = :mes_sql),
                     Distribuidores AS (SELECT DISTINCT cgc FROM fato_mtrix_historico_mensal WHERE mes_ano = :mes_sql AND ciclo_sop = (SELECT max_ciclo FROM Ultimo_Ciclo_Mtrix) AND cgc IS NOT NULL),
-                    FatFabrica AS (SELECT v.sku, SUM(v.qt_pedido) AS vol_sellin_real FROM fato_vendas v INNER JOIN Distribuidores d ON v.cgc = d.cgc WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql GROUP BY v.sku),
                     Sellout AS (SELECT sku, SUM(volume_sellout) AS vol_sellout_real FROM fato_mtrix_historico_mensal WHERE mes_ano = :mes_sql AND ciclo_sop = (SELECT max_ciclo FROM Ultimo_Ciclo_Mtrix) GROUP BY sku),
+                    Metas_Pareadas AS (SELECT i.sku, SUM(i.vol_ia) AS vol_ia_congelado, SUM(i.vol_final) AS vol_comercial_congelado FROM fato_ibp_granular i INNER JOIN Distribuidores d ON i.cgc = d.cgc WHERE TO_CHAR(i.mes_projetado, 'YYYY-MM') = :mes_sql AND i.ciclo_sop = :ciclo_congelado GROUP BY i.sku),
                     Estoque AS (SELECT DISTINCT ON (sku) sku, estoque_atual_caixas, dias_cobertura FROM fato_mtrix_snapshot WHERE ciclo_sop = :ciclo_congelado ORDER BY sku, id DESC)
-                    SELECT p.sku, p.descricao, p.categoria, p.segmento, :mes_str AS mes_ano, COALESCE(f.vol_sellin_real, 0) AS vol_real, COALESCE(s.vol_sellout_real, 0) AS vol_ia_congelado, COALESCE(e.estoque_atual_caixas, 0) AS estoque_canal, COALESCE(e.dias_cobertura, 0) AS dias_cobertura, COALESCE(s.vol_sellout_real, 0) AS vol_comercial_congelado
-                    FROM dim_produtos p LEFT JOIN FatFabrica f ON p.sku = f.sku LEFT JOIN Sellout s ON p.sku = s.sku LEFT JOIN Estoque e ON p.sku = e.sku
-                    WHERE 1=1 {clausula_filtro} AND (COALESCE(f.vol_sellin_real, 0) > 0 OR COALESCE(s.vol_sellout_real, 0) > 0 OR COALESCE(e.estoque_atual_caixas, 0) > 0)
+                    SELECT p.sku, p.descricao, p.categoria, p.segmento, :mes_str AS mes_ano, COALESCE(s.vol_sellout_real, 0) AS vol_real, COALESCE(m.vol_ia_congelado, 0) AS vol_ia_congelado, COALESCE(m.vol_comercial_congelado, 0) AS vol_comercial_congelado, COALESCE(e.estoque_atual_caixas, 0) AS estoque_canal, COALESCE(e.dias_cobertura, 0) AS dias_cobertura
+                    FROM dim_produtos p LEFT JOIN Sellout s ON p.sku = s.sku LEFT JOIN Metas_Pareadas m ON p.sku = m.sku LEFT JOIN Estoque e ON p.sku = e.sku
+                    WHERE 1=1 {clausula_filtro} AND (COALESCE(s.vol_sellout_real, 0) > 0 OR COALESCE(m.vol_ia_congelado, 0) > 0 OR COALESCE(m.vol_comercial_congelado, 0) > 0 OR COALESCE(e.estoque_atual_caixas, 0) > 0)
                 """)
             df = pd.read_sql(query, db.bind, params=params_query)
             if not df.empty: resultados_meses.append(df)
@@ -116,6 +116,9 @@ async def carregar_auditoria_cpfr(
         df_sku = df_sku.sort_values(by="erro_abs_comercial", ascending=False)
 
         soma_real = df_sku["vol_real"].sum()
+        soma_ia = df_sku["vol_ia_congelado"].sum()
+        soma_comercial = df_sku["vol_comercial_congelado"].sum()
+
         wmape_ia = df_sku["mape_ia"].sum() / len(df_sku) if len(df_sku) > 0 else 0
         wmape_comercial = df_sku["mape_comercial"].sum() / len(df_sku) if len(df_sku) > 0 else 0
         
@@ -123,13 +126,16 @@ async def carregar_auditoria_cpfr(
             wmape_ia = np.abs(df_sku["vol_real"] - df_sku["vol_ia_congelado"]).sum() / soma_real
             wmape_comercial = np.abs(df_sku["vol_real"] - df_sku["vol_comercial_congelado"]).sum() / soma_real
 
-        bias_global = (df_sku["vol_comercial_congelado"].sum() - soma_real) / soma_real if soma_real > 0 else 0.0
+        # 🔥 NOVO: Divisão do Viés Global
+        bias_ia = (soma_ia - soma_real) / soma_real if soma_real > 0 else 0.0
+        bias_humano = (soma_comercial - soma_real) / soma_real if soma_real > 0 else 0.0
 
         return {
             "kpis_globais": {
                 "wmape_ia": round(wmape_ia, 4), "wmape_comercial": round(wmape_comercial, 4),
-                "fva": round(wmape_ia - wmape_comercial, 4) if lente == "sellin" else 0.0, 
-                "bias_global": round(bias_global, 4), "cobertura_media_canal": int(df_c[df_c["dias_cobertura"] < 999]["dias_cobertura"].mean()) if lente == "sellout" and not df_c.empty else 0
+                "fva": round(wmape_ia - wmape_comercial, 4), 
+                "bias_ia": round(bias_ia, 4), "bias_humano": round(bias_humano, 4), 
+                "cobertura_media_canal": int(df_c[df_c["dias_cobertura"] < 999]["dias_cobertura"].mean()) if lente == "sellout" and not df_c.empty else 0
             },
             "cronologia": [], "tabela_skus": df_sku.to_dict(orient="records")
         }
@@ -137,7 +143,7 @@ async def carregar_auditoria_cpfr(
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==============================================================================
-# 3. TORRE DE CONTROLE MTD (COM DUPLO GAP - IA E HUMANO)
+# 3. TORRE DE CONTROLE MTD (COM DUPLO GAP E DUPLO BIAS)
 # ==============================================================================
 @router.get("/torre-controle")
 async def carregar_torre_controle(
@@ -177,7 +183,6 @@ async def carregar_torre_controle(
         if not resultados: return {"graficos": [], "skus": []}
         df = pd.concat(resultados, ignore_index=True)
         
-        # Blindagem contra concatenação de strings escondidas
         for col in ['val_real', 'val_meta_ia', 'val_meta_hum']:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
@@ -185,22 +190,25 @@ async def carregar_torre_controle(
         for m in meses_horizonte:
             df_m = df[df["mes_ano"] == m]
             if df_m.empty: continue
-            sr, sm = df_m["val_real"].sum(), df_m["val_meta_hum"].sum()
+            sr = df_m["val_real"].sum()
+            sm_ia = df_m["val_meta_ia"].sum()
+            sm_hum = df_m["val_meta_hum"].sum()
+
             wmape = (np.abs(df_m["val_real"] - df_m["val_meta_hum"]).sum() / sr) if sr > 0 else 1.0
             
-            df_m_mape = df_m[df_m["val_real"] > 0]
-            mape = np.mean(np.abs(df_m_mape["val_real"] - df_m_mape["val_meta_hum"]) / df_m_mape["val_real"]) if not df_m_mape.empty else 1.0
+            # 🔥 NOVO: Separação Chronológica do Viés
+            bias_ia = ((sm_ia - sr) / sr) if sr > 0 else 0
+            bias_humano = ((sm_hum - sr) / sr) if sr > 0 else 0
             
-            cronologia.append({"mes": m, "wmape": round(wmape, 4), "mape": round(mape, 4), "bias": round(((sm - sr) / sr), 4) if sr > 0 else 0})
+            cronologia.append({
+                "mes": m, "wmape": round(wmape, 4), 
+                "bias_ia": round(bias_ia, 4), 
+                "bias_humano": round(bias_humano, 4)
+            })
 
-        # Agrupamento Multi-Mês Seguro
         df_sku = df.groupby(["sku", "descricao"]).agg({"val_real": "sum", "val_meta_ia": "sum", "val_meta_hum": "sum"}).reset_index()
-        
-        # Cálculo dos Gaps (Meta - Realizado) -> >0 significa "Falta Vender", <0 "Estourou Meta"
         df_sku["gap_ia"] = df_sku["val_meta_ia"] - df_sku["val_real"]
         df_sku["gap_humano"] = df_sku["val_meta_hum"] - df_sku["val_real"]
-
-        # MAPE
         df_sku["mape_ia"] = np.where(df_sku["val_real"] > 0, np.abs(df_sku["gap_ia"]) / df_sku["val_real"], np.where(df_sku["val_meta_ia"] > 0, 1.0, 0.0))
         df_sku["mape_humano"] = np.where(df_sku["val_real"] > 0, np.abs(df_sku["gap_humano"]) / df_sku["val_real"], np.where(df_sku["val_meta_hum"] > 0, 1.0, 0.0))
         

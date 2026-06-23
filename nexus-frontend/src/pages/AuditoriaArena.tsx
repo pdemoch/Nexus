@@ -4,7 +4,7 @@ import {
   Layers, ShoppingCart, TrendingUp, TrendingDown, Factory, Target, Activity, 
   Search, RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, DollarSign
 } from 'lucide-react';
-import { ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, LineChart, Line, ReferenceLine, ComposedChart, Bar } from 'recharts';
+import { ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, LineChart, Line, ReferenceLine, ComposedChart, Bar, Legend } from 'recharts';
 
 // --- HELPERS DE FORMATAÇÃO ---
 const formatFin = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor || 0));
@@ -302,12 +302,21 @@ export default function AuditoriaArena() {
         )}
       </div>
 
+      {/* RENDERIZAÇÃO DOS GRÁFICOS */}
       {lente === 'sellin' || lente === 'sellout' ? (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-indigo-500 shadow-md"><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">% WMAPE IA</div><div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_ia)}</div></div>
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-sky-500 shadow-md"><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">{lente === 'sellin' ? '% WMAPE Humano' : 'Erro Escoamento'}</div><div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_comercial)}</div></div>
           <div className={`bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md border-l-4 ${kpisGerais.fva >= 0 ? 'border-l-emerald-500' : 'border-l-rose-500'}`}><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2 flex justify-between">FVA (Melhoria) {kpisGerais.fva >= 0 ? <TrendingUp className="w-4 h-4 text-emerald-500"/> : <TrendingDown className="w-4 h-4 text-rose-500"/>}</div><div className={`text-3xl font-black ${kpisGerais.fva >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{lente === 'sellin' ? formatPct(kpisGerais.fva) : 'N/A'}</div></div>
-          <div className={`bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md border-l-4 ${kpisGerais.bias_global > 0 ? 'border-l-amber-500' : 'border-l-rose-500'}`}><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">BIAS Global</div><div className={`text-3xl font-black ${kpisGerais.bias_global > 0 ? 'text-amber-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.bias_global)}</div></div>
+          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md">
+            <div className="text-[10px] font-black uppercase text-slate-400 tracking-wider mb-2 flex justify-between border-b border-slate-700 pb-1">
+              <span>BIAS Humano</span><span>BIAS IA</span>
+            </div>
+            <div className="flex justify-between items-center mt-2">
+              <span className={`text-xl font-black ${kpisGerais.bias_humano > 0 ? 'text-amber-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.bias_humano)}</span>
+              <span className={`text-xl font-black ${kpisGerais.bias_ia > 0 ? 'text-amber-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.bias_ia)}</span>
+            </div>
+          </div>
         </div>
       ) : lente === 'kpis' ? (
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
@@ -318,9 +327,20 @@ export default function AuditoriaArena() {
             </div>
           </div>
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md">
-            <h3 className="text-sm font-black text-white uppercase tracking-widest mb-4 flex items-center gap-2">Bias Temporal (Viés)</h3>
+            <h3 className="text-sm font-black text-white uppercase tracking-widest mb-4 flex items-center gap-2">Bias Temporal (Interferência Humana vs IA)</h3>
             <div className="h-[220px] w-full">
-              <ResponsiveContainer><LineChart data={graficosKpi} margin={{ top: 10, right: 10, bottom: 0, left: -20 }}><CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} /><XAxis dataKey="mes" stroke="#64748b" tick={{fontSize: 10}} /><YAxis stroke="#64748b" tickFormatter={(v) => `${(v*100).toFixed(0)}%`} tick={{fontSize: 10}} /><RechartsTooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155' }} formatter={(v:any) => formatPct(v)} /><ReferenceLine y={0} stroke="#94a3b8" strokeWidth={2} /><Line type="step" dataKey="bias" name="Viés" stroke="#f59e0b" strokeWidth={3} dot={{ r: 5 }} /></LineChart></ResponsiveContainer>
+              <ResponsiveContainer>
+                <LineChart data={graficosKpi} margin={{ top: 10, right: 10, bottom: 0, left: -20 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                  <XAxis dataKey="mes" stroke="#64748b" tick={{fontSize: 10}} />
+                  <YAxis stroke="#64748b" tickFormatter={(v) => `${(v*100).toFixed(0)}%`} tick={{fontSize: 10}} />
+                  <RechartsTooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155' }} formatter={(v:any) => formatPct(v)} />
+                  <Legend verticalAlign="top" height={36} wrapperStyle={{ fontSize: '10px', fontWeight: 'bold' }}/>
+                  <ReferenceLine y={0} stroke="#94a3b8" strokeWidth={2} />
+                  <Line type="monotone" dataKey="bias_ia" name="Viés (BIAS) IA" stroke="#a855f7" strokeWidth={2} strokeDasharray="5 5" dot={{ r: 4 }} />
+                  <Line type="monotone" dataKey="bias_humano" name="Viés (BIAS) S&OP" stroke="#f59e0b" strokeWidth={3} dot={{ r: 5 }} />
+                </LineChart>
+              </ResponsiveContainer>
             </div>
           </div>
         </div>
@@ -331,6 +351,7 @@ export default function AuditoriaArena() {
         </div>
       )}
 
+      {/* RENDERIZAÇÃO DAS TABELAS COM SORT E TFOOT */}
       <div className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-2xl">
         {carregando ? (
           <div className="p-20 flex justify-center items-center gap-3 text-indigo-400 font-bold uppercase text-xs"><RefreshCw className="w-6 h-6 animate-spin" /> Processando Tabelas...</div>
@@ -396,7 +417,7 @@ export default function AuditoriaArena() {
                 <td className="px-4 py-4 text-right">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_real || 0), 0))}</td>
                 <td className="px-4 py-4 text-right text-indigo-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_ia_congelado || 0), 0))}</td>
                 <td className="px-4 py-4 text-right text-sky-400">{lente === 'sellin' ? formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_comercial_congelado || 0), 0)) : formatVol(sortedSkus.reduce((sum, r) => sum + (r.estoque_canal || 0), 0))}</td>
-                <td colSpan={2} className="px-4 py-4 bg-slate-950/40 text-right text-slate-500 text-[10px]">As médias ponderadas estão nos Cards de Topo</td>
+                <td colSpan={2} className="px-4 py-4 bg-slate-950/40 text-right text-slate-500 text-[10px]">Médias Ponderadas nos Cards Topo</td>
               </tr>
             </tfoot>
            </table>
