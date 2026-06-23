@@ -1,9 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
-import { 
-  Layers, ShoppingCart, TrendingUp, TrendingDown, Factory, Target, Activity, 
-  Search, RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, DollarSign
-} from 'lucide-react';
+import { Layers, ShoppingCart, TrendingUp, TrendingDown, Factory, Target, Activity, Search, RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, DollarSign } from 'lucide-react';
 import { ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, LineChart, Line, ReferenceLine, ComposedChart, Bar } from 'recharts';
 
 // --- HELPERS DE FORMATAÇÃO ---
@@ -11,11 +8,9 @@ const formatFin = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'cu
 const formatVol = (val: number) => Math.round(val || 0).toLocaleString('pt-BR');
 const formatPct = (val: number) => new Intl.NumberFormat('pt-BR', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(val || 0);
 
-// --- COMPONENTE: DROPDOWN ÁRVORE (ESTILO EXCEL) ---
+// --- COMPONENTE DROPDOWN ---
 const ExcelTreeDropdown = ({ titulo, options, selected, onChange }: any) => {
   const [open, setOpen] = useState(false);
-  
-  // Agrupa meses por Ano: { "2026": ["06/2026", "07/2026"] }
   const groupedOptions = useMemo(() => {
     return options.reduce((acc: any, mes: string) => {
       const ano = mes.split('/')[1];
@@ -26,7 +21,6 @@ const ExcelTreeDropdown = ({ titulo, options, selected, onChange }: any) => {
   }, [options]);
 
   const toggleMonth = (val: string) => selected.includes(val) && selected.length > 1 ? onChange(selected.filter((v: string) => v !== val)) : !selected.includes(val) && onChange([...selected, val]);
-  
   const toggleYear = (ano: string, mesesDoAno: string[]) => {
     const todosSelecionados = mesesDoAno.every(m => selected.includes(m));
     if (todosSelecionados) {
@@ -70,7 +64,17 @@ const ExcelTreeDropdown = ({ titulo, options, selected, onChange }: any) => {
   );
 };
 
-// --- COMPONENTE: DRILL-DOWN DE CLIENTES ---
+// --- COMPONENTE SORT HEADER ---
+const SortableHeader = ({ field, label, currentSort, requestSort, className = "text-right" }: any) => {
+  const isSorted = currentSort.key === field;
+  return (
+    <th onClick={() => requestSort(field)} className={`px-4 py-4 cursor-pointer hover:text-white transition-colors select-none ${className}`}>
+      {label} {isSorted ? (currentSort.direction === 'asc' ? '↑' : '↓') : ''}
+    </th>
+  );
+}
+
+// --- DRILL-DOWN CLIENTES ---
 const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => {
   const [expandido, setExpandido] = useState(false);
   const [clientes, setClientes] = useState<any[]>([]);
@@ -87,7 +91,7 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
     } catch (e) { } finally { setCarregando(false); }
   };
 
-  const variancia = row.val_meta_hum - row.val_real; // Se +, falta faturar. Se -, estourou.
+  const variancia = row.val_meta_hum - row.val_real; 
 
   return (
     <React.Fragment>
@@ -147,6 +151,7 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
   );
 };
 
+// --- TELA PRINCIPAL ---
 export default function AuditoriaArena() {
   const [lente, setLente] = useState<'kpis' | 'estoque' | 'sellin' | 'sellout'>('kpis');
   const [visao, setVisao] = useState<'caixas' | 'financeiro'>('financeiro');
@@ -165,6 +170,7 @@ export default function AuditoriaArena() {
   const [kpisGerais, setKpisGerais] = useState<any>({});
   const [carregando, setCarregando] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [sortConfig, setSortConfig] = useState({ key: 'erro_absoluto', direction: 'desc' });
 
   const formatador = visao === 'caixas' ? formatVol : formatFin;
 
@@ -194,22 +200,24 @@ export default function AuditoriaArena() {
         params.append('visao', visao);
         const res = await axios.get(`/api/v1/kpis/torre-controle?${params.toString()}`);
         setGraficosKpi(res.data.graficos || []); setSkus(res.data.skus || []);
+        setSortConfig({ key: 'erro_absoluto', direction: 'desc' });
       } 
       else if (lente === 'estoque') {
         const res = await axios.get(`/api/v1/kpis/riscos-estoque?${params.toString()}`);
         setSkus(res.data.estoque_sku || []); setKpisGerais(res.data.kpis_globais || {});
+        setSortConfig({ key: 'ruptura_rs', direction: 'desc' });
       }
       else {
         params.append('lente', lente);
         const res = await axios.get(`/api/v1/kpis/auditoria-dinamica?${params.toString()}`);
         setSkus(res.data.tabela_skus || []); setKpisGerais(res.data.kpis_globais || {});
+        setSortConfig({ key: 'erro_abs_comercial', direction: 'desc' });
       }
     } catch (err) {} finally { setCarregando(false); }
   };
 
   useEffect(() => { carregarDadosCore(); }, [lente, visao, categoriaSel, segmentoSel, mesesSelecionados]);
 
-  // --- FUNÇÃO ADICIONADA PARA O BOTÃO DE SINCRONIZAR ESTOQUE ---
   const handleSyncStock = async () => {
     setIsSyncing(true);
     try {
@@ -217,12 +225,24 @@ export default function AuditoriaArena() {
       await carregarDadosCore();
     } catch (e) {
       alert("Erro ao sincronizar com ERP GOBI.");
-    } finally {
-      setIsSyncing(false);
-    }
+    } finally { setIsSyncing(false); }
   };
 
-  const skusFiltrados = skus.filter(r => r.descricao?.toLowerCase().includes(buscaSku.toLowerCase()) || r.sku?.toLowerCase().includes(buscaSku.toLowerCase()));
+  const requestSort = (key: string) => {
+    let direction = 'desc';
+    if (sortConfig.key === key && sortConfig.direction === 'desc') direction = 'asc';
+    setSortConfig({ key, direction });
+  };
+
+  const sortedSkus = useMemo(() => {
+    let sortable = [...skus].filter(r => r.descricao?.toLowerCase().includes(buscaSku.toLowerCase()) || r.sku?.toLowerCase().includes(buscaSku.toLowerCase()));
+    sortable.sort((a, b) => {
+      if (a[sortConfig.key] < b[sortConfig.key]) return sortConfig.direction === 'asc' ? -1 : 1;
+      if (a[sortConfig.key] > b[sortConfig.key]) return sortConfig.direction === 'asc' ? 1 : -1;
+      return 0;
+    });
+    return sortable;
+  }, [skus, sortConfig, buscaSku]);
 
   return (
     <div className="p-6 bg-slate-950 min-h-screen text-slate-100 font-sans">
@@ -232,7 +252,7 @@ export default function AuditoriaArena() {
           <h1 className="text-2xl font-black text-white tracking-tight flex items-center gap-3">
             <Activity className="text-indigo-500 w-7 h-7" /> Torre de Controle S&OP
           </h1>
-          <p className="text-xs text-slate-400 mt-1 font-medium">Cockpit Executivo: Consequências Financeiras e Mapeamento de Erro (% WMAPE)</p>
+          <p className="text-xs text-slate-400 mt-1 font-medium">Cockpit Executivo: Consequências Financeiras e Mapeamento de Erro</p>
         </div>
 
         <div className="flex flex-col md:flex-row gap-3">
@@ -243,16 +263,16 @@ export default function AuditoriaArena() {
             </div>
           )}
           <div className="flex bg-slate-950 p-1.5 rounded-xl border border-slate-800 shadow-inner overflow-x-auto">
-            <button onClick={() => setLente('kpis')} className={`px-4 py-2 text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'kpis' ? 'bg-rose-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><Target className="w-4 h-4" /> Desvios MTD</button>
-            <button onClick={() => setLente('estoque')} className={`px-4 py-2 text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'estoque' ? 'bg-amber-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><Factory className="w-4 h-4" /> Riscos Estoque</button>
-            <button onClick={() => setLente('sellin')} className={`px-4 py-2 text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'sellin' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><Layers className="w-4 h-4" /> Retroativo Fábrica</button>
-            <button onClick={() => setLente('sellout')} className={`px-4 py-2 text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'sellout' ? 'bg-teal-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><ShoppingCart className="w-4 h-4" /> Retroativo MTRIX</button>
+            <button onClick={() => setLente('kpis')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'kpis' ? 'bg-rose-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><Target className="w-4 h-4" /> Desvios MTD</button>
+            <button onClick={() => setLente('estoque')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'estoque' ? 'bg-amber-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><Factory className="w-4 h-4" /> Riscos Estoque</button>
+            <button onClick={() => setLente('sellin')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'sellin' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><Layers className="w-4 h-4" /> Retroativo Fábrica</button>
+            <button onClick={() => setLente('sellout')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'sellout' ? 'bg-teal-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><ShoppingCart className="w-4 h-4" /> Retroativo MTRIX</button>
           </div>
         </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
-        {lente !== 'estoque' && <ExcelTreeDropdown titulo="Horizonte S&OP (Meses/Anos)" options={mesesDisponiveis} selected={mesesSelecionados} onChange={setMesesSelecionados} />}
+        {lente !== 'estoque' && <ExcelTreeDropdown titulo="Horizonte S&OP" options={mesesDisponiveis} selected={mesesSelecionados} onChange={setMesesSelecionados} />}
         <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
           <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2 block">Categoria</label>
           <select value={categoriaSel} onChange={(e) => setCategoriaSel(e.target.value)} className="w-full bg-slate-950 border border-slate-800 text-sm p-2 rounded-lg text-slate-300 focus:outline-none"><option value="Todas">Todas as Categorias</option>{listaCategorias.map(c => <option key={c} value={c}>{c}</option>)}</select>
@@ -262,7 +282,7 @@ export default function AuditoriaArena() {
           <select value={segmentoSel} onChange={(e) => setSegmentoSel(e.target.value)} className="w-full bg-slate-950 border border-slate-800 text-sm p-2 rounded-lg text-slate-300 focus:outline-none"><option value="Todos">Todos os Segmentos</option>{listaSegmentos.map(s => <option key={s} value={s}>{s}</option>)}</select>
         </div>
         <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
-          <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2 block">Pesquisar SKU</label>
+          <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2 flex justify-between">Pesquisar SKU <span className="text-indigo-400 font-bold">{sortedSkus.length} Itens</span></label>
           <div className="relative"><Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-500" /><input type="text" value={buscaSku} onChange={(e) => setBuscaSku(e.target.value)} placeholder="Código ou nome..." className="w-full bg-slate-950 border border-slate-800 text-sm py-2 pl-9 pr-3 rounded-lg text-slate-300 focus:outline-none" /></div>
         </div>
         {lente === 'estoque' && (
@@ -272,22 +292,16 @@ export default function AuditoriaArena() {
         )}
       </div>
 
+      {/* RENDERIZAÇÃO DOS GRÁFICOS */}
       {lente === 'sellin' || lente === 'sellout' ? (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-indigo-500 shadow-md">
-            <div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">% WMAPE IA (Erro Ponderado)</div>
-            <div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_ia)}</div>
-          </div>
-          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-sky-500 shadow-md">
-            <div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">{lente === 'sellin' ? '% WMAPE Humano (Erro Ponderado)' : 'Erro Escoamento'}</div>
-            <div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_comercial)}</div>
-          </div>
-          <div className={`bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md border-l-4 ${kpisGerais.fva >= 0 ? 'border-l-emerald-500' : 'border-l-rose-500'}`}>
-            <div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2 flex justify-between">FVA (Melhoria sobre IA) {kpisGerais.fva >= 0 ? <TrendingUp className="w-4 h-4 text-emerald-500"/> : <TrendingDown className="w-4 h-4 text-rose-500"/>}</div>
-            <div className={`text-3xl font-black ${kpisGerais.fva >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{lente === 'sellin' ? formatPct(kpisGerais.fva) : 'N/A'}</div>
-          </div>
+          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-indigo-500 shadow-md"><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">% WMAPE IA</div><div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_ia)}</div></div>
+          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-sky-500 shadow-md"><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">{lente === 'sellin' ? '% WMAPE Humano' : 'Erro Escoamento'}</div><div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_comercial)}</div></div>
+          <div className={`bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md border-l-4 ${kpisGerais.fva >= 0 ? 'border-l-emerald-500' : 'border-l-rose-500'}`}><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2 flex justify-between">FVA (Melhoria) {kpisGerais.fva >= 0 ? <TrendingUp className="w-4 h-4 text-emerald-500"/> : <TrendingDown className="w-4 h-4 text-rose-500"/>}</div><div className={`text-3xl font-black ${kpisGerais.fva >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.fva)}</div></div>
           <div className={`bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md border-l-4 ${kpisGerais.bias_global > 0 ? 'border-l-amber-500' : 'border-l-rose-500'}`}>
-            <div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">BIAS Global (Viés)</div>
+            <div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2 flex justify-between">
+              BIAS Global {lente === 'sellout' && <span className="text-indigo-400">({kpisGerais.cobertura_media_canal} Dias Cob.)</span>}
+            </div>
             <div className={`text-3xl font-black ${kpisGerais.bias_global > 0 ? 'text-amber-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.bias_global)}</div>
           </div>
         </div>
@@ -300,7 +314,7 @@ export default function AuditoriaArena() {
             </div>
           </div>
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md">
-            <h3 className="text-sm font-black text-white uppercase tracking-widest mb-4 flex items-center gap-2">Bias Temporal (Viés Comercial)</h3>
+            <h3 className="text-sm font-black text-white uppercase tracking-widest mb-4 flex items-center gap-2">Bias Temporal (Viés)</h3>
             <div className="h-[220px] w-full">
               <ResponsiveContainer><LineChart data={graficosKpi} margin={{ top: 10, right: 10, bottom: 0, left: -20 }}><CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} /><XAxis dataKey="mes" stroke="#64748b" tick={{fontSize: 10}} /><YAxis stroke="#64748b" tickFormatter={(v) => `${(v*100).toFixed(0)}%`} tick={{fontSize: 10}} /><RechartsTooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155' }} formatter={(v:any) => formatPct(v)} /><ReferenceLine y={0} stroke="#94a3b8" strokeWidth={2} /><Line type="step" dataKey="bias" name="Viés" stroke="#f59e0b" strokeWidth={3} dot={{ r: 5 }} /></LineChart></ResponsiveContainer>
             </div>
@@ -308,19 +322,28 @@ export default function AuditoriaArena() {
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-          <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-rose-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><TrendingDown className="w-4 h-4 text-rose-500"/> Faturamento em Risco</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_ruptura_rs) : formatVol(kpisGerais.total_ruptura_rs)}</p><p className="text-[10px] text-slate-500 font-bold uppercase mt-1">Por Ruptura de Estoque</p></div>
-          <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-amber-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><Package className="w-4 h-4 text-amber-500"/> Capital Imobilizado</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_sobra_rs) : formatVol(kpisGerais.total_sobra_rs)}</p><p className="text-[10px] text-slate-500 font-bold uppercase mt-1">Excesso vs Meta To-Go</p></div>
+          <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-rose-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><TrendingDown className="w-4 h-4 text-rose-500"/> Faturamento em Risco</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_ruptura_rs) : formatVol(kpisGerais.total_ruptura_rs)}</p></div>
+          <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-amber-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><Package className="w-4 h-4 text-amber-500"/> Capital Imobilizado</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_sobra_rs) : formatVol(kpisGerais.total_sobra_rs)}</p></div>
         </div>
       )}
 
+      {/* RENDERIZAÇÃO DAS TABELAS COM SORT E TFOOT */}
       <div className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-2xl">
         {carregando ? (
-          <div className="p-20 flex justify-center items-center gap-3 text-indigo-400 font-bold uppercase text-xs"><RefreshCw className="w-6 h-6 animate-spin" /> Atualizando Cockpit...</div>
+          <div className="p-20 flex justify-center items-center gap-3 text-indigo-400 font-bold uppercase text-xs"><RefreshCw className="w-6 h-6 animate-spin" /> Processando Tabelas...</div>
         ) : lente === 'estoque' ? (
           <table className="w-full text-left whitespace-nowrap">
-            <thead><tr className="bg-slate-950 text-slate-400 text-[10px] font-black uppercase tracking-widest border-b border-slate-800"><th className="px-6 py-4">Produto</th><th className="px-4 py-4 text-right">Meta To-Go</th><th className="px-4 py-4 text-right text-indigo-400">Estoque Físico</th><th className="px-4 py-4 text-right bg-rose-950/10">Ruptura (Risco)</th><th className="px-6 py-4 text-right bg-amber-950/10">Sobra (Imobilizado)</th></tr></thead>
+            <thead>
+              <tr className="bg-slate-950 text-slate-400 text-[10px] font-black uppercase tracking-widest border-b border-slate-800">
+                <SortableHeader field="descricao" label="Produto" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
+                <SortableHeader field="meta_togo" label="Meta To-Go" currentSort={sortConfig} requestSort={requestSort} />
+                <SortableHeader field="estoque_atual" label="Estoque Físico" currentSort={sortConfig} requestSort={requestSort} className="text-indigo-400 text-right" />
+                <SortableHeader field="ruptura_rs" label="Ruptura (Risco)" currentSort={sortConfig} requestSort={requestSort} className="bg-rose-950/10 text-right" />
+                <SortableHeader field="sobra_rs" label="Sobra (Imobilizado)" currentSort={sortConfig} requestSort={requestSort} className="px-6 bg-amber-950/10 text-right" />
+              </tr>
+            </thead>
             <tbody className="divide-y divide-slate-800/60 text-xs">
-              {skusFiltrados.map((d, i) => (
+              {sortedSkus.map((d, i) => (
                 <tr key={i} className="hover:bg-slate-800/30">
                   <td className="px-6 py-3.5"><div className="flex flex-col"><span className="font-bold text-slate-200">{d.descricao}</span><span className="text-[10px] text-slate-500 font-mono">{d.sku}</span></div></td>
                   <td className="px-4 py-3.5 text-right font-black text-white">{formatVol(d.meta_togo)} CX</td>
@@ -330,34 +353,76 @@ export default function AuditoriaArena() {
                 </tr>
               ))}
             </tbody>
+            <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
+              <tr>
+                <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Totais da Visão</td>
+                <td className="px-4 py-4 text-right">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.meta_togo || 0), 0))} CX</td>
+                <td className="px-4 py-4 text-right">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.estoque_atual || 0), 0))} CX</td>
+                <td className="px-4 py-4 text-right text-rose-400">{visao === 'financeiro' ? formatFin(sortedSkus.reduce((sum, r) => sum + (r.ruptura_rs || 0), 0)) : formatVol(sortedSkus.reduce((sum, r) => sum + (r.ruptura_vol || 0), 0)) + ' CX'}</td>
+                <td className="px-6 py-4 text-right text-amber-400">{visao === 'financeiro' ? formatFin(sortedSkus.reduce((sum, r) => sum + (r.sobra_rs || 0), 0)) : formatVol(sortedSkus.reduce((sum, r) => sum + (r.sobra_vol || 0), 0)) + ' CX'}</td>
+              </tr>
+            </tfoot>
           </table>
         ) : lente === 'sellin' || lente === 'sellout' ? (
            <table className="w-full text-left whitespace-nowrap">
              <thead>
                <tr className="bg-slate-950 text-slate-400 border-b border-slate-800 text-[10px] font-black uppercase tracking-widest">
-                 <th className="px-6 py-4">Produto</th><th className="px-4 py-4 text-right">Realizado</th><th className="px-4 py-4 text-right">IA (Frozen)</th><th className="px-4 py-4 text-right">{lente === 'sellin' ? 'Humano (Frozen)' : 'Estoque Canal'}</th><th className="px-4 py-4 text-right border-l border-slate-800 bg-slate-950/40 text-rose-400">% MAPE IA</th>{lente === 'sellin' && <th className="px-4 py-4 text-right bg-slate-950/40 text-rose-400">% MAPE Humano</th>}<th className="px-6 py-4 text-right bg-slate-950/40">{lente === 'sellin' ? 'FVA (Melhoria)' : 'Status Canal'}</th>
+                 <SortableHeader field="descricao" label="Produto" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
+                 <SortableHeader field="vol_real" label="Realizado" currentSort={sortConfig} requestSort={requestSort} />
+                 <SortableHeader field="vol_ia_congelado" label="IA (Frozen)" currentSort={sortConfig} requestSort={requestSort} />
+                 <SortableHeader field="vol_comercial_congelado" label="Humano (Frozen)" currentSort={sortConfig} requestSort={requestSort} />
+                 {lente === 'sellout' && <SortableHeader field="estoque_canal" label="Estoque Canal" currentSort={sortConfig} requestSort={requestSort} />}
+                 <SortableHeader field="mape_ia" label="% MAPE IA" currentSort={sortConfig} requestSort={requestSort} className="border-l border-slate-800 bg-slate-950/40 text-rose-400 text-right" />
+                 <SortableHeader field="mape_comercial" label="% MAPE Humano" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/40 text-rose-400 text-right" />
                </tr>
              </thead>
              <tbody className="divide-y divide-slate-800/60 text-xs">
-               {skusFiltrados.map(row => (
+               {sortedSkus.map(row => (
                  <tr key={row.sku} className="hover:bg-slate-800/30">
                    <td className="px-6 py-3.5"><div className="flex flex-col"><span className="font-bold text-slate-200">{row.descricao}</span><span className="text-[10px] text-slate-500 font-mono mt-0.5">{row.sku}</span></div></td>
                    <td className="px-4 py-3.5 text-right font-black text-white">{formatVol(row.vol_real)}</td>
                    <td className="px-4 py-3.5 text-right font-semibold text-indigo-400 bg-indigo-950/10">{formatVol(row.vol_ia_congelado)}</td>
-                   <td className="px-4 py-3.5 text-right font-semibold text-sky-400 bg-sky-950/10">{lente === 'sellin' ? formatVol(row.vol_comercial_congelado) : formatVol(row.estoque_canal)}</td>
+                   <td className="px-4 py-3.5 text-right font-semibold text-sky-400 bg-sky-950/10">{formatVol(row.vol_comercial_congelado)}</td>
+                   {lente === 'sellout' && <td className="px-4 py-3.5 text-right font-semibold text-amber-400">{formatVol(row.estoque_canal)}</td>}
                    <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 border-l border-slate-800 bg-slate-950/40">{formatPct(row.mape_ia)}</td>
-                   {lente === 'sellin' && <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 bg-slate-950/40">{formatPct(row.mape_comercial)}</td>}
-                   <td className="px-6 py-3.5 text-right bg-slate-950/40">{lente === 'sellin' ? (row.fva > 0 ? <span className="bg-emerald-500/10 text-emerald-400 px-2.5 py-1 rounded font-black text-[10px]">+ {formatPct(row.fva)} FVA</span> : row.fva < 0 ? <span className="bg-rose-500/10 text-rose-400 px-2.5 py-1 rounded font-black text-[10px]">{formatPct(row.fva)} FVA</span> : <span className="text-slate-500 font-bold text-[10px]">Neutro</span>) : (<span className="bg-emerald-500/10 text-emerald-400 px-2.5 py-1 rounded font-black text-[10px]">Ativo</span>)}</td>
+                   <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 bg-slate-950/40">{formatPct(row.mape_comercial)}</td>
                  </tr>
                ))}
              </tbody>
+             <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
+              <tr>
+                <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Somas do Portfólio</td>
+                <td className="px-4 py-4 text-right">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_real || 0), 0))}</td>
+                <td className="px-4 py-4 text-right text-indigo-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_ia_congelado || 0), 0))}</td>
+                <td className="px-4 py-4 text-right text-sky-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_comercial_congelado || 0), 0))}</td>
+                {lente === 'sellout' && <td className="px-4 py-4 text-right text-amber-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.estoque_canal || 0), 0))}</td>}
+                <td colSpan={2} className="px-4 py-4 bg-slate-950/40 text-right text-slate-500 text-[10px]">Médias Ponderadas nos Cards Topo</td>
+              </tr>
+            </tfoot>
            </table>
         ) : (
            <table className="w-full text-left whitespace-nowrap">
-             <thead><tr className="bg-slate-950 text-slate-400 border-b border-slate-800 text-[10px] font-black uppercase tracking-widest"><th className="px-6 py-4">Produto (Clique p/ Clientes)</th><th className="px-4 py-4 text-right">Meta (Lag 2)</th><th className="px-4 py-4 text-right">Realizado MTD</th><th className="px-4 py-4 text-right bg-slate-950/40">Gap / Variância</th><th className="px-4 py-4 text-right border-l border-slate-800 bg-slate-950/40 text-rose-400">% MAPE MTD</th></tr></thead>
+             <thead>
+               <tr className="bg-slate-950 text-slate-400 border-b border-slate-800 text-[10px] font-black uppercase tracking-widest">
+                 <SortableHeader field="descricao" label="Produto (Clique p/ Clientes)" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
+                 <SortableHeader field="val_meta_hum" label="Meta (Lag 2)" currentSort={sortConfig} requestSort={requestSort} />
+                 <SortableHeader field="val_real" label="Realizado MTD" currentSort={sortConfig} requestSort={requestSort} />
+                 <SortableHeader field="erro_absoluto" label="Gap / Variância" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/40 text-right" />
+                 <SortableHeader field="mape_sku" label="% MAPE MTD" currentSort={sortConfig} requestSort={requestSort} className="border-l border-slate-800 bg-slate-950/40 text-rose-400 text-right" />
+               </tr>
+             </thead>
              <tbody className="divide-y divide-slate-800/60 text-xs">
-               {skusFiltrados.map((row) => <RowSKUDrillDown key={row.sku} row={row} visao={visao} mesesSelecionados={mesesSelecionados} formatador={formatador} />)}
+               {sortedSkus.map((row) => <RowSKUDrillDown key={row.sku} row={row} visao={visao} mesesSelecionados={mesesSelecionados} formatador={formatador} />)}
              </tbody>
+             <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
+              <tr>
+                <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Acumulado MTD</td>
+                <td className="px-4 py-4 text-right text-slate-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.val_meta_hum || 0), 0))}</td>
+                <td className="px-4 py-4 text-right">{formatador(sortedSkus.reduce((sum, r) => sum + (r.val_real || 0), 0))}</td>
+                <td className="px-4 py-4 text-right bg-slate-950/40 text-rose-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.erro_absoluto || 0), 0))} <span className="text-[9px] text-slate-500 block">Gap Absoluto</span></td>
+                <td className="px-4 py-4 bg-slate-950/40"></td>
+              </tr>
+            </tfoot>
            </table>
         )}
       </div>

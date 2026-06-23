@@ -18,9 +18,6 @@ def calcular_ciclo_lag2(mes_alvo: str) -> str:
     dt_lag2 = dt_alvo - relativedelta(months=2)
     return dt_lag2.strftime("%m/%Y")
 
-# ==============================================================================
-# 1. FILTROS EXCEL DINÂMICOS (100% TEMPO REAL)
-# ==============================================================================
 @router.get("/filtros-auditoria")
 async def carregar_filtros_auditoria(lente: str = "sellin", db: Session = Depends(get_db)):
     try:
@@ -28,22 +25,21 @@ async def carregar_filtros_auditoria(lente: str = "sellin", db: Session = Depend
         df_f = pd.read_sql(query_f, db.bind)
         
         if lente == "sellout":
-            q_meses = text("SELECT DISTINCT mes_ano FROM fato_mtrix_historico_mensal ORDER BY mes_ano DESC LIMIT 36")
+            q_meses = text("SELECT DISTINCT mes_ano FROM fato_mtrix_historico_mensal WHERE mes_ano >= '2025-01' ORDER BY mes_ano DESC")
             df_m = pd.read_sql(q_meses, db.bind)
             meses = [f"{str(m).split('-')[1]}/{str(m).split('-')[0]}" for m in df_m["mes_ano"].unique() if m] if not df_m.empty else []
         else:
             q_meses = text("""
                 SELECT DISTINCT TO_CHAR(mes_projetado, 'MM/YYYY') as mes_ano, TO_CHAR(mes_projetado, 'YYYY-MM') as sort_key 
                 FROM fato_ibp_granular 
-                WHERE mes_projetado >= CURRENT_DATE - INTERVAL '12 months' 
+                WHERE mes_projetado >= '2026-06-01' 
                 ORDER BY sort_key ASC
             """)
             df_m = pd.read_sql(q_meses, db.bind)
             meses = list(df_m["mes_ano"].unique()) if not df_m.empty else []
 
         if not meses:
-            dt_atual = datetime.datetime.now()
-            meses = [(dt_atual + relativedelta(months=i)).strftime("%m/%Y") for i in range(5)]
+            meses = ["06/2026"]
 
         return {
             "categorias": list(df_f["categoria"].dropna().unique()),
@@ -53,16 +49,13 @@ async def carregar_filtros_auditoria(lente: str = "sellin", db: Session = Depend
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ==============================================================================
-# 2. MOTOR DE AUDITORIA (SELL-IN E SELL-OUT) - MATEMÁTICA WMAPE/MAPE
-# ==============================================================================
 @router.get("/auditoria-dinamica")
 async def carregar_auditoria_cpfr(
     lente: str = "sellin", categoria: Optional[str] = "Todas", segmento: Optional[str] = "Todos",
     meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)
 ):
     if not meses_horizonte:
-        meses_horizonte = [datetime.datetime.now().strftime("%m/%Y")]
+        meses_horizonte = ["06/2026"]
 
     try:
         resultados_meses = []
@@ -70,7 +63,6 @@ async def carregar_auditoria_cpfr(
         for mes_str in meses_horizonte:
             mes_sql = f"{mes_str.split('/')[1]}-{mes_str.split('/')[0]}" 
             ciclo_congelado = calcular_ciclo_lag2(mes_str)
-
             clausula_filtro = ""
             params_query = {"mes_sql": mes_sql, "ciclo_congelado": ciclo_congelado, "mes_str": mes_str}
             
@@ -90,15 +82,16 @@ async def carregar_auditoria_cpfr(
                     WHERE 1=1 {clausula_filtro} AND (COALESCE(v.vol_real, 0) > 0 OR COALESCE(i.vol_ia_congelado, 0) > 0 OR COALESCE(i.vol_comercial_congelado, 0) > 0)
                 """)
             else:
+                # 💡 NOVA LÓGICA MTRIX: Cruza Sellout Real com Metas Pareadas da fato_ibp_granular
                 query = text(f"""
                     WITH Ultimo_Ciclo_Mtrix AS (SELECT MAX(ciclo_sop) as max_ciclo FROM fato_mtrix_historico_mensal WHERE mes_ano = :mes_sql),
                     Distribuidores AS (SELECT DISTINCT cgc FROM fato_mtrix_historico_mensal WHERE mes_ano = :mes_sql AND ciclo_sop = (SELECT max_ciclo FROM Ultimo_Ciclo_Mtrix) AND cgc IS NOT NULL),
-                    FatFabrica AS (SELECT v.sku, SUM(v.qt_pedido) AS vol_sellin_real FROM fato_vendas v INNER JOIN Distribuidores d ON v.cgc = d.cgc WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql GROUP BY v.sku),
                     Sellout AS (SELECT sku, SUM(volume_sellout) AS vol_sellout_real FROM fato_mtrix_historico_mensal WHERE mes_ano = :mes_sql AND ciclo_sop = (SELECT max_ciclo FROM Ultimo_Ciclo_Mtrix) GROUP BY sku),
+                    Metas_Pareadas AS (SELECT i.sku, SUM(i.vol_ia) AS vol_ia_congelado, SUM(i.vol_final) AS vol_comercial_congelado FROM fato_ibp_granular i INNER JOIN Distribuidores d ON i.cgc = d.cgc WHERE TO_CHAR(i.mes_projetado, 'YYYY-MM') = :mes_sql AND i.ciclo_sop = :ciclo_congelado GROUP BY i.sku),
                     Estoque AS (SELECT DISTINCT ON (sku) sku, estoque_atual_caixas, dias_cobertura FROM fato_mtrix_snapshot WHERE ciclo_sop = :ciclo_congelado ORDER BY sku, id DESC)
-                    SELECT p.sku, p.descricao, p.categoria, p.segmento, :mes_str AS mes_ano, COALESCE(f.vol_sellin_real, 0) AS vol_real, COALESCE(s.vol_sellout_real, 0) AS vol_ia_congelado, COALESCE(e.estoque_atual_caixas, 0) AS estoque_canal, COALESCE(e.dias_cobertura, 0) AS dias_cobertura, COALESCE(s.vol_sellout_real, 0) AS vol_comercial_congelado
-                    FROM dim_produtos p LEFT JOIN FatFabrica f ON p.sku = f.sku LEFT JOIN Sellout s ON p.sku = s.sku LEFT JOIN Estoque e ON p.sku = e.sku
-                    WHERE 1=1 {clausula_filtro} AND (COALESCE(f.vol_sellin_real, 0) > 0 OR COALESCE(s.vol_sellout_real, 0) > 0 OR COALESCE(e.estoque_atual_caixas, 0) > 0)
+                    SELECT p.sku, p.descricao, p.categoria, p.segmento, :mes_str AS mes_ano, COALESCE(s.vol_sellout_real, 0) AS vol_real, COALESCE(m.vol_ia_congelado, 0) AS vol_ia_congelado, COALESCE(m.vol_comercial_congelado, 0) AS vol_comercial_congelado, COALESCE(e.estoque_atual_caixas, 0) AS estoque_canal, COALESCE(e.dias_cobertura, 0) AS dias_cobertura
+                    FROM dim_produtos p LEFT JOIN Sellout s ON p.sku = s.sku LEFT JOIN Metas_Pareadas m ON p.sku = m.sku LEFT JOIN Estoque e ON p.sku = e.sku
+                    WHERE 1=1 {clausula_filtro} AND (COALESCE(s.vol_sellout_real, 0) > 0 OR COALESCE(m.vol_ia_congelado, 0) > 0 OR COALESCE(m.vol_comercial_congelado, 0) > 0 OR COALESCE(e.estoque_atual_caixas, 0) > 0)
                 """)
             df = pd.read_sql(query, db.bind, params=params_query)
             if not df.empty: resultados_meses.append(df)
@@ -108,18 +101,18 @@ async def carregar_auditoria_cpfr(
         
         df_sku = df_c.groupby(["sku", "descricao", "categoria", "segmento"]).agg({"vol_real": "sum", "vol_ia_congelado": "sum", "vol_comercial_congelado": "sum", "estoque_canal": "last", "dias_cobertura": "last"}).reset_index()
         
-        # MAPE: Abs(Real - Meta) / Real. Se Real = 0, considera 100% de erro (1.0).
+        for col in ["vol_real", "vol_ia_congelado", "vol_comercial_congelado"]:
+            df_sku[col] = pd.to_numeric(df_sku[col], errors='coerce').fillna(0)
+
         df_sku["mape_ia"] = np.where(df_sku["vol_real"] > 0, np.abs(df_sku["vol_real"] - df_sku["vol_ia_congelado"]) / df_sku["vol_real"], np.where(df_sku["vol_ia_congelado"] > 0, 1.0, 0.0))
         df_sku["mape_comercial"] = np.where(df_sku["vol_real"] > 0, np.abs(df_sku["vol_real"] - df_sku["vol_comercial_congelado"]) / df_sku["vol_real"], np.where(df_sku["vol_comercial_congelado"] > 0, 1.0, 0.0))
-        df_sku["fva"] = df_sku["mape_ia"] - df_sku["mape_comercial"] # Se positivo, Humano errou menos que IA
+        df_sku["fva"] = df_sku["mape_ia"] - df_sku["mape_comercial"]
         
-        # O Fator Financeiro Absoluto domina a ordem
         df_sku["erro_abs_comercial"] = np.abs(df_sku["vol_real"] - df_sku["vol_comercial_congelado"])
         df_sku = df_sku.sort_values(by="erro_abs_comercial", ascending=False)
 
-        # WMAPE Global (Evita que produtos com volume 1 distorçam a média da empresa)
         soma_real = df_sku["vol_real"].sum()
-        wmape_ia = df_sku["mape_ia"].sum() / len(df_sku) if len(df_sku) > 0 else 0 # Fallback
+        wmape_ia = df_sku["mape_ia"].sum() / len(df_sku) if len(df_sku) > 0 else 0
         wmape_comercial = df_sku["mape_comercial"].sum() / len(df_sku) if len(df_sku) > 0 else 0
         
         if soma_real > 0:
@@ -131,24 +124,18 @@ async def carregar_auditoria_cpfr(
         return {
             "kpis_globais": {
                 "wmape_ia": round(wmape_ia, 4), "wmape_comercial": round(wmape_comercial, 4),
-                "fva": round(wmape_ia - wmape_comercial, 4) if lente == "sellin" else 0.0, 
-                "bias_global": round(bias_global, 4), "cobertura_media_canal": int(df_c[df_c["dias_cobertura"] < 999]["dias_cobertura"].mean()) if lente == "sellout" and not df_c.empty else 0
+                "fva": round(wmape_ia - wmape_comercial, 4), # 🔥 FVA Liberado para TODAS as Lentes
+                "bias_global": round(bias_global, 4), 
+                "cobertura_media_canal": int(df_c[df_c["dias_cobertura"] < 999]["dias_cobertura"].mean()) if lente == "sellout" and not df_c.empty else 0
             },
             "cronologia": [], "tabela_skus": df_sku.to_dict(orient="records")
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ==============================================================================
-# 3. TORRE DE CONTROLE MTD (COM DRILL-DOWN E MAPE)
-# ==============================================================================
 @router.get("/torre-controle")
-async def carregar_torre_controle(
-    visao: str = "caixas", categoria: str = "Todas", segmento: str = "Todos", 
-    meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)
-):
-    if not meses_horizonte: meses_horizonte = [datetime.datetime.now().strftime("%m/%Y")]
-
+async def carregar_torre_controle(visao: str = "caixas", categoria: str = "Todas", segmento: str = "Todos", meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)):
+    if not meses_horizonte: meses_horizonte = ["06/2026"]
     try:
         resultados = []
         for mes_str in meses_horizonte:
@@ -174,6 +161,9 @@ async def carregar_torre_controle(
 
         if not resultados: return {"graficos": [], "skus": []}
         df = pd.concat(resultados, ignore_index=True)
+        
+        df['val_real'] = pd.to_numeric(df['val_real'], errors='coerce').fillna(0)
+        df['val_meta_hum'] = pd.to_numeric(df['val_meta_hum'], errors='coerce').fillna(0)
 
         cronologia = []
         for m in meses_horizonte:
@@ -181,11 +171,8 @@ async def carregar_torre_controle(
             if df_m.empty: continue
             sr, sm = df_m["val_real"].sum(), df_m["val_meta_hum"].sum()
             wmape = (np.abs(df_m["val_real"] - df_m["val_meta_hum"]).sum() / sr) if sr > 0 else 1.0
-            
             df_m_mape = df_m[df_m["val_real"] > 0]
             mape = np.mean(np.abs(df_m_mape["val_real"] - df_m_mape["val_meta_hum"]) / df_m_mape["val_real"]) if not df_m_mape.empty else 1.0
-            
-            # BIAS: (Meta - Real) / Real -> >0 (Sobra), <0 (Falta)
             cronologia.append({"mes": m, "wmape": round(wmape, 4), "mape": round(mape, 4), "bias": round(((sm - sr) / sr), 4) if sr > 0 else 0})
 
         df_sku = df.groupby(["sku", "descricao"]).agg({"val_real": "sum", "val_meta_hum": "sum"}).reset_index()
@@ -197,8 +184,7 @@ async def carregar_torre_controle(
 
 @router.get("/torre-controle/clientes/{sku}")
 async def drilldown_clientes_kpis(sku: str, visao: str = "caixas", meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)):
-    if not meses_horizonte: meses_horizonte = [datetime.datetime.now().strftime("%m/%Y")]
-
+    if not meses_horizonte: meses_horizonte = ["06/2026"]
     try:
         resultados = []
         for mes_str in meses_horizonte:
@@ -206,7 +192,6 @@ async def drilldown_clientes_kpis(sku: str, visao: str = "caixas", meses_horizon
             ciclo_congelado = calcular_ciclo_lag2(mes_str)
             fr = "qt_pedido" if visao == "caixas" else "vl_pedido"
             fm = "vol_final" if visao == "caixas" else "(vol_final * pmv_aplicado)"
-
             query = text(f"""
                 WITH Vendas AS (SELECT cgc, SUM({fr}) AS val_real FROM fato_vendas WHERE TO_CHAR(data_pedido, 'YYYY-MM') = :mes_sql AND sku = :sku GROUP BY cgc),
                 Metas AS (SELECT cgc, SUM({fm}) AS val_meta_hum FROM fato_ibp_granular WHERE TO_CHAR(mes_projetado, 'YYYY-MM') = :mes_sql AND ciclo_sop = :ciclo_congelado AND sku = :sku GROUP BY cgc),
@@ -220,24 +205,18 @@ async def drilldown_clientes_kpis(sku: str, visao: str = "caixas", meses_horizon
         return df_final.fillna("Não Cadastrado").to_dict(orient="records")
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
-# ==============================================================================
-# 4. INTELIGÊNCIA DE ESTOQUE E SINCRONIZAÇÃO
-# ==============================================================================
 @router.post("/sync-stock")
 async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
-    try:
-        return {"status": "success", "message": "Estoque sincronizado via API 90."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    try: return {"status": "success", "message": "Estoque sincronizado via API 90."}
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/riscos-estoque")
-async def carregar_riscos_estoque(categoria: str = "Todas", segmento: str = "Todos", db: Session = Depends(get_db)):
+async def carregar_riscos_estoque(categoria: str = "Todas", segmento: str = "Todos", meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)):
+    if not meses_horizonte: meses_horizonte = ["06/2026"]
     try:
-        hoje = datetime.date.today()
-        mes_sql = hoje.strftime("%Y-%m")
-        mes_str = hoje.strftime("%m/%Y")
-        ciclo_congelado = calcular_ciclo_lag2(mes_str)
-        
+        mes_alvo = meses_horizonte[0] 
+        mes_sql = f"{mes_alvo.split('/')[1]}-{mes_alvo.split('/')[0]}"
+        ciclo_congelado = calcular_ciclo_lag2(mes_alvo)
         clausula_filtro = ""
         params_query = {"mes_sql": mes_sql, "ciclo_congelado": ciclo_congelado}
         if categoria != "Todas": clausula_filtro += " AND p.categoria = :categoria"; params_query["categoria"] = categoria
@@ -251,9 +230,9 @@ async def carregar_riscos_estoque(categoria: str = "Todas", segmento: str = "Tod
             FROM dim_produtos p LEFT JOIN Estoque e ON p.sku = e.sku LEFT JOIN Vendas v ON p.sku = v.sku LEFT JOIN Metas m ON p.sku = m.sku
             WHERE 1=1 {clausula_filtro} AND (COALESCE(e.estoque_atual, 0) > 0 OR COALESCE(v.vendas_mtd, 0) > 0 OR COALESCE(m.meta_mes, 0) > 0)
         """)
-        
         df_sku = pd.read_sql(query_sku, db.bind, params=params_query)
         if df_sku.empty: return {"estoque_sku": [], "kpis_globais": {"total_ruptura_rs": 0, "total_sobra_rs": 0, "meta_caixas": 0, "realizado_caixas": 0}}
+        for col in ['meta_mes', 'vendas_mtd', 'estoque_atual', 'pmv']: df_sku[col] = pd.to_numeric(df_sku[col], errors='coerce').fillna(0)
 
         df_sku['meta_togo'] = np.maximum(0, df_sku['meta_mes'] - df_sku['vendas_mtd'])
         df_sku['ruptura_vol'] = np.maximum(0, df_sku['meta_togo'] - df_sku['estoque_atual'])
@@ -261,13 +240,7 @@ async def carregar_riscos_estoque(categoria: str = "Todas", segmento: str = "Tod
         df_sku['ruptura_rs'] = df_sku['ruptura_vol'] * df_sku['pmv']
         df_sku['sobra_rs'] = df_sku['sobra_vol'] * df_sku['pmv']
 
-        kpis = {
-            "total_ruptura_rs": float(df_sku['ruptura_rs'].sum()),
-            "total_sobra_rs": float(df_sku['sobra_rs'].sum()),
-            "meta_caixas": float(df_sku['meta_mes'].sum()),
-            "realizado_caixas": float(df_sku['vendas_mtd'].sum())
-        }
-
+        kpis = {"total_ruptura_rs": float(df_sku['ruptura_rs'].sum()), "total_sobra_rs": float(df_sku['sobra_rs'].sum()), "meta_caixas": float(df_sku['meta_mes'].sum()), "realizado_caixas": float(df_sku['vendas_mtd'].sum())}
         df_sku = df_sku.sort_values(by=["ruptura_rs", "sobra_rs"], ascending=[False, False])
         return {"estoque_sku": df_sku.to_dict(orient="records"), "kpis_globais": kpis}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
