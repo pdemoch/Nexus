@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
-import { Layers, ShoppingCart, TrendingUp, TrendingDown, Factory, Target, Activity, Search, RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, DollarSign } from 'lucide-react';
+import { 
+  Layers, ShoppingCart, TrendingUp, TrendingDown, Factory, Target, Activity, 
+  Search, RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, DollarSign
+} from 'lucide-react';
 import { ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, LineChart, Line, ReferenceLine, ComposedChart, Bar } from 'recharts';
 
 // --- HELPERS DE FORMATAÇÃO ---
@@ -68,7 +71,7 @@ const ExcelTreeDropdown = ({ titulo, options, selected, onChange }: any) => {
 const SortableHeader = ({ field, label, currentSort, requestSort, className = "text-right" }: any) => {
   const isSorted = currentSort.key === field;
   return (
-    <th onClick={() => requestSort(field)} className={`px-4 py-4 cursor-pointer hover:text-white transition-colors select-none ${className}`}>
+    <th onClick={() => requestSort(field)} className={`px-3 py-4 cursor-pointer hover:text-white transition-colors select-none ${className}`}>
       {label} {isSorted ? (currentSort.direction === 'asc' ? '↑' : '↓') : ''}
     </th>
   );
@@ -91,8 +94,6 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
     } catch (e) { } finally { setCarregando(false); }
   };
 
-  const variancia = row.val_meta_hum - row.val_real; 
-
   return (
     <React.Fragment>
       <tr className="hover:bg-slate-800/30 transition-colors cursor-pointer group" onClick={carregarClientes}>
@@ -102,18 +103,21 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
             <div className="flex flex-col"><span className="font-bold text-slate-200">{row.descricao}</span><span className="text-[10px] text-slate-500 font-mono">{row.sku}</span></div>
           </div>
         </td>
-        <td className="px-4 py-3 text-right font-semibold text-slate-400 border-b border-slate-800">{formatador(row.val_meta_hum)}</td>
-        <td className="px-4 py-3 text-right font-black text-white border-b border-slate-800">{formatador(row.val_real)}</td>
-        <td className="px-4 py-3 text-right font-bold border-b border-slate-800">
-           <span className={variancia > 0 ? 'text-rose-400' : 'text-emerald-400'}>{variancia > 0 ? 'Falta ' : 'Sobrou '}{formatador(Math.abs(variancia))}</span>
+        <td className="px-3 py-3 text-right font-semibold text-indigo-400 border-b border-slate-800">{formatador(row.val_meta_ia)}</td>
+        <td className="px-3 py-3 text-right font-semibold text-sky-400 border-b border-slate-800">{formatador(row.val_meta_hum)}</td>
+        <td className="px-3 py-3 text-right font-black text-white border-b border-slate-800">{formatador(row.val_real)}</td>
+        <td className="px-3 py-3 text-right font-bold border-b border-slate-800 bg-slate-950/20">
+           <span className={row.gap_ia > 0 ? 'text-rose-400' : 'text-emerald-400'}>{row.gap_ia > 0 ? 'Falta ' : 'Over '}{formatador(Math.abs(row.gap_ia))}</span>
         </td>
-        <td className="px-4 py-3 text-right font-mono font-bold text-rose-400 border-b border-slate-800 bg-slate-950/40">
-           {formatPct(row.mape_sku)}
+        <td className="px-3 py-3 text-right font-bold border-b border-slate-800 bg-slate-950/20">
+           <span className={row.gap_humano > 0 ? 'text-rose-400' : 'text-emerald-400'}>{row.gap_humano > 0 ? 'Falta ' : 'Over '}{formatador(Math.abs(row.gap_humano))}</span>
         </td>
+        <td className="px-3 py-3 text-right font-mono font-bold text-rose-400 border-b border-slate-800 bg-slate-950/40">{formatPct(row.mape_ia)}</td>
+        <td className="px-3 py-3 text-right font-mono font-bold text-rose-400 border-b border-slate-800 bg-slate-950/40">{formatPct(row.mape_humano)}</td>
       </tr>
       {expandido && (
         <tr className="bg-slate-900/50 shadow-inner">
-          <td colSpan={5} className="p-4 border-b border-slate-800">
+          <td colSpan={8} className="p-4 border-b border-slate-800">
             {carregando ? (
               <div className="text-xs text-indigo-400 flex items-center gap-2 font-bold"><RefreshCw className="w-4 h-4 animate-spin"/> Mapeando Clientes GOBI...</div>
             ) : clientes.length === 0 ? (
@@ -121,23 +125,29 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
             ) : (
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                 <div className="bg-slate-950 p-3 rounded-lg border border-rose-900/50">
-                  <h4 className="text-[10px] font-black uppercase tracking-widest text-rose-400 mb-2 flex items-center gap-2"><TrendingDown className="w-3 h-3"/> Alerta: Inadimplência de Meta (Gap)</h4>
+                  <h4 className="text-[10px] font-black uppercase tracking-widest text-rose-400 mb-2 flex items-center gap-2"><TrendingDown className="w-3 h-3"/> Alerta: Inadimplência de Meta</h4>
                   <div className="max-h-48 overflow-y-auto pr-2 space-y-1">
-                    {clientes.filter(c => c.variancia < 0).map(c => (
+                    {clientes.filter(c => c.gap_humano > 0).map(c => (
                       <div key={c.cgc} className="flex justify-between items-center bg-slate-900 p-2 rounded border border-slate-800 text-xs">
                          <div className="truncate pr-4"><span className="font-bold text-slate-300 block truncate">{c.razaosocial}</span><span className="text-[9px] text-slate-500 font-mono block">{c.cgc}</span></div>
-                         <div className="text-right shrink-0"><span className="block text-slate-400 text-[10px]">Falta Faturar</span><span className="font-black text-rose-400">{formatador(Math.abs(c.variancia))}</span></div>
+                         <div className="text-right shrink-0">
+                            <span className="block text-slate-400 text-[10px]">Gap S&OP: <span className="font-black text-rose-400">{formatador(Math.abs(c.gap_humano))}</span></span>
+                            <span className="block text-slate-500 text-[9px]">Gap IA: {formatador(Math.abs(c.gap_ia))}</span>
+                         </div>
                       </div>
                     ))}
                   </div>
                 </div>
                 <div className="bg-slate-950 p-3 rounded-lg border border-emerald-900/50">
-                  <h4 className="text-[10px] font-black uppercase tracking-widest text-emerald-400 mb-2 flex items-center gap-2"><AlertTriangle className="w-3 h-3"/> Alerta: Over-Forecast (Acima do Acordo)</h4>
+                  <h4 className="text-[10px] font-black uppercase tracking-widest text-emerald-400 mb-2 flex items-center gap-2"><AlertTriangle className="w-3 h-3"/> Alerta: Over-Forecast</h4>
                   <div className="max-h-48 overflow-y-auto pr-2 space-y-1">
-                    {clientes.filter(c => c.variancia > 0).map(c => (
+                    {clientes.filter(c => c.gap_humano < 0).map(c => (
                       <div key={c.cgc} className="flex justify-between items-center bg-slate-900 p-2 rounded border border-slate-800 text-xs">
                          <div className="truncate pr-4"><span className="font-bold text-slate-300 block truncate">{c.razaosocial}</span><span className="text-[9px] text-slate-500 font-mono block">{c.cgc}</span></div>
-                         <div className="text-right shrink-0"><span className="block text-slate-400 text-[10px]">Over</span><span className="font-black text-emerald-400">+{formatador(c.variancia)}</span></div>
+                         <div className="text-right shrink-0">
+                            <span className="block text-slate-400 text-[10px]">Over S&OP: <span className="font-black text-emerald-400">+{formatador(Math.abs(c.gap_humano))}</span></span>
+                            <span className="block text-slate-500 text-[9px]">Over IA: +{formatador(Math.abs(c.gap_ia))}</span>
+                         </div>
                       </div>
                     ))}
                   </div>
@@ -292,18 +302,12 @@ export default function AuditoriaArena() {
         )}
       </div>
 
-      {/* RENDERIZAÇÃO DOS GRÁFICOS */}
       {lente === 'sellin' || lente === 'sellout' ? (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-indigo-500 shadow-md"><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">% WMAPE IA</div><div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_ia)}</div></div>
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-sky-500 shadow-md"><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">{lente === 'sellin' ? '% WMAPE Humano' : 'Erro Escoamento'}</div><div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_comercial)}</div></div>
-          <div className={`bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md border-l-4 ${kpisGerais.fva >= 0 ? 'border-l-emerald-500' : 'border-l-rose-500'}`}><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2 flex justify-between">FVA (Melhoria) {kpisGerais.fva >= 0 ? <TrendingUp className="w-4 h-4 text-emerald-500"/> : <TrendingDown className="w-4 h-4 text-rose-500"/>}</div><div className={`text-3xl font-black ${kpisGerais.fva >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.fva)}</div></div>
-          <div className={`bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md border-l-4 ${kpisGerais.bias_global > 0 ? 'border-l-amber-500' : 'border-l-rose-500'}`}>
-            <div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2 flex justify-between">
-              BIAS Global {lente === 'sellout' && <span className="text-indigo-400">({kpisGerais.cobertura_media_canal} Dias Cob.)</span>}
-            </div>
-            <div className={`text-3xl font-black ${kpisGerais.bias_global > 0 ? 'text-amber-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.bias_global)}</div>
-          </div>
+          <div className={`bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md border-l-4 ${kpisGerais.fva >= 0 ? 'border-l-emerald-500' : 'border-l-rose-500'}`}><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2 flex justify-between">FVA (Melhoria) {kpisGerais.fva >= 0 ? <TrendingUp className="w-4 h-4 text-emerald-500"/> : <TrendingDown className="w-4 h-4 text-rose-500"/>}</div><div className={`text-3xl font-black ${kpisGerais.fva >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{lente === 'sellin' ? formatPct(kpisGerais.fva) : 'N/A'}</div></div>
+          <div className={`bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md border-l-4 ${kpisGerais.bias_global > 0 ? 'border-l-amber-500' : 'border-l-rose-500'}`}><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">BIAS Global</div><div className={`text-3xl font-black ${kpisGerais.bias_global > 0 ? 'text-amber-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.bias_global)}</div></div>
         </div>
       ) : lente === 'kpis' ? (
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
@@ -327,7 +331,6 @@ export default function AuditoriaArena() {
         </div>
       )}
 
-      {/* RENDERIZAÇÃO DAS TABELAS COM SORT E TFOOT */}
       <div className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-2xl">
         {carregando ? (
           <div className="p-20 flex justify-center items-center gap-3 text-indigo-400 font-bold uppercase text-xs"><RefreshCw className="w-6 h-6 animate-spin" /> Processando Tabelas...</div>
@@ -370,10 +373,9 @@ export default function AuditoriaArena() {
                  <SortableHeader field="descricao" label="Produto" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
                  <SortableHeader field="vol_real" label="Realizado" currentSort={sortConfig} requestSort={requestSort} />
                  <SortableHeader field="vol_ia_congelado" label="IA (Frozen)" currentSort={sortConfig} requestSort={requestSort} />
-                 <SortableHeader field="vol_comercial_congelado" label="Humano (Frozen)" currentSort={sortConfig} requestSort={requestSort} />
-                 {lente === 'sellout' && <SortableHeader field="estoque_canal" label="Estoque Canal" currentSort={sortConfig} requestSort={requestSort} />}
+                 <SortableHeader field={lente === 'sellin' ? 'vol_comercial_congelado' : 'estoque_canal'} label={lente === 'sellin' ? 'Humano (Frozen)' : 'Estoque Canal'} currentSort={sortConfig} requestSort={requestSort} />
                  <SortableHeader field="mape_ia" label="% MAPE IA" currentSort={sortConfig} requestSort={requestSort} className="border-l border-slate-800 bg-slate-950/40 text-rose-400 text-right" />
-                 <SortableHeader field="mape_comercial" label="% MAPE Humano" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/40 text-rose-400 text-right" />
+                 {lente === 'sellin' && <SortableHeader field="mape_comercial" label="% MAPE Humano" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/40 text-rose-400 text-right" />}
                </tr>
              </thead>
              <tbody className="divide-y divide-slate-800/60 text-xs">
@@ -382,10 +384,9 @@ export default function AuditoriaArena() {
                    <td className="px-6 py-3.5"><div className="flex flex-col"><span className="font-bold text-slate-200">{row.descricao}</span><span className="text-[10px] text-slate-500 font-mono mt-0.5">{row.sku}</span></div></td>
                    <td className="px-4 py-3.5 text-right font-black text-white">{formatVol(row.vol_real)}</td>
                    <td className="px-4 py-3.5 text-right font-semibold text-indigo-400 bg-indigo-950/10">{formatVol(row.vol_ia_congelado)}</td>
-                   <td className="px-4 py-3.5 text-right font-semibold text-sky-400 bg-sky-950/10">{formatVol(row.vol_comercial_congelado)}</td>
-                   {lente === 'sellout' && <td className="px-4 py-3.5 text-right font-semibold text-amber-400">{formatVol(row.estoque_canal)}</td>}
+                   <td className="px-4 py-3.5 text-right font-semibold text-sky-400 bg-sky-950/10">{lente === 'sellin' ? formatVol(row.vol_comercial_congelado) : formatVol(row.estoque_canal)}</td>
                    <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 border-l border-slate-800 bg-slate-950/40">{formatPct(row.mape_ia)}</td>
-                   <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 bg-slate-950/40">{formatPct(row.mape_comercial)}</td>
+                   {lente === 'sellin' && <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 bg-slate-950/40">{formatPct(row.mape_comercial)}</td>}
                  </tr>
                ))}
              </tbody>
@@ -394,9 +395,8 @@ export default function AuditoriaArena() {
                 <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Somas do Portfólio</td>
                 <td className="px-4 py-4 text-right">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_real || 0), 0))}</td>
                 <td className="px-4 py-4 text-right text-indigo-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_ia_congelado || 0), 0))}</td>
-                <td className="px-4 py-4 text-right text-sky-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_comercial_congelado || 0), 0))}</td>
-                {lente === 'sellout' && <td className="px-4 py-4 text-right text-amber-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.estoque_canal || 0), 0))}</td>}
-                <td colSpan={2} className="px-4 py-4 bg-slate-950/40 text-right text-slate-500 text-[10px]">Médias Ponderadas nos Cards Topo</td>
+                <td className="px-4 py-4 text-right text-sky-400">{lente === 'sellin' ? formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_comercial_congelado || 0), 0)) : formatVol(sortedSkus.reduce((sum, r) => sum + (r.estoque_canal || 0), 0))}</td>
+                <td colSpan={2} className="px-4 py-4 bg-slate-950/40 text-right text-slate-500 text-[10px]">As médias ponderadas estão nos Cards de Topo</td>
               </tr>
             </tfoot>
            </table>
@@ -405,10 +405,13 @@ export default function AuditoriaArena() {
              <thead>
                <tr className="bg-slate-950 text-slate-400 border-b border-slate-800 text-[10px] font-black uppercase tracking-widest">
                  <SortableHeader field="descricao" label="Produto (Clique p/ Clientes)" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
-                 <SortableHeader field="val_meta_hum" label="Meta (Lag 2)" currentSort={sortConfig} requestSort={requestSort} />
-                 <SortableHeader field="val_real" label="Realizado MTD" currentSort={sortConfig} requestSort={requestSort} />
-                 <SortableHeader field="erro_absoluto" label="Gap / Variância" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/40 text-right" />
-                 <SortableHeader field="mape_sku" label="% MAPE MTD" currentSort={sortConfig} requestSort={requestSort} className="border-l border-slate-800 bg-slate-950/40 text-rose-400 text-right" />
+                 <SortableHeader field="val_meta_ia" label="Meta IA" currentSort={sortConfig} requestSort={requestSort} className="text-indigo-400 text-right" />
+                 <SortableHeader field="val_meta_hum" label="Meta S&OP" currentSort={sortConfig} requestSort={requestSort} className="text-sky-400 text-right" />
+                 <SortableHeader field="val_real" label="Realizado MTD" currentSort={sortConfig} requestSort={requestSort} className="text-white text-right" />
+                 <SortableHeader field="gap_ia" label="Gap IA" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/20 text-right" />
+                 <SortableHeader field="gap_humano" label="Gap S&OP" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/20 text-right" />
+                 <SortableHeader field="mape_ia" label="% MAPE IA" currentSort={sortConfig} requestSort={requestSort} className="border-l border-slate-800 bg-slate-950/40 text-rose-400 text-right" />
+                 <SortableHeader field="mape_humano" label="% MAPE S&OP" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/40 text-rose-400 text-right" />
                </tr>
              </thead>
              <tbody className="divide-y divide-slate-800/60 text-xs">
@@ -417,10 +420,12 @@ export default function AuditoriaArena() {
              <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
               <tr>
                 <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Acumulado MTD</td>
-                <td className="px-4 py-4 text-right text-slate-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.val_meta_hum || 0), 0))}</td>
-                <td className="px-4 py-4 text-right">{formatador(sortedSkus.reduce((sum, r) => sum + (r.val_real || 0), 0))}</td>
-                <td className="px-4 py-4 text-right bg-slate-950/40 text-rose-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.erro_absoluto || 0), 0))} <span className="text-[9px] text-slate-500 block">Gap Absoluto</span></td>
-                <td className="px-4 py-4 bg-slate-950/40"></td>
+                <td className="px-3 py-4 text-right text-indigo-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.val_meta_ia || 0), 0))}</td>
+                <td className="px-3 py-4 text-right text-sky-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.val_meta_hum || 0), 0))}</td>
+                <td className="px-3 py-4 text-right">{formatador(sortedSkus.reduce((sum, r) => sum + (r.val_real || 0), 0))}</td>
+                <td className="px-3 py-4 text-right bg-slate-950/20 text-slate-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.gap_ia || 0), 0))}</td>
+                <td className="px-3 py-4 text-right bg-slate-950/20 text-slate-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.gap_humano || 0), 0))}</td>
+                <td colSpan={2} className="px-3 py-4 bg-slate-950/40 text-right text-slate-500 text-[10px]">Gap Consolidado</td>
               </tr>
             </tfoot>
            </table>
