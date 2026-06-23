@@ -13,6 +13,7 @@ from app.api.routers import (
     router_soe,
     router_supply,
     router_kpis,
+    router_mtrix,
     router_ai,
     router_agent_sql,
     router_datalake
@@ -66,6 +67,7 @@ app.include_router(router_gerenciamento.router)
 app.include_router(router_supply.router)
 app.include_router(router_soe.router)
 app.include_router(router_kpis.router)
+app.include_router(router_mtrix.router)
 app.include_router(router_ai.router)
 app.include_router(router_agent_sql.router)
 app.include_router(router_datalake.router)
