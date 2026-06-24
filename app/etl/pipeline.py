@@ -5,7 +5,7 @@ import polars as pl
 import asyncio
 from datetime import date
 from dateutil.relativedelta import relativedelta
-from sqlalchemy import func
+from sqlalchemy import func, text
 from app.core.state import AppState
 from app.core.database import SessionLocal
 from app.models.domain_models import FatoIbpGranular
@@ -20,6 +20,58 @@ def log(mensagem: str):
     linha_log = f"[{hora}] {mensagem}"
     AppState.logs.append(linha_log)
     print(linha_log)
+
+def aplicar_pmv_historico_pipeline(engine, ciclo_atual: str):
+    """
+    Substitui o PMV genérico da fato_ibp_granular pelo PMV exato 
+    praticado por cada cliente (CGC) nos últimos 4 meses.
+    """
+    log(f"💰 [FINANÇAS] Calculando PMV Histórico Dinâmico (Cliente x SKU) para o ciclo {ciclo_atual}...")
+    
+    sql_update_pmv = text("""
+        -- 1. Calcula o PMV exato por Cliente + SKU nos últimos 4 meses
+        WITH pmv_cliente_sku AS (
+            SELECT 
+                cgc, 
+                sku, 
+                SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv_real
+            FROM fato_vendas
+            WHERE data_pedido >= CURRENT_DATE - INTERVAL '4 months'
+            GROUP BY cgc, sku
+        ),
+        -- 2. Fallback: Calcula o PMV médio nacional do SKU (caso o cliente não tenha comprado nos últimos 4 meses)
+        pmv_nacional_sku AS (
+            SELECT 
+                sku, 
+                SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv_nacional
+            FROM fato_vendas
+            WHERE data_pedido >= CURRENT_DATE - INTERVAL '4 months'
+            GROUP BY sku
+        )
+        
+        -- 3. Aplica a atualização na fato_ibp_granular
+        UPDATE fato_ibp_granular AS f
+        SET pmv_aplicado = COALESCE(
+            c.pmv_real,           -- Prioridade 1: Preço exato do Cliente
+            n.pmv_nacional,       -- Prioridade 2: Preço médio Nacional
+            f.pmv_aplicado,       -- Prioridade 3: Mantém o valor base que a IA inseriu
+            0
+        )
+        FROM fato_ibp_granular f_target
+        LEFT JOIN pmv_cliente_sku c ON f_target.cgc = c.cgc AND f_target.sku = c.sku
+        LEFT JOIN pmv_nacional_sku n ON f_target.sku = n.sku
+        WHERE f.id = f_target.id
+          AND f.ciclo_sop = :ciclo;
+    """)
+
+    try:
+        with engine.begin() as conn:
+            resultado = conn.execute(sql_update_pmv, {"ciclo": ciclo_atual})
+            linhas_afetadas = resultado.rowcount
+            log(f"✅ [FINANÇAS] Sucesso! {linhas_afetadas} SKUs atualizados com precificação histórica de precisão.")
+    except Exception as e:
+        log(f"❌ [ERRO CRÍTICO] Falha ao atualizar PMV no pipeline: {str(e)}")
+        raise e
 
 async def executar_pipeline_nexus():
     tempo_inicio_total = time.time()
@@ -115,6 +167,13 @@ async def executar_pipeline_nexus():
             log("⏳ [LOAD] Rateando e injetando as Metas e Previsões S&OP no Banco...")
             await asyncio.to_thread(loader.executar_carga_forecast, df_forecast, ciclo_alvo, log_callback=log) 
             log(f"✅ [LOAD] Metas atomizadas com sucesso em {time.time() - t0:.2f}s.")
+
+            # =====================================================================
+            # 🔥 7. APLICAÇÃO DA REGRA DE NEGÓCIO FINANCEIRA (PMV DINÂMICO)
+            # =====================================================================
+            with SessionLocal() as db_session:
+                engine_db = db_session.get_bind()
+                await asyncio.to_thread(aplicar_pmv_historico_pipeline, engine_db, ciclo_alvo)
 
         tempo_total = time.time() - tempo_inicio_total
         minutos, segundos = divmod(tempo_total, 60)

@@ -126,14 +126,10 @@ async def exportar_base_granular(db: Session = Depends(get_db), usuario_logado: 
         ciclo = get_current_cycle(db)
         m2, m4 = get_projection_window(db)
         
-        # 💡 NOVO: Inteligência SQL para buscar PMV Dinâmico (Cliente x SKU) dos últimos 4 meses
+        # 🔥 CÓDIGO CIRÚRGICO: A query agora é super leve.
+        # Removemos WITH pmv_historico_4m e o LEFT JOIN. 
+        # Lemos diretamente f.pmv_aplicado que foi cravado no Pipeline.
         sql = """
-            WITH pmv_historico_4m AS (
-                SELECT cgc, sku, SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv_real_4m
-                FROM fato_vendas
-                WHERE data_pedido >= CURRENT_DATE - INTERVAL '4 months'
-                GROUP BY cgc, sku
-            )
             SELECT 
                 f.ciclo_sop AS "Ciclo S&OP",
                 c.cgc AS "CGC",
@@ -149,13 +145,12 @@ async def exportar_base_granular(db: Session = Depends(get_db), usuario_logado: 
                 f.sku AS "SKU",
                 p.descricao AS "Produto",
                 TO_CHAR(f.mes_projetado, 'YYYY-MM-DD') AS "Mês Projetado",
-                ROUND(COALESCE(hist.pmv_real_4m, f.pmv_aplicado, 0)::numeric, 2) AS "PMV Unitário (R$)",
+                ROUND(COALESCE(f.pmv_aplicado, 0)::numeric, 2) AS "PMV Unitário (R$)",
                 COALESCE(f.vol_final, 0) AS "Final S&OP (CX)",
-                ROUND((COALESCE(f.vol_final, 0) * COALESCE(hist.pmv_real_4m, f.pmv_aplicado, 0))::numeric, 2) AS "Receita S&OP (R$)"
+                ROUND((COALESCE(f.vol_final, 0) * COALESCE(f.pmv_aplicado, 0))::numeric, 2) AS "Receita S&OP (R$)"
             FROM fato_ibp_granular f
             JOIN dim_clientes c ON f.cgc = c.cgc
             JOIN dim_produtos p ON f.sku = p.sku
-            LEFT JOIN pmv_historico_4m hist ON hist.cgc = f.cgc AND hist.sku = f.sku
             WHERE f.ciclo_sop = :ciclo
               AND f.mes_projetado >= :m2
               AND f.mes_projetado <= :m4
@@ -212,8 +207,6 @@ async def listar_logs_auditoria(db: Session = Depends(get_db), usuario_logado: d
 
 @router.delete("/delete-user/{user_id}")
 async def excluir_usuario_sistema(user_id: int, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    """Exclui permanentemente um usuário ativo do sistema via Raw SQL para evitar erros de importação"""
-    
     if usuario_logado.get('funcao') != 'Administrador':
         raise HTTPException(status_code=403, detail="Acesso negado. Apenas administradores podem excluir usuários.")
     

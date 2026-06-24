@@ -6,7 +6,7 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
     { id: 'dashboard', label: 'Plano de Demanda', icon: LayoutDashboard, roles: ['Administrador', 'Gerente', 'Supply Chain', 'Marketing', 'C-Level'] },
     { id: 'soe-radar', label: 'S&OE', icon: Activity, roles: ['Administrador'] },
     { id: 'inbound', label: 'Mapa Produtivo', icon: Factory, roles: ['Administrador'] },
-    { id: 'auditoria', label: 'KPIs', icon: Crosshair, roles: ['Administrador'] },
+    { id: 'auditoria', label: 'KPIs', icon: Crosshair, roles: ['Administrador', 'C-Level', 'Gerente', 'Marketing', 'Supply Chain'] },
     { id: 'topdown', label: 'Plano Irrestrito', icon: BarChart3, roles: ['Administrador', 'Marketing'] },
     { id: 'npd', label: 'Inovações', icon: Rocket, roles: ['Administrador', 'Marketing'] },
     { id: 'supply', label: 'Supply Review', icon: Factory, roles: ['Administrador', 'Supply Chain'] },

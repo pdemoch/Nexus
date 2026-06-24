@@ -56,15 +56,7 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
             if sku not in orc_dict: orc_dict[sku] = {}
             orc_dict[sku][mes_str] = float(o.receita_orcamento or 0)
 
-        # 2. BASE HISTÓRICA E S&OP
-        inicio_hist = m2_date - relativedelta(months=3)
-        hist_query = db.query(FatoVendas.sku, FatoVendas.cgc, func.sum(FatoVendas.qt_pedido).label('vol_total_3m'), func.sum(FatoVendas.vl_pedido).label('rec_total_3m')).filter(FatoVendas.data_pedido >= inicio_hist, FatoVendas.data_pedido < m2_date).group_by(FatoVendas.sku, FatoVendas.cgc).all()
-        hist_map = {}
-        for h in hist_query:
-            vol_medio = float(h.vol_total_3m or 0) / 3.0
-            rec_media = float(h.rec_total_3m or 0) / 3.0
-            hist_map[f"{h.sku}|{h.cgc}"] = {"vol_hist_media": vol_medio, "pmv_hist_media": rec_media / vol_medio if vol_medio > 0 else 0}
-
+        # 2. JANELA DE ASSERTIVIDADE (M-1)
         mes_passado = m2_date - relativedelta(months=1)
         ia_m1_query = db.query(FatoIbpGranular.sku, FatoIbpGranular.cgc, func.sum(FatoIbpGranular.vol_ia).label('vol_ia_m1')).filter(FatoIbpGranular.ciclo_sop == ciclo_anterior, FatoIbpGranular.mes_projetado == mes_passado).group_by(FatoIbpGranular.sku, FatoIbpGranular.cgc).all()
         vendas_m1_query = db.query(FatoVendas.sku, FatoVendas.cgc, func.sum(FatoVendas.qt_pedido).label('vol_real_m1')).filter(FatoVendas.data_pedido >= mes_passado, FatoVendas.data_pedido < m2_date).group_by(FatoVendas.sku, FatoVendas.cgc).all()
@@ -75,9 +67,12 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
             chave, v_real, v_ia = f"{ia.sku}|{ia.cgc}", vendas_m1_dict.get(f"{ia.sku}|{ia.cgc}", 0), float(ia.vol_ia_m1 or 0)
             assertividade_map[chave] = max(0, 100 - ((abs(v_ia - v_real) / v_real) * 100)) if v_real > 0 and v_ia > 0 else (0 if v_real > 0 else 100 if v_ia == 0 else 0)
 
-        prev_query = db.query(FatoIbpGranular.sku, FatoIbpGranular.cgc, FatoIbpGranular.mes_projetado, FatoIbpGranular.vol_final, FatoIbpGranular.pmv_aplicado).filter(FatoIbpGranular.ciclo_sop == ciclo_anterior, FatoIbpGranular.mes_projetado >= m2_date, FatoIbpGranular.mes_projetado <= parse_date_safe(m4_str)).all()
-        prev_map = {f"{p.sku}|{p.cgc}|{str(p.mes_projetado)}": {"vol_anterior": float(p.vol_final or 0), "pmv_anterior": float(p.pmv_aplicado or 0)} for p in prev_query}
+        # 3. COMPARAÇÃO COM CICLO ANTERIOR
+        prev_query = db.query(FatoIbpGranular.sku, FatoIbpGranular.cgc, FatoIbpGranular.mes_projetado, FatoIbpGranular.vol_final).filter(FatoIbpGranular.ciclo_sop == ciclo_anterior, FatoIbpGranular.mes_projetado >= m2_date, FatoIbpGranular.mes_projetado <= parse_date_safe(m4_str)).all()
+        prev_map = {f"{p.sku}|{p.cgc}|{str(p.mes_projetado)}": float(p.vol_final or 0) for p in prev_query}
 
+        # 4. CONSULTA ATUAL S&OP GLOBAL - AJUSTADA CIRURGICAMENTE
+        # Removemos joins complexos e queries pesadas. Lemos diretamente f.pmv_aplicado da fato
         query = get_truth_query(db, ciclo_atual, m2_str, m4_str).with_entities(
             DimProduto.categoria, FatoIbpGranular.sku, DimProduto.descricao, DimCliente.razaosocial, DimCliente.cgc,
             FatoIbpGranular.mes_projetado, FatoIbpGranular.vol_ia, FatoIbpGranular.vol_topdown, 
@@ -96,18 +91,16 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
             chave_hist, chave_prev = f"{sku}|{cgc}", f"{sku}|{cgc}|{mes_str}"
 
             vol_ia, vol_final, vol_bu, vol_sp, pmv_atual = float(r.vol_ia or 0), float(r.vol_final or 0), float(r.vol_bottomup or 0), float(r.vol_supply or 0), float(r.pmv_aplicado or 0)
-            historico = hist_map.get(chave_hist, {"vol_hist_media": 0, "pmv_hist_media": 0})
-            anterior = prev_map.get(chave_prev, {"vol_anterior": vol_final, "pmv_anterior": pmv_atual})
+            vol_anterior = prev_map.get(chave_prev, vol_final)
             
-            pmv_hist, vol_hist = historico["pmv_hist_media"], historico["vol_hist_media"]
             dados_enriquecidos.append({
                 "categoria": r.categoria, "sku": sku, "descricao": r.descricao, "cgc": cgc, "razaosocial": r.razaosocial, "mes_projetado": mes_str,
                 "vol_ia": int(vol_ia), "vol_topdown": int(r.vol_topdown or 0), "vol_bottomup": int(vol_bu), "vol_supply": int(vol_sp), "vol_final": int(vol_final), "vol_meta": int(r.vol_meta or 0),
                 "pmv_aplicado": pmv_atual, "rec_ia": float(r.rec_ia or 0), "rec_td": float(r.rec_td or 0), "rec_bu": float(r.rec_bu or 0), "rec_supply": float(r.rec_supply or 0), "rec_final": float(r.rec_final or 0),
                 "justificativa_supply": getattr(r, 'justificativa_supply', '') or "", "delta_ia_comercial_vol": int(vol_ia - vol_bu), "impacto_financeiro_ia_brl": round((vol_ia - vol_bu) * pmv_atual, 2),
-                "vol_hist_media": float(vol_hist), "pmv_hist_media": float(pmv_hist), "crescimento_hist_pct": round(((vol_final / vol_hist) - 1) * 100 if vol_hist > 0 else 100 if vol_final > 0 else 0, 2), "assertividade_ia": round(assertividade_map.get(chave_hist, 0.0), 1),
-                "vol_anterior": int(anterior["vol_anterior"]), "delta_ciclo_vol": int(vol_final - anterior["vol_anterior"]), "corte_supply_vol": int(max(0, vol_bu - vol_sp)), "unmet_demand_brl": round(max(0, vol_bu - vol_sp) * pmv_atual, 2),
-                "var_pmv_pct": round(((pmv_atual / pmv_hist) - 1) * 100 if pmv_hist > 0 else 0, 2)
+                "vol_hist_media": 0.0, "pmv_hist_media": 0.0, "crescimento_hist_pct": 0.0, "assertividade_ia": round(assertividade_map.get(chave_hist, 0.0), 1),
+                "vol_anterior": int(vol_anterior), "delta_ciclo_vol": int(vol_final - vol_anterior), "corte_supply_vol": int(max(0, vol_bu - vol_sp)), "unmet_demand_brl": round(max(0, vol_bu - vol_sp) * pmv_atual, 2),
+                "var_pmv_pct": 0.0
             })
         
         reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo_atual, ControleCiclo.origem == 'S&OP-Final').first()
@@ -117,9 +110,9 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
         if not is_locked and (not reg_sp or reg_sp.status != 'Fechado'):
             return {"status": "success", "is_locked": True, "lock_message": "Aguardando encerramento do Supply Review (Fase 3)", "dados": dados_enriquecidos, "orcamento": orc_dict}
 
-        return {"status": "success", "is_locked": is_locked, "lock_message": "Demanda Irrestrita Publicada" if is_locked else "Plano Aberto para Aprovação Final", "dados": dados_enriquecidos, "orcamento": orc_dict}
+        return {"status": "success", "is_locked": is_locked, "lock_message": "Demanda Irrestrita Publicada" if is_locked else "Plano Aberto para Approvação Final", "dados": dados_enriquecidos, "orcamento": orc_dict}
     except Exception as e:
-        raise HTTPException(500, repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/grafico")
 async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria', db: Session = Depends(get_db)):
@@ -221,7 +214,6 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
             if not linhas: continue
 
             total_base_antigo = sum([float(l.vol_final or 0) for l in linhas])
-            # 🔥 CORREÇÃO DA ARQUITETURA: Agora o rateio baseia-se unicamente na proporção definida no VOL_META!
             total_base_meta = sum([float(l.vol_meta or 0) for l in linhas])
             
             soma_dist, volume_alvo, total_clientes = 0, int(ajuste.novo_volume), len(linhas)
@@ -235,12 +227,10 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
                     rateado = int(round(volume_alvo * peso))
                     soma_dist += rateado
                 
-                # Apenas a Demanda Final (Demanda Irrestrita) é alterada pelo Dashboard
                 l.vol_final = rateado
-                # 🚫 REMOVIDO: l.vol_meta = rateado -> Preservamos o vol_meta para manter o histórico do desejo Comercial/Consenso
 
             nome_user = usuario.get('nome', usuario.get('email', 'Desconhecido'))
-            registrar_log_auditoria(db=db, ciclo=ciclo, origem="S&OP Global (Dashboard Final)", usuario=nome_user, sku=sku, cliente="TODOS_OS_CLIENTES", mes=data_alvo, v_antigo=int(total_base_antigo), v_novo=volume_alvo)
+            registrar_log_auditoria(db=db, ciclo=ciclo, origen="S&OP Global (Dashboard Final)", usuario=nome_user, sku=sku, cliente="TODOS_OS_CLIENTES", mes=data_alvo, v_antigo=int(total_base_antigo), v_novo=volume_alvo)
 
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
         if not registro: db.add(ControleCiclo(ciclo_sop=ciclo, origem='S&OP-Final', status='Fechado'))

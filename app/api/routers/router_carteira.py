@@ -72,14 +72,8 @@ def get_dados_metas(nome_responsavel: Optional[str] = Query(None), db: Session =
             filtro_responsavel = " AND (c.gerente_nome = :resp OR c.supervisor_nome = :resp OR f.vendedor_nome = :resp) "
             params["resp"] = nome_responsavel
 
-        # O SELECT AGORA PUXA A DESCRIÇÃO DO SKU (p.descricao)
+        # AJUSTE CIRÚRGICO: Removida a CTE pmv_historico_4m e simplificada para ler f.pmv_aplicado diretamente
         sql = f"""
-            WITH pmv_historico_4m AS (
-                SELECT cgc, sku, SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv_real_4m
-                FROM fato_vendas
-                WHERE data_pedido >= CURRENT_DATE - INTERVAL '4 months'
-                GROUP BY cgc, sku
-            )
             SELECT 
                 COALESCE(NULLIF(TRIM(c.gerente_nome), ''), 'SEM GERENTE') AS gerente,
                 COALESCE(NULLIF(TRIM(c.supervisor_nome), ''), 'SEM COORDENADOR') AS coordenador,
@@ -91,12 +85,13 @@ def get_dados_metas(nome_responsavel: Optional[str] = Query(None), db: Session =
                 COALESCE(NULLIF(TRIM(p.segmento), ''), 'SEM SEGMENTO') AS segmento,
                 TO_CHAR(f.mes_projetado, 'YYYY-MM') AS mes_banco,
                 COALESCE(f.vol_bottomup, 0) AS vol_base_herdado,
-                COALESCE(hist.pmv_real_4m, f.pmv_aplicado, 0) AS pmv_aplicado,
+                COALESCE(f.vol_topdown, 0) AS vol_topdown,
+                COALESCE(f.vol_ia, 0) AS vol_ia,
+                COALESCE(f.pmv_aplicado, 0) AS pmv_aplicado,
                 COALESCE(f.vol_meta, 0) AS vol_meta_salvo
             FROM fato_ibp_granular f
             JOIN dim_clientes c ON f.cgc = c.cgc
             JOIN dim_produtos p ON f.sku = p.sku
-            LEFT JOIN pmv_historico_4m hist ON hist.cgc = f.cgc AND hist.sku = f.sku
             WHERE f.ciclo_sop = :ciclo_atual
               AND f.mes_projetado >= :data_ini
               AND f.mes_projetado <= :data_fim
@@ -107,13 +102,15 @@ def get_dados_metas(nome_responsavel: Optional[str] = Query(None), db: Session =
         df = pd.read_sql(text(sql), engine, params=params)
         if df.empty: return {"dados": [], "is_fechado": False}
 
-        df['vol_base_herdado'] = pd.to_numeric(df['vol_base_herdado'], errors='coerce').fillna(0)
-        df['vol_meta_salvo'] = pd.to_numeric(df['vol_meta_salvo'], errors='coerce').fillna(0)
+        for col in ['vol_base_herdado', 'vol_topdown', 'vol_ia', 'vol_meta_salvo', 'pmv_aplicado']:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
         df['receita_base'] = df['vol_base_herdado'] * df['pmv_aplicado']
 
-        # A DESCRIÇÃO ENTRA NO GROUPBY PARA VIAJAR ATÉ AO JSON
         df_grouped = df.groupby(['gerente', 'coordenador', 'vendedor', 'razao_social', 'categoria', 'segmento', 'sku', 'descricao_sku', 'mes_banco']).agg(
             vol_base_herdado=pd.NamedAgg(column='vol_base_herdado', aggfunc='sum'),
+            vol_topdown=pd.NamedAgg(column='vol_topdown', aggfunc='sum'),
+            vol_ia=pd.NamedAgg(column='vol_ia', aggfunc='sum'),
             vol_meta_salvo=pd.NamedAgg(column='vol_meta_salvo', aggfunc='sum'),
             receita_total=pd.NamedAgg(column='receita_base', aggfunc='sum')
         ).reset_index()
@@ -148,6 +145,8 @@ def get_dados_metas(nome_responsavel: Optional[str] = Query(None), db: Session =
                                     "pmv": float(row['pmv_ponderado']), 
                                     "rec_base": float(row['receita_total']),
                                     "vol_base": float(row['vol_base_herdado']), 
+                                    "vol_topdown": float(row['vol_topdown']),
+                                    "vol_ia": float(row['vol_ia']),
                                     "vol_meta": float(vol_simulado_inicial) 
                                 })
                             
@@ -155,7 +154,7 @@ def get_dados_metas(nome_responsavel: Optional[str] = Query(None), db: Session =
                                 "chave_matriz": f"P|{ger_name}|{coord_name}|{vend_name}|{razao_name}|{sku_name}",
                                 "nome": str(sku_name), 
                                 "produto": str(sku_name),
-                                "descricao": str(df_sku['descricao_sku'].iloc[0]), # A DESCRIÇÃO É INSERIDA AQUI
+                                "descricao": str(df_sku['descricao_sku'].iloc[0]), 
                                 "tipo": "produto",
                                 "categoria": str(df_sku['categoria'].iloc[0]), 
                                 "segmento": str(df_sku['segmento'].iloc[0]),
@@ -191,7 +190,7 @@ async def salvar_metas(payload: PayloadSalvarMetas, db: Session = Depends(get_db
                     FROM fato_ibp_granular f
                     JOIN dim_clientes c ON f.cgc = c.cgc
                     LEFT JOIN fato_vendas v ON v.cgc = f.cgc AND v.sku = f.sku AND v.data_pedido >= CURRENT_DATE - INTERVAL '4 months'
-                    WHERE f.ciclo_sop = :ciclo AND TO_CHAR(f.mes_projetado, 'YYYY-MM') = :mes AND f.sku = :sku AND c.razaosocial = :razao
+                    WHERE f.ciclo_sop = :ciclo AND TO_CHAR(f.mes_projetado, 'YYYY-MM') = :mes_...
                     GROUP BY f.id, f.cgc
                 )
                 SELECT fato_id, cgc, peso_historico, SUM(peso_historico) OVER() AS peso_total_razao, COUNT(*) OVER() AS qtd_lojas FROM cgc_historico
@@ -237,13 +236,8 @@ def exportar_csv(db: Session = Depends(get_db)):
         engine = db.get_bind()
         ciclo_atual = obter_ciclo_real_fato(engine)
 
+        # AJUSTE CIRÚRGICO: Simplificado para extrair f.pmv_aplicado diretamente sem subqueries temporais de recálculo
         sql = """
-            WITH pmv_historico_4m AS (
-                SELECT cgc, sku, SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv_real_4m
-                FROM fato_vendas
-                WHERE data_pedido >= CURRENT_DATE - INTERVAL '4 months'
-                GROUP BY cgc, sku
-            )
             SELECT 
                 f.ciclo_sop AS "Ciclo",
                 TO_CHAR(f.mes_projetado, 'MM/YYYY') AS "Mes",
@@ -255,12 +249,11 @@ def exportar_csv(db: Session = Depends(get_db)):
                 f.sku AS "SKU",
                 p.descricao AS "Descricao SKU",
                 COALESCE(f.vol_meta, 0) AS "Vol Meta (CX)",
-                COALESCE(hist.pmv_real_4m, f.pmv_aplicado, 0) AS "PMV",
-                COALESCE(f.vol_meta, 0) * COALESCE(hist.pmv_real_4m, f.pmv_aplicado, 0) AS "Faturamento (R$)"
+                COALESCE(f.pmv_aplicado, 0) AS "PMV",
+                COALESCE(f.vol_meta, 0) * COALESCE(f.pmv_aplicado, 0) AS "Faturamento (R$)"
             FROM fato_ibp_granular f
             JOIN dim_clientes c ON f.cgc = c.cgc
             JOIN dim_produtos p ON f.sku = p.sku
-            LEFT JOIN pmv_historico_4m hist ON hist.cgc = f.cgc AND hist.sku = f.sku
             WHERE f.ciclo_sop = :ciclo_atual
               AND f.vol_meta > 0
             ORDER BY c.gerente_nome, c.supervisor_nome, f.vendedor_nome, c.razaosocial, f.sku

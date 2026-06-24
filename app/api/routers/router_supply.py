@@ -80,7 +80,7 @@ async def listar_supply_review(db: Session = Depends(get_db), usuario: dict = De
         data_fim = hoje + relativedelta(months=4)
         meses_alvo = [(hoje + relativedelta(months=i)).strftime("%Y-%m-%d") for i in range(2, 5)]
 
-        # 🔥 NOVO: Busca do Orçamento Top-Down Financeiro
+        # Busca do Orçamento Top-Down Financeiro
         orc_query = db.execute(text("""
             SELECT sku, mes_projetado, receita_orcamento 
             FROM fato_orcamento 
@@ -93,6 +93,7 @@ async def listar_supply_review(db: Session = Depends(get_db), usuario: dict = De
 
         q = get_truth_query(db, ciclo, data_ini, data_fim)
 
+        # 🔥 BLINDAGEM SSOT: Cálculo Múltiplo de Faturamento Ponderado direto no Banco
         resultados = q.with_entities(
             FatoIbpGranular.sku,
             DimProduto.descricao.label('prod_desc'),
@@ -102,7 +103,9 @@ async def listar_supply_review(db: Session = Depends(get_db), usuario: dict = De
             func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
             func.sum(FatoIbpGranular.vol_meta).label('v_meta'), 
             func.sum(FatoIbpGranular.vol_supply).label('v_sup'),
-            func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
+            func.avg(FatoIbpGranular.pmv_aplicado).label('pmv_avg'),
+            func.sum(FatoIbpGranular.vol_meta * FatoIbpGranular.pmv_aplicado).label('rec_meta'),
+            func.sum(FatoIbpGranular.vol_supply * FatoIbpGranular.pmv_aplicado).label('rec_sup')
         ).group_by(
             FatoIbpGranular.sku, DimProduto.descricao, DimProduto.categoria, FatoIbpGranular.mes_projetado
         ).all()
@@ -128,11 +131,16 @@ async def listar_supply_review(db: Session = Depends(get_db), usuario: dict = De
                 v_ia = int(r.v_ia or 0)
                 v_meta = int(r.v_meta or 0)
                 v_sup = int(r.v_sup or 0)
-                pmv_b = float(r.pmv or 0)
+                
+                r_meta = float(r.rec_meta or 0)
+                r_sup = float(r.rec_sup or 0)
+                pmv_avg = float(r.pmv_avg or 0)
                 
                 v_orcamento_rec = orc_dict.get(f"{sk}|{ms}", 0.0)
 
+                # Se o Supply ainda não interveio, a fábrica enxerga a Meta do Vendedor como alvo inicial
                 vol_exibicao_supply = v_sup if v_sup > 0 else v_meta
+                rec_exibicao_supply = r_sup if v_sup > 0 else r_meta
 
                 for nivel in [arvore[cat]["meses"][ms], arvore[cat]["produtos"][sk]["meses"][ms]]:
                     nivel["vol_topdown"] += v_td
@@ -140,12 +148,15 @@ async def listar_supply_review(db: Session = Depends(get_db), usuario: dict = De
                     nivel["vol_ia"] += v_ia
                     nivel["vol_comercial"] += v_meta
                     nivel["vol_supply"] += vol_exibicao_supply
-                    nivel["receita_comercial"] += (vol_exibicao_supply * pmv_b)
+                    nivel["receita_comercial"] += rec_exibicao_supply
                     
+                    # Cálculo Ponderado do PMV para o Frontend
                     if nivel["vol_supply"] > 0:
                         nivel["pmv"] = nivel["receita_comercial"] / nivel["vol_supply"]
+                    elif nivel["vol_comercial"] > 0:
+                        nivel["pmv"] = nivel["receita_comercial"] / nivel["vol_comercial"]
                     else:
-                        nivel["pmv"] = pmv_b
+                        nivel["pmv"] = pmv_avg
 
         final = []
         for cat_k, cat_v in arvore.items():
@@ -188,6 +199,7 @@ async def aprovar_supply(payload: PayloadCongelarSupply, db: Session = Depends(g
 
             if not linhas: continue
 
+            # Inteligência Fair-Share - Baseada na proporção da vol_meta (A Venda Final)
             soma_meta_total = sum([float(l.vol_meta or 0) for l in linhas])
             soma_dist = 0
             volume_total = int(ajuste.novo_volume)
