@@ -1,11 +1,24 @@
 import polars as pl
+from datetime import date
+from dateutil.relativedelta import relativedelta
 
 class NexusTransformer:
     def processar_camada_silver(self, lf_150: pl.LazyFrame, lf_188: pl.LazyFrame, df_seg: pl.DataFrame, df_orc: pl.DataFrame):
-        print("\n⚙️ [SILVER] Harmonizando dados para Injeção no Banco (Upsert)...")
+        print("\n⚙️ [SILVER] Harmonizando dados (Filtro Cerca-Viva: Janela Móvel)...")
+
+        # =========================================================================
+        # 🔥 O FILTRO CERCA-VIVA (BARREIRA CONTRA HISTÓRICO ANTIGO)
+        # Calcula a mesma janela do pipeline para garantir que apenas os últimos
+        # 3 meses sejam processados e enviados para o Loader.
+        # =========================================================================
+        hoje = date.today()
+        data_inicio_janela = (hoje - relativedelta(months=3)).replace(day=1)
+        # Converte para string YYYYMMDD para comparar com a coluna 'dtapedido' da 150
+        data_inicio_str = data_inicio_janela.strftime("%Y%m%d")
 
         # 1. Tratamento da Tabela de Vendas (150)
         lf_vendas = lf_150.filter(
+            (pl.col("dtapedido") >= data_inicio_str) &  # <-- BLINDAGEM TEMPORAL
             (pl.col("operacao").cast(pl.Utf8).str.strip_chars() != "51") & 
             (~pl.col("regional").cast(pl.Utf8).str.to_uppercase().str.contains("FIFEIRO")) &
             (~pl.col("regional").cast(pl.Utf8).str.to_uppercase().str.contains("EIC"))
@@ -26,6 +39,7 @@ class NexusTransformer:
             lf_vendas = lf_vendas.drop(col_remover)
 
         # 2. Tratamento do Cadastro de Clientes (188)
+        # Nomes de coluna corrigidos cirurgicamente ('cod' e 'razao social')
         lf_clientes = lf_188.select([
             "cod", "loja", "cgc", "razao social", "bloqueado", "vendedor_nome", "gerente_nome", "supervisor_nome"
         ]).rename({
@@ -119,7 +133,6 @@ class NexusTransformer:
         df_orc_final = pl.DataFrame()
         if not df_orc.is_empty():
             df_orc = df_orc.filter(pl.col("Produto").is_not_null())
-            # Como já forçamos a leitura como string no extractor, apenas limpamos os espaços
             df_orc = df_orc.with_columns(pl.col("Produto").str.strip_chars())
             
             meses = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez']

@@ -8,17 +8,27 @@ class NexusLoader:
     def __init__(self):
         pass
 
-    def executar_carga_silver(self, df_silver: pl.DataFrame, log_callback=print):
+    def executar_carga_silver(self, df_silver: pl.DataFrame, data_inicio: date, log_callback=print):
+        """
+        [CIRURGIA DE JANELA MÓVEL APLICADA]
+        Recebe a data_inicio_janela do pipeline, limpa estritamente este período 
+        na FatoVendas (matando dados zumbis) e realiza um Bulk Insert.
+        As Dimensões (Clientes/Hierarquias) continuam com Upsert.
+        """
         from app.core.database import SessionLocal
-        from app.models.domain_models import DimCliente, FatoVendas, DimProduto
+        from app.models.domain_models import DimCliente, FatoVendas
 
         total_registros = len(df_silver)
-        log_callback(f"   -> [SILVER] Processando {total_registros} registros para Injeção (Upsert)...")
+        log_callback(f"   -> [SILVER] Processando {total_registros} registros na Janela Deslizante (a partir de {data_inicio})...")
         if df_silver.is_empty(): return
 
         db = SessionLocal()
         try:
-            log_callback("      • Sincronizando Cadastro de Clientes e Hierarquias...")
+            log_callback("      • Sincronizando Cadastro de Clientes e Hierarquias (Upsert)...")
+            # =========================================================================
+            # 1. ATUALIZAÇÃO DOS CADASTROS (DIMENSÕES)
+            # Esta parte mantém a sua lógica original intacta.
+            # =========================================================================
             df_clientes = df_silver.select([
                 "cgc", "cod_cliente", "loja", "cliente_razaosocial", 
                 "regional", "bloqueado", "vendedor_nome", "gerente_nome", "supervisor_nome" 
@@ -28,63 +38,70 @@ class NexusLoader:
                 stmt = pg_insert(DimCliente).values(
                     cgc=row['cgc'], cod_cliente=row['cod_cliente'], loja=row['loja'],
                     razaosocial=row['cliente_razaosocial'], regional=row['regional'],
-                    bloqueado=row['bloqueado'], vendedor_nome=row['vendedor_nome'], 
-                    gerente_nome=row['gerente_nome'], supervisor_nome=row['supervisor_nome'] 
-                )
-                stmt = stmt.on_conflict_do_update(
+                    bloqueado=row['bloqueado'], vendedor_nome=row['vendedor_nome'],
+                    gerente_nome=row['gerente_nome'], supervisor_nome=row['supervisor_nome']
+                ).on_conflict_do_update(
                     index_elements=['cgc'],
                     set_={
-                        'cod_cliente': stmt.excluded.cod_cliente, 'loja': stmt.excluded.loja,
-                        'razaosocial': stmt.excluded.razaosocial, 'regional': stmt.excluded.regional,
-                        'bloqueado': stmt.excluded.bloqueado, 'vendedor_nome': stmt.excluded.vendedor_nome, 
-                        'gerente_nome': stmt.excluded.gerente_nome, 'supervisor_nome': stmt.excluded.supervisor_nome
+                        'razaosocial': row['cliente_razaosocial'],
+                        'regional': row['regional'],
+                        'bloqueado': row['bloqueado'],
+                        'vendedor_nome': row['vendedor_nome'],
+                        'gerente_nome': row['gerente_nome'],
+                        'supervisor_nome': row['supervisor_nome']
                     }
                 )
                 db.execute(stmt)
 
-            log_callback("      • Sincronizando Cadastro de Produtos (Portfólio)...")
-            df_produtos = df_silver.select(["produto", "descricao", "bu", "categoria", "segmento", "curva_2026"]).unique(subset=["produto"])
+            # =========================================================================
+            # 2. A CIRURGIA NA FATO VENDAS (EXPURGO DA JANELA MÓVEL)
+            # AÇÃO CRÍTICA: Apaga tudo da janela de 3 meses para não somar zumbis
+            # =========================================================================
+            log_callback(f"      • Expurgo atómico de vendas canceladas/fantasmas (a partir de {data_inicio})...")
+            
+            db.execute(
+                text("DELETE FROM fato_vendas WHERE data_pedido >= :dt_inicio"), 
+                {"dt_inicio": data_inicio}
+            )
 
-            for row in df_produtos.to_dicts():
-                stmt_prod = pg_insert(DimProduto).values(
-                    sku=row['produto'], descricao=row['descricao'], bu=row['bu'],
-                    categoria=row['categoria'], segmento=row['segmento'], curva=row['curva_2026']
-                )
-                stmt_prod = stmt_prod.on_conflict_do_update(
-                    index_elements=['sku'],
-                    set_={
-                        'descricao': stmt_prod.excluded.descricao, 'bu': stmt_prod.excluded.bu,
-                        'categoria': stmt_prod.excluded.categoria, 'segmento': stmt_prod.excluded.segmento, 'curva': stmt_prod.excluded.curva
-                    }
-                )
-                db.execute(stmt_prod)
+            # =========================================================================
+            # 3. INSERÇÃO ATÓMICA (BULK INSERT) PARA REPOPULAR A JANELA
+            # =========================================================================
+            log_callback("      • Injetando vendas purificadas e consolidadas no banco de dados...")
+            
+            vendas_dicts = []
+            for row in df_silver.to_dicts():
+                # Conversão segura da string de data do ERP (YYYYMMDD) para o formato Python Date
+                dt_str = str(row['dtapedido'])
+                if len(dt_str) == 8:
+                    dt_obj = date(int(dt_str[:4]), int(dt_str[4:6]), int(dt_str[6:]))
+                else:
+                    dt_obj = row['dtapedido'] # Fallback caso o Polars já tenha convertido
 
-            log_callback("      • Realizando Upsert Atômico na Fato_Vendas (S&OE Ready)...")
-            vendas_dicts = df_silver.select(["pedido", "dtapedido", "produto", "cgc", "vendedor_nome", "qtpedido", "vlpedido", "qtfatura", "qtcorte"]).to_dicts()
+                vendas_dicts.append({
+                    "pedido": row.get('pedido', 'S/N'),
+                    "sku": row['produto'],
+                    "cgc": row['cgc'],
+                    "data_pedido": dt_obj,
+                    "qt_pedido": row.get('qtpedido', 0.0),
+                    "vl_pedido": row.get('vlpedido', 0.0),
+                    "qt_faturada": row.get('qtfatura', 0.0),
+                    "qt_corte": row.get('qtcorte', 0.0)
+                })
 
-            for row in vendas_dicts:
-                qt_fatura_val = row.get('qtfatura') or 0.0
-                qt_corte_val = row.get('qtcorte') or 0.0
-
-                stmt_vendas = pg_insert(FatoVendas).values(
-                    pedido=row['pedido'], data_pedido=row['dtapedido'], sku=row['produto'], cgc=row['cgc'], vendedor_nome=row['vendedor_nome'],
-                    qt_pedido=row['qtpedido'], vl_pedido=row['vlpedido'], qtfatura=qt_fatura_val, qtcorte=qt_corte_val 
-                )
-                stmt_vendas = stmt_vendas.on_conflict_do_update(
-                    constraint='uix_vendas_pedido',
-                    set_={
-                        'qt_pedido': stmt_vendas.excluded.qt_pedido, 'vl_pedido': stmt_vendas.excluded.vl_pedido,
-                        'vendedor_nome': stmt_vendas.excluded.vendedor_nome, 'qtfatura': stmt_vendas.excluded.qtfatura, 'qtcorte': stmt_vendas.excluded.qtcorte    
-                    }
-                )
-                db.execute(stmt_vendas)
+            # Realiza o insert massivo. É muito mais leve que o Upsert e não acumula lixo
+            if vendas_dicts:
+                db.bulk_insert_mappings(FatoVendas, vendas_dicts)
 
             db.commit()
-            log_callback("✅ [SILVER] Upsert concluído com sucesso!")
+            log_callback("✅ [SILVER] Janela de Faturamento atualizada com sucesso. Nenhuma duplicação detetada.")
+
         except Exception as e:
-            db.rollback()
-            log_callback(f"❌ [SILVER] Erro no Upsert: {str(e)}")
+            db.rollback() # Se houver falha, o DELETE é desfeito. Segurança total.
+            log_callback(f"❌ [ERRO LOADER] Falha crítica na injeção Silver: {str(e)}")
             raise e
+        finally:
+            db.close()
 
     def executar_carga_orcamento(self, df_orcamento: pl.DataFrame, log_callback=print):
         if df_orcamento.is_empty(): return

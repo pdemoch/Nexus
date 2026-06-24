@@ -1,6 +1,7 @@
 import traceback
 import time
 import os
+import glob
 import polars as pl
 import asyncio
 from datetime import date
@@ -77,8 +78,13 @@ async def executar_pipeline_nexus():
     tempo_inicio_total = time.time()
     try:
         os.makedirs("data", exist_ok=True)
+        
+        # =========================================================================
+        # ⚙️ CÁLCULO DA JANELA DESLIZANTE (3 Meses)
+        # =========================================================================
         hoje = date.today()
-        data_fim = hoje 
+        data_fim = hoje
+        data_inicio_janela = (data_fim - relativedelta(months=3)).replace(day=1)
         
         log("🚀 [SYSTEM] Iniciando Nexus Engine 4.0 (Arquitetura CPFR com AWS Data Lake)...")
 
@@ -86,25 +92,37 @@ async def executar_pipeline_nexus():
         # 1. OBTER CICLO ATIVO (GOVERNANÇA DE S&OP)
         # =========================================================================
         with SessionLocal() as db:
-            # O Pipeline obedece cegamente ao ciclo que o usuário escolheu no Frontend
             ciclo_alvo = getattr(AppState, 'ciclo_ativo', None)
             if not ciclo_alvo:
                 ciclo_alvo = hoje.strftime("%m/%Y")
             
             log(f"🧭 [S&OP] Ciclo âncora travado na competência: {ciclo_alvo}")
             
-            # Verifica se já passamos pela IA neste ciclo para evitar duplicações
             trava = db.query(func.count(FatoIbpGranular.id)).filter(FatoIbpGranular.ciclo_sop == ciclo_alvo).scalar()
             ciclo_existe = (trava > 0)
+
+        # =========================================================================
+        # 🧹 LIMPEZA CIRÚRGICA DOS PARQUETS DA JANELA (Evita Ressurreição de Zumbis)
+        # =========================================================================
+        log(f"🧹 [SYSTEM] Limpando Parquets locais da janela ({data_inicio_janela.strftime('%m/%Y')} a {data_fim.strftime('%m/%Y')}) para recarga...")
+        curr_date = data_inicio_janela
+        while curr_date <= data_fim:
+            mes_str = curr_date.strftime("%Y-%m")
+            for f in glob.glob(f"data/150_{mes_str}*.parquet"):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+            curr_date += relativedelta(months=1)
 
         # =========================================================================
         # 2. FASE DE EXTRAÇÃO DO ERP INTERNO (SELL-IN / GOBI ERP)
         # =========================================================================
         extractor = GobiExtractor()
-        data_inicio = date(2023, 4, 1) # Janela histórica para a IA de Fábrica
-
-        log(f"📥 [EXTRACT] Extraindo dados da Fábrica (Gobi ERP: {data_inicio} a {data_fim})...")
-        lf_150, lf_188, df_seg, df_orc = await extractor.extrair_tudo(data_inicio, data_fim)
+        
+        # A extração agora é focada exclusivamente na Janela Deslizante
+        log(f"📥 [EXTRACT] Extraindo dados da Fábrica (Gobi ERP: {data_inicio_janela} a {data_fim})...")
+        lf_150, lf_188, df_seg, df_orc = await extractor.extrair_tudo(data_inicio_janela, data_fim)
         
         if len(lf_150.columns) == 0 or len(lf_188.columns) == 0:
             log("⚠️ [SYSTEM] Arquivos de Vendas vazios. O pipeline será encerrado por segurança.")
@@ -129,10 +147,11 @@ async def executar_pipeline_nexus():
         
         log("   -> Executando processamento Polars em memória...")
         df_silver_coletado = await asyncio.to_thread(lf_silver.collect)
-        log(f"📊 [AUDITORIA] ETL Gobi Concluído: {len(df_silver_coletado)} linhas consolidadas prontas para injeção.")
+        log(f"📊 [AUDITORIA] ETL Gobi Concluído: {len(df_silver_coletado)} linhas na Janela prontas para injeção.")
 
-        log("   -> Iniciando injeção no Banco de Dados (Upsert Atômico)...")
-        await asyncio.to_thread(loader.executar_carga_silver, df_silver_coletado, log_callback=log)
+        log("   -> Iniciando injeção no Banco de Dados (Delete Janela + Bulk Insert)...")
+        # ATENÇÃO: Passamos a data_inicio_janela para o loader saber a partir de quando fazer o expurgo (DELETE)
+        await asyncio.to_thread(loader.executar_carga_silver, df_silver_coletado, data_inicio_janela, log_callback=log)
         await asyncio.to_thread(loader.atualizar_hierarquia_historica, lf_clientes, log_callback=log)
 
         if df_orc_final is not None and not df_orc_final.is_empty():
@@ -143,7 +162,6 @@ async def executar_pipeline_nexus():
         # 5. FASE DE CONSUMO DO DATA LAKE (SELL-OUT / MTRIX)
         # =========================================================================
         log(f"📥 [LAKE] Consumindo Data Lake de Canal Indireto na AWS...")
-        # Lê os Parquets da AWS, cruza com o ERP e grava as tabelas leves
         await asyncio.to_thread(loader.executar_carga_mtrix, ciclo_alvo, log_callback=log)
         
         log(f"   ⏳ Tempo Total FASE ETL + Lake: {time.time() - tempo_inicio_total:.2f}s.")
@@ -159,7 +177,6 @@ async def executar_pipeline_nexus():
             t0 = time.time()
             log("🧠 [ML] Acordando os Motores Duplos de Inteligência Artificial (Alpha e Beta)...")
             
-            # Passamos a âncora de tempo para a IA não se perder nas projeções
             df_forecast = await asyncio.to_thread(forecaster.executar_arena, ciclo_alvo, log_callback=log)
             log(f"✅ [ML] Previsões Concluídas em {time.time() - t0:.2f}s.")
 
