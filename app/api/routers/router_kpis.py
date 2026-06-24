@@ -198,20 +198,21 @@ async def carregar_torre_controle(
             if segmento != "Todos": clausula_filtro += " AND p.segmento = :segmento"; params_query["segmento"] = segmento
             if razaosocial != "Todos": filtro_cliente = " AND c.razaosocial = :razaosocial"; params_query["razaosocial"] = razaosocial
 
-            f_r = "qt_pedido" if visao == "caixas" else "vl_pedido"
-            f_mi = "vol_ia" if visao == "caixas" else "(vol_ia * pmv_aplicado)"
-            f_mh = "vol_final" if visao == "caixas" else "(vol_final * pmv_aplicado)"
+            # 🔥 CORREÇÃO DE SINTAXE SQL: Prefixos adicionados perfeitamente para evitar erros 500
+            f_r = "v.qt_pedido" if visao == "caixas" else "v.vl_pedido"
+            f_mi = "m.vol_ia" if visao == "caixas" else "(m.vol_ia * m.pmv_aplicado)"
+            f_mh = "m.vol_final" if visao == "caixas" else "(m.vol_final * m.pmv_aplicado)"
 
             query = text(f"""
                 WITH Vendas AS (
-                    SELECT v.sku, SUM(v.{f_r}) AS val_real 
+                    SELECT v.sku, SUM({f_r}) AS val_real 
                     FROM fato_vendas v
                     LEFT JOIN dim_clientes c ON v.cgc = c.cgc
                     WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql {filtro_cliente}
                     GROUP BY v.sku
                 ),
                 Metas AS (
-                    SELECT m.sku, SUM(m.{f_mi}) AS val_meta_ia, SUM(m.{f_mh}) AS val_meta_hum 
+                    SELECT m.sku, SUM({f_mi}) AS val_meta_ia, SUM({f_mh}) AS val_meta_hum 
                     FROM fato_ibp_granular m
                     LEFT JOIN dim_clientes c ON m.cgc = c.cgc
                     WHERE TO_CHAR(m.mes_projetado, 'YYYY-MM') = :mes_sql AND m.ciclo_sop = :ciclo_congelado {filtro_cliente}
@@ -345,7 +346,7 @@ async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict
             db.bulk_save_objects(novos_registros)
             msg = "Estoque Sincronizado com Sucesso via ERP Gobi API."
         else:
-            # 🔥 MODO DE SIMULAÇÃO INTELIGENTE (Se a API falhar, injeta Estoque Matemático para o Showroom)
+            # 🔥 MODO DE SIMULAÇÃO INTELIGENTE
             mock_query = text("""
                 INSERT INTO fato_estoque_d0 (sku, qtd_dispo, data_atualizacao)
                 SELECT sku, ROUND(SUM(vol_final) * (0.6 + (RANDOM() * 0.8))), NOW()
@@ -380,7 +381,6 @@ async def carregar_riscos_estoque(
         if segmento != "Todos": clausula_filtro += " AND p.segmento = :segmento"; params_query["segmento"] = segmento
         if razaosocial != "Todos": filtro_cliente = " AND c.razaosocial = :razaosocial"; params_query["razaosocial"] = razaosocial
 
-        # 🔥 CORREÇÃO DE SINTAXE: SELECT sku e não produto 
         query_sku = text(f"""
             WITH Estoque AS (SELECT sku, SUM(qtd_dispo) as estoque_atual FROM fato_estoque_d0 GROUP BY sku),
             Vendas AS (
