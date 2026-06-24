@@ -106,7 +106,7 @@ async def listar_topdown(db: Session = Depends(get_db), usuario: dict = Depends(
                     nivel["vol_td"] += v_td
                     nivel["receita_td"] += r_td
                     nivel["vol_meta_real"] += vol_exibicao_macro
-                    nivel["receita_simulada"] += (vol_exibicao_macro * pmv_avg) # Base aproximada para níveis macro
+                    nivel["receita_simulada"] += (vol_exibicao_macro * pmv_avg) 
                     
                     if nivel["vol_td"] > 0:
                         nivel["pmv"] = nivel["receita_td"] / nivel["vol_td"]
@@ -125,10 +125,11 @@ async def listar_topdown(db: Session = Depends(get_db), usuario: dict = Depends(
                 segs.append({"id": f"{cat_k}|{seg_k}", "nome": seg_k, "tipo": "segmento", "meses": [{"mes_banco": k, "mes_str": f"{meses_nomes.get(k.split('-')[1], k.split('-')[1])}/{k.split('-')[0][2:]}", **v} for k,v in seg_v["meses"].items()], "subRows": sorted(prods, key=lambda x: x["nome"])})
             final_portfolio.append({"id": cat_k, "nome": cat_k, "tipo": "categoria", "meses": [{"mes_banco": k, "mes_str": f"{meses_nomes.get(k.split('-')[1], k.split('-')[1])}/{k.split('-')[0][2:]}", **v} for k,v in cat_v["meses"].items()], "subRows": sorted(segs, key=lambda x: x["nome"])})
 
+        # 🔥 CORREÇÃO CIRÚRGICA: Removido o embrulho 'portfolio' para evitar o _.map is not a function
         return {
             "status": "success", 
             "is_topdown_fechado": is_topdown_fechado, 
-            "dados": {"portfolio": sorted(final_portfolio, key=lambda x: x["nome"])}
+            "dados": sorted(final_portfolio, key=lambda x: x["nome"])
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=repr(e))
@@ -166,7 +167,6 @@ async def salvar_rascunho_topdown(payload: PayloadAprovarTopDown, db: Session = 
                     rateado = int(round(volume_alvo * peso))
                     soma_dist += rateado
                 
-                # 🔥 Apenas o volume Top-Down é gravado! PMV não é tocado.
                 l.vol_topdown = rateado
 
         if payload.finalizar_etapa:
