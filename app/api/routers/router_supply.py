@@ -53,22 +53,12 @@ async def checar_status_supply(db: Session = Depends(get_db)):
         ).first()
         supply_fechado = tranca_sup.status == 'Fechado' if tranca_sup else False
 
-        # 2. RADAR: Checa se TODAS as Regionais (Coordenadores) já trancaram o Gerenciamento
-        cx = func.coalesce(func.nullif(func.trim(DimCliente.supervisor_nome), ''), func.nullif(func.trim(DimCliente.gerente_nome), ''), 'SEM COORDENADOR')
-        regionais_banco = db.query(cx).distinct().all()
-        regionais_ativas = [r[0] for r in regionais_banco if r[0]]
-
-        if not regionais_ativas:
-            comercial_fechado = False
-        else:
-            travas = db.query(ControleCiclo).filter(
-                ControleCiclo.ciclo_sop == ciclo,
-                ControleCiclo.origem.in_(regionais_ativas)
-            ).all()
-            status_map = {t.origem: t.status for t in travas}
-            
-            # A fase comercial só está fechada se TODAS as regionais ativas existirem no mapa e estiverem 'Fechado'
-            comercial_fechado = all(status_map.get(reg) == 'Fechado' for reg in regionais_ativas)
+        # 2. RADAR CORRIGIDO: Checa o cadeado global da fase Comercial
+        tranca_comercial = db.query(ControleCiclo).filter(
+            ControleCiclo.ciclo_sop == ciclo,
+            ControleCiclo.origem == 'Metas_Equipe'
+        ).first()
+        comercial_fechado = tranca_comercial.status == 'Fechado' if tranca_comercial else False
 
         return {
             "status": "success", 
@@ -86,11 +76,9 @@ async def listar_supply_review(db: Session = Depends(get_db), usuario: dict = De
     try:
         ciclo = get_current_cycle(db)
         
-        # MÁQUINA DO TEMPO: O "Hoje" respeita o relógio global
         _mes_str, _ano_str = ciclo.split('/')
         hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
         
-        # Foco do S&OP Supply no Horizonte Tático (M2, M3, M4)
         data_ini = hoje + relativedelta(months=2)
         data_fim = hoje + relativedelta(months=4)
         meses_alvo = [(hoje + relativedelta(months=i)).strftime("%Y-%m-%d") for i in range(2, 5)]
@@ -132,7 +120,6 @@ async def listar_supply_review(db: Session = Depends(get_db), usuario: dict = De
                 v_sup = int(r.v_sup or 0)
                 pmv_b = float(r.pmv or 0)
 
-                # Se o Supply ainda não interveio, herda a promessa Comercial na tela
                 vol_exibicao_supply = v_sup if v_sup > 0 else v_bu
 
                 for nivel in [arvore[cat]["meses"][ms], arvore[cat]["produtos"][sk]["meses"][ms]]:
@@ -187,7 +174,6 @@ async def aprovar_supply(payload: PayloadCongelarSupply, db: Session = Depends(g
 
             if not linhas: continue
 
-            # Inteligência Fair-Share
             soma_bu_total = sum([float(l.vol_bottomup or 0) for l in linhas])
             soma_dist = 0
             volume_total = int(ajuste.novo_volume)
@@ -241,7 +227,6 @@ async def grafico_supply(produto_id: str, db: Session = Depends(get_db)):
         ciclo_atual = get_current_cycle(db)
         ciclo_anterior = get_previous_cycle(db)
         
-        # MÁQUINA DO TEMPO: O "Hoje" respeita o relógio global
         _mes_str, _ano_str = ciclo_atual.split('/')
         hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
         

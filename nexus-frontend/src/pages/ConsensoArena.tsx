@@ -99,7 +99,12 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
       const res = await axios.get('/api/v1/consensus/micro', { params: { nome_responsavel: nomeResponsavel }});
       setDadosBrutos(res.data?.dados || []);
       setIsFechado(res.data?.is_fechado || false);
-      setCelulasEditadas({}); setLockedNodes(new Set()); setLockedTargets({}); setExpanded({}); setViewMode('carteira');
+      
+      // Limpa edições antigas para recalcular com base no banco, 
+      // mas preserva 'lockedNodes' e 'lockedTargets' para não resetar o rateio em progresso!
+      setCelulasEditadas({}); 
+      setExpanded({}); 
+      setViewMode('carteira');
     } catch (e) { console.error(e); } finally { setIsLoading(false); }
   }, [nomeResponsavel, isGerenteOrAdmin]);
 
@@ -191,7 +196,7 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
     });
   };
 
-  // Visão Macro (Atualizada para guardar a descrição do SKU)
+  // Visão Macro 
   const dadosPortfolio = useMemo(() => {
     if (viewMode !== 'portfolio') return [];
     const folhas: any[] = [];
@@ -207,7 +212,6 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
 
         let skuNode = mapa[cat].subRows[seg].subRows[f.produto];
         if (!skuNode) {
-            // Repassamos a propriedade descricao
             skuNode = { tipo: 'produto_macro', nome: f.nome, produto: f.produto, descricao: f.descricao, chave_matriz: `MACRO|${f.produto}`, meses: colunasData.map((m:any) => ({ mes_banco: m.mes_banco, mes_str: m.mes_str, vol_meta: 0, vol_sim: 0 })) };
             mapa[cat].subRows[seg].subRows[f.produto] = skuNode;
         }
@@ -273,12 +277,10 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
         const r = info.row; const t = r.original.tipo;
         const icon = t === 'gerente' ? <Target className="w-5 h-5 text-purple-600"/> : t === 'coordenador' ? <Users className="w-4 h-4 text-indigo-600"/> : t === 'vendedor' ? <Users className="w-4 h-4 text-blue-500"/> : t === 'cliente' ? <Store className="w-4 h-4 text-slate-500"/> : <Package className="w-4 h-4 text-slate-400"/>;
         return (
-          // Largura da primeira coluna expandida para acomodar as descrições (min-w-[350px])
           <div style={{ paddingLeft: `${r.depth * 2}rem` }} className="flex items-start gap-3 py-2 min-w-[350px]">
             {r.getCanExpand() ? (<button onClick={r.getToggleExpandedHandler()} className="mt-0.5 p-1.5 text-slate-400 hover:bg-slate-100 rounded-lg">{r.getIsExpanded() ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}</button>) : <div className="w-7"/>}
             <div className="w-8 h-8 rounded-full bg-slate-50 flex items-center justify-center border shadow-sm shrink-0 mt-0.5">{icon}</div>
             
-            {/* Lógica condicional: Se for SKU (produto), mostra o código e a descrição por baixo */}
             <div className="flex flex-col">
               {t === 'produto' || t === 'produto_macro' ? (
                  <>
@@ -355,13 +357,13 @@ export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }
           }
 
           return (
-            // A largura das colunas mensais saltou de w-36 para w-52
             <div className="flex flex-col items-center w-52">
                 <div className="flex w-full justify-between items-center mb-1 px-1">
                     <span className="text-[9px] text-slate-400 font-bold uppercase tracking-widest" title="Histórico Base Real">
                         Hist: {formatMoeda(base_rs)}
                     </span>
-                    {isEditableType && (
+                    {/* O Botão de trancar fica escondido se isFechado for true */}
+                    {!isFechado && isEditableType && (
                         <button onClick={()=>toggleLock(row, isOk)} className={`p-1 rounded ${isLocked ? 'bg-rose-100 text-rose-600' : isOk ? 'bg-emerald-100 text-emerald-600 hover:bg-emerald-200 shadow-sm shadow-emerald-400/50' : 'bg-slate-100 text-slate-300 cursor-not-allowed'}`} title={isLocked ? "Desbloquear" : isOk ? "Travar Valor" : "Ajuste o Rateio do nível superior para fechar 100%"}>
                             {isLocked ? <Lock className="w-3 h-3"/> : <LockOpen className="w-3 h-3"/>}
                         </button>
