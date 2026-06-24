@@ -86,8 +86,6 @@ async def reabrir_ciclo(origem: str, db: Session = Depends(get_db), usuario_loga
     try:
         # 1. Lógica especial para o Gerenciamento (Destranca todos os vendedores)
         if origem.strip().upper() == "GERENCIAMENTO":
-            # Apaga qualquer cadeado que NÃO seja as 3 etapas globais
-            # (Ou seja, vai apagar as travas de "Ricardo", "João", etc.)
             deletados = db.query(ControleCiclo).filter(
                 ControleCiclo.ciclo_sop == ciclo_atual,
                 ~func.upper(func.trim(ControleCiclo.origem)).in_([
@@ -101,7 +99,7 @@ async def reabrir_ciclo(origem: str, db: Session = Depends(get_db), usuario_loga
                 return {"status": "success", "message": f"Todos os {deletados} bloqueios de Vendedores foram removidos!"}
             return {"status": "success", "message": "A tela de Gerenciamento já se encontra aberta."}
 
-        # 2. Lógica padrão para as etapas globais (Top-Down, Supply, Dashboard)
+        # 2. Lógica padrão para as etapas globais
         cadeado = db.query(ControleCiclo).filter(
             ControleCiclo.ciclo_sop == ciclo_atual, 
             func.upper(func.trim(ControleCiclo.origem)) == origem.strip().upper()
@@ -124,47 +122,51 @@ async def exportar_base_granular(db: Session = Depends(get_db), usuario_logado: 
         raise HTTPException(status_code=403, detail="Acesso negado.")
         
     try:
+        engine = db.get_bind()
         ciclo = get_current_cycle(db)
         m2, m4 = get_projection_window(db)
         
-        resultados = get_truth_query(db, ciclo, m2, m4).with_entities(
-            DimCliente.vendedor_nome, DimCliente.gerente_nome, DimCliente.regional, DimCliente.cgc, DimCliente.razaosocial,
-            DimCliente.cod_cliente, DimCliente.loja, DimCliente.supervisor_nome,
-            DimProduto.sku, DimProduto.descricao, DimProduto.categoria, DimProduto.segmento,
-            FatoIbpGranular.mes_projetado, FatoIbpGranular.pmv_aplicado,
-            FatoIbpGranular.vol_ia, FatoIbpGranular.vol_topdown, FatoIbpGranular.vol_bottomup, 
-            FatoIbpGranular.vol_supply, FatoIbpGranular.vol_final, FatoIbpGranular.vol_meta
-        ).all()
+        # 💡 NOVO: Inteligência SQL para buscar PMV Dinâmico (Cliente x SKU) dos últimos 4 meses
+        sql = """
+            WITH pmv_historico_4m AS (
+                SELECT cgc, sku, SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv_real_4m
+                FROM fato_vendas
+                WHERE data_pedido >= CURRENT_DATE - INTERVAL '4 months'
+                GROUP BY cgc, sku
+            )
+            SELECT 
+                f.ciclo_sop AS "Ciclo S&OP",
+                c.cgc AS "CGC",
+                c.cod_cliente AS "Cliente",
+                c.loja AS "Loja",
+                c.razaosocial AS "Razão Social",
+                c.regional AS "Regional",
+                c.gerente_nome AS "Gerente",
+                c.supervisor_nome AS "Coordenador",
+                f.vendedor_nome AS "Vendedor",
+                p.categoria AS "Categoria",
+                p.segmento AS "Segmento",
+                f.sku AS "SKU",
+                p.descricao AS "Produto",
+                TO_CHAR(f.mes_projetado, 'YYYY-MM-DD') AS "Mês Projetado",
+                ROUND(COALESCE(hist.pmv_real_4m, f.pmv_aplicado, 0)::numeric, 2) AS "PMV Unitário (R$)",
+                COALESCE(f.vol_final, 0) AS "Final S&OP (CX)",
+                ROUND((COALESCE(f.vol_final, 0) * COALESCE(hist.pmv_real_4m, f.pmv_aplicado, 0))::numeric, 2) AS "Receita S&OP (R$)"
+            FROM fato_ibp_granular f
+            JOIN dim_clientes c ON f.cgc = c.cgc
+            JOIN dim_produtos p ON f.sku = p.sku
+            LEFT JOIN pmv_historico_4m hist ON hist.cgc = f.cgc AND hist.sku = f.sku
+            WHERE f.ciclo_sop = :ciclo
+              AND f.mes_projetado >= :m2
+              AND f.mes_projetado <= :m4
+            ORDER BY c.gerente_nome, c.supervisor_nome, f.vendedor_nome, c.razaosocial, f.sku
+        """
+        
+        df = pd.read_sql(text(sql), engine, params={"ciclo": ciclo, "m2": m2, "m4": m4})
 
-        if not resultados:
+        if df.empty:
             raise HTTPException(404, detail="Sem dados no ciclo selecionado.")
 
-        dados = []
-        for r in resultados:
-            # Multiplicamos o volume final pelo PMV para já exportar o valor financeiro (Opcional, mas muito útil)
-            receita_projetada = float(r.vol_final or 0) * float(r.pmv_aplicado or 0)
-
-            dados.append({
-                "Ciclo S&OP": ciclo,
-                "CGC": r.cgc,
-                "Cliente": r.cod_cliente,
-                "Loja": r.loja,
-                "Razão Social": r.razaosocial,                
-                "Regional": r.regional,                
-                "Gerente": r.gerente_nome,
-                "Coordenador": r.supervisor_nome,
-                "Vendedor": r.vendedor_nome,           
-                "Categoria": r.categoria,
-                "Segmento": r.segmento,
-                "SKU": r.sku,
-                "Produto": r.descricao,
-                "Mês Projetado": str(r.mes_projetado),
-                "PMV Unitário (R$)": float(r.pmv_aplicado or 0),
-                "Final S&OP (CX)": int(r.vol_final or 0),
-                "Receita S&OP (R$)": round(receita_projetada, 2)
-            })
-
-        df = pd.DataFrame(dados)
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Base_SOP_Granular')
@@ -222,13 +224,11 @@ async def excluir_usuario_sistema(user_id: int, db: Session = Depends(get_db), u
         )
 
     try:
-        # Apaga o usuário diretamente com SQL, sem necessitar da classe Modelo
         db.execute(text("DELETE FROM usuarios WHERE id = :id"), {"id": user_id})
         db.commit()
         return {"status": "success", "message": f"Utilizador removido com sucesso do Nexus."}
     except Exception as e:
         db.rollback()
-        # Se a tabela não se chamar "usuarios", tenta a "users"
         try:
             db.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_id})
             db.commit()
