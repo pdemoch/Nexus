@@ -56,7 +56,7 @@ const AiInsightBox = ({ alvo, pmv, volume, demandaComercial }: { alvo: string, p
   const fetchInsight = async () => {
     setLoading(true);
     try {
-      const prompt = `Gere uma análise executiva de Supply Chain (máx 3 parágrafos) para a categoria/produto ${alvo}. Demanda do Comercial: ${demandaComercial} CX. Capacidade aprovada (Supply): ${volume} CX. PMV: R$ ${pmv.toFixed(2)}. Foque em restrições de fábrica, ruptura de estoque e impacto no Fair-Share.`;
+      const prompt = `Gere uma análise executiva de Supply Chain (máx 3 parágrafos) para a categoria/produto ${alvo}. Demanda do Comercial (Meta Final): ${demandaComercial} CX. Capacidade aprovada (Supply): ${volume} CX. PMV: R$ ${pmv.toFixed(2)}. Foque em restrições de fábrica, ruptura de estoque e impacto no Fair-Share.`;
       const res = await axios.post('/api/v1/ai-sql/perguntar', { pergunta: prompt });
       setInsight(res.data.resposta);
     } catch (e) { setInsight("Erro ao comunicar com a IA Nexus. Tente novamente."); } finally { setLoading(false); }
@@ -85,7 +85,6 @@ export default function SupplyReviewArena() {
   const [celulasEditadas, setCelulasEditadas] = useState<any>({});
   const [isLoading, setIsLoading] = useState(true);
   
-  // STATUS E TRAVAS (O RADAR)
   const [isComercialFechado, setIsComercialFechado] = useState(false);
   const [isSupplyFechado, setIsSupplyFechado] = useState(false);
   
@@ -102,11 +101,9 @@ export default function SupplyReviewArena() {
       setIsComercialFechado(comercialLiberado);
       setIsSupplyFechado(resStatus.data.fechado);
 
-      // Só carrega a árvore se o Gerenciamento Comercial estiver totalmente fechado
       if (comercialLiberado) {
         const resLista = await axios.get('/api/v1/consensus/supply', { params: { nocache: new Date().getTime() } });
         setDadosBrutos(resLista.data.dados || []);
-        // Expande categorias por padrão
         const cats: any = {};
         (resLista.data.dados || []).forEach((c: any) => { cats[c.id] = true; });
         setExpanded(cats);
@@ -118,7 +115,7 @@ export default function SupplyReviewArena() {
   useEffect(() => { fetchStatusAndData(); }, [fetchStatusAndData]);
 
   // =====================================================================
-  // MOTOR DE CASCATA EM TEMPO REAL (PRODUTO -> CATEGORIA) E JUSTIFICATIVA
+  // MOTOR DE CASCATA EM TEMPO REAL E JUSTIFICATIVA
   // =====================================================================
   const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
     if (isSupplyFechado) return;
@@ -131,12 +128,10 @@ export default function SupplyReviewArena() {
         return originalVol;
       };
 
-      // Grava no Produto Folha, mantendo a justificativa se já houver
       if (!nextEdits[chaveStr]) nextEdits[chaveStr] = {};
       const prevJustificativa = nextEdits[chaveStr][mesBanco]?.justificativa || "";
       nextEdits[chaveStr][mesBanco] = { novo_volume: novoValor, justificativa: prevJustificativa };
 
-      // Rollup para a Categoria
       dadosBrutos.forEach(cat => {
         const hasChildEdited = cat.subRows?.some((p: any) => p.id === chaveStr);
         if (hasChildEdited) {
@@ -185,13 +180,12 @@ export default function SupplyReviewArena() {
         origem_ajuste: "Supply Review",
         ajustes: Object.entries(celulasEditadas).flatMap(([chave, meses]: any) => 
           Object.entries(meses)
-            // Filtra para enviar apenas SKUs (produtos não têm | no ID nesta tela)
             .filter(() => !dadosBrutos.some(c => c.id === chave))
             .map(([mes_projetado, val]: any) => ({
               produto: chave, 
               mes_projetado, 
               novo_volume: parseInt(val.novo_volume, 10), 
-              justificativa: val.justificativa || "Ajuste de Capacidade Fabril" // Grava a justificativa atômica
+              justificativa: val.justificativa || "Ajuste de Capacidade Fabril"
             }))
         )
       };
@@ -207,13 +201,13 @@ export default function SupplyReviewArena() {
   };
 
   const handleExportCSV = () => {
-    let csv = "CATEGORIA,SKU,DESCRICAO,MES,DEMANDA COMERCIAL (CX),CAPACIDADE SUPPLY (CX),GAP\n";
+    let csv = "CATEGORIA,SKU,DESCRICAO,MES,ORCAMENTO TOPDOWN,DEMANDA S&OP,CAPACIDADE SUPPLY,GAP\n";
     dadosBrutos.forEach(cat => {
       cat.subRows?.forEach((prod: any) => {
         prod.meses.forEach((m: any) => {
           const edicao = celulasEditadas[prod.id]?.[m.mes_banco];
           const vSup = edicao !== undefined ? edicao.novo_volume : m.vol_supply;
-          csv += `"${cat.nome}","${prod.id}","${prod.nome}","${m.mes_str}",${m.vol_comercial},${vSup},${vSup - m.vol_comercial}\n`;
+          csv += `"${cat.nome}","${prod.id}","${prod.nome}","${m.mes_str}",${m.vol_topdown},${m.vol_comercial},${vSup},${vSup - m.vol_comercial}\n`;
         });
       });
     });
@@ -242,9 +236,6 @@ export default function SupplyReviewArena() {
     const chave = rowData.id; 
     const chartData = dadosGraficoCache[chave];
 
-    // =====================================================================
-    // O SEGREDO DO GRÁFICO DINÂMICO (REATIVIDADE EM TEMPO REAL) E IA
-    // =====================================================================
     const chartDataDinamico = useMemo(() => {
       if (!chartData) return [];
       return chartData.map((d: any) => {
@@ -258,16 +249,11 @@ export default function SupplyReviewArena() {
 
         const mesRow = (rowData?.meses || []).find((m: any) => m.mes_banco === mesBanco);
         let iaVal = d.IA;
-        // Puxa a IA do renderizador da tela caso o gráfico venha com ponto cego do backend
         if (mesRow && mesRow.vol_ia !== undefined && mesRow.vol_ia > 0) {
            iaVal = mesRow.vol_ia;
         }
 
-        return {
-          ...d,
-          Supply: dynamicSupply,
-          IA: iaVal
-        };
+        return { ...d, Supply: dynamicSupply, IA: iaVal };
       });
     }, [chartData, celulasEditadas, rowData]);
 
@@ -283,9 +269,6 @@ export default function SupplyReviewArena() {
       return { vComercial, vSupply, gap, pmvMedio: count > 0 ? (pmvAcc / count) : 0 };
     }, [rowData, celulasEditadas]);
 
-    // =====================================================================
-    // CUSTOM TOOLTIP (CORRIGE O BUG DO HOVER INVISÍVEL NO RECHARTS)
-    // =====================================================================
     const CustomTooltip = ({ active, payload, label }: any) => {
       if (active && payload && payload.length) {
         return (
@@ -328,7 +311,6 @@ export default function SupplyReviewArena() {
           <div className="col-span-2 bg-slate-800 border border-slate-700 p-4 rounded-xl h-[340px]">
             {loadingGrafico === chave ? <div className="h-full flex items-center justify-center text-slate-500">Mapeando série histórica...</div> : chartDataDinamico && (
               <ResponsiveContainer width="100%" height="100%">
-                {/* Agora o LineChart está plugado no chartDataDinamico, reagindo ao teclado e com Tooltip Visível */}
                 <LineChart data={chartDataDinamico} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
                   <XAxis dataKey="name" tick={{fill: '#94a3b8', fontSize: 12}} tickMargin={10} axisLine={false} />
@@ -336,8 +318,9 @@ export default function SupplyReviewArena() {
                   <Tooltip content={<CustomTooltip />} cursor={{ stroke: '#475569', strokeWidth: 1, strokeDasharray: '3 3' }} />
                   <Legend iconType="circle" wrapperStyle={{ paddingTop: '10px' }} />
                   <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} connectNulls={false} />
+                  <Line type="monotone" dataKey="Topdown" name="Orçamento (Top-Down)" stroke="#10b981" strokeWidth={2} strokeDasharray="3 3" dot={false} connectNulls={false} />
                   <Line type="monotone" dataKey="IA" name="Projeção IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
-                  <Line type="monotone" dataKey="Comercial" name="Demanda Comercial (S&OP)" stroke="#eab308" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="Comercial" name="Demanda Comercial" stroke="#eab308" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
                   <Line type="monotone" dataKey="Supply" name="Capacidade Fábrica" stroke="#3b82f6" strokeWidth={3} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
                 </LineChart>
               </ResponsiveContainer>
@@ -406,12 +389,15 @@ export default function SupplyReviewArena() {
               <td key={idx} className="p-0 border-l border-slate-200 align-top">
                 <div className={`flex flex-col h-full min-h-[90px] ${isSupplyFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/40' : 'hover:bg-slate-50'}`}>
                   
-                  {/* CABEÇALHO DA CÉLULA: DEMANDA COMERCIAL E IA */}
-                  <div className="px-2 py-1.5 border-b border-slate-200/50 flex justify-center gap-2 items-center bg-slate-100/80">
-                    <span className="text-[10px] font-bold text-slate-500 bg-white border border-slate-200 px-2 py-0.5 rounded shadow-sm whitespace-nowrap" title="Projeção IA">
+                  {/* CABEÇALHO DA CÉLULA: TOPDOWN, IA E DEMANDA COMERCIAL */}
+                  <div className="px-2 py-1.5 border-b border-slate-200/50 flex justify-center gap-1.5 items-center bg-slate-100/80 overflow-hidden">
+                    <span className="text-[9px] font-bold text-slate-500 bg-white border border-slate-200 px-1.5 py-0.5 rounded shadow-sm whitespace-nowrap" title="Orçamento (Top-Down)">
+                      TD: {formatVolume(m.vol_topdown)}
+                    </span>
+                    <span className="text-[9px] font-bold text-slate-500 bg-white border border-slate-200 px-1.5 py-0.5 rounded shadow-sm whitespace-nowrap" title="Projeção IA">
                       IA: {formatVolume(m.vol_ia)}
                     </span>
-                    <span className="text-[10px] font-bold text-blue-700 bg-blue-100/50 border border-blue-200 px-2 py-0.5 rounded shadow-sm whitespace-nowrap" title="Demanda Aprovada pelo Comercial">
+                    <span className="text-[9px] font-bold text-blue-700 bg-blue-100/50 border border-blue-200 px-1.5 py-0.5 rounded shadow-sm whitespace-nowrap" title="Demanda Final S&OP (Comercial)">
                       COM: {formatVolume(m.vol_comercial)}
                     </span>
                   </div>
@@ -419,7 +405,6 @@ export default function SupplyReviewArena() {
                   {/* CORPO: SUPPLY INPUT E DADOS FINANCEIROS */}
                   <div className="px-4 py-2 flex flex-col items-end justify-center flex-1">
                     <div className="w-24">
-                      {/* O SmartInput é travado se o Supply estiver fechado OU se for a linha de Categoria (nível 0) */}
                       <SmartInput 
                          value={valorExibicao} 
                          disabled={isSupplyFechado || depth === 0} 

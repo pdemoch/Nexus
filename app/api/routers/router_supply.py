@@ -46,14 +46,12 @@ async def checar_status_supply(db: Session = Depends(get_db)):
     try:
         ciclo = get_current_cycle(db)
         
-        # 1. Checa o status da própria fase de Supply
         tranca_sup = db.query(ControleCiclo).filter(
             ControleCiclo.ciclo_sop == ciclo, 
             ControleCiclo.origem == 'Supply Review'
         ).first()
         supply_fechado = tranca_sup.status == 'Fechado' if tranca_sup else False
 
-        # 2. RADAR CORRIGIDO: Checa o cadeado global da fase Comercial
         tranca_comercial = db.query(ControleCiclo).filter(
             ControleCiclo.ciclo_sop == ciclo,
             ControleCiclo.origem == 'Metas_Equipe'
@@ -75,7 +73,6 @@ async def checar_status_supply(db: Session = Depends(get_db)):
 async def listar_supply_review(db: Session = Depends(get_db), usuario: dict = Depends(require_supply_or_admin)):
     try:
         ciclo = get_current_cycle(db)
-        
         _mes_str, _ano_str = ciclo.split('/')
         hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
         
@@ -85,13 +82,15 @@ async def listar_supply_review(db: Session = Depends(get_db), usuario: dict = De
 
         q = get_truth_query(db, ciclo, data_ini, data_fim)
 
+        # Atualizado para extrair o Topdown e o Vol Meta Oficial
         resultados = q.with_entities(
             FatoIbpGranular.sku,
             DimProduto.descricao.label('prod_desc'),
             DimProduto.categoria.label('prod_cat'),
             FatoIbpGranular.mes_projetado,
+            func.sum(FatoIbpGranular.vol_topdown).label('v_td'),
             func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
-            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'),
+            func.sum(FatoIbpGranular.vol_meta).label('v_meta'), 
             func.sum(FatoIbpGranular.vol_supply).label('v_sup'),
             func.avg(FatoIbpGranular.pmv_aplicado).label('pmv')
         ).group_by(
@@ -100,7 +99,7 @@ async def listar_supply_review(db: Session = Depends(get_db), usuario: dict = De
 
         arvore = {}
         def criar_meses():
-            return {m: {"vol_ia":0, "vol_comercial":0, "vol_supply":0, "receita_comercial":0, "pmv":0.0} for m in meses_alvo}
+            return {"vol_topdown":0, "vol_ia":0, "vol_comercial":0, "vol_supply":0, "receita_comercial":0, "pmv":0.0}
 
         for r in resultados:
             sk = str(r.sku).strip()
@@ -109,22 +108,25 @@ async def listar_supply_review(db: Session = Depends(get_db), usuario: dict = De
             ms = str(r.mes_projetado)
 
             if cat not in arvore:
-                arvore[cat] = {"nome": cat, "tipo": "categoria", "meses": criar_meses(), "produtos": {}}
+                arvore[cat] = {"nome": cat, "tipo": "categoria", "meses": {m: criar_meses() for m in meses_alvo}, "produtos": {}}
             
             if sk not in arvore[cat]["produtos"]:
-                arvore[cat]["produtos"][sk] = {"id": sk, "nome": de, "tipo": "produto", "meses": criar_meses()}
+                arvore[cat]["produtos"][sk] = {"id": sk, "nome": de, "tipo": "produto", "meses": {m: criar_meses() for m in meses_alvo}}
 
             if ms in meses_alvo:
+                v_td = int(r.v_td or 0)
                 v_ia = int(r.v_ia or 0)
-                v_bu = int(r.v_bu or 0)
+                v_meta = int(r.v_meta or 0)
                 v_sup = int(r.v_sup or 0)
                 pmv_b = float(r.pmv or 0)
 
-                vol_exibicao_supply = v_sup if v_sup > 0 else v_bu
+                # Se o Supply ainda não interveio, a fábrica enxerga a Meta do Vendedor como alvo inicial
+                vol_exibicao_supply = v_sup if v_sup > 0 else v_meta
 
                 for nivel in [arvore[cat]["meses"][ms], arvore[cat]["produtos"][sk]["meses"][ms]]:
+                    nivel["vol_topdown"] += v_td
                     nivel["vol_ia"] += v_ia
-                    nivel["vol_comercial"] += v_bu
+                    nivel["vol_comercial"] += v_meta
                     nivel["vol_supply"] += vol_exibicao_supply
                     nivel["receita_comercial"] += (vol_exibicao_supply * pmv_b)
                     
@@ -174,7 +176,8 @@ async def aprovar_supply(payload: PayloadCongelarSupply, db: Session = Depends(g
 
             if not linhas: continue
 
-            soma_bu_total = sum([float(l.vol_bottomup or 0) for l in linhas])
+            # Inteligência Fair-Share - Baseada na proporção da vol_meta (A Venda Final)
+            soma_meta_total = sum([float(l.vol_meta or 0) for l in linhas])
             soma_dist = 0
             volume_total = int(ajuste.novo_volume)
             
@@ -182,8 +185,8 @@ async def aprovar_supply(payload: PayloadCongelarSupply, db: Session = Depends(g
                 if i == len(linhas) - 1:
                     rateado = volume_total - soma_dist 
                 else:
-                    if soma_bu_total > 0:
-                        peso = float(l.vol_bottomup or 0) / soma_bu_total
+                    if soma_meta_total > 0:
+                        peso = float(l.vol_meta or 0) / soma_meta_total
                     else:
                         peso = 1.0 / len(linhas) 
                         
@@ -193,7 +196,7 @@ async def aprovar_supply(payload: PayloadCongelarSupply, db: Session = Depends(g
                 l.vol_supply = rateado
                 l.justificativa_supply = ajuste.justificativa
                 l.vol_final = rateado 
-                l.vol_meta = rateado
+                # PROPOSITALMENTE REMOVIDO l.vol_meta = rateado (Para não sobregravar a história comercial)
 
         if not registro: 
             db.add(ControleCiclo(ciclo_sop=ciclo, origem='Supply Review', status='Fechado'))
@@ -206,9 +209,6 @@ async def aprovar_supply(payload: PayloadCongelarSupply, db: Session = Depends(g
         db.rollback()
         raise HTTPException(500, repr(e))
 
-# =====================================================================
-# ROTA DE DESTRANCAR (REABRIR FASE)
-# =====================================================================
 @router.post("/destrancar")
 async def destrancar_supply(db: Session = Depends(get_db), usuario: dict = Depends(require_supply_or_admin)):
     ciclo = get_current_cycle(db)
@@ -237,7 +237,7 @@ async def grafico_supply(produto_id: str, db: Session = Depends(get_db)):
         curr = inicio_hist
         while curr <= hoje + relativedelta(months=4):
             mes_str = curr.strftime('%Y-%m')
-            calendario[mes_str] = {"Realizado": None, "IA": None, "Comercial": None, "Supply": None}
+            calendario[mes_str] = {"Realizado": None, "Topdown": None, "IA": None, "Comercial": None, "Supply": None}
             curr += relativedelta(months=1)
 
         q_hist = db.query(
@@ -252,16 +252,18 @@ async def grafico_supply(produto_id: str, db: Session = Depends(get_db)):
         q_proj = db.query(
             func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes_ano'),
             FatoIbpGranular.ciclo_sop,
+            func.sum(FatoIbpGranular.vol_topdown).label('td'),
             func.sum(FatoIbpGranular.vol_ia).label('ia'),
-            func.sum(FatoIbpGranular.vol_bottomup).label('bu'),
+            func.sum(FatoIbpGranular.vol_meta).label('meta'), # Gráfico pega a Meta Comercial
             func.sum(FatoIbpGranular.vol_supply).label('sup')
         ).filter(FatoIbpGranular.sku == produto_id)
 
         proj_por_mes = defaultdict(dict)
         for row in q_proj.group_by('mes_ano', FatoIbpGranular.ciclo_sop).all():
             proj_por_mes[row.mes_ano][row.ciclo_sop] = {
+                "td": int(row.td or 0),
                 "ia": int(row.ia or 0), 
-                "bu": int(row.bu or 0),
+                "meta": int(row.meta or 0),
                 "sup": int(row.sup or 0)
             }
 
@@ -279,10 +281,12 @@ async def grafico_supply(produto_id: str, db: Session = Depends(get_db)):
             
             if ciclo_ia_str in proj_por_mes[mes_str]:
                 calendario[mes_str]["IA"] = proj_por_mes[mes_str][ciclo_ia_str]["ia"]
+                
             if ciclo_atual in proj_por_mes[mes_str]:
-                calendario[mes_str]["Comercial"] = proj_por_mes[mes_str][ciclo_atual]["bu"]
+                calendario[mes_str]["Topdown"] = proj_por_mes[mes_str][ciclo_atual]["td"]
+                calendario[mes_str]["Comercial"] = proj_por_mes[mes_str][ciclo_atual]["meta"]
                 sup_val = proj_por_mes[mes_str][ciclo_atual]["sup"]
-                calendario[mes_str]["Supply"] = sup_val if sup_val > 0 else proj_por_mes[mes_str][ciclo_atual]["bu"]
+                calendario[mes_str]["Supply"] = sup_val if sup_val > 0 else proj_por_mes[mes_str][ciclo_atual]["meta"]
 
         timeline = []
         for ms, v in sorted(calendario.items()):
@@ -291,6 +295,7 @@ async def grafico_supply(produto_id: str, db: Session = Depends(get_db)):
                 "name": ms,
                 "data_iso": f"{ms}-01",
                 "Realizado": None if mes_dt > hoje else (v["Realizado"] or 0),
+                "Topdown": v["Topdown"] if mes_dt >= m2_comercial else None,
                 "IA": v["IA"],
                 "Comercial": v["Comercial"] if mes_dt >= m2_comercial else None,
                 "Supply": v["Supply"] if mes_dt >= m2_comercial else None
