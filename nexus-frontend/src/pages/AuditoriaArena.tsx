@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { 
   ShoppingCart, TrendingUp, TrendingDown, Factory, Target, Activity, 
-  Search, RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, DollarSign
+  Search, RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, DollarSign, Users
 } from 'lucide-react';
 import { ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, LineChart, Line, ReferenceLine, ComposedChart, Bar, Legend } from 'recharts';
 
@@ -11,7 +11,7 @@ const formatFin = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'cu
 const formatVol = (val: number) => Math.round(val || 0).toLocaleString('pt-BR');
 const formatPct = (val: number) => new Intl.NumberFormat('pt-BR', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(val || 0);
 
-// --- COMPONENTE DROPDOWN ---
+// --- COMPONENTE DROPDOWN MESES ---
 const ExcelTreeDropdown = ({ titulo, options, selected, onChange }: any) => {
   const [open, setOpen] = useState(false);
   const groupedOptions = useMemo(() => {
@@ -168,12 +168,16 @@ export default function AuditoriaArena() {
   
   const [mesesDisponiveis, setMesesDisponiveis] = useState<string[]>([]);
   const [mesesSelecionados, setMesesSelecionados] = useState<string[]>([]);
+  
+  // Filtros Globais da Tela
   const [categoriaSel, setCategoriaSel] = useState('Todas');
   const [segmentoSel, setSegmentoSel] = useState('Todos');
+  const [clienteSel, setClienteSel] = useState('Todos');
   const [buscaSku, setBuscaSku] = useState('');
   
-  const [listaCategorias, setListaCategorias] = useState<string[]>([]);
-  const [listaSegmentos, setListaSegmentos] = useState<string[]>([]);
+  // Dicionários para o Filtro Dinâmico em Cascata
+  const [paresCatSeg, setParesCatSeg] = useState<any[]>([]);
+  const [listaClientes, setListaClientes] = useState<string[]>([]);
 
   const [graficosKpi, setGraficosKpi] = useState<any[]>([]);
   const [skus, setSkus] = useState<any[]>([]);
@@ -188,14 +192,25 @@ export default function AuditoriaArena() {
     const fetchFiltros = async () => {
       try {
         const res = await axios.get(`/api/v1/kpis/filtros-auditoria?lente=${lente}`);
-        setListaCategorias(res.data.categorias || []);
-        setListaSegmentos(res.data.segmentos || []);
+        setParesCatSeg(res.data.pares_cat_seg || []);
+        setListaClientes(res.data.clientes || []);
         setMesesDisponiveis(res.data.meses_disponiveis || []);
         if (res.data.meses_disponiveis?.length > 0) setMesesSelecionados(res.data.meses_disponiveis.slice(0, 6)); 
       } catch (err) {}
     };
     fetchFiltros();
   }, [lente]);
+
+  // 🔥 LÓGICA DE FILTRO EM CASCATA INSTANTÂNEA NO FRONTEND
+  const categoriasExibidas = useMemo(() => {
+      if (segmentoSel === 'Todos') return Array.from(new Set(paresCatSeg.map(f => f.categoria))).sort();
+      return Array.from(new Set(paresCatSeg.filter(f => f.segmento === segmentoSel).map(f => f.categoria))).sort();
+  }, [paresCatSeg, segmentoSel]);
+
+  const segmentosExibidos = useMemo(() => {
+      if (categoriaSel === 'Todas') return Array.from(new Set(paresCatSeg.map(f => f.segmento))).sort();
+      return Array.from(new Set(paresCatSeg.filter(f => f.categoria === categoriaSel).map(f => f.segmento))).sort();
+  }, [paresCatSeg, categoriaSel]);
 
   const carregarDadosCore = async () => {
     if (lente !== 'estoque' && mesesSelecionados.length === 0) return;
@@ -204,6 +219,7 @@ export default function AuditoriaArena() {
       const params = new URLSearchParams();
       params.append('categoria', categoriaSel);
       params.append('segmento', segmentoSel);
+      params.append('razaosocial', clienteSel);
 
       if (lente === 'kpis') {
         params.append('visao', visao);
@@ -231,7 +247,7 @@ export default function AuditoriaArena() {
     } catch (err) {} finally { setCarregando(false); }
   };
 
-  useEffect(() => { carregarDadosCore(); }, [lente, visao, categoriaSel, segmentoSel, mesesSelecionados]);
+  useEffect(() => { carregarDadosCore(); }, [lente, visao, categoriaSel, segmentoSel, clienteSel, mesesSelecionados]);
 
   const handleSyncStock = async () => {
     setIsSyncing(true);
@@ -285,22 +301,31 @@ export default function AuditoriaArena() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
-        {lente !== 'estoque' && <ExcelTreeDropdown titulo="Horizonte S&OP" options={mesesDisponiveis} selected={mesesSelecionados} onChange={setMesesSelecionados} />}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+        {lente !== 'estoque' && <div className="lg:col-span-1"><ExcelTreeDropdown titulo="Horizonte S&OP" options={mesesDisponiveis} selected={mesesSelecionados} onChange={setMesesSelecionados} /></div>}
+        
+        <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
+          <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2 flex items-center gap-2"><Users className="w-3 h-3"/> Razão Social (Cliente)</label>
+          <select value={clienteSel} onChange={(e) => setClienteSel(e.target.value)} className="w-full bg-slate-950 border border-slate-800 text-sm p-2 rounded-lg text-slate-300 focus:outline-none"><option value="Todos">Todos os Clientes</option>{listaClientes.map((c:any) => <option key={c} value={c}>{c}</option>)}</select>
+        </div>
+
         <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
           <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2 block">Categoria</label>
-          <select value={categoriaSel} onChange={(e) => setCategoriaSel(e.target.value)} className="w-full bg-slate-950 border border-slate-800 text-sm p-2 rounded-lg text-slate-300 focus:outline-none"><option value="Todas">Todas as Categorias</option>{listaCategorias.map(c => <option key={c} value={c}>{c}</option>)}</select>
+          <select value={categoriaSel} onChange={(e) => setCategoriaSel(e.target.value)} className="w-full bg-slate-950 border border-slate-800 text-sm p-2 rounded-lg text-slate-300 focus:outline-none"><option value="Todas">Todas as Categorias</option>{categoriasExibidas.map((c:any) => <option key={c} value={c}>{c}</option>)}</select>
         </div>
+
         <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
           <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2 block">Segmento</label>
-          <select value={segmentoSel} onChange={(e) => setSegmentoSel(e.target.value)} className="w-full bg-slate-950 border border-slate-800 text-sm p-2 rounded-lg text-slate-300 focus:outline-none"><option value="Todos">Todos os Segmentos</option>{listaSegmentos.map(s => <option key={s} value={s}>{s}</option>)}</select>
+          <select value={segmentoSel} onChange={(e) => setSegmentoSel(e.target.value)} className="w-full bg-slate-950 border border-slate-800 text-sm p-2 rounded-lg text-slate-300 focus:outline-none"><option value="Todos">Todos os Segmentos</option>{segmentosExibidos.map((s:any) => <option key={s} value={s}>{s}</option>)}</select>
         </div>
-        <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
+
+        <div className={`bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md ${lente === 'estoque' ? 'col-span-2' : ''}`}>
           <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2 flex justify-between">Pesquisar SKU <span className="text-indigo-400 font-bold">{sortedSkus.length} Itens</span></label>
           <div className="relative"><Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-500" /><input type="text" value={buscaSku} onChange={(e) => setBuscaSku(e.target.value)} placeholder="Código ou nome..." className="w-full bg-slate-950 border border-slate-800 text-sm py-2 pl-9 pr-3 rounded-lg text-slate-300 focus:outline-none" /></div>
         </div>
+        
         {lente === 'estoque' && (
-          <button onClick={handleSyncStock} disabled={isSyncing} className="w-full h-full bg-slate-800 hover:bg-slate-700 rounded-xl border border-slate-700 text-xs font-black uppercase text-sky-400 flex items-center justify-center gap-2 transition-all">
+          <button onClick={handleSyncStock} disabled={isSyncing} className="col-span-1 h-full bg-slate-800 hover:bg-slate-700 rounded-xl border border-slate-700 text-xs font-black uppercase text-sky-400 flex items-center justify-center gap-2 transition-all">
             {isSyncing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} Sync ERP (API 90)
           </button>
         )}
