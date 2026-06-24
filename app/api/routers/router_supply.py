@@ -5,7 +5,7 @@ from collections import defaultdict
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, text
 
 from app.core.database import get_db
 from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, ControleCiclo, FatoVendas
@@ -80,9 +80,19 @@ async def listar_supply_review(db: Session = Depends(get_db), usuario: dict = De
         data_fim = hoje + relativedelta(months=4)
         meses_alvo = [(hoje + relativedelta(months=i)).strftime("%Y-%m-%d") for i in range(2, 5)]
 
+        # 🔥 NOVO: Busca do Orçamento Top-Down Financeiro
+        orc_query = db.execute(text("""
+            SELECT sku, mes_projetado, receita_orcamento 
+            FROM fato_orcamento 
+            WHERE mes_projetado >= :m2 AND mes_projetado <= :m4
+        """), {"m2": data_ini, "m4": data_fim}).fetchall()
+        
+        orc_dict = {}
+        for o in orc_query:
+            orc_dict[f"{o.sku}|{o.mes_projetado}"] = float(o.receita_orcamento or 0)
+
         q = get_truth_query(db, ciclo, data_ini, data_fim)
 
-        # Atualizado para extrair o Topdown e o Vol Meta Oficial
         resultados = q.with_entities(
             FatoIbpGranular.sku,
             DimProduto.descricao.label('prod_desc'),
@@ -99,7 +109,7 @@ async def listar_supply_review(db: Session = Depends(get_db), usuario: dict = De
 
         arvore = {}
         def criar_meses():
-            return {"vol_topdown":0, "vol_ia":0, "vol_comercial":0, "vol_supply":0, "receita_comercial":0, "pmv":0.0}
+            return {"vol_topdown":0, "receita_meta":0, "vol_ia":0, "vol_comercial":0, "vol_supply":0, "receita_comercial":0, "pmv":0.0}
 
         for r in resultados:
             sk = str(r.sku).strip()
@@ -119,12 +129,14 @@ async def listar_supply_review(db: Session = Depends(get_db), usuario: dict = De
                 v_meta = int(r.v_meta or 0)
                 v_sup = int(r.v_sup or 0)
                 pmv_b = float(r.pmv or 0)
+                
+                v_orcamento_rec = orc_dict.get(f"{sk}|{ms}", 0.0)
 
-                # Se o Supply ainda não interveio, a fábrica enxerga a Meta do Vendedor como alvo inicial
                 vol_exibicao_supply = v_sup if v_sup > 0 else v_meta
 
                 for nivel in [arvore[cat]["meses"][ms], arvore[cat]["produtos"][sk]["meses"][ms]]:
                     nivel["vol_topdown"] += v_td
+                    nivel["receita_meta"] += v_orcamento_rec
                     nivel["vol_ia"] += v_ia
                     nivel["vol_comercial"] += v_meta
                     nivel["vol_supply"] += vol_exibicao_supply
@@ -176,7 +188,6 @@ async def aprovar_supply(payload: PayloadCongelarSupply, db: Session = Depends(g
 
             if not linhas: continue
 
-            # Inteligência Fair-Share - Baseada na proporção da vol_meta (A Venda Final)
             soma_meta_total = sum([float(l.vol_meta or 0) for l in linhas])
             soma_dist = 0
             volume_total = int(ajuste.novo_volume)
@@ -196,7 +207,6 @@ async def aprovar_supply(payload: PayloadCongelarSupply, db: Session = Depends(g
                 l.vol_supply = rateado
                 l.justificativa_supply = ajuste.justificativa
                 l.vol_final = rateado 
-                # PROPOSITALMENTE REMOVIDO l.vol_meta = rateado (Para não sobregravar a história comercial)
 
         if not registro: 
             db.add(ControleCiclo(ciclo_sop=ciclo, origem='Supply Review', status='Fechado'))
@@ -254,7 +264,7 @@ async def grafico_supply(produto_id: str, db: Session = Depends(get_db)):
             FatoIbpGranular.ciclo_sop,
             func.sum(FatoIbpGranular.vol_topdown).label('td'),
             func.sum(FatoIbpGranular.vol_ia).label('ia'),
-            func.sum(FatoIbpGranular.vol_meta).label('meta'), # Gráfico pega a Meta Comercial
+            func.sum(FatoIbpGranular.vol_meta).label('meta'), 
             func.sum(FatoIbpGranular.vol_supply).label('sup')
         ).filter(FatoIbpGranular.sku == produto_id)
 

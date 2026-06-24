@@ -10,10 +10,32 @@ import {
 } from 'recharts';
 
 // =====================================================================
-// HELPERS DE FORMATAÇÃO
+// HELPERS DE FORMATAÇÃO E VARIAÇÃO
 // =====================================================================
 const formatVolume = (val: number) => new Intl.NumberFormat('pt-BR').format(Math.round(val || 0));
 const formatMoeda = (val: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val || 0);
+
+const calcVar = (atual: number, anterior: number) => anterior > 0 ? ((atual - anterior) / anterior) * 100 : 0;
+
+const VarBadge = ({ atual = 0, anterior = 0, dark = false }: { atual?: number, anterior?: number, dark?: boolean }) => {
+  const v = calcVar(atual, anterior);
+  if (v === 0 || anterior === 0) return null;
+  const isPos = v >= 0;
+  
+  if (dark) {
+    return (
+      <span className={`text-[9px] font-black flex items-center gap-0.5 px-1 py-0.5 rounded ${isPos ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
+        {isPos ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />} {Math.abs(v).toFixed(1)}%
+      </span>
+    );
+  }
+  
+  return (
+    <span className={`text-[9px] font-black flex items-center gap-0.5 px-1.5 py-0.5 rounded ${isPos ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+      {isPos ? <TrendingUp className="w-2.5 h-2.5" /> : <TrendingDown className="w-2.5 h-2.5" />} {Math.abs(v).toFixed(1)}%
+    </span>
+  );
+};
 
 // =====================================================================
 // COMPONENTE: SMART INPUT (Sem Perda de Foco)
@@ -114,9 +136,15 @@ export default function SupplyReviewArena() {
 
   useEffect(() => { fetchStatusAndData(); }, [fetchStatusAndData]);
 
-  // =====================================================================
-  // MOTOR DE CASCATA EM TEMPO REAL E JUSTIFICATIVA
-  // =====================================================================
+  // Função recursiva para buscar o orçamento original de qualquer nível
+  const getStaticTD = useCallback((row: any, mesBanco: string): number => {
+    if (row.tipo === 'produto') {
+      const m = row.meses?.find((x: any) => x.mes_banco === mesBanco);
+      return m?.receita_meta || 0;
+    }
+    return (row.subRows || []).reduce((acc: number, child: any) => acc + getStaticTD(child, mesBanco), 0);
+  }, []);
+
   const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
     if (isSupplyFechado) return;
 
@@ -320,7 +348,7 @@ export default function SupplyReviewArena() {
                   <Line type="monotone" dataKey="Realizado" name="Histórico Real" stroke="#0f172a" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} connectNulls={false} />
                   <Line type="monotone" dataKey="Topdown" name="Orçamento (Top-Down)" stroke="#10b981" strokeWidth={2} strokeDasharray="3 3" dot={false} connectNulls={false} />
                   <Line type="monotone" dataKey="IA" name="Projeção IA" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
-                  <Line type="monotone" dataKey="Comercial" name="Demanda Comercial" stroke="#eab308" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
+                  <Line type="monotone" dataKey="Comercial" name="Demanda S&OP (Meta)" stroke="#eab308" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
                   <Line type="monotone" dataKey="Supply" name="Capacidade Fábrica" stroke="#3b82f6" strokeWidth={3} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
                 </LineChart>
               </ResponsiveContainer>
@@ -335,18 +363,27 @@ export default function SupplyReviewArena() {
   };
 
   const totaisGerais = useMemo(() => {
-    const totais: Record<string, { volSup: number, volCom: number }> = {};
+    const totais: Record<string, { volSup: number, volCom: number, fatSup: number, orcFat: number }> = {};
     dadosBrutos.forEach(cat => {
       cat.meses?.forEach((m: any) => {
-        if (!totais[m.mes_banco]) totais[m.mes_banco] = { volSup: 0, volCom: 0 };
+        if (!totais[m.mes_banco]) totais[m.mes_banco] = { volSup: 0, volCom: 0, fatSup: 0, orcFat: 0 };
         const edicao = celulasEditadas[cat.id]?.[m.mes_banco];
         const vAtual = edicao !== undefined ? parseInt(edicao.novo_volume) : (m.vol_supply || 0);
         totais[m.mes_banco].volSup += vAtual;
+        totais[m.mes_banco].fatSup += (vAtual * (m.pmv || 0));
         totais[m.mes_banco].volCom += (m.vol_comercial || 0);
       });
     });
+
+    const colunasData = dadosBrutos.length > 0 ? dadosBrutos[0].meses : [];
+    colunasData?.forEach((m: any) => {
+       let orc = 0;
+       dadosBrutos.forEach(r => orc += getStaticTD(r, m.mes_banco));
+       if (totais[m.mes_banco]) totais[m.mes_banco].orcFat = orc;
+    });
+
     return totais;
-  }, [dadosBrutos, celulasEditadas]);
+  }, [dadosBrutos, celulasEditadas, getStaticTD]);
 
   const renderRow = (row: any, depth = 0) => {
     const isExpanded = expanded[row.id];
@@ -385,15 +422,15 @@ export default function SupplyReviewArena() {
             const valorExibicao = isEdited ? edicao.novo_volume : (m.vol_supply || 0);
             const gap = valorExibicao - m.vol_comercial;
 
+            const rSup = valorExibicao * (m.pmv || 0);
+            const rMeta = getStaticTD(row, m.mes_banco);
+
             return (
               <td key={idx} className="p-0 border-l border-slate-200 align-top">
                 <div className={`flex flex-col h-full min-h-[90px] ${isSupplyFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/40' : 'hover:bg-slate-50'}`}>
                   
-                  {/* CABEÇALHO DA CÉLULA: TOPDOWN, IA E DEMANDA COMERCIAL */}
+                  {/* CABEÇALHO DA CÉLULA: IA E DEMANDA COMERCIAL */}
                   <div className="px-2 py-1.5 border-b border-slate-200/50 flex justify-center gap-1.5 items-center bg-slate-100/80 overflow-hidden">
-                    <span className="text-[9px] font-bold text-slate-500 bg-white border border-slate-200 px-1.5 py-0.5 rounded shadow-sm whitespace-nowrap" title="Orçamento (Top-Down)">
-                      TD: {formatVolume(m.vol_topdown)}
-                    </span>
                     <span className="text-[9px] font-bold text-slate-500 bg-white border border-slate-200 px-1.5 py-0.5 rounded shadow-sm whitespace-nowrap" title="Projeção IA">
                       IA: {formatVolume(m.vol_ia)}
                     </span>
@@ -403,7 +440,7 @@ export default function SupplyReviewArena() {
                   </div>
                   
                   {/* CORPO: SUPPLY INPUT E DADOS FINANCEIROS */}
-                  <div className="px-4 py-2 flex flex-col items-end justify-center flex-1">
+                  <div className="px-4 py-2 flex flex-col items-center justify-center flex-1">
                     <div className="w-24">
                       <SmartInput 
                          value={valorExibicao} 
@@ -411,16 +448,25 @@ export default function SupplyReviewArena() {
                          onChange={(novoVol) => handleEditCell(row.id, m.mes_banco, novoVol)} 
                       />
                     </div>
-                    {/* Faturamento Previsto Dinâmico */}
-                    <span className="text-[10px] font-bold text-emerald-500 tracking-tight pr-1 mt-0.5" title="Receita (R$) Prevista">
-                      {formatMoeda(valorExibicao * (m.pmv || 0))}
-                    </span>
+                    
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                       <span className="text-[10px] font-bold text-emerald-500 tracking-tight" title="Receita (R$) Prevista">
+                         {formatMoeda(rSup)}
+                       </span>
+                       {rMeta > 0 && <VarBadge atual={rSup} anterior={rMeta} />}
+                    </div>
+
                     {/* Alerta de Ruptura (Corte de Fair-Share) */}
                     {gap !== 0 && (
                       <span className={`text-[10px] font-bold mt-1 px-1.5 py-0.5 rounded ${gap < 0 ? 'bg-rose-100 text-rose-600' : 'bg-emerald-100 text-emerald-600'}`} title="GAP versus Demanda Comercial">
                         {gap > 0 ? '+' : ''}{formatVolume(gap)} cx
                       </span>
                     )}
+
+                    {/* ORÇAMENTO (TOP-DOWN) EMBUTIDO NO RODAPÉ DA CÉLULA */}
+                    <div className="flex flex-col items-center mt-1.5 pt-1.5 border-t border-slate-100 w-full">
+                       <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Orç: {formatMoeda(rMeta)}</span>
+                    </div>
 
                     {/* CAMPO DE JUSTIFICATIVA INDIVIDUAL (Apenas Produto) */}
                     {depth > 0 && !isSupplyFechado && (
@@ -540,14 +586,22 @@ export default function SupplyReviewArena() {
                     </div>
                   </td>
                   {colunasData?.map((m: any, i: number) => (
-                    <td key={i} className="px-6 py-5 border-l border-slate-800/50 text-right">
+                    <td key={i} className="px-6 py-5 border-l border-slate-800/50 text-center">
                       <div className="flex flex-col items-center justify-center">
                         <span className="font-black text-white text-base">
                           {formatVolume(totaisGerais[m.mes_banco]?.volSup || 0)} <span className="text-[10px] text-slate-400 font-medium ml-1">CX</span>
                         </span>
-                        <span className="font-bold text-slate-400 text-xs tracking-tight mt-1 px-2 py-0.5 rounded border border-slate-700 bg-slate-800" title="Demanda Comercial Total">
-                          Comercial: {formatVolume(totaisGerais[m.mes_banco]?.volCom || 0)}
-                        </span>
+                        
+                        <div className="flex items-center gap-1.5 mt-1">
+                           <span className="font-bold text-blue-400 text-xs tracking-tight bg-blue-400/10 px-2 py-0.5 rounded">
+                             {formatMoeda(totaisGerais[m.mes_banco]?.fatSup || 0)}
+                           </span>
+                           {totaisGerais[m.mes_banco]?.orcFat > 0 && <VarBadge atual={totaisGerais[m.mes_banco]?.fatSup} anterior={totaisGerais[m.mes_banco]?.orcFat} dark />}
+                        </div>
+
+                        <div className="flex items-center justify-center gap-1 mt-1.5 pt-1.5 border-t border-slate-800 w-full">
+                          <span className="text-[9px] text-slate-500 font-bold tracking-widest uppercase">Orç: {formatMoeda(totaisGerais[m.mes_banco]?.orcFat || 0)}</span>
+                        </div>
                       </div>
                     </td>
                   ))}
