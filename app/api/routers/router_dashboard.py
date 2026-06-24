@@ -43,7 +43,6 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
         m2_date = parse_date_safe(m2_str)
         
         # 1. ORÇAMENTO FINANCEIRO
-        # Busca na nova tabela de orçamento injetada pelo ETL
         orc_query = db.execute(text("""
             SELECT sku, mes_projetado, receita_orcamento 
             FROM fato_orcamento 
@@ -143,7 +142,6 @@ async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria',
 
         inicio_hist = hoje - relativedelta(years=2)
 
-        # Buscar o Orçamento no banco filtrando pela Categoria ou SKU
         orc_graf_query = db.execute(text("""
             SELECT o.mes_projetado, SUM(o.receita_orcamento) as rec
             FROM fato_orcamento o
@@ -223,23 +221,23 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
             if not linhas: continue
 
             total_base_antigo = sum([float(l.vol_final or 0) for l in linhas])
-            base_total_bu, base_total_sp = sum([float(l.vol_bottomup or 0) for l in linhas]), sum([float(l.vol_supply or 0) for l in linhas])
-            
-            usar_base_sp = base_total_bu <= 0
-            total_base = base_total_sp if usar_base_sp else base_total_bu
+            # 🔥 CORREÇÃO DA ARQUITETURA: Agora o rateio baseia-se unicamente na proporção definida no VOL_META!
+            total_base_meta = sum([float(l.vol_meta or 0) for l in linhas])
             
             soma_dist, volume_alvo, total_clientes = 0, int(ajuste.novo_volume), len(linhas)
             
             for i, l in enumerate(linhas):
-                if i == total_clientes - 1: rateado = volume_alvo - soma_dist 
+                if i == total_clientes - 1: 
+                    rateado = volume_alvo - soma_dist 
                 else:
-                    vol_referencia = float(l.vol_supply or 0) if usar_base_sp else float(l.vol_bottomup or 0)
-                    peso = vol_referencia / total_base if total_base > 0 else 1.0 / total_clientes
+                    vol_referencia = float(l.vol_meta or 0)
+                    peso = vol_referencia / total_base_meta if total_base_meta > 0 else 1.0 / total_clientes
                     rateado = int(round(volume_alvo * peso))
                     soma_dist += rateado
                 
+                # Apenas a Demanda Final (Demanda Irrestrita) é alterada pelo Dashboard
                 l.vol_final = rateado
-                l.vol_meta = rateado
+                # 🚫 REMOVIDO: l.vol_meta = rateado -> Preservamos o vol_meta para manter o histórico do desejo Comercial/Consenso
 
             nome_user = usuario.get('nome', usuario.get('email', 'Desconhecido'))
             registrar_log_auditoria(db=db, ciclo=ciclo, origem="S&OP Global (Dashboard Final)", usuario=nome_user, sku=sku, cliente="TODOS_OS_CLIENTES", mes=data_alvo, v_antigo=int(total_base_antigo), v_novo=volume_alvo)

@@ -153,11 +153,12 @@ export default function GlobalDashboard() {
   }, [dadosBrutos]);
 
   const { arvoreDados, skuReferencias } = useMemo(() => {
-    if (!dadosBrutos.length) return { arvoreDados: [], skuReferencias: { totaisBU: new Map(), basesSupply: new Map(), basesFinal: new Map() } };
+    if (!dadosBrutos.length) return { arvoreDados: [], skuReferencias: { totaisMeta: new Map(), basesSupply: new Map(), basesFinal: new Map() } };
     
     const term = busca.toLowerCase();
     const tree = new Map();
-    const totaisBU = new Map();
+    // 🔥 NOVO: Atualizado para guardar os totais da META ao invés do BU antigo
+    const totaisMeta = new Map();
     const basesSupply = new Map();
     const basesFinal = new Map();
     
@@ -167,11 +168,11 @@ export default function GlobalDashboard() {
       const mes = r.mes_projetado;
       const razaoLimpa = r.razaosocial || 'CLIENTE NÃO IDENTIFICADO';
       
-      if (!totaisBU.has(r.sku)) totaisBU.set(r.sku, {});
+      if (!totaisMeta.has(r.sku)) totaisMeta.set(r.sku, {});
       if (!basesSupply.has(r.sku)) basesSupply.set(r.sku, {});
       if (!basesFinal.has(r.sku)) basesFinal.set(r.sku, {});
       
-      totaisBU.get(r.sku)[mes] = (totaisBU.get(r.sku)[mes] || 0) + (r.vol_bottomup || 0);
+      totaisMeta.get(r.sku)[mes] = (totaisMeta.get(r.sku)[mes] || 0) + (r.vol_meta || 0);
       basesSupply.get(r.sku)[mes] = (basesSupply.get(r.sku)[mes] || 0) + (r.vol_supply || 0);
       basesFinal.get(r.sku)[mes] = (basesFinal.get(r.sku)[mes] || 0) + (r.vol_final || 0);
 
@@ -194,7 +195,7 @@ export default function GlobalDashboard() {
       [cat, skuNode, cliNode].forEach(node => {
         if (!node.meses.has(mes)) {
             node.meses.set(mes, { 
-              mes_banco: mes, vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, 
+              mes_banco: mes, vol_ia:0, vol_td:0, vol_bu:0, vol_sp:0, vol_final:0, vol_meta:0,
               rec_ia:0, rec_td:0, rec_bu:0, rec_sp:0, rec_final:0, rec_orc:0
             });
         }
@@ -204,6 +205,7 @@ export default function GlobalDashboard() {
         mNode.vol_bu += (r.vol_bottomup || 0);
         mNode.vol_sp += (r.vol_supply || 0);
         mNode.vol_final += (r.vol_final || 0);
+        mNode.vol_meta += (r.vol_meta || 0);
         
         mNode.rec_ia += (r.rec_ia || 0);
         mNode.rec_td += (r.rec_td || 0);
@@ -213,7 +215,6 @@ export default function GlobalDashboard() {
       });
     });
 
-    // Injeção do Orçamento Financeiro pela raiz dos SKUs
     Array.from(tree.values()).forEach((cat: any) => {
        Array.from(cat.filhos.values()).forEach((sku: any) => {
           sku.meses.forEach((m: any) => {
@@ -237,7 +238,7 @@ export default function GlobalDashboard() {
       }))
     }));
 
-    return { arvoreDados: dataArray, skuReferencias: { totaisBU, basesSupply, basesFinal } };
+    return { arvoreDados: dataArray, skuReferencias: { totaisMeta, basesSupply, basesFinal } };
   }, [dadosBrutos, busca, orcamentoBase]);
 
   const getDynamicRowVol = useCallback((rowOriginal: any, mesBanco: string): number => {
@@ -245,18 +246,21 @@ export default function GlobalDashboard() {
           const editado = celulasEditadas[rowOriginal.produto]?.[mesBanco];
           const mesData = rowOriginal.meses.find((m:any) => m.mes_banco === mesBanco);
           const dbValue = mesData?.vol_final;
-          const baseFinal = (dbValue !== undefined && dbValue !== null) ? dbValue : (mesData?.vol_sp || 0);
+          const baseFinal = (dbValue !== undefined && dbValue !== null && dbValue > 0) ? dbValue : (mesData?.vol_sp || 0);
           return editado !== undefined ? Number(editado) : baseFinal;
       }
       if (rowOriginal.tipo === 'cliente') {
           const skuId = rowOriginal.chave_pai;
           const editadoSku = celulasEditadas[skuId]?.[mesBanco];
           const mesCliente = rowOriginal.meses.find((m:any) => m.mes_banco === mesBanco);
-          const totalBU = skuReferencias.totaisBU.get(skuId)?.[mesBanco] || 1;
+          // 🔥 NOVO: Agora a proporção para o cálculo de Rateio do cliente obedece ESTRITAMENTE a "vol_meta" do Consenso!
+          const totalMeta = skuReferencias.totaisMeta.get(skuId)?.[mesBanco] || 1;
           const baseSupply = skuReferencias.basesSupply.get(skuId)?.[mesBanco] || 0;
-          const baseFinal = skuReferencias.basesFinal.get(skuId)?.[mesBanco] > 0 ? skuReferencias.basesFinal.get(skuId)[mesBanco] : baseSupply;
+          let dbFinal = skuReferencias.basesFinal.get(skuId)?.[mesBanco];
+          const baseFinal = dbFinal > 0 ? dbFinal : baseSupply;
+          
           const volAtualSku = editadoSku !== undefined ? Number(editadoSku) : baseFinal;
-          const peso = (mesCliente?.vol_bu || 0) / totalBU;
+          const peso = (mesCliente?.vol_meta || 0) / totalMeta;
           return Math.round(volAtualSku * peso);
       }
       if (rowOriginal.tipo === 'categoria') {
@@ -583,7 +587,6 @@ export default function GlobalDashboard() {
 
         {/* --- TABELA PRINCIPAL --- */}
         <div className="bg-white rounded-[40px] shadow-sm border border-slate-100 overflow-hidden relative">
-           {/* Barra de rolagem vertical removida para a tabela fluir livremente */}
            <div className="overflow-x-auto relative pb-10">
              <table className="w-full text-left border-collapse relative">
                <thead className="sticky top-0 z-20 shadow-sm">
