@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { 
-  Layers, ShoppingCart, TrendingUp, TrendingDown, Factory, Target, Activity, 
+  ShoppingCart, TrendingUp, TrendingDown, Factory, Target, Activity, 
   Search, RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, DollarSign
 } from 'lucide-react';
 import { ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, LineChart, Line, ReferenceLine, ComposedChart, Bar, Legend } from 'recharts';
@@ -163,7 +163,7 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
 
 // --- TELA PRINCIPAL ---
 export default function AuditoriaArena() {
-  const [lente, setLente] = useState<'kpis' | 'estoque' | 'sellin' | 'sellout'>('kpis');
+  const [lente, setLente] = useState<'kpis' | 'estoque' | 'sellout'>('kpis');
   const [visao, setVisao] = useState<'caixas' | 'financeiro'>('financeiro');
   
   const [mesesDisponiveis, setMesesDisponiveis] = useState<string[]>([]);
@@ -187,7 +187,7 @@ export default function AuditoriaArena() {
   useEffect(() => {
     const fetchFiltros = async () => {
       try {
-        const res = await axios.get(`/api/v1/kpis/filtros-auditoria?lente=${lente === 'sellout' ? 'sellout' : 'sellin'}`);
+        const res = await axios.get(`/api/v1/kpis/filtros-auditoria?lente=${lente}`);
         setListaCategorias(res.data.categorias || []);
         setListaSegmentos(res.data.segmentos || []);
         setMesesDisponiveis(res.data.meses_disponiveis || []);
@@ -198,29 +198,34 @@ export default function AuditoriaArena() {
   }, [lente]);
 
   const carregarDadosCore = async () => {
-    if (mesesSelecionados.length === 0) return;
+    if (lente !== 'estoque' && mesesSelecionados.length === 0) return;
     setCarregando(true);
     try {
       const params = new URLSearchParams();
       params.append('categoria', categoriaSel);
       params.append('segmento', segmentoSel);
-      mesesSelecionados.forEach(m => params.append('meses_horizonte', m));
 
       if (lente === 'kpis') {
         params.append('visao', visao);
+        mesesSelecionados.forEach(m => params.append('meses_horizonte', m));
         const res = await axios.get(`/api/v1/kpis/torre-controle?${params.toString()}`);
-        setGraficosKpi(res.data.graficos || []); setSkus(res.data.skus || []);
+        setGraficosKpi(res.data.graficos || []); 
+        setSkus(res.data.skus || []);
+        setKpisGerais(res.data.kpis_globais || {});
         setSortConfig({ key: 'erro_absoluto', direction: 'desc' });
       } 
       else if (lente === 'estoque') {
         const res = await axios.get(`/api/v1/kpis/riscos-estoque?${params.toString()}`);
-        setSkus(res.data.estoque_sku || []); setKpisGerais(res.data.kpis_globais || {});
+        setSkus(res.data.estoque_sku || []); 
+        setKpisGerais(res.data.kpis_globais || {});
         setSortConfig({ key: 'ruptura_rs', direction: 'desc' });
       }
       else {
         params.append('lente', lente);
+        mesesSelecionados.forEach(m => params.append('meses_horizonte', m));
         const res = await axios.get(`/api/v1/kpis/auditoria-dinamica?${params.toString()}`);
-        setSkus(res.data.tabela_skus || []); setKpisGerais(res.data.kpis_globais || {});
+        setSkus(res.data.tabela_skus || []); 
+        setKpisGerais(res.data.kpis_globais || {});
         setSortConfig({ key: 'erro_abs_comercial', direction: 'desc' });
       }
     } catch (err) {} finally { setCarregando(false); }
@@ -275,7 +280,6 @@ export default function AuditoriaArena() {
           <div className="flex bg-slate-950 p-1.5 rounded-xl border border-slate-800 shadow-inner overflow-x-auto">
             <button onClick={() => setLente('kpis')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'kpis' ? 'bg-rose-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><Target className="w-4 h-4" /> Desvios MTD</button>
             <button onClick={() => setLente('estoque')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'estoque' ? 'bg-amber-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><Factory className="w-4 h-4" /> Riscos Estoque</button>
-            <button onClick={() => setLente('sellin')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'sellin' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><Layers className="w-4 h-4" /> Retroativo Fábrica</button>
             <button onClick={() => setLente('sellout')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'sellout' ? 'bg-teal-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><ShoppingCart className="w-4 h-4" /> Retroativo MTRIX</button>
           </div>
         </div>
@@ -303,27 +307,39 @@ export default function AuditoriaArena() {
       </div>
 
       {/* RENDERIZAÇÃO DOS GRÁFICOS */}
-      {lente === 'sellin' || lente === 'sellout' ? (
+      {lente === 'kpis' || lente === 'sellout' ? (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-indigo-500 shadow-md"><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">% WMAPE IA</div><div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_ia)}</div></div>
-          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-sky-500 shadow-md"><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">{lente === 'sellin' ? '% WMAPE Humano' : 'Erro Escoamento'}</div><div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_comercial)}</div></div>
-          <div className={`bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md border-l-4 ${kpisGerais.fva >= 0 ? 'border-l-emerald-500' : 'border-l-rose-500'}`}><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2 flex justify-between">FVA (Melhoria) {kpisGerais.fva >= 0 ? <TrendingUp className="w-4 h-4 text-emerald-500"/> : <TrendingDown className="w-4 h-4 text-rose-500"/>}</div><div className={`text-3xl font-black ${kpisGerais.fva >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{lente === 'sellin' ? formatPct(kpisGerais.fva) : 'N/A'}</div></div>
+          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-sky-500 shadow-md"><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">{lente === 'kpis' ? '% WMAPE S&OP' : 'Erro Escoamento'}</div><div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_comercial)}</div></div>
+          <div className={`bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md border-l-4 ${kpisGerais.fva >= 0 ? 'border-l-emerald-500' : 'border-l-rose-500'}`}><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2 flex justify-between">FVA (Melhoria) {kpisGerais.fva >= 0 ? <TrendingUp className="w-4 h-4 text-emerald-500"/> : <TrendingDown className="w-4 h-4 text-rose-500"/>}</div><div className={`text-3xl font-black ${kpisGerais.fva >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.fva)}</div></div>
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md">
             <div className="text-[10px] font-black uppercase text-slate-400 tracking-wider mb-2 flex justify-between border-b border-slate-700 pb-1">
-              <span>BIAS Humano</span><span>BIAS IA</span>
+              <span>{lente === 'sellout' ? 'BIAS Canal' : 'BIAS S&OP'}</span><span>{lente === 'sellout' ? 'Dias Cob.' : 'BIAS IA'}</span>
             </div>
             <div className="flex justify-between items-center mt-2">
               <span className={`text-xl font-black ${kpisGerais.bias_humano > 0 ? 'text-amber-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.bias_humano)}</span>
-              <span className={`text-xl font-black ${kpisGerais.bias_ia > 0 ? 'text-amber-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.bias_ia)}</span>
+              <span className={`text-xl font-black ${kpisGerais.bias_ia > 0 ? 'text-amber-400' : 'text-rose-400'}`}>{lente === 'sellout' ? `${kpisGerais.cobertura_media_canal} D` : formatPct(kpisGerais.bias_ia)}</span>
             </div>
           </div>
         </div>
-      ) : lente === 'kpis' ? (
+      ) : null}
+      
+      {lente === 'kpis' ? (
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md">
-            <h3 className="text-sm font-black text-white uppercase tracking-widest mb-4 flex items-center gap-2">% WMAPE (Evolução do Erro Ponderado)</h3>
+            <h3 className="text-sm font-black text-white uppercase tracking-widest mb-4 flex items-center gap-2">% WMAPE Temporal (IA vs S&OP)</h3>
             <div className="h-[220px] w-full">
-              <ResponsiveContainer><ComposedChart data={graficosKpi} margin={{ top: 10, right: 10, bottom: 0, left: -20 }}><CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} /><XAxis dataKey="mes" stroke="#64748b" tick={{fontSize: 10}} /><YAxis stroke="#64748b" tickFormatter={(v) => `${(v*100).toFixed(0)}%`} tick={{fontSize: 10}} /><RechartsTooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155' }} formatter={(v:any) => formatPct(v)} /><Bar dataKey="wmape" fill="#6366f1" radius={[4,4,0,0]} /></ComposedChart></ResponsiveContainer>
+              <ResponsiveContainer>
+                <ComposedChart data={graficosKpi} margin={{ top: 10, right: 10, bottom: 0, left: -20 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                  <XAxis dataKey="mes" stroke="#64748b" tick={{fontSize: 10}} />
+                  <YAxis stroke="#64748b" tickFormatter={(v) => `${(v*100).toFixed(0)}%`} tick={{fontSize: 10}} />
+                  <RechartsTooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155' }} formatter={(v:any) => formatPct(v)} />
+                  <Legend verticalAlign="top" height={36} wrapperStyle={{ fontSize: '10px', fontWeight: 'bold' }}/>
+                  <Bar dataKey="wmape_ia" name="WMAPE IA" fill="#a855f7" radius={[4,4,0,0]} barSize={20} />
+                  <Bar dataKey="wmape_humano" name="WMAPE S&OP" fill="#f59e0b" radius={[4,4,0,0]} barSize={20} />
+                </ComposedChart>
+              </ResponsiveContainer>
             </div>
           </div>
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md">
@@ -344,12 +360,12 @@ export default function AuditoriaArena() {
             </div>
           </div>
         </div>
-      ) : (
+      ) : lente === 'estoque' ? (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
           <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-rose-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><TrendingDown className="w-4 h-4 text-rose-500"/> Faturamento em Risco</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_ruptura_rs) : formatVol(kpisGerais.total_ruptura_rs)}</p></div>
           <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-amber-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><Package className="w-4 h-4 text-amber-500"/> Capital Imobilizado</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_sobra_rs) : formatVol(kpisGerais.total_sobra_rs)}</p></div>
         </div>
-      )}
+      ) : null}
 
       {/* RENDERIZAÇÃO DAS TABELAS COM SORT E TFOOT */}
       <div className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-2xl">
@@ -387,16 +403,17 @@ export default function AuditoriaArena() {
               </tr>
             </tfoot>
           </table>
-        ) : lente === 'sellin' || lente === 'sellout' ? (
+        ) : lente === 'sellout' ? (
            <table className="w-full text-left whitespace-nowrap">
              <thead>
                <tr className="bg-slate-950 text-slate-400 border-b border-slate-800 text-[10px] font-black uppercase tracking-widest">
                  <SortableHeader field="descricao" label="Produto" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
-                 <SortableHeader field="vol_real" label="Realizado" currentSort={sortConfig} requestSort={requestSort} />
-                 <SortableHeader field="vol_ia_congelado" label="IA (Frozen)" currentSort={sortConfig} requestSort={requestSort} />
-                 <SortableHeader field={lente === 'sellin' ? 'vol_comercial_congelado' : 'estoque_canal'} label={lente === 'sellin' ? 'Humano (Frozen)' : 'Estoque Canal'} currentSort={sortConfig} requestSort={requestSort} />
+                 <SortableHeader field="vol_real" label="Realizado (Sell-out)" currentSort={sortConfig} requestSort={requestSort} />
+                 <SortableHeader field="vol_ia_congelado" label="Meta IA" currentSort={sortConfig} requestSort={requestSort} />
+                 <SortableHeader field="vol_comercial_congelado" label="Meta S&OP" currentSort={sortConfig} requestSort={requestSort} />
+                 <SortableHeader field="estoque_canal" label="Estoque Canal" currentSort={sortConfig} requestSort={requestSort} />
                  <SortableHeader field="mape_ia" label="% MAPE IA" currentSort={sortConfig} requestSort={requestSort} className="border-l border-slate-800 bg-slate-950/40 text-rose-400 text-right" />
-                 {lente === 'sellin' && <SortableHeader field="mape_comercial" label="% MAPE Humano" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/40 text-rose-400 text-right" />}
+                 <SortableHeader field="mape_comercial" label="% MAPE S&OP" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/40 text-rose-400 text-right" />
                </tr>
              </thead>
              <tbody className="divide-y divide-slate-800/60 text-xs">
@@ -405,9 +422,10 @@ export default function AuditoriaArena() {
                    <td className="px-6 py-3.5"><div className="flex flex-col"><span className="font-bold text-slate-200">{row.descricao}</span><span className="text-[10px] text-slate-500 font-mono mt-0.5">{row.sku}</span></div></td>
                    <td className="px-4 py-3.5 text-right font-black text-white">{formatVol(row.vol_real)}</td>
                    <td className="px-4 py-3.5 text-right font-semibold text-indigo-400 bg-indigo-950/10">{formatVol(row.vol_ia_congelado)}</td>
-                   <td className="px-4 py-3.5 text-right font-semibold text-sky-400 bg-sky-950/10">{lente === 'sellin' ? formatVol(row.vol_comercial_congelado) : formatVol(row.estoque_canal)}</td>
+                   <td className="px-4 py-3.5 text-right font-semibold text-sky-400 bg-sky-950/10">{formatVol(row.vol_comercial_congelado)}</td>
+                   <td className="px-4 py-3.5 text-right font-semibold text-amber-400">{formatVol(row.estoque_canal)}</td>
                    <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 border-l border-slate-800 bg-slate-950/40">{formatPct(row.mape_ia)}</td>
-                   {lente === 'sellin' && <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 bg-slate-950/40">{formatPct(row.mape_comercial)}</td>}
+                   <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 bg-slate-950/40">{formatPct(row.mape_comercial)}</td>
                  </tr>
                ))}
              </tbody>
@@ -416,7 +434,8 @@ export default function AuditoriaArena() {
                 <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Somas do Portfólio</td>
                 <td className="px-4 py-4 text-right">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_real || 0), 0))}</td>
                 <td className="px-4 py-4 text-right text-indigo-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_ia_congelado || 0), 0))}</td>
-                <td className="px-4 py-4 text-right text-sky-400">{lente === 'sellin' ? formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_comercial_congelado || 0), 0)) : formatVol(sortedSkus.reduce((sum, r) => sum + (r.estoque_canal || 0), 0))}</td>
+                <td className="px-4 py-4 text-right text-sky-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_comercial_congelado || 0), 0))}</td>
+                <td className="px-4 py-4 text-right text-amber-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.estoque_canal || 0), 0))}</td>
                 <td colSpan={2} className="px-4 py-4 bg-slate-950/40 text-right text-slate-500 text-[10px]">Médias Ponderadas nos Cards Topo</td>
               </tr>
             </tfoot>

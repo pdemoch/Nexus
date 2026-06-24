@@ -19,10 +19,10 @@ def calcular_ciclo_lag2(mes_alvo: str) -> str:
     return dt_lag2.strftime("%m/%Y")
 
 # ==============================================================================
-# 1. FILTROS EXCEL DINÂMICOS (TRAVA 06/2026)
+# 1. FILTROS EXCEL DINÂMICOS
 # ==============================================================================
 @router.get("/filtros-auditoria")
-async def carregar_filtros_auditoria(lente: str = "sellin", db: Session = Depends(get_db)):
+async def carregar_filtros_auditoria(lente: str = "kpis", db: Session = Depends(get_db)):
     try:
         query_f = text("SELECT DISTINCT categoria, segmento FROM dim_produtos WHERE categoria IS NOT NULL")
         df_f = pd.read_sql(query_f, db.bind)
@@ -52,11 +52,11 @@ async def carregar_filtros_auditoria(lente: str = "sellin", db: Session = Depend
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==============================================================================
-# 2. MOTOR DE AUDITORIA (SELL-IN E SELL-OUT)
+# 2. MOTOR DE AUDITORIA (SELL-OUT MTRIX)
 # ==============================================================================
 @router.get("/auditoria-dinamica")
 async def carregar_auditoria_cpfr(
-    lente: str = "sellin", categoria: Optional[str] = "Todas", segmento: Optional[str] = "Todos",
+    lente: str = "sellout", categoria: Optional[str] = "Todas", segmento: Optional[str] = "Todos",
     meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)
 ):
     if not meses_horizonte: meses_horizonte = ["06/2026"]
@@ -78,25 +78,16 @@ async def carregar_auditoria_cpfr(
                 clausula_filtro += " AND p.segmento = :segmento"
                 params_query["segmento"] = segmento
 
-            if lente == "sellin":
-                query = text(f"""
-                    WITH Vendas AS (SELECT sku, SUM(qt_pedido) AS vol_real FROM fato_vendas WHERE TO_CHAR(data_pedido, 'YYYY-MM') = :mes_sql GROUP BY sku),
-                    Metas AS (SELECT sku, SUM(vol_ia) AS vol_ia_congelado, SUM(vol_final) AS vol_comercial_congelado FROM fato_ibp_granular WHERE TO_CHAR(mes_projetado, 'YYYY-MM') = :mes_sql AND ciclo_sop = :ciclo_congelado GROUP BY sku)
-                    SELECT p.sku, p.descricao, p.categoria, p.segmento, :mes_str AS mes_ano, COALESCE(v.vol_real, 0) AS vol_real, COALESCE(i.vol_ia_congelado, 0) AS vol_ia_congelado, COALESCE(i.vol_comercial_congelado, 0) AS vol_comercial_congelado, 0 AS estoque_canal, 0 AS dias_cobertura
-                    FROM dim_produtos p LEFT JOIN Vendas v ON p.sku = v.sku LEFT JOIN Metas i ON p.sku = i.sku
-                    WHERE 1=1 {clausula_filtro} AND (COALESCE(v.vol_real, 0) > 0 OR COALESCE(i.vol_ia_congelado, 0) > 0 OR COALESCE(i.vol_comercial_congelado, 0) > 0)
-                """)
-            else:
-                query = text(f"""
-                    WITH Ultimo_Ciclo_Mtrix AS (SELECT MAX(ciclo_sop) as max_ciclo FROM fato_mtrix_historico_mensal WHERE mes_ano = :mes_sql),
-                    Distribuidores AS (SELECT DISTINCT cgc FROM fato_mtrix_historico_mensal WHERE mes_ano = :mes_sql AND ciclo_sop = (SELECT max_ciclo FROM Ultimo_Ciclo_Mtrix) AND cgc IS NOT NULL),
-                    Sellout AS (SELECT sku, SUM(volume_sellout) AS vol_sellout_real FROM fato_mtrix_historico_mensal WHERE mes_ano = :mes_sql AND ciclo_sop = (SELECT max_ciclo FROM Ultimo_Ciclo_Mtrix) GROUP BY sku),
-                    Metas_Pareadas AS (SELECT i.sku, SUM(i.vol_ia) AS vol_ia_congelado, SUM(i.vol_final) AS vol_comercial_congelado FROM fato_ibp_granular i INNER JOIN Distribuidores d ON i.cgc = d.cgc WHERE TO_CHAR(i.mes_projetado, 'YYYY-MM') = :mes_sql AND i.ciclo_sop = :ciclo_congelado GROUP BY i.sku),
-                    Estoque AS (SELECT DISTINCT ON (sku) sku, estoque_atual_caixas, dias_cobertura FROM fato_mtrix_snapshot WHERE ciclo_sop = :ciclo_congelado ORDER BY sku, id DESC)
-                    SELECT p.sku, p.descricao, p.categoria, p.segmento, :mes_str AS mes_ano, COALESCE(s.vol_sellout_real, 0) AS vol_real, COALESCE(m.vol_ia_congelado, 0) AS vol_ia_congelado, COALESCE(m.vol_comercial_congelado, 0) AS vol_comercial_congelado, COALESCE(e.estoque_atual_caixas, 0) AS estoque_canal, COALESCE(e.dias_cobertura, 0) AS dias_cobertura
-                    FROM dim_produtos p LEFT JOIN Sellout s ON p.sku = s.sku LEFT JOIN Metas_Pareadas m ON p.sku = m.sku LEFT JOIN Estoque e ON p.sku = e.sku
-                    WHERE 1=1 {clausula_filtro} AND (COALESCE(s.vol_sellout_real, 0) > 0 OR COALESCE(m.vol_ia_congelado, 0) > 0 OR COALESCE(m.vol_comercial_congelado, 0) > 0 OR COALESCE(e.estoque_atual_caixas, 0) > 0)
-                """)
+            query = text(f"""
+                WITH Ultimo_Ciclo_Mtrix AS (SELECT MAX(ciclo_sop) as max_ciclo FROM fato_mtrix_historico_mensal WHERE mes_ano = :mes_sql),
+                Distribuidores AS (SELECT DISTINCT cgc FROM fato_mtrix_historico_mensal WHERE mes_ano = :mes_sql AND ciclo_sop = (SELECT max_ciclo FROM Ultimo_Ciclo_Mtrix) AND cgc IS NOT NULL),
+                Sellout AS (SELECT sku, SUM(volume_sellout) AS vol_sellout_real FROM fato_mtrix_historico_mensal WHERE mes_ano = :mes_sql AND ciclo_sop = (SELECT max_ciclo FROM Ultimo_Ciclo_Mtrix) GROUP BY sku),
+                Metas_Pareadas AS (SELECT i.sku, SUM(i.vol_ia) AS vol_ia_congelado, SUM(i.vol_final) AS vol_comercial_congelado FROM fato_ibp_granular i INNER JOIN Distribuidores d ON i.cgc = d.cgc WHERE TO_CHAR(i.mes_projetado, 'YYYY-MM') = :mes_sql AND i.ciclo_sop = :ciclo_congelado GROUP BY i.sku),
+                Estoque AS (SELECT DISTINCT ON (sku) sku, estoque_atual_caixas, dias_cobertura FROM fato_mtrix_snapshot WHERE ciclo_sop = :ciclo_congelado ORDER BY sku, id DESC)
+                SELECT p.sku, p.descricao, p.categoria, p.segmento, :mes_str AS mes_ano, COALESCE(s.vol_sellout_real, 0) AS vol_real, COALESCE(m.vol_ia_congelado, 0) AS vol_ia_congelado, COALESCE(m.vol_comercial_congelado, 0) AS vol_comercial_congelado, COALESCE(e.estoque_atual_caixas, 0) AS estoque_canal, COALESCE(e.dias_cobertura, 0) AS dias_cobertura
+                FROM dim_produtos p LEFT JOIN Sellout s ON p.sku = s.sku LEFT JOIN Metas_Pareadas m ON p.sku = m.sku LEFT JOIN Estoque e ON p.sku = e.sku
+                WHERE 1=1 {clausula_filtro} AND (COALESCE(s.vol_sellout_real, 0) > 0 OR COALESCE(m.vol_ia_congelado, 0) > 0 OR COALESCE(m.vol_comercial_congelado, 0) > 0 OR COALESCE(e.estoque_atual_caixas, 0) > 0)
+            """)
             df = pd.read_sql(query, db.bind, params=params_query)
             if not df.empty: resultados_meses.append(df)
 
@@ -126,7 +117,6 @@ async def carregar_auditoria_cpfr(
             wmape_ia = np.abs(df_sku["vol_real"] - df_sku["vol_ia_congelado"]).sum() / soma_real
             wmape_comercial = np.abs(df_sku["vol_real"] - df_sku["vol_comercial_congelado"]).sum() / soma_real
 
-        # 🔥 NOVO: Divisão do Viés Global
         bias_ia = (soma_ia - soma_real) / soma_real if soma_real > 0 else 0.0
         bias_humano = (soma_comercial - soma_real) / soma_real if soma_real > 0 else 0.0
 
@@ -135,7 +125,7 @@ async def carregar_auditoria_cpfr(
                 "wmape_ia": round(wmape_ia, 4), "wmape_comercial": round(wmape_comercial, 4),
                 "fva": round(wmape_ia - wmape_comercial, 4), 
                 "bias_ia": round(bias_ia, 4), "bias_humano": round(bias_humano, 4), 
-                "cobertura_media_canal": int(df_c[df_c["dias_cobertura"] < 999]["dias_cobertura"].mean()) if lente == "sellout" and not df_c.empty else 0
+                "cobertura_media_canal": int(df_c[df_c["dias_cobertura"] < 999]["dias_cobertura"].mean()) if not df_c.empty else 0
             },
             "cronologia": [], "tabela_skus": df_sku.to_dict(orient="records")
         }
@@ -143,7 +133,7 @@ async def carregar_auditoria_cpfr(
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==============================================================================
-# 3. TORRE DE CONTROLE MTD (COM DUPLO GAP E DUPLO BIAS)
+# 3. TORRE DE CONTROLE MTD (COM CARDS DE FVA)
 # ==============================================================================
 @router.get("/torre-controle")
 async def carregar_torre_controle(
@@ -180,12 +170,13 @@ async def carregar_torre_controle(
             df_m = pd.read_sql(query, db.bind, params=params_query)
             if not df_m.empty: resultados.append(df_m)
 
-        if not resultados: return {"graficos": [], "skus": []}
+        if not resultados: return {"graficos": [], "skus": [], "kpis_globais": {}}
         df = pd.concat(resultados, ignore_index=True)
         
         for col in ['val_real', 'val_meta_ia', 'val_meta_hum']:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
+        # Geração dos Gráficos Mês a Mês
         cronologia = []
         for m in meses_horizonte:
             df_m = df[df["mes_ano"] == m]
@@ -194,18 +185,36 @@ async def carregar_torre_controle(
             sm_ia = df_m["val_meta_ia"].sum()
             sm_hum = df_m["val_meta_hum"].sum()
 
-            wmape = (np.abs(df_m["val_real"] - df_m["val_meta_hum"]).sum() / sr) if sr > 0 else 1.0
+            wmape_ia = (np.abs(df_m["val_real"] - df_m["val_meta_ia"]).sum() / sr) if sr > 0 else 1.0
+            wmape_humano = (np.abs(df_m["val_real"] - df_m["val_meta_hum"]).sum() / sr) if sr > 0 else 1.0
             
-            # 🔥 NOVO: Separação Chronológica do Viés
             bias_ia = ((sm_ia - sr) / sr) if sr > 0 else 0
             bias_humano = ((sm_hum - sr) / sr) if sr > 0 else 0
             
             cronologia.append({
-                "mes": m, "wmape": round(wmape, 4), 
-                "bias_ia": round(bias_ia, 4), 
-                "bias_humano": round(bias_humano, 4)
+                "mes": m, "wmape_ia": round(wmape_ia, 4), "wmape_humano": round(wmape_humano, 4), 
+                "bias_ia": round(bias_ia, 4), "bias_humano": round(bias_humano, 4)
             })
 
+        # 🔥 NOVO: Cálculo Global para os Cards do Topo
+        sr_total = df["val_real"].sum()
+        sm_ia_total = df["val_meta_ia"].sum()
+        sm_hum_total = df["val_meta_hum"].sum()
+
+        wmape_ia_global = (np.abs(df["val_real"] - df["val_meta_ia"]).sum() / sr_total) if sr_total > 0 else 1.0
+        wmape_hum_global = (np.abs(df["val_real"] - df["val_meta_hum"]).sum() / sr_total) if sr_total > 0 else 1.0
+        bias_ia_global = ((sm_ia_total - sr_total) / sr_total) if sr_total > 0 else 0.0
+        bias_hum_global = ((sm_hum_total - sr_total) / sr_total) if sr_total > 0 else 0.0
+        
+        kpis_globais = {
+            "wmape_ia": round(wmape_ia_global, 4),
+            "wmape_comercial": round(wmape_hum_global, 4),
+            "fva": round(wmape_ia_global - wmape_hum_global, 4),
+            "bias_ia": round(bias_ia_global, 4),
+            "bias_humano": round(bias_hum_global, 4)
+        }
+
+        # Geração da Tabela Analítica
         df_sku = df.groupby(["sku", "descricao"]).agg({"val_real": "sum", "val_meta_ia": "sum", "val_meta_hum": "sum"}).reset_index()
         df_sku["gap_ia"] = df_sku["val_meta_ia"] - df_sku["val_real"]
         df_sku["gap_humano"] = df_sku["val_meta_hum"] - df_sku["val_real"]
@@ -215,7 +224,7 @@ async def carregar_torre_controle(
         df_sku["erro_absoluto"] = np.abs(df_sku["gap_humano"])
         df_sku = df_sku.sort_values(by="erro_absoluto", ascending=False)
         
-        return {"graficos": cronologia, "skus": df_sku.to_dict(orient="records")}
+        return {"graficos": cronologia, "skus": df_sku.to_dict(orient="records"), "kpis_globais": kpis_globais}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/torre-controle/clientes/{sku}")
