@@ -38,22 +38,18 @@ def obter_status_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_
         if not ciclo:
             ciclo = get_current_cycle(db)
             
-        query = text("SELECT status FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'Top-Down Arena'")
+        # [VACINA DO CADEADO]: TRIM e LIKE ignoram espaços ocultos gravados no banco
+        query = text("SELECT status FROM controle_ciclos WHERE TRIM(ciclo_sop) = TRIM(:c) AND origem LIKE '%Top-Down%'")
         trava = db.execute(query, {"c": ciclo}).fetchone()
         
-        # Blindagem: strip() remove espaços acidentais e lower() garante a comparação
         is_locked = (trava is not None and trava[0].strip().lower() == 'fechado')
-        
-        # Retornamos ambas as chaves para garantir que o Frontend compreende
         return {"ciclo": ciclo, "isLocked": is_locked, "locked": is_locked}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/grafico")
 def obter_grafico_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_db)):
-    """
-    [CORREÇÃO 404] O Frontend consome o Recharts através deste endpoint exclusivo!
-    """
+    """Alimenta o gráfico Recharts (Timeline) do topo da tela."""
     try:
         if not ciclo:
             ciclo = get_current_cycle(db)
@@ -61,7 +57,6 @@ def obter_grafico_topdown(ciclo: Optional[str] = None, db: Session = Depends(get
         ciclo_date = datetime.datetime.strptime(ciclo, "%m/%Y")
         hoje = datetime.date.today()
 
-        # 1. Histórico Realizado (Últimos 6 meses)
         query_hist = text("""
             SELECT TO_CHAR(data_pedido, 'YYYY-MM-01') as mes, SUM(COALESCE(qt_pedido, 0)) as qtd
             FROM fato_vendas
@@ -70,7 +65,6 @@ def obter_grafico_topdown(ciclo: Optional[str] = None, db: Session = Depends(get
         """)
         dados_hist = db.execute(query_hist, {"limite": ciclo_date.date()}).fetchall()
 
-        # 2. Futuro (Projetado)
         query_futuro = text("""
             SELECT TO_CHAR(mes_projetado, 'YYYY-MM-01') as mes, 
                    SUM(COALESCE(vol_topdown, 0)) as td, 
@@ -84,9 +78,7 @@ def obter_grafico_topdown(ciclo: Optional[str] = None, db: Session = Depends(get
 
         calendario = defaultdict(lambda: {"Realizado": 0.0, "IA": 0.0, "TopDown": 0.0, "CicloAnterior": 0.0})
         
-        for r in dados_hist:
-            calendario[r[0]]["Realizado"] = float(r[1])
-            
+        for r in dados_hist: calendario[r[0]]["Realizado"] = float(r[1])
         for r in dados_futuro:
             calendario[r[0]]["TopDown"] = float(r[1])
             calendario[r[0]]["IA"] = float(r[2])
@@ -108,7 +100,6 @@ def obter_grafico_topdown(ciclo: Optional[str] = None, db: Session = Depends(get
             
         return timeline
     except Exception as e:
-        print(f"❌ ERRO GRÁFICO: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("")
@@ -117,30 +108,34 @@ def obter_visao_topdown(
     db: Session = Depends(get_db),
     usuario: dict = Depends(require_admin)
 ):
-    """Gera a árvore de Matriz para o DataGrid do Frontend."""
+    """Gera a árvore da Matriz para o DataGrid do Frontend."""
+    nome_usuario = usuario.get('nome') or usuario.get('username') or "Usuário"
     try:
         if not ciclo:
             ciclo = get_current_cycle(db)
 
-        query_trava = text("SELECT status FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'Top-Down Arena'")
+        print(f"\n🧭 [TOP-DOWN] Utilizador Executivo '{nome_usuario}' acedeu ao ciclo {ciclo}.")
+
+        query_trava = text("SELECT status FROM controle_ciclos WHERE TRIM(ciclo_sop) = TRIM(:c) AND origem LIKE '%Top-Down%'")
         trava = db.execute(query_trava, {"c": ciclo}).fetchone()
         is_locked = (trava is not None and trava[0].strip().lower() == 'fechado')
 
+        # [VACINA DO JOIN]: O LTRIM garante que SKUs como '00123' e '123' cruzem perfeitamente
         query_matriz = text("""
             SELECT 
                 f.sku,
-                p.descricao,
-                p.categoria,
-                p.segmento,
+                MAX(p.descricao) as descricao,
+                MAX(p.categoria) as categoria,
+                MAX(p.segmento) as segmento,
                 f.mes_projetado,
                 SUM(COALESCE(f.vol_topdown, 0)) as vol_td,
                 SUM(COALESCE(f.vol_ia, 0)) as vol_ia,
                 AVG(COALESCE(f.pmv_aplicado, 0)) as pmv_medio,
                 SUM(COALESCE(f.vol_meta, 0)) as vol_anterior
             FROM fato_ibp_granular f
-            LEFT JOIN dim_produtos p ON f.sku = p.sku
+            LEFT JOIN dim_produtos p ON ltrim(f.sku::text, '0') = ltrim(p.sku::text, '0')
             WHERE f.ciclo_sop = :ciclo
-            GROUP BY f.sku, p.descricao, p.categoria, p.segmento, f.mes_projetado
+            GROUP BY f.sku, f.mes_projetado
         """)
 
         dados_banco = db.execute(query_matriz, {"ciclo": ciclo}).fetchall()
@@ -155,10 +150,11 @@ def obter_visao_topdown(
             seg = row[3] or "SEM SEGMENTO"
             mes_date = row[4]
             
-            # [CORREÇÃO DAS CAIXAS VAZIAS] - Garantindo o formato ISO estrito que o React mapeia (YYYY-MM-DD)
             if isinstance(mes_date, str):
                 mes_date = datetime.datetime.strptime(mes_date, "%Y-%m-%d").date()
-            mes_str = mes_date.strftime("%Y-%m-%d")
+                
+            # [VACINA DO INDEFINIDO]: Garantimos a devolução da chave no formato YYYY-MM que o React exige
+            mes_str = mes_date.strftime("%Y-%m")
             meses_dinamicos.add(mes_str)
 
             vol_td = float(row[5] or 0)
@@ -203,22 +199,20 @@ def salvar_ajustes_topdown(
     usuario: dict = Depends(require_admin)
 ):
     nome_usuario = usuario.get('nome') or usuario.get('username') or "Usuário"
-    print(f"\n💾 [TOP-DOWN] {nome_usuario} submeteu {len(payload.ajustes)} edições.")
-    
     try:
         if not ciclo:
             ciclo = get_current_cycle(db)
 
-        trava = db.execute(text("SELECT status FROM controle_ciclos WHERE ciclo_sop = :ciclo AND origem = 'Top-Down Arena'"), {"ciclo": ciclo}).fetchone()
+        query_trava = text("SELECT status FROM controle_ciclos WHERE TRIM(ciclo_sop) = TRIM(:c) AND origem LIKE '%Top-Down%'")
+        trava = db.execute(query_trava, {"c": ciclo}).fetchone()
         if trava and trava[0].strip().lower() == 'fechado':
             raise HTTPException(status_code=400, detail="Este ciclo já se encontra encerrado.")
 
         updates_para_banco = []
 
         for aj in payload.ajustes:
-            # O React agora envia YYYY-MM-DD direto
             mes_str_banco = aj.mes_projetado
-            if len(mes_str_banco) == 7: # Se vier YYYY-MM, garante YYYY-MM-DD
+            if len(mes_str_banco) == 7:
                 mes_str_banco += "-01"
                 
             novo_volume_macro = aj.novo_volume
@@ -244,7 +238,6 @@ def salvar_ajustes_topdown(
             
             total_hist = sum(r[1] for r in linhas_sku)
             total_ia = sum(r[2] for r in linhas_sku)
-            
             soma_alocada = 0
             fracoes = []
 
@@ -266,7 +259,6 @@ def salvar_ajustes_topdown(
 
             faltam = novo_volume_macro - soma_alocada
             fracoes.sort(key=lambda x: x["resto"], reverse=True) 
-
             for i in range(faltam):
                 if i < len(fracoes): fracoes[i]["vol"] += 1 
 
@@ -277,9 +269,9 @@ def salvar_ajustes_topdown(
             db.bulk_update_mappings(FatoIbpGranular, updates_para_banco)
 
         if payload.finalizar_etapa:
-            db.execute(text("DELETE FROM controle_ciclos WHERE ciclo_sop = :ciclo AND origem = 'Top-Down Arena'"), {"ciclo": ciclo})
-            db.execute(text("INSERT INTO controle_ciclos (ciclo_sop, origem, status, data_fechamento) VALUES (:ciclo, 'Top-Down Arena', 'Fechado', CURRENT_TIMESTAMP)"), {"ciclo": ciclo})
-            db.execute(text("UPDATE fato_ibp_granular SET vol_bottomup = vol_topdown, vol_meta = vol_topdown, vol_final = vol_topdown WHERE ciclo_sop = :ciclo"), {"ciclo": ciclo})
+            db.execute(text("DELETE FROM controle_ciclos WHERE TRIM(ciclo_sop) = TRIM(:c) AND origem LIKE '%Top-Down%'"), {"c": ciclo})
+            db.execute(text("INSERT INTO controle_ciclos (ciclo_sop, origem, status, data_fechamento) VALUES (:c, 'Top-Down Arena', 'Fechado', CURRENT_TIMESTAMP)"), {"c": ciclo})
+            db.execute(text("UPDATE fato_ibp_granular SET vol_bottomup = vol_topdown, vol_meta = vol_topdown, vol_final = vol_topdown WHERE ciclo_sop = :c"), {"c": ciclo})
             registrar_log_auditoria(db, usuario.get('id', 1), "Finalizar Etapa", f"Ciclo {ciclo} trancado.")
             
         db.commit()
