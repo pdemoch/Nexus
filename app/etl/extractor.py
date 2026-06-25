@@ -186,7 +186,7 @@ class MtrixExtractor:
 
     def _calcular_janela_temporal(self, primeira_carga: bool):
         hoje = datetime.now()
-        mes_alvo = hoje - relativedelta(months=2) 
+        mes_alvo = hoje 
         ultimo_dia = calendar.monthrange(mes_alvo.year, mes_alvo.month)[1]
         
         data_fim = datetime(mes_alvo.year, mes_alvo.month, ultimo_dia)

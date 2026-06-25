@@ -55,9 +55,8 @@ def obter_grafico_topdown(
     try:
         if not ciclo: ciclo = get_current_cycle(db)
         ciclo_date = datetime.datetime.strptime(ciclo, "%m/%Y")
-        hoje = datetime.date.today()
-
-        hist_where = " v.data_pedido >= :limite - INTERVAL '24 months' AND v.data_pedido < :limite "
+        
+        hist_where = " v.data_pedido >= :limite - INTERVAL '24 months' AND v.data_pedido < :limite + INTERVAL '1 month' "
         futuro_where = " f.ciclo_sop = :ciclo "
         params = {"ciclo": ciclo, "limite": ciclo_date.date()}
 
@@ -105,15 +104,17 @@ def obter_grafico_topdown(
 
         meses_pt = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
         timeline = []
+        ancora_grafico = ciclo_date.date()
+        
         for ms in sorted(calendario.keys()):
             dt = datetime.datetime.strptime(ms, '%Y-%m-%d').date()
             timeline.append({
                 "name": f"{meses_pt[dt.month-1]}/{dt.strftime('%y')}",
                 "data_iso": ms,
-                "Realizado": round(calendario[ms]["Realizado"]) if dt < hoje else None,
-                "IA": round(calendario[ms]["IA"]) if dt >= hoje.replace(day=1) else None,
-                "Top-Down": round(calendario[ms]["TopDown"]) if dt >= hoje.replace(day=1) else None,
-                "CicloAnterior": round(calendario[ms]["CicloAnterior"]) if dt >= hoje.replace(day=1) else None
+                "Realizado": round(calendario[ms]["Realizado"]) if dt <= ancora_grafico else None,
+                "IA": round(calendario[ms]["IA"]) if dt >= ancora_grafico else None,
+                "TopDown": round(calendario[ms]["TopDown"]) if dt >= ancora_grafico else None, # CORREÇÃO: Chave exata sem hífen
+                "CicloAnterior": round(calendario[ms]["CicloAnterior"]) if dt >= ancora_grafico else None
             })
         return {"dados": timeline}
     except Exception as e:
@@ -126,11 +127,9 @@ def obter_visao_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_d
         if not ciclo: ciclo = get_current_cycle(db)
 
         ciclo_date = datetime.datetime.strptime(ciclo, "%m/%Y")
-        
         m2_date = (ciclo_date + relativedelta(months=2)).date()
         m4_date = (ciclo_date + relativedelta(months=4)).date()
 
-        # FIX 1: Buscar o Orçamento Genuíno na tabela fato_orcamento (Igual ao Dashboard)
         orc_query = db.execute(text("""
             SELECT sku, TO_CHAR(mes_projetado, 'YYYY-MM-01') as mes_banco, SUM(receita_orcamento) as receita_orcamento
             FROM fato_orcamento
@@ -142,7 +141,6 @@ def obter_visao_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_d
         for o in orc_query:
             orc_dict[f"{o.sku}|{o.mes_banco}"] = float(o.receita_orcamento or 0)
 
-        # FIX 2: Cálculo Matemático Preciso do Faturamento Linha-a-Linha no SQL
         query_matriz = text("""
             SELECT 
                 f.sku, MAX(p.descricao) as descricao, MAX(p.categoria) as categoria, MAX(p.segmento) as segmento,
@@ -197,7 +195,6 @@ def obter_visao_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_d
                 r_td = float(rec_td)
                 r_ia = float(rec_ia)
                 
-                # PMV calculado pela ponderação financeira real, eliminando desvios decimais
                 if v_td > 0:
                     v_pmv = r_td / v_td
                 elif v_ia > 0:
@@ -205,7 +202,6 @@ def obter_visao_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_d
                 else:
                     v_pmv = float(pmv_fallback)
                 
-                # Consumo do Orçamento Real da Base
                 sku_orcamento = orc_dict.get(f"{sku}|{mes_banco}", 0.0)
                 sku_fat = r_td
 

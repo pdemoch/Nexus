@@ -195,7 +195,19 @@ export default function AuditoriaArena() {
         setParesCatSeg(res.data.pares_cat_seg || []);
         setListaClientes(res.data.clientes || []);
         setMesesDisponiveis(res.data.meses_disponiveis || []);
-        if (res.data.meses_disponiveis?.length > 0) setMesesSelecionados(res.data.meses_disponiveis.slice(0, 6)); 
+        
+        // 🔥 CORREÇÃO: Força a seleção sempre no Mês Atual
+        if (res.data.meses_disponiveis?.length > 0) {
+          const dataAtual = new Date();
+          const mesAtualStr = `${String(dataAtual.getMonth() + 1).padStart(2, '0')}/${dataAtual.getFullYear()}`;
+          
+          if (res.data.meses_disponiveis.includes(mesAtualStr)) {
+            setMesesSelecionados([mesAtualStr]);
+          } else {
+            // Se o mês atual ainda não existir na base, marca o mais recente
+            setMesesSelecionados([res.data.meses_disponiveis[0]]);
+          }
+        } 
       } catch (err) {}
     };
     fetchFiltros();

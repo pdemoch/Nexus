@@ -16,10 +16,6 @@ from app.models.domain_models import FatoEstoqueD0
 router = APIRouter(prefix="/api/v1/kpis", tags=["Auditoria, KPIs e Riscos de Estoque"])
 
 def obter_ciclo_meta_seguro(db: Session, mes_alvo: str) -> str:
-    """
-    Tenta localizar o ciclo S&OP ideal (Lag 2). 
-    Se a base for recente e não tiver histórico antigo, faz o fallback inteligente para o ciclo ativo.
-    """
     try:
         mes, ano = mes_alvo.split('/')
         dt_alvo = datetime.date(int(ano), int(mes), 1)
@@ -36,7 +32,7 @@ def obter_ciclo_meta_seguro(db: Session, mes_alvo: str) -> str:
         return "06/2026"
 
 # ==============================================================================
-# 1. FILTROS EXCEL DINÂMICOS
+# 1. FILTROS EXCEL DINÂMICOS (CORRIGIDOS PARA MTRIX)
 # ==============================================================================
 @router.get("/filtros-auditoria")
 async def carregar_filtros_auditoria(lente: str = "kpis", db: Session = Depends(get_db)):
@@ -44,14 +40,23 @@ async def carregar_filtros_auditoria(lente: str = "kpis", db: Session = Depends(
         query_f = text("SELECT DISTINCT categoria, segmento FROM dim_produtos WHERE categoria IS NOT NULL AND segmento IS NOT NULL")
         df_f = pd.read_sql(query_f, db.bind)
         
-        query_cli = text("SELECT DISTINCT razaosocial FROM dim_clientes WHERE razaosocial IS NOT NULL ORDER BY razaosocial")
-        df_cli = pd.read_sql(query_cli, db.bind)
-        
         if lente == "sellout":
-            q_meses = text("SELECT DISTINCT mes_ano FROM fato_mtrix_historico_mensal WHERE mes_ano >= '2026-06' ORDER BY mes_ano DESC")
+            # REQUISITO: Histórico completo (Sem limite de data)
+            q_meses = text("SELECT DISTINCT mes_ano FROM fato_mtrix_historico_mensal ORDER BY mes_ano DESC")
             df_m = pd.read_sql(q_meses, db.bind)
             meses = [f"{str(m).split('-')[1]}/{str(m).split('-')[0]}" for m in df_m["mes_ano"].unique() if m] if not df_m.empty else []
+            
+            # REQUISITO: Apenas clientes do universo MTRIX
+            query_cli = text("""
+                SELECT DISTINCT c.razaosocial 
+                FROM fato_mtrix_historico_mensal m
+                JOIN dim_clientes c ON m.cgc = c.cgc
+                WHERE c.razaosocial IS NOT NULL 
+                ORDER BY c.razaosocial
+            """)
+            df_cli = pd.read_sql(query_cli, db.bind)
         else:
+            # Universo S&OP Padrão
             q_meses = text("""
                 SELECT DISTINCT TO_CHAR(mes_projetado, 'MM/YYYY') as mes_ano, TO_CHAR(mes_projetado, 'YYYY-MM') as sort_key 
                 FROM fato_ibp_granular 
@@ -60,6 +65,9 @@ async def carregar_filtros_auditoria(lente: str = "kpis", db: Session = Depends(
             """)
             df_m = pd.read_sql(q_meses, db.bind)
             meses = list(df_m["mes_ano"].unique()) if not df_m.empty else []
+            
+            query_cli = text("SELECT DISTINCT razaosocial FROM dim_clientes WHERE razaosocial IS NOT NULL ORDER BY razaosocial")
+            df_cli = pd.read_sql(query_cli, db.bind)
 
         if not meses: meses = ["06/2026"]
 
@@ -198,7 +206,6 @@ async def carregar_torre_controle(
             if segmento != "Todos": clausula_filtro += " AND p.segmento = :segmento"; params_query["segmento"] = segmento
             if razaosocial != "Todos": filtro_cliente = " AND c.razaosocial = :razaosocial"; params_query["razaosocial"] = razaosocial
 
-            # 🔥 CORREÇÃO DE SINTAXE SQL: Prefixos adicionados perfeitamente para evitar erros 500
             f_r = "v.qt_pedido" if visao == "caixas" else "v.vl_pedido"
             f_mi = "m.vol_ia" if visao == "caixas" else "(m.vol_ia * m.pmv_aplicado)"
             f_mh = "m.vol_final" if visao == "caixas" else "(m.vol_final * m.pmv_aplicado)"
@@ -313,7 +320,6 @@ async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict
         lote_anterior = []
         estoque_novo = {}
 
-        # 1. Tenta aceder à API Oficial (Gobi ERP)
         try:
             async with aiohttp.ClientSession() as session:
                 while True:
@@ -337,7 +343,6 @@ async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict
         except Exception as e:
             print(f"API Gobi indisponível. Recorrendo à Simulação Nexus para demonstração. Erro: {e}")
 
-        # 2. Inserção na Tabela Fato
         db.execute(text("TRUNCATE TABLE fato_estoque_d0"))
         agora = datetime.datetime.utcnow()
         novos_registros = [FatoEstoqueD0(sku=sku, qtd_dispo=qtd, data_atualizacao=agora) for sku, qtd in estoque_novo.items()]
@@ -346,7 +351,6 @@ async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict
             db.bulk_save_objects(novos_registros)
             msg = "Estoque Sincronizado com Sucesso via ERP Gobi API."
         else:
-            # 🔥 MODO DE SIMULAÇÃO INTELIGENTE
             mock_query = text("""
                 INSERT INTO fato_estoque_d0 (sku, qtd_dispo, data_atualizacao)
                 SELECT sku, ROUND(SUM(vol_final) * (0.6 + (RANDOM() * 0.8))), NOW()
