@@ -67,15 +67,16 @@ def obter_visao_topdown(
 ):
     """
     Retorna a matriz macro completa para a Diretoria (Top-Down Arena).
-    Preserva a timeline complexa dos gráficos, métricas de orçamento e a hierarquia limpa.
-    O ciclo é opcional para evitar erros 422 caso o frontend perca a referência.
     """
+    # CORREÇÃO: Usar .get() para evitar o erro KeyError: 'nome'
+    nome_usuario = usuario.get('nome') or usuario.get('username') or "Usuário"
+    
     try:
-        # Mecanismo de segurança: se o frontend não enviar o ciclo, o backend descobre sozinho
+        # Se o frontend não enviar o ciclo, o backend descobre sozinho
         if not ciclo:
             ciclo = get_current_cycle(db)
             
-        print(f"\n🧭 [TOP-DOWN] Utilizador Executivo '{usuario['nome']}' acedeu ao ciclo {ciclo}.")
+        print(f"\n🧭 [TOP-DOWN] Utilizador Executivo '{nome_usuario}' acedeu ao ciclo {ciclo}.")
         
         ciclo_date = datetime.datetime.strptime(ciclo, "%m/%Y")
         hoje = datetime.date.today()
