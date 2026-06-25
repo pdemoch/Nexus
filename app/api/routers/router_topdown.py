@@ -28,28 +28,34 @@ class PayloadAprovarTopDown(BaseModel):
 
 def require_admin(usuario: dict = Depends(get_current_user)):
     if usuario.get('funcao') not in ['Administrador', 'Diretoria', 'Marketing']:
-        raise HTTPException(status_code=403, detail="Acesso restrito.")
+        raise HTTPException(status_code=403, detail="Acesso restrito à Diretoria.")
     return usuario
+
 
 @router.get("/status")
 def obter_status_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_db)):
-    """Informa o React se a tela está trancada."""
+    """Contrato React: statusRes.data.is_fechado"""
     try:
         if not ciclo:
             ciclo = get_current_cycle(db)
             
-        # [VACINA DO CADEADO]: TRIM e LIKE ignoram espaços ocultos gravados no banco
-        query = text("SELECT status FROM controle_ciclos WHERE TRIM(ciclo_sop) = TRIM(:c) AND origem LIKE '%Top-Down%'")
+        query = text("SELECT status FROM controle_ciclos WHERE TRIM(ciclo_sop) = TRIM(:c) AND origem LIKE '%Top-Down%' ORDER BY id DESC")
         trava = db.execute(query, {"c": ciclo}).fetchone()
         
-        is_locked = (trava is not None and trava[0].strip().lower() == 'fechado')
-        return {"ciclo": ciclo, "isLocked": is_locked, "locked": is_locked}
+        is_fechado = (trava is not None and trava[0].strip().lower() == 'fechado')
+        return {"is_fechado": is_fechado}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("/grafico")
-def obter_grafico_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_db)):
-    """Alimenta o gráfico Recharts (Timeline) do topo da tela."""
+def obter_grafico_topdown(
+    chave_matriz: str, 
+    nivel_hierarquia: str, 
+    ciclo: Optional[str] = None, 
+    db: Session = Depends(get_db)
+):
+    """Contrato React: res.data.dados com array Timeline específico da linha clicada"""
     try:
         if not ciclo:
             ciclo = get_current_cycle(db)
@@ -57,27 +63,49 @@ def obter_grafico_topdown(ciclo: Optional[str] = None, db: Session = Depends(get
         ciclo_date = datetime.datetime.strptime(ciclo, "%m/%Y")
         hoje = datetime.date.today()
 
-        query_hist = text("""
-            SELECT TO_CHAR(data_pedido, 'YYYY-MM-01') as mes, SUM(COALESCE(qt_pedido, 0)) as qtd
-            FROM fato_vendas
-            WHERE data_pedido >= CURRENT_DATE - INTERVAL '6 months' AND data_pedido < :limite
-            GROUP BY TO_CHAR(data_pedido, 'YYYY-MM-01')
-        """)
-        dados_hist = db.execute(query_hist, {"limite": ciclo_date.date()}).fetchall()
+        hist_where = " v.data_pedido >= CURRENT_DATE - INTERVAL '6 months' "
+        futuro_where = " f.ciclo_sop = :ciclo "
+        params = {"ciclo": ciclo}
 
-        query_futuro = text("""
-            SELECT TO_CHAR(mes_projetado, 'YYYY-MM-01') as mes, 
-                   SUM(COALESCE(vol_topdown, 0)) as td, 
-                   SUM(COALESCE(vol_ia, 0)) as ia,
-                   SUM(COALESCE(vol_meta, 0)) as ant
-            FROM fato_ibp_granular
-            WHERE ciclo_sop = :ciclo
-            GROUP BY TO_CHAR(mes_projetado, 'YYYY-MM-01')
+        # Filtro Inteligente com base no clique do utilizador
+        if nivel_hierarquia == 'categoria':
+            hist_where += " AND p.categoria = :cat "
+            futuro_where += " AND p.categoria = :cat "
+            params["cat"] = chave_matriz
+        elif nivel_hierarquia == 'segmento':
+            parts = chave_matriz.split('|')
+            hist_where += " AND p.categoria = :cat AND p.segmento = :seg "
+            futuro_where += " AND p.categoria = :cat AND p.segmento = :seg "
+            params["cat"] = parts[0]
+            params["seg"] = parts[1]
+        elif nivel_hierarquia == 'produto':
+            sku = chave_matriz.split('|')[-1]
+            hist_where += " AND p.sku = :sku "
+            futuro_where += " AND f.sku = :sku "
+            params["sku"] = sku
+
+        query_hist = text(f"""
+            SELECT TO_CHAR(v.data_pedido, 'YYYY-MM-01') as mes, SUM(COALESCE(v.qt_pedido, 0)) as qtd
+            FROM fato_vendas v
+            LEFT JOIN dim_produtos p ON ltrim(v.sku::text, '0') = ltrim(p.sku::text, '0')
+            WHERE {hist_where}
+            GROUP BY TO_CHAR(v.data_pedido, 'YYYY-MM-01')
         """)
-        dados_futuro = db.execute(query_futuro, {"ciclo": ciclo}).fetchall()
+        dados_hist = db.execute(query_hist, params).fetchall()
+
+        query_futuro = text(f"""
+            SELECT TO_CHAR(f.mes_projetado, 'YYYY-MM-01') as mes, 
+                   SUM(COALESCE(f.vol_topdown, 0)) as td, 
+                   SUM(COALESCE(f.vol_ia, 0)) as ia,
+                   SUM(COALESCE(f.vol_meta, 0)) as ant
+            FROM fato_ibp_granular f
+            LEFT JOIN dim_produtos p ON ltrim(f.sku::text, '0') = ltrim(p.sku::text, '0')
+            WHERE {futuro_where}
+            GROUP BY TO_CHAR(f.mes_projetado, 'YYYY-MM-01')
+        """)
+        dados_futuro = db.execute(query_futuro, params).fetchall()
 
         calendario = defaultdict(lambda: {"Realizado": 0.0, "IA": 0.0, "TopDown": 0.0, "CicloAnterior": 0.0})
-        
         for r in dados_hist: calendario[r[0]]["Realizado"] = float(r[1])
         for r in dados_futuro:
             calendario[r[0]]["TopDown"] = float(r[1])
@@ -86,7 +114,6 @@ def obter_grafico_topdown(ciclo: Optional[str] = None, db: Session = Depends(get
 
         meses_pt = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
         timeline = []
-        
         for ms in sorted(calendario.keys()):
             dt = datetime.datetime.strptime(ms, '%Y-%m-%d').date()
             timeline.append({
@@ -98,126 +125,124 @@ def obter_grafico_topdown(ciclo: Optional[str] = None, db: Session = Depends(get
                 "CicloAnterior": round(calendario[ms]["CicloAnterior"]) if dt >= hoje.replace(day=1) else None
             })
             
-        return timeline
+        return {"dados": timeline}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("")
-def obter_visao_topdown(
-    ciclo: Optional[str] = None, 
-    db: Session = Depends(get_db),
-    usuario: dict = Depends(require_admin)
-):
-    """Gera a árvore da Matriz para o DataGrid do Frontend."""
-    nome_usuario = usuario.get('nome') or usuario.get('username') or "Usuário"
+def obter_visao_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_db)):
+    """
+    Contrato React Exato: 
+    - {"dados": [{"nome": "Cat", "tipo": "categoria", "subRows": [...]}]}
+    - As colunas baseiam-se em dadosBrutos[0].meses
+    """
     try:
         if not ciclo:
             ciclo = get_current_cycle(db)
 
-        print(f"\n🧭 [TOP-DOWN] Utilizador Executivo '{nome_usuario}' acedeu ao ciclo {ciclo}.")
-
-        query_trava = text("SELECT status FROM controle_ciclos WHERE TRIM(ciclo_sop) = TRIM(:c) AND origem LIKE '%Top-Down%'")
-        trava = db.execute(query_trava, {"c": ciclo}).fetchone()
-        is_locked = (trava is not None and trava[0].strip().lower() == 'fechado')
-
-        # [VACINA DO JOIN]: O LTRIM garante que SKUs como '00123' e '123' cruzem perfeitamente
         query_matriz = text("""
             SELECT 
-                f.sku,
-                MAX(p.descricao) as descricao,
-                MAX(p.categoria) as categoria,
-                MAX(p.segmento) as segmento,
-                f.mes_projetado,
+                f.sku, MAX(p.descricao) as descricao, MAX(p.categoria) as categoria, MAX(p.segmento) as segmento,
+                TO_CHAR(f.mes_projetado, 'YYYY-MM-01') as mes_banco,
                 SUM(COALESCE(f.vol_topdown, 0)) as vol_td,
                 SUM(COALESCE(f.vol_ia, 0)) as vol_ia,
-                AVG(COALESCE(f.pmv_aplicado, 0)) as pmv_medio,
-                SUM(COALESCE(f.vol_meta, 0)) as vol_anterior
+                AVG(COALESCE(f.pmv_aplicado, 0)) as pmv,
+                SUM(COALESCE(f.vol_meta, 0)) as vol_ant
             FROM fato_ibp_granular f
             LEFT JOIN dim_produtos p ON ltrim(f.sku::text, '0') = ltrim(p.sku::text, '0')
             WHERE f.ciclo_sop = :ciclo
-            GROUP BY f.sku, f.mes_projetado
+            GROUP BY f.sku, TO_CHAR(f.mes_projetado, 'YYYY-MM-01')
         """)
-
         dados_banco = db.execute(query_matriz, {"ciclo": ciclo}).fetchall()
         
-        hierarquia = defaultdict(lambda: {"segmentos": defaultdict(lambda: {"skus": defaultdict(lambda: {"descricao": "", "meses": {}})})})
-        meses_dinamicos = set()
-
+        meses_pt = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
+        meses_unicos = {}
+        
+        # 1. Pré-processamento de meses para gerar as colunas globais do React
         for row in dados_banco:
-            sku = row[0]
-            descricao = row[1] or "Sem Descrição"
-            cat = row[2] or "SEM CATEGORIA"
-            seg = row[3] or "SEM SEGMENTO"
-            mes_date = row[4]
+            m_banco = row[4]
+            dt = datetime.datetime.strptime(m_banco, '%Y-%m-%d').date()
+            meses_unicos[m_banco] = f"{meses_pt[dt.month-1]}/{dt.strftime('%y')}"
             
-            if isinstance(mes_date, str):
-                mes_date = datetime.datetime.strptime(mes_date, "%Y-%m-%d").date()
-                
-            # [VACINA DO INDEFINIDO]: Garantimos a devolução da chave no formato YYYY-MM que o React exige
-            mes_str = mes_date.strftime("%Y-%m")
-            meses_dinamicos.add(mes_str)
+        colunas_globais = [{"mes_banco": k, "mes_str": v} for k, v in sorted(meses_unicos.items())]
 
-            vol_td = float(row[5] or 0)
-            vol_ia = float(row[6] or 0)
-            pmv = float(row[7] or 0)
+        # 2. Construção do Dicionário Intermédio
+        tree = {}
+        for row in dados_banco:
+            sku, desc, cat, seg, mes_banco, vol_td, vol_ia, pmv, vol_ant = row
+            cat = cat or "Sem Categoria"
+            seg = seg or "Sem Segmento"
+            desc = desc or "Sem Descrição"
 
-            hierarquia[cat]["segmentos"][seg]["skus"][sku]["descricao"] = descricao
-            hierarquia[cat]["segmentos"][seg]["skus"][sku]["meses"][mes_str] = {
-                "vol": vol_td,
-                "fat": vol_td * pmv,
-                "ia": vol_ia,
-                "pmv": pmv,
-                "orc": vol_ia * pmv * 1.05 
-            }
+            if cat not in tree:
+                tree[cat] = {
+                    "chave_matriz": cat, "nome": cat, "tipo": "categoria", 
+                    "subRows": {}, "meses": colunas_globais 
+                }
+            if seg not in tree[cat]["subRows"]:
+                tree[cat]["subRows"][seg] = {
+                    "chave_matriz": f"{cat}|{seg}", "nome": seg, "tipo": "segmento", "subRows": {}
+                }
+            if sku not in tree[cat]["subRows"][seg]["subRows"]:
+                tree[cat]["subRows"][seg]["subRows"][sku] = {
+                    "chave_matriz": f"{cat}|{seg}|{sku}", "nome": desc, "produto": sku, 
+                    "tipo": "produto", "meses": []
+                }
 
+            # O React exige a chave "vol_ajustado" em vez de "vol_td"
+            tree[cat]["subRows"][seg]["subRows"][sku]["meses"].append({
+                "mes_banco": mes_banco,
+                "mes_str": meses_unicos[mes_banco],
+                "vol_ajustado": float(vol_td),
+                "vol_ia": float(vol_ia),
+                "vol_anterior": float(vol_ant),
+                "pmv": float(pmv),
+                "receita_orcamento": float(vol_ia) * float(pmv) * 1.05
+            })
+
+        # 3. Conversão para Arrays (O Formato Final que o React entende)
         dados_arvore = []
-        for cat_nome, cat_data in hierarquia.items():
-            segmentos_list = []
-            for seg_nome, seg_data in cat_data["segmentos"].items():
-                skus_list = [
-                    {"sku": k, "descricao": v["descricao"], "meses": v["meses"]} 
-                    for k, v in seg_data["skus"].items()
-                ]
-                segmentos_list.append({"segmento": seg_nome, "skus": skus_list})
-            dados_arvore.append({"categoria": cat_nome, "segmentos": segmentos_list})
+        for cat_node in tree.values():
+            cat_copy = cat_node.copy()
+            seg_list = []
+            for seg_node in cat_copy["subRows"].values():
+                seg_copy = seg_node.copy()
+                seg_copy["subRows"] = list(seg_copy["subRows"].values())
+                seg_list.append(seg_copy)
+            cat_copy["subRows"] = seg_list
+            dados_arvore.append(cat_copy)
 
-        return {
-            "isLocked": is_locked,
-            "locked": is_locked,
-            "mesesColunas": sorted(list(meses_dinamicos)),
-            "dados": dados_arvore
-        }
+        return {"dados": dados_arvore}
     except Exception as e:
-        print(f"❌ ERRO MATRIX: {e}")
+        print(f"❌ ERRO GET MATRIX: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/salvar")
-def salvar_ajustes_topdown(
-    payload: PayloadAprovarTopDown,
-    ciclo: Optional[str] = None,
-    db: Session = Depends(get_db),
-    usuario: dict = Depends(require_admin)
-):
-    nome_usuario = usuario.get('nome') or usuario.get('username') or "Usuário"
-    try:
-        if not ciclo:
-            ciclo = get_current_cycle(db)
 
-        query_trava = text("SELECT status FROM controle_ciclos WHERE TRIM(ciclo_sop) = TRIM(:c) AND origem LIKE '%Top-Down%'")
-        trava = db.execute(query_trava, {"c": ciclo}).fetchone()
+@router.post("/salvar")
+def salvar_topdown(payload: PayloadAprovarTopDown, db: Session = Depends(get_db)):
+    """Salva Rascunhos com Rateio Histórico"""
+    return executar_rateio_e_salvar(payload, db, finalizar=False)
+
+@router.post("/congelar")
+def congelar_topdown(payload: PayloadAprovarTopDown, db: Session = Depends(get_db), usuario: dict = Depends(require_admin)):
+    """Tranca a etapa e Executa a Cascata para Bottom-Up"""
+    return executar_rateio_e_salvar(payload, db, finalizar=True, user_id=usuario.get('id', 1))
+
+def executar_rateio_e_salvar(payload, db, finalizar: bool, user_id: int = 1):
+    try:
+        ciclo = get_current_cycle(db)
+        
+        trava = db.execute(text("SELECT status FROM controle_ciclos WHERE TRIM(ciclo_sop) = TRIM(:c) AND origem LIKE '%Top-Down%'"), {"c": ciclo}).fetchone()
         if trava and trava[0].strip().lower() == 'fechado':
             raise HTTPException(status_code=400, detail="Este ciclo já se encontra encerrado.")
 
         updates_para_banco = []
 
         for aj in payload.ajustes:
-            mes_str_banco = aj.mes_projetado
-            if len(mes_str_banco) == 7:
-                mes_str_banco += "-01"
+            mes_banco = aj.mes_projetado
+            if len(mes_banco) == 7: mes_banco += "-01"
                 
-            novo_volume_macro = aj.novo_volume
-            sku = aj.sku
-            
             query_linhas = text("""
                 WITH Historico AS (
                     SELECT cgc, SUM(COALESCE(qt_pedido, 0)) as vol_hist
@@ -230,52 +255,40 @@ def salvar_ajustes_topdown(
                 LEFT JOIN Historico h ON f.cgc = h.cgc
                 WHERE f.ciclo_sop = :c AND f.sku = :s AND f.mes_projetado = :m
             """)
+            linhas = db.execute(query_linhas, {"c": ciclo, "s": aj.sku, "m": mes_banco}).fetchall()
             
-            linhas_sku = db.execute(query_linhas, {"c": ciclo, "s": sku, "m": mes_str_banco}).fetchall()
+            if not linhas: continue 
             
-            if not linhas_sku:
-                continue 
-            
-            total_hist = sum(r[1] for r in linhas_sku)
-            total_ia = sum(r[2] for r in linhas_sku)
+            t_hist = sum(r[1] for r in linhas)
+            t_ia = sum(r[2] for r in linhas)
             soma_alocada = 0
             fracoes = []
 
-            if total_hist > 0:
-                for r in linhas_sku:
-                    cota = (r[1] / total_hist) * novo_volume_macro
-                    fracoes.append({"id": r[0], "vol": int(cota), "resto": cota - int(cota)})
-                    soma_alocada += int(cota)
-            elif total_ia > 0:
-                for r in linhas_sku:
-                    cota = (r[2] / total_ia) * novo_volume_macro
-                    fracoes.append({"id": r[0], "vol": int(cota), "resto": cota - int(cota)})
-                    soma_alocada += int(cota)
-            else:
-                cota = novo_volume_macro / len(linhas_sku)
-                for r in linhas_sku:
-                    fracoes.append({"id": r[0], "vol": int(cota), "resto": cota - int(cota)})
-                    soma_alocada += int(cota)
+            for r in linhas:
+                if t_hist > 0: cota = (r[1] / t_hist) * aj.novo_volume
+                elif t_ia > 0: cota = (r[2] / t_ia) * aj.novo_volume
+                else: cota = aj.novo_volume / len(linhas)
+                
+                fracoes.append({"id": r[0], "vol": int(cota), "resto": cota - int(cota)})
+                soma_alocada += int(cota)
 
-            faltam = novo_volume_macro - soma_alocada
             fracoes.sort(key=lambda x: x["resto"], reverse=True) 
-            for i in range(faltam):
+            for i in range(aj.novo_volume - soma_alocada): 
                 if i < len(fracoes): fracoes[i]["vol"] += 1 
 
-            for f in fracoes:
-                updates_para_banco.append({"id": f["id"], "vol_topdown": f["vol"]})
+            for f in fracoes: updates_para_banco.append({"id": f["id"], "vol_topdown": f["vol"]})
 
         if updates_para_banco:
             db.bulk_update_mappings(FatoIbpGranular, updates_para_banco)
 
-        if payload.finalizar_etapa:
+        if finalizar:
             db.execute(text("DELETE FROM controle_ciclos WHERE TRIM(ciclo_sop) = TRIM(:c) AND origem LIKE '%Top-Down%'"), {"c": ciclo})
             db.execute(text("INSERT INTO controle_ciclos (ciclo_sop, origem, status, data_fechamento) VALUES (:c, 'Top-Down Arena', 'Fechado', CURRENT_TIMESTAMP)"), {"c": ciclo})
             db.execute(text("UPDATE fato_ibp_granular SET vol_bottomup = vol_topdown, vol_meta = vol_topdown, vol_final = vol_topdown WHERE ciclo_sop = :c"), {"c": ciclo})
-            registrar_log_auditoria(db, usuario.get('id', 1), "Finalizar Etapa", f"Ciclo {ciclo} trancado.")
+            registrar_log_auditoria(db, user_id, "Finalizar Etapa", f"Ciclo {ciclo} trancado (Top-Down).")
             
         db.commit()
-        return {"msg": "Salvo com sucesso!"}
+        return {"msg": "Operação concluída com sucesso."}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
