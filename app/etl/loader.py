@@ -9,12 +9,6 @@ class NexusLoader:
         pass
 
     def executar_carga_silver(self, df_silver: pl.DataFrame, data_inicio: date, log_callback=print):
-        """
-        [CIRURGIA DE JANELA MÓVEL APLICADA]
-        Recebe a data_inicio_janela do pipeline, limpa estritamente este período 
-        na FatoVendas (matando dados zumbis) e realiza um Bulk Insert.
-        As Dimensões (Clientes/Hierarquias) continuam com Upsert.
-        """
         from app.core.database import SessionLocal
         from app.models.domain_models import DimCliente, FatoVendas
 
@@ -25,10 +19,7 @@ class NexusLoader:
         db = SessionLocal()
         try:
             log_callback("      • Sincronizando Cadastro de Clientes e Hierarquias (Upsert)...")
-            # =========================================================================
-            # 1. ATUALIZAÇÃO DOS CADASTROS (DIMENSÕES)
-            # Esta parte mantém a sua lógica original intacta.
-            # =========================================================================
+            
             df_clientes = df_silver.select([
                 "cgc", "cod_cliente", "loja", "cliente_razaosocial", 
                 "regional", "bloqueado", "vendedor_nome", "gerente_nome", "supervisor_nome" 
@@ -53,30 +44,18 @@ class NexusLoader:
                 )
                 db.execute(stmt)
 
-            # =========================================================================
-            # 2. A CIRURGIA NA FATO VENDAS (EXPURGO DA JANELA MÓVEL)
-            # AÇÃO CRÍTICA: Apaga tudo da janela de 3 meses para não somar zumbis
-            # =========================================================================
             log_callback(f"      • Expurgo atómico de vendas canceladas/fantasmas (a partir de {data_inicio})...")
-            
-            db.execute(
-                text("DELETE FROM fato_vendas WHERE data_pedido >= :dt_inicio"), 
-                {"dt_inicio": data_inicio}
-            )
+            db.execute(text("DELETE FROM fato_vendas WHERE data_pedido >= :dt_inicio"), {"dt_inicio": data_inicio})
 
-            # =========================================================================
-            # 3. INSERÇÃO ATÓMICA (BULK INSERT) PARA REPOPULAR A JANELA
-            # =========================================================================
             log_callback("      • Injetando vendas purificadas e consolidadas no banco de dados...")
             
             vendas_dicts = []
             for row in df_silver.to_dicts():
-                # Conversão segura da string de data do ERP (YYYYMMDD) para o formato Python Date
                 dt_str = str(row['dtapedido'])
                 if len(dt_str) == 8:
                     dt_obj = date(int(dt_str[:4]), int(dt_str[4:6]), int(dt_str[6:]))
                 else:
-                    dt_obj = row['dtapedido'] # Fallback caso o Polars já tenha convertido
+                    dt_obj = row['dtapedido'] 
 
                 vendas_dicts.append({
                     "pedido": row.get('pedido', 'S/N'),
@@ -89,7 +68,6 @@ class NexusLoader:
                     "qt_corte": row.get('qtcorte', 0.0)
                 })
 
-            # Realiza o insert massivo. É muito mais leve que o Upsert e não acumula lixo
             if vendas_dicts:
                 db.bulk_insert_mappings(FatoVendas, vendas_dicts)
 
@@ -97,7 +75,7 @@ class NexusLoader:
             log_callback("✅ [SILVER] Janela de Faturamento atualizada com sucesso. Nenhuma duplicação detetada.")
 
         except Exception as e:
-            db.rollback() # Se houver falha, o DELETE é desfeito. Segurança total.
+            db.rollback() 
             log_callback(f"❌ [ERRO LOADER] Falha crítica na injeção Silver: {str(e)}")
             raise e
         finally:
@@ -112,7 +90,6 @@ class NexusLoader:
         try:
             log_callback("      • Sincronizando Base de Orçamento Financeiro (Meta Anual)...")
             
-            # Cria a tabela de Orçamento caso não exista no schema inicial
             db.execute(text("""
                 CREATE TABLE IF NOT EXISTS fato_orcamento (
                     sku VARCHAR(255),
@@ -124,7 +101,6 @@ class NexusLoader:
             
             orc_dicts = df_orcamento.to_dicts()
             
-            # Upsert para garantir que metas orçamentárias podem ser atualizadas sem duplicar
             query = text("""
                 INSERT INTO fato_orcamento (sku, mes_projetado, receita_orcamento)
                 VALUES (:sku, :mes_projetado, :receita_orcamento)
@@ -286,18 +262,13 @@ class NexusLoader:
         from app.core.database import SessionLocal
         from app.models.domain_models import FatoMtrixSnapshot, FatoMtrixHistoricoMensal
         from sqlalchemy import text
-        import polars as pl
 
         log_callback(f"   -> [MTRIX] Iniciando Data Cleansing e sumarização do S3 (Ciclo {ciclo_alvo})...")
 
         try:
             bucket_path = "s3://nexus-datalake-linea-prd/mtrix"
 
-            # =================================================================
-            # 1. CARREGAR E HIGIENIZAR DIMENSÕES (DE/PARA)
-            # =================================================================
             try:
-                # O Polars nativamente identifica o IAM Role da AWS, sem precisar de s3fs
                 df_prod = pl.read_parquet(f"{bucket_path}/sellout_produtos.parquet")
                 df_prod = df_prod.select([
                     pl.col("PRODUCT_CODE").cast(pl.Utf8),
@@ -318,9 +289,14 @@ class NexusLoader:
                 df_dist = pl.DataFrame(schema={"DISTRIBUTOR_CODE": pl.Utf8, "cgc": pl.Utf8})
 
             # =================================================================
-            # 2. PROCESSAR ESTOQUE (USANDO QTY_CONV2 PARA CAIXAS)
+            # 2. PROCESSAR ESTOQUE (GARANTINDO O ÚLTIMO DIA DO MÊS)
             # =================================================================
-            log_callback("      • Mapeando posições de estoque no canal (Lendo QTY_CONV2)...")
+            log_callback("      • Mapeando posições de estoque no canal (Filtrando Último Dia Válido)...")
+            
+            # NOTA: Aqui está QTY_CONV2 (48.66 caixas). Se você achar que a coluna correta era 
+            # QTY_UNIT (3504) ou QTY_CONV6 (292.0), basta trocar aqui na linha de baixo.
+            coluna_estoque_alvo = "QTY_CONV2"
+
             try:
                 lf_estoque = pl.scan_parquet(f"{bucket_path}/sellout_estoque_*.parquet")
                 df_estoque = (
@@ -328,12 +304,15 @@ class NexusLoader:
                     .with_columns([
                         pl.col("DISTRIBUTOR_CODE").cast(pl.Utf8),
                         pl.col("PRODUCT_CODE").cast(pl.Utf8),
-                        pl.col("QTY_CONV2").cast(pl.Float64, strict=False).fill_null(0.0),
+                        pl.col(coluna_estoque_alvo).cast(pl.Float64, strict=False).fill_null(0.0),
                         pl.col("STOCK_DATE").cast(pl.Utf8)
                     ])
-                    .sort("STOCK_DATE", descending=True)
                     .group_by(["DISTRIBUTOR_CODE", "PRODUCT_CODE"])
-                    .agg(pl.col("QTY_CONV2").first().alias("estoque_atual_caixas"))
+                    .agg(
+                        # 🔒 TRAVA MATEMÁTICA: Ordena por data DENTRO da agregação
+                        # Isso anula a aleatoriedade das threads e força o motor a capturar o dia 31!
+                        pl.col(coluna_estoque_alvo).sort_by("STOCK_DATE", descending=True).first().alias("estoque_atual_caixas")
+                    )
                 ).collect()
             except Exception as e:
                 log_callback(f"      ⚠️ Aviso Estoque S3: {e}")
@@ -342,7 +321,7 @@ class NexusLoader:
             # =================================================================
             # 3. PROCESSAR SELL-OUT (HISTÓRICO E M-1) - QTY_CONV2
             # =================================================================
-            log_callback("      • Sumarizando volume de saída em Caixas (QTY_CONV2)...")
+            log_callback(f"      • Sumarizando volume de saída em Caixas ({coluna_estoque_alvo})...")
             try:
                 lf_sellout = pl.scan_parquet(f"{bucket_path}/sellout_sellout_*.parquet")
                 
@@ -352,10 +331,10 @@ class NexusLoader:
                         pl.col("DISTRIBUTOR_CODE").cast(pl.Utf8),
                         pl.col("PRODUCT_CODE").cast(pl.Utf8),
                         pl.col("SELLOUT_DATE").cast(pl.Utf8).str.slice(0, 7).alias("mes_ano"),
-                        pl.col("QTY_CONV2").cast(pl.Float64, strict=False).fill_null(0.0)
+                        pl.col(coluna_estoque_alvo).cast(pl.Float64, strict=False).fill_null(0.0)
                     ])
                     .group_by(["DISTRIBUTOR_CODE", "PRODUCT_CODE", "mes_ano"])
-                    .agg(pl.col("QTY_CONV2").sum().alias("volume_sellout"))
+                    .agg(pl.col(coluna_estoque_alvo).sum().alias("volume_sellout"))
                 ).collect()
                 
                 if len(df_sellout_mensal) > 0:
@@ -385,10 +364,8 @@ class NexusLoader:
             df_snap = df_estoque.join(df_sellout_m1, on=["DISTRIBUTOR_CODE", "PRODUCT_CODE"], how="outer").fill_null(0.0)
             df_snap = df_snap.join(df_prod, on="PRODUCT_CODE", how="left").join(df_dist, on="DISTRIBUTOR_CODE", how="left")
             
-            # Como agora temos o CNPJ real via DISTRIBUTOR_ID, garantimos dados limpos
             df_snap = df_snap.drop_nulls(subset=["sku", "cgc"])
             
-            # Calcula Dias de Cobertura de forma segura
             df_snap = df_snap.with_columns(
                 pl.when(pl.col("sellout_m1_caixas") > 0)
                 .then((pl.col("estoque_atual_caixas") / pl.col("sellout_m1_caixas")) * 30.0)

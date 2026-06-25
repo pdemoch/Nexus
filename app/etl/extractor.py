@@ -186,17 +186,18 @@ class MtrixExtractor:
 
     def _calcular_janela_temporal(self, primeira_carga: bool):
         hoje = datetime.now()
-        mes_alvo = hoje 
-        ultimo_dia = calendar.monthrange(mes_alvo.year, mes_alvo.month)[1]
         
-        data_fim = datetime(mes_alvo.year, mes_alvo.month, ultimo_dia)
+        # 🔥 CORREÇÃO CIRÚRGICA: A data fim agora é exatamente a data/hora de hoje.
+        # Isto impede que o script envie o dia 30 ou 31 para a MTRIX, o que fazia
+        # a API rejeitar a query por ser uma data no futuro.
+        data_fim = hoje
         
         if primeira_carga:
-            data_inicio = mes_alvo - relativedelta(years=3)
+            data_inicio = hoje - relativedelta(years=3)
             data_inicio = data_inicio.replace(day=1)
             modo = "HISTÓRICA (3 Anos Particionados)"
         else:
-            data_inicio = mes_alvo - relativedelta(months=3)
+            data_inicio = hoje - relativedelta(months=3)
             data_inicio = data_inicio.replace(day=1)
             modo = "ROTINA (Últimos 3 Meses)"
             
