@@ -1,4 +1,5 @@
 import datetime
+from dateutil.relativedelta import relativedelta
 from typing import List, Optional
 from collections import defaultdict
 from fastapi import APIRouter, HTTPException, Depends
@@ -34,14 +35,10 @@ def require_admin(usuario: dict = Depends(get_current_user)):
 
 @router.get("/status")
 def obter_status_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_db)):
-    """Contrato React: statusRes.data.is_fechado"""
     try:
-        if not ciclo:
-            ciclo = get_current_cycle(db)
-            
+        if not ciclo: ciclo = get_current_cycle(db)
         query = text("SELECT status FROM controle_ciclos WHERE TRIM(ciclo_sop) = TRIM(:c) AND origem LIKE '%Top-Down%' ORDER BY id DESC")
         trava = db.execute(query, {"c": ciclo}).fetchone()
-        
         is_fechado = (trava is not None and trava[0].strip().lower() == 'fechado')
         return {"is_fechado": is_fechado}
     except Exception as e:
@@ -55,19 +52,16 @@ def obter_grafico_topdown(
     ciclo: Optional[str] = None, 
     db: Session = Depends(get_db)
 ):
-    """Contrato React: res.data.dados com array Timeline específico da linha clicada"""
     try:
-        if not ciclo:
-            ciclo = get_current_cycle(db)
-            
+        if not ciclo: ciclo = get_current_cycle(db)
         ciclo_date = datetime.datetime.strptime(ciclo, "%m/%Y")
         hoje = datetime.date.today()
 
-        hist_where = " v.data_pedido >= CURRENT_DATE - INTERVAL '6 months' "
+        # REQUISITO: 2 Anos de Histórico exatos relativos ao ciclo atual
+        hist_where = " v.data_pedido >= :limite - INTERVAL '24 months' AND v.data_pedido < :limite "
         futuro_where = " f.ciclo_sop = :ciclo "
-        params = {"ciclo": ciclo}
+        params = {"ciclo": ciclo, "limite": ciclo_date.date()}
 
-        # Filtro Inteligente com base no clique do utilizador
         if nivel_hierarquia == 'categoria':
             hist_where += " AND p.categoria = :cat "
             futuro_where += " AND p.categoria = :cat "
@@ -95,9 +89,7 @@ def obter_grafico_topdown(
 
         query_futuro = text(f"""
             SELECT TO_CHAR(f.mes_projetado, 'YYYY-MM-01') as mes, 
-                   SUM(COALESCE(f.vol_topdown, 0)) as td, 
-                   SUM(COALESCE(f.vol_ia, 0)) as ia,
-                   SUM(COALESCE(f.vol_meta, 0)) as ant
+                   SUM(COALESCE(f.vol_topdown, 0)) as td, SUM(COALESCE(f.vol_ia, 0)) as ia, SUM(COALESCE(f.vol_meta, 0)) as ant
             FROM fato_ibp_granular f
             LEFT JOIN dim_produtos p ON ltrim(f.sku::text, '0') = ltrim(p.sku::text, '0')
             WHERE {futuro_where}
@@ -124,7 +116,6 @@ def obter_grafico_topdown(
                 "Top-Down": round(calendario[ms]["TopDown"]) if dt >= hoje.replace(day=1) else None,
                 "CicloAnterior": round(calendario[ms]["CicloAnterior"]) if dt >= hoje.replace(day=1) else None
             })
-            
         return {"dados": timeline}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -132,14 +123,14 @@ def obter_grafico_topdown(
 
 @router.get("")
 def obter_visao_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_db)):
-    """
-    Contrato React Exato: 
-    - {"dados": [{"nome": "Cat", "tipo": "categoria", "subRows": [...]}]}
-    - As colunas baseiam-se em dadosBrutos[0].meses
-    """
     try:
-        if not ciclo:
-            ciclo = get_current_cycle(db)
+        if not ciclo: ciclo = get_current_cycle(db)
+
+        ciclo_date = datetime.datetime.strptime(ciclo, "%m/%Y")
+        
+        # REQUISITO: Definir as balizas estritas de M2, M3 e M4 com base no ciclo
+        m2_date = (ciclo_date + relativedelta(months=2)).date()
+        m4_date = (ciclo_date + relativedelta(months=4)).date()
 
         query_matriz = text("""
             SELECT 
@@ -158,75 +149,111 @@ def obter_visao_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_d
         
         meses_pt = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
         meses_unicos = {}
-        
-        # 1. Pré-processamento de meses para gerar as colunas globais do React
-        for row in dados_banco:
-            m_banco = row[4]
-            dt = datetime.datetime.strptime(m_banco, '%Y-%m-%d').date()
-            meses_unicos[m_banco] = f"{meses_pt[dt.month-1]}/{dt.strftime('%y')}"
-            
-        colunas_globais = [{"mes_banco": k, "mes_str": v} for k, v in sorted(meses_unicos.items())]
-
-        # 2. Construção do Dicionário Intermédio
         tree = {}
+
         for row in dados_banco:
             sku, desc, cat, seg, mes_banco, vol_td, vol_ia, pmv, vol_ant = row
             cat = cat or "Sem Categoria"
             seg = seg or "Sem Segmento"
             desc = desc or "Sem Descrição"
 
-            if cat not in tree:
-                tree[cat] = {
-                    "chave_matriz": cat, "nome": cat, "tipo": "categoria", 
-                    "subRows": {}, "meses": colunas_globais 
-                }
-            if seg not in tree[cat]["subRows"]:
-                tree[cat]["subRows"][seg] = {
-                    "chave_matriz": f"{cat}|{seg}", "nome": seg, "tipo": "segmento", "subRows": {}
-                }
-            if sku not in tree[cat]["subRows"][seg]["subRows"]:
-                tree[cat]["subRows"][seg]["subRows"][sku] = {
-                    "chave_matriz": f"{cat}|{seg}|{sku}", "nome": desc, "produto": sku, 
-                    "tipo": "produto", "meses": []
-                }
+            mes_date = datetime.datetime.strptime(mes_banco, '%Y-%m-%d').date()
 
-            # O React exige a chave "vol_ajustado" em vez de "vol_td"
-            tree[cat]["subRows"][seg]["subRows"][sku]["meses"].append({
-                "mes_banco": mes_banco,
-                "mes_str": meses_unicos[mes_banco],
-                "vol_ajustado": float(vol_td),
-                "vol_ia": float(vol_ia),
-                "vol_anterior": float(vol_ant),
-                "pmv": float(pmv),
-                "receita_orcamento": float(vol_ia) * float(pmv) * 1.05
-            })
+            # REQUISITO: Ignorar meses na Matriz/Grid que estejam fora de M2, M3 e M4
+            if m2_date <= mes_date <= m4_date:
+                meses_unicos[mes_banco] = f"{meses_pt[mes_date.month-1]}/{mes_date.strftime('%y')}"
 
-        # 3. Conversão para Arrays (O Formato Final que o React entende)
+                if cat not in tree:
+                    tree[cat] = {
+                        "chave_matriz": cat, "nome": cat, "tipo": "categoria", "subRows": {}, 
+                        "meses_dict": defaultdict(lambda: {"vol_ia": 0.0, "vol_anterior": 0.0, "receita_orcamento": 0.0, "vol_ajustado": 0.0, "fat": 0.0})
+                    }
+                if seg not in tree[cat]["subRows"]:
+                    tree[cat]["subRows"][seg] = {
+                        "chave_matriz": f"{cat}|{seg}", "nome": seg, "tipo": "segmento", "subRows": {},
+                        "meses_dict": defaultdict(lambda: {"vol_ia": 0.0, "vol_anterior": 0.0, "receita_orcamento": 0.0, "vol_ajustado": 0.0, "fat": 0.0})
+                    }
+                if sku not in tree[cat]["subRows"][seg]["subRows"]:
+                    tree[cat]["subRows"][seg]["subRows"][sku] = {
+                        "chave_matriz": f"{cat}|{seg}|{sku}", "nome": desc, "produto": sku, 
+                        "tipo": "produto", "meses": []
+                    }
+
+                v_td = float(vol_td)
+                v_ia = float(vol_ia)
+                v_ant = float(vol_ant)
+                v_pmv = float(pmv)
+                
+                sku_orcamento = v_ia * v_pmv * 1.05
+                sku_fat = v_td * v_pmv
+
+                # Injeção no SKU
+                tree[cat]["subRows"][seg]["subRows"][sku]["meses"].append({
+                    "mes_banco": mes_banco, "mes_str": meses_unicos[mes_banco],
+                    "vol_ajustado": v_td, "vol_ia": v_ia, "vol_anterior": v_ant,
+                    "pmv": v_pmv, "receita_orcamento": sku_orcamento
+                })
+
+                # REQUISITO: Acumulação Vertical (Categoria e Segmento) para o React ler IA, Lag 1 e Orçamento globais
+                c_agg = tree[cat]["meses_dict"][mes_banco]
+                c_agg["vol_ia"] += v_ia
+                c_agg["vol_anterior"] += v_ant
+                c_agg["receita_orcamento"] += sku_orcamento
+                c_agg["vol_ajustado"] += v_td
+                c_agg["fat"] += sku_fat
+
+                s_agg = tree[cat]["subRows"][seg]["meses_dict"][mes_banco]
+                s_agg["vol_ia"] += v_ia
+                s_agg["vol_anterior"] += v_ant
+                s_agg["receita_orcamento"] += sku_orcamento
+                s_agg["vol_ajustado"] += v_td
+                s_agg["fat"] += sku_fat
+
+        # Consolidação Final da Árvore
         dados_arvore = []
-        for cat_node in tree.values():
-            cat_copy = cat_node.copy()
+        for cat_key, cat_node in tree.items():
+            cat_meses = []
+            for m_banco in sorted(meses_unicos.keys()):
+                agg = cat_node["meses_dict"][m_banco]
+                pmv_agg = agg["fat"] / agg["vol_ajustado"] if agg["vol_ajustado"] > 0 else 0.0
+                cat_meses.append({
+                    "mes_banco": m_banco, "mes_str": meses_unicos[m_banco],
+                    "vol_ajustado": agg["vol_ajustado"], "vol_ia": agg["vol_ia"], "vol_anterior": agg["vol_anterior"],
+                    "pmv": pmv_agg, "receita_orcamento": agg["receita_orcamento"]
+                })
+            cat_node["meses"] = cat_meses
+            cat_node.pop("meses_dict", None)
+
             seg_list = []
-            for seg_node in cat_copy["subRows"].values():
-                seg_copy = seg_node.copy()
-                seg_copy["subRows"] = list(seg_copy["subRows"].values())
-                seg_list.append(seg_copy)
-            cat_copy["subRows"] = seg_list
-            dados_arvore.append(cat_copy)
+            for seg_key, seg_node in cat_node["subRows"].items():
+                seg_meses = []
+                for m_banco in sorted(meses_unicos.keys()):
+                    agg = seg_node["meses_dict"][m_banco]
+                    pmv_agg = agg["fat"] / agg["vol_ajustado"] if agg["vol_ajustado"] > 0 else 0.0
+                    seg_meses.append({
+                        "mes_banco": m_banco, "mes_str": meses_unicos[m_banco],
+                        "vol_ajustado": agg["vol_ajustado"], "vol_ia": agg["vol_ia"], "vol_anterior": agg["vol_anterior"],
+                        "pmv": pmv_agg, "receita_orcamento": agg["receita_orcamento"]
+                    })
+                seg_node["meses"] = seg_meses
+                seg_node.pop("meses_dict", None)
+                seg_node["subRows"] = list(seg_node["subRows"].values())
+                seg_list.append(seg_node)
+
+            cat_node["subRows"] = seg_list
+            dados_arvore.append(cat_node)
 
         return {"dados": dados_arvore}
     except Exception as e:
-        print(f"❌ ERRO GET MATRIX: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/salvar")
 def salvar_topdown(payload: PayloadAprovarTopDown, db: Session = Depends(get_db)):
-    """Salva Rascunhos com Rateio Histórico"""
     return executar_rateio_e_salvar(payload, db, finalizar=False)
 
 @router.post("/congelar")
 def congelar_topdown(payload: PayloadAprovarTopDown, db: Session = Depends(get_db), usuario: dict = Depends(require_admin)):
-    """Tranca a etapa e Executa a Cascata para Bottom-Up"""
     return executar_rateio_e_salvar(payload, db, finalizar=True, user_id=usuario.get('id', 1))
 
 def executar_rateio_e_salvar(payload, db, finalizar: bool, user_id: int = 1):
@@ -256,7 +283,6 @@ def executar_rateio_e_salvar(payload, db, finalizar: bool, user_id: int = 1):
                 WHERE f.ciclo_sop = :c AND f.sku = :s AND f.mes_projetado = :m
             """)
             linhas = db.execute(query_linhas, {"c": ciclo, "s": aj.sku, "m": mes_banco}).fetchall()
-            
             if not linhas: continue 
             
             t_hist = sum(r[1] for r in linhas)
