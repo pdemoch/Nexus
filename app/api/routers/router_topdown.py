@@ -128,7 +128,7 @@ def obter_visao_topdown(
 
             vol_td = float(row[4])
             vol_ia = float(row[5])
-            容_pmv = float(row[6])
+            pmv = float(row[6])
             vol_ant = float(row[7])
 
             # Preenchimento da estrutura do gráfico superior
@@ -137,14 +137,14 @@ def obter_visao_topdown(
             calendario[mes_str]["CicloAnterior"] += vol_ant
 
             # Montagem estruturada do grid expansível
-            fat_td = vol_td * 容_pmv
-            orc_fake = vol_ia * 容_pmv * 1.05 
+            fat_td = vol_td * pmv
+            orc_fake = vol_ia * pmv * 1.05 
 
             hierarquia[cat]["segmentos"][seg]["skus"][sku][mes_str] = {
                 "vol": vol_td,
                 "fat": fat_td,
                 "ia": vol_ia,
-                "pmv": 容_pmv,
+                "pmv": pmv,
                 "orc": orc_fake
             }
 
@@ -156,10 +156,11 @@ def obter_visao_topdown(
             m_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
             nome_formatado = f"{meses_pt[m_dt.month - 1]}/{m_dt.strftime('%y')}"
             
+            # CORREÇÃO DO SYNTAX ERROR: Removido o operador := 
             timeline_final.append({
                 "name": nome_formatado,
                 "data_iso": f"{ms}-01",
-                "Realizado": None if m_dt >= hoje else tabular_round := round(v["Realizado"]),
+                "Realizado": None if m_dt >= hoje else round(v["Realizado"]),
                 "IA": round(v["IA"]) if m_dt >= hoje.replace(day=1) else None,
                 "Top-Down": round(v["TopDown"]) if m_dt >= hoje.replace(day=1) else None,
                 "CicloAnterior": round(v["CicloAnterior"]) if m_dt >= hoje.replace(day=1) else None
