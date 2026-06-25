@@ -57,7 +57,6 @@ def obter_grafico_topdown(
         ciclo_date = datetime.datetime.strptime(ciclo, "%m/%Y")
         hoje = datetime.date.today()
 
-        # REQUISITO: 2 Anos de Histórico exatos relativos ao ciclo atual
         hist_where = " v.data_pedido >= :limite - INTERVAL '24 months' AND v.data_pedido < :limite "
         futuro_where = " f.ciclo_sop = :ciclo "
         params = {"ciclo": ciclo, "limite": ciclo_date.date()}
@@ -128,18 +127,32 @@ def obter_visao_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_d
 
         ciclo_date = datetime.datetime.strptime(ciclo, "%m/%Y")
         
-        # REQUISITO: Definir as balizas estritas de M2, M3 e M4 com base no ciclo
         m2_date = (ciclo_date + relativedelta(months=2)).date()
         m4_date = (ciclo_date + relativedelta(months=4)).date()
 
+        # FIX 1: Buscar o Orçamento Genuíno na tabela fato_orcamento (Igual ao Dashboard)
+        orc_query = db.execute(text("""
+            SELECT sku, TO_CHAR(mes_projetado, 'YYYY-MM-01') as mes_banco, SUM(receita_orcamento) as receita_orcamento
+            FROM fato_orcamento
+            WHERE mes_projetado >= :m2 AND mes_projetado <= :m4
+            GROUP BY sku, TO_CHAR(mes_projetado, 'YYYY-MM-01')
+        """), {"m2": m2_date, "m4": m4_date}).fetchall()
+
+        orc_dict = {}
+        for o in orc_query:
+            orc_dict[f"{o.sku}|{o.mes_banco}"] = float(o.receita_orcamento or 0)
+
+        # FIX 2: Cálculo Matemático Preciso do Faturamento Linha-a-Linha no SQL
         query_matriz = text("""
             SELECT 
                 f.sku, MAX(p.descricao) as descricao, MAX(p.categoria) as categoria, MAX(p.segmento) as segmento,
                 TO_CHAR(f.mes_projetado, 'YYYY-MM-01') as mes_banco,
                 SUM(COALESCE(f.vol_topdown, 0)) as vol_td,
                 SUM(COALESCE(f.vol_ia, 0)) as vol_ia,
-                AVG(COALESCE(f.pmv_aplicado, 0)) as pmv,
-                SUM(COALESCE(f.vol_meta, 0)) as vol_ant
+                SUM(COALESCE(f.vol_meta, 0)) as vol_ant,
+                SUM(COALESCE(f.vol_topdown, 0) * COALESCE(f.pmv_aplicado, 0)) as rec_td,
+                SUM(COALESCE(f.vol_ia, 0) * COALESCE(f.pmv_aplicado, 0)) as rec_ia,
+                AVG(COALESCE(f.pmv_aplicado, 0)) as pmv_fallback
             FROM fato_ibp_granular f
             LEFT JOIN dim_produtos p ON ltrim(f.sku::text, '0') = ltrim(p.sku::text, '0')
             WHERE f.ciclo_sop = :ciclo
@@ -152,14 +165,13 @@ def obter_visao_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_d
         tree = {}
 
         for row in dados_banco:
-            sku, desc, cat, seg, mes_banco, vol_td, vol_ia, pmv, vol_ant = row
+            sku, desc, cat, seg, mes_banco, vol_td, vol_ia, vol_ant, rec_td, rec_ia, pmv_fallback = row
             cat = cat or "Sem Categoria"
             seg = seg or "Sem Segmento"
             desc = desc or "Sem Descrição"
 
             mes_date = datetime.datetime.strptime(mes_banco, '%Y-%m-%d').date()
 
-            # REQUISITO: Ignorar meses na Matriz/Grid que estejam fora de M2, M3 e M4
             if m2_date <= mes_date <= m4_date:
                 meses_unicos[mes_banco] = f"{meses_pt[mes_date.month-1]}/{mes_date.strftime('%y')}"
 
@@ -182,19 +194,27 @@ def obter_visao_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_d
                 v_td = float(vol_td)
                 v_ia = float(vol_ia)
                 v_ant = float(vol_ant)
-                v_pmv = float(pmv)
+                r_td = float(rec_td)
+                r_ia = float(rec_ia)
                 
-                sku_orcamento = v_ia * v_pmv * 1.05
-                sku_fat = v_td * v_pmv
+                # PMV calculado pela ponderação financeira real, eliminando desvios decimais
+                if v_td > 0:
+                    v_pmv = r_td / v_td
+                elif v_ia > 0:
+                    v_pmv = r_ia / v_ia
+                else:
+                    v_pmv = float(pmv_fallback)
+                
+                # Consumo do Orçamento Real da Base
+                sku_orcamento = orc_dict.get(f"{sku}|{mes_banco}", 0.0)
+                sku_fat = r_td
 
-                # Injeção no SKU
                 tree[cat]["subRows"][seg]["subRows"][sku]["meses"].append({
                     "mes_banco": mes_banco, "mes_str": meses_unicos[mes_banco],
                     "vol_ajustado": v_td, "vol_ia": v_ia, "vol_anterior": v_ant,
                     "pmv": v_pmv, "receita_orcamento": sku_orcamento
                 })
 
-                # REQUISITO: Acumulação Vertical (Categoria e Segmento) para o React ler IA, Lag 1 e Orçamento globais
                 c_agg = tree[cat]["meses_dict"][mes_banco]
                 c_agg["vol_ia"] += v_ia
                 c_agg["vol_anterior"] += v_ant
@@ -209,7 +229,6 @@ def obter_visao_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_d
                 s_agg["vol_ajustado"] += v_td
                 s_agg["fat"] += sku_fat
 
-        # Consolidação Final da Árvore
         dados_arvore = []
         for cat_key, cat_node in tree.items():
             cat_meses = []
