@@ -34,16 +34,15 @@ class PayloadAprovarTopDown(BaseModel):
     finalizar_etapa: bool = False
 
 def require_admin(usuario: dict = Depends(get_current_user)):
-    # Governação de acesso: Diretoria, Administradores e Marketing possuem passe-livre macro
-    if usuario['funcao'] not in ['Administrador', 'Diretoria', 'Marketing']:
+    # Correção Segura: usar .get() para evitar KeyErrors no token
+    if usuario.get('funcao') not in ['Administrador', 'Diretoria', 'Marketing']:
         raise HTTPException(status_code=403, detail="Acesso restrito à Diretoria e Administradores.")
     return usuario
 
 @router.get("/status")
 def obter_status_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_db)):
     """
-    Rota auxiliar para o Frontend descobrir o estado da tela ao carregar.
-    Resolve o erro 404 Not Found.
+    [VACINA 404] Rota auxiliar para o Frontend descobrir o estado da tela ao carregar.
     """
     try:
         if not ciclo:
@@ -59,6 +58,7 @@ def obter_status_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("")
 def obter_visao_topdown(
     ciclo: Optional[str] = None, 
@@ -66,13 +66,13 @@ def obter_visao_topdown(
     usuario: dict = Depends(require_admin)
 ):
     """
-    Retorna a matriz macro completa para a Diretoria (Top-Down Arena).
+    [VACINA TELA BRANCA] Retorna a matriz macro completa para a Diretoria.
+    Preserva a timeline complexa dos gráficos e a hierarquia limpa.
     """
-    # CORREÇÃO: Usar .get() para evitar o erro KeyError: 'nome'
+    # [VACINA 500] Evita KeyError se o token vier sem a chave 'nome'
     nome_usuario = usuario.get('nome') or usuario.get('username') or "Usuário"
     
     try:
-        # Se o frontend não enviar o ciclo, o backend descobre sozinho
         if not ciclo:
             ciclo = get_current_cycle(db)
             
@@ -89,20 +89,10 @@ def obter_visao_topdown(
         """)
         resultado_trava = db.execute(query_trava, {"ciclo": ciclo}).fetchone()
         ciclo_fechado = (resultado_trava is not None and resultado_trava[0] == 'Fechado')
-        print(f"   -> Estado de travamento verificado no banco: {'FECHADO 🔒' if ciclo_fechado else 'ABERTO 🔓'}")
-
-        # Definição dos 4 meses de projeção tática do ciclo
-        meses_interesse = [
-            (ciclo_date + relativedelta(months=1)).strftime("%Y-%m-%d"),
-            (ciclo_date + relativedelta(months=2)).strftime("%Y-%m-%d"),
-            (ciclo_date + relativedelta(months=3)).strftime("%Y-%m-%d"),
-            (ciclo_date + relativedelta(months=4)).strftime("%Y-%m-%d")
-        ]
 
         # =========================================================================
         # 📊 CONSTRUÇÃO DA TIMELINE COMPLEXA (GRÁFICOS SUPERIORES)
         # =========================================================================
-        # Busca o histórico real de faturamento para os meses anteriores (Realizado)
         query_hist = text("""
             SELECT TO_CHAR(data_pedido, 'YYYY-MM') as mes, SUM(COALESCE(qt_pedido, 0)) as qtd
             FROM fato_vendas
@@ -115,7 +105,7 @@ def obter_visao_topdown(
         for row in dados_historicos:
             calendario[row[0]]["Realizado"] = float(row[1])
 
-        # 2. QUERY MATRIX COM JOIN RELACIONAL BLINDADO
+        # 2. QUERY MATRIX COM JOIN RELACIONAL BLINDADO (Fim da Tela Branca)
         query_matriz = text("""
             SELECT 
                 f.sku,
@@ -128,18 +118,15 @@ def obter_visao_topdown(
                 SUM(COALESCE(f.vol_meta, 0)) as vol_anterior
             FROM fato_ibp_granular f
             LEFT JOIN dim_produto p ON f.sku = p.sku
-            LEFT JOIN dim_cliente c ON f.cgc = c.cgc
             WHERE f.ciclo_sop = :ciclo
             GROUP BY f.sku, p.categoria, p.segmento, f.mes_projetado
         """)
 
         dados_banco = db.execute(query_matriz, {"ciclo": ciclo}).fetchall()
-        print(f"   -> {len(dados_banco)} registos relacionais extraídos para processamento.")
-
+        
         hierarquia = defaultdict(lambda: {"segmentos": defaultdict(lambda: {"skus": defaultdict(dict)})})
         meses_dinamicos = set()
 
-        # Alimenta a matriz e acumula os valores projetados na timeline do gráfico
         for row in dados_banco:
             sku = row[0]
             cat = row[1] or "SEM CATEGORIA"
@@ -152,17 +139,15 @@ def obter_visao_topdown(
             mes_str = f"{mes_date.year}-{mes_date.month:02d}"
             meses_dinamicos.add(mes_str)
 
-            vol_td = float(row[4])
-            vol_ia = float(row[5])
-            pmv = float(row[6])
-            vol_ant = float(row[7])
+            vol_td = float(row[4] or 0)
+            vol_ia = float(row[5] or 0)
+            pmv = float(row[6] or 0)
+            vol_ant = float(row[7] or 0)
 
-            # Preenchimento da estrutura do gráfico superior
             calendario[mes_str]["IA"] += vol_ia
             calendario[mes_str]["TopDown"] += vol_td
             calendario[mes_str]["CicloAnterior"] += vol_ant
 
-            # Montagem estruturada do grid expansível
             fat_td = vol_td * pmv
             orc_fake = vol_ia * pmv * 1.05 
 
@@ -174,7 +159,7 @@ def obter_visao_topdown(
                 "orc": orc_fake
             }
 
-        # Formatação final do array 'timeline' com meses traduzidos (Jan/y, Fev/y...)
+        # Formatação final do array 'timeline' (Gráfico)
         meses_pt = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
         timeline_final = []
         
@@ -182,6 +167,7 @@ def obter_visao_topdown(
             m_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
             nome_formatado = f"{meses_pt[m_dt.month - 1]}/{m_dt.strftime('%y')}"
             
+            # Sem o operador morsa (:=) para compatibilidade perfeita
             timeline_final.append({
                 "name": nome_formatado,
                 "data_iso": f"{ms}-01",
@@ -191,7 +177,7 @@ def obter_visao_topdown(
                 "CicloAnterior": round(v["CicloAnterior"]) if m_dt >= hoje.replace(day=1) else None
             })
 
-        # Estruturação final dos nós (Nodes) para o TreeGrid do React
+        # Estruturação final para o TreeGrid do React
         dados_arvore = []
         for cat_nome, cat_data in hierarquia.items():
             segmentos_list = []
@@ -224,6 +210,7 @@ def obter_visao_topdown(
         print(f"❌ ERRO CRÍTICO NO BACKEND TOPDOWN: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.post("/salvar")
 def salvar_ajustes_topdown(
     payload: PayloadAprovarTopDown,
@@ -231,21 +218,18 @@ def salvar_ajustes_topdown(
     db: Session = Depends(get_db),
     usuario: dict = Depends(require_admin)
 ):
-    """
-    Grava de forma massiva as decisões da Diretoria e realiza 
-    a passagem de bastão atómica para as Gerências.
-    """
-    print(f"\n💾 [TOP-DOWN] {usuario['nome']} submeteu {len(payload.ajustes)} alterações.")
+    nome_usuario = usuario.get('nome') or usuario.get('username') or "Usuário"
+    print(f"\n💾 [TOP-DOWN] {nome_usuario} submeteu {len(payload.ajustes)} alterações.")
     
     try:
         if not ciclo:
             ciclo = get_current_cycle(db)
 
-        # 1. Trava de Segurança contra Sobrescrita de Ciclo Trancado
+        # 1. Trava de Segurança
         query_trava = text("SELECT status FROM controle_ciclos WHERE ciclo_sop = :ciclo AND origem = 'Top-Down Arena'")
         trava = db.execute(query_trava, {"ciclo": ciclo}).fetchone()
         if trava and trava[0] == 'Fechado':
-            raise HTTPException(status_code=400, detail="Este ciclo já se encontra encerrado e auditado.")
+            raise HTTPException(status_code=400, detail="Este ciclo já se encontra encerrado.")
 
         # 2. Gravação das Metas (vol_topdown)
         query_update = text("""
@@ -265,11 +249,10 @@ def salvar_ajustes_topdown(
                 "mes_proj": mes_str_banco
             })
             
-        # 3. FINALIZAÇÃO DA ETAPA E CRIAÇÃO DO CADEADO (CONTROLE_CICLOS)
+        # 3. FINALIZAÇÃO E CASCATA
         if payload.finalizar_etapa:
-            print("🔒 [TOP-DOWN] Comando de finalização detetado. Selando a etapa...")
+            print("🔒 [TOP-DOWN] Selando a etapa e executando Cascata...")
             
-            # Limpa qualquer resíduo e cria a trava definitiva de fechamento
             db.execute(text("DELETE FROM controle_ciclos WHERE ciclo_sop = :ciclo AND origem = 'Top-Down Arena'"), {"ciclo": ciclo})
             
             db.execute(text("""
@@ -277,10 +260,7 @@ def salvar_ajustes_topdown(
                 VALUES (:ciclo, 'Top-Down Arena', 'Fechado', CURRENT_TIMESTAMP)
             """), {"ciclo": ciclo})
             
-            # =========================================================================
-            # 🔥 REGRA DE TRANSIÇÃO (CASCATA COMPLETA COM VOL_FINAL)
-            # Copia o vol_topdown para vol_bottomup, vol_meta e vol_final ao mesmo tempo
-            # =========================================================================
+            # Cascata Completa (TopDown -> BottomUp, Meta e Final)
             db.execute(text("""
                 UPDATE fato_ibp_granular 
                 SET vol_bottomup = vol_topdown, 
@@ -289,18 +269,18 @@ def salvar_ajustes_topdown(
                 WHERE ciclo_sop = :ciclo
             """), {"ciclo": ciclo})
             
-            # Registro de Auditoria Nativo do Sistema para Compliance
+            # Auditoria mantida
             registrar_log_auditoria(
                 db, 
                 usuario_id=usuario.get('id', 1), 
                 acao="Finalizar Etapa", 
-                detalhe=f"Diretoria trancou o ciclo {ciclo}. vol_topdown replicado para vol_bottomup, vol_meta e vol_final."
+                detalhe=f"Diretoria trancou o ciclo {ciclo}. vol_topdown replicado."
             )
             
         db.commit()
-        return {"msg": "Decisões estratégicas salvas com sucesso!"}
+        return {"msg": "Decisões salvas com sucesso!"}
         
     except Exception as e:
         db.rollback()
-        print(f"❌ ERRO OPERACIONAL AO GRAVAR MATRIZ: {str(e)}")
+        print(f"❌ ERRO AO GRAVAR MATRIZ: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
