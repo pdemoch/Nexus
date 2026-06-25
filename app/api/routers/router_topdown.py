@@ -39,19 +39,44 @@ def require_admin(usuario: dict = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Acesso restrito à Diretoria e Administradores.")
     return usuario
 
+@router.get("/status")
+def obter_status_topdown(ciclo: Optional[str] = None, db: Session = Depends(get_db)):
+    """
+    Rota auxiliar para o Frontend descobrir o estado da tela ao carregar.
+    Resolve o erro 404 Not Found.
+    """
+    try:
+        if not ciclo:
+            ciclo = get_current_cycle(db)
+            
+        query = text("SELECT status FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'Top-Down Arena'")
+        trava = db.execute(query, {"c": ciclo}).fetchone()
+        
+        return {
+            "ciclo": ciclo,
+            "isLocked": (trava is not None and trava[0] == 'Fechado')
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("")
 def obter_visao_topdown(
-    ciclo: str,
+    ciclo: Optional[str] = None, 
     db: Session = Depends(get_db),
     usuario: dict = Depends(require_admin)
 ):
     """
     Retorna a matriz macro completa para a Diretoria (Top-Down Arena).
     Preserva a timeline complexa dos gráficos, métricas de orçamento e a hierarquia limpa.
+    O ciclo é opcional para evitar erros 422 caso o frontend perca a referência.
     """
-    print(f"\n🧭 [TOP-DOWN] Utilizador Executivo '{usuario['nome']}' acedeu ao ciclo {ciclo}.")
-    
     try:
+        # Mecanismo de segurança: se o frontend não enviar o ciclo, o backend descobre sozinho
+        if not ciclo:
+            ciclo = get_current_cycle(db)
+            
+        print(f"\n🧭 [TOP-DOWN] Utilizador Executivo '{usuario['nome']}' acedeu ao ciclo {ciclo}.")
+        
         ciclo_date = datetime.datetime.strptime(ciclo, "%m/%Y")
         hoje = datetime.date.today()
         inicio_projeto = ciclo_date
@@ -156,7 +181,6 @@ def obter_visao_topdown(
             m_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
             nome_formatado = f"{meses_pt[m_dt.month - 1]}/{m_dt.strftime('%y')}"
             
-            # CORREÇÃO DO SYNTAX ERROR: Removido o operador := 
             timeline_final.append({
                 "name": nome_formatado,
                 "data_iso": f"{ms}-01",
@@ -201,8 +225,8 @@ def obter_visao_topdown(
 
 @router.post("/salvar")
 def salvar_ajustes_topdown(
-    ciclo: str,
     payload: PayloadAprovarTopDown,
+    ciclo: Optional[str] = None,
     db: Session = Depends(get_db),
     usuario: dict = Depends(require_admin)
 ):
@@ -213,6 +237,9 @@ def salvar_ajustes_topdown(
     print(f"\n💾 [TOP-DOWN] {usuario['nome']} submeteu {len(payload.ajustes)} alterações.")
     
     try:
+        if not ciclo:
+            ciclo = get_current_cycle(db)
+
         # 1. Trava de Segurança contra Sobrescrita de Ciclo Trancado
         query_trava = text("SELECT status FROM controle_ciclos WHERE ciclo_sop = :ciclo AND origem = 'Top-Down Arena'")
         trava = db.execute(query_trava, {"ciclo": ciclo}).fetchone()
