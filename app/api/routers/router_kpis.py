@@ -393,13 +393,18 @@ async def carregar_riscos_estoque(
         if razaosocial != "Todos": filtro_cliente = " AND c.razaosocial = :razaosocial"; params_query["razaosocial"] = razaosocial
 
         query_sku = text(f"""
-            WITH Estoque AS (SELECT sku, SUM(qtd_dispo) as estoque_atual FROM fato_estoque_d0 GROUP BY sku),
+            WITH Estoque AS (
+                SELECT sku, SUM(qtd_dispo) as estoque_atual 
+                FROM fato_estoque_d0 
+                GROUP BY sku
+            ),
             Vendas AS (
                 SELECT 
                     v.sku, 
                     SUM(v.qt_pedido) as vendas_mtd,
                     SUM(v.qtfatura) as faturado_mtd,
                     SUM(v.qtcorte) as corte_mtd,
+                    -- FINANCEIRO REAL (ERP)
                     SUM(v.vl_pedido) as vl_pedido,
                     SUM(v.vlfatura) as vl_faturado,
                     SUM(v.vlcorte) as vl_corte
@@ -419,13 +424,13 @@ async def carregar_riscos_estoque(
             SELECT 
                 p.sku, p.descricao, p.categoria, 
                 COALESCE(e.estoque_atual, 0) as estoque_atual, 
-                COALESCE(v.vendas_mtd, 0) as vendas_mtd, 
-                COALESCE(v.faturado_mtd, 0) as faturado_mtd,
-                COALESCE(v.corte_mtd, 0) as corte_mtd,
+                COALESCE(v.vendas_mtd, 0) as vendas_mtd_vol, 
+                COALESCE(v.faturado_mtd, 0) as faturado_mtd_vol,
+                COALESCE(v.corte_mtd, 0) as corte_mtd_vol,
                 COALESCE(v.vl_pedido, 0) as vl_pedido,
                 COALESCE(v.vl_faturado, 0) as vl_faturado,
                 COALESCE(v.vl_corte, 0) as vl_corte,
-                COALESCE(m.meta_mes, 0) as meta_mes, 
+                COALESCE(m.meta_mes, 0) as meta_mes_vol, 
                 COALESCE(m.pmv, 0) as pmv
             FROM dim_produtos p 
             LEFT JOIN Estoque e ON p.sku = e.sku 
@@ -437,19 +442,37 @@ async def carregar_riscos_estoque(
         df_sku = pd.read_sql(query_sku, db.bind, params=params_query)
         if df_sku.empty: return {"estoque_sku": [], "kpis_globais": {"total_ruptura_rs": 0, "total_sobra_rs": 0, "meta_caixas": 0, "realizado_caixas": 0}}
 
-        colunas_numericas = ['meta_mes', 'vendas_mtd', 'faturado_mtd', 'corte_mtd', 'estoque_atual', 'pmv', 'vl_pedido', 'vl_faturado', 'vl_corte']
-        for col in colunas_numericas: df_sku[col] = pd.to_numeric(df_sku[col], errors='coerce').fillna(0)
+        colunas_numericas = ['meta_mes_vol', 'vendas_mtd_vol', 'faturado_mtd_vol', 'corte_mtd_vol', 'estoque_atual', 'pmv', 'vl_pedido', 'vl_faturado', 'vl_corte']
+        for col in colunas_numericas: 
+            df_sku[col] = pd.to_numeric(df_sku[col], errors='coerce').fillna(0)
             
-        df_sku['meta_togo'] = np.maximum(0, df_sku['meta_mes'] - df_sku['vendas_mtd'])
-        df_sku['carteira_aberto'] = np.maximum(0, df_sku['vendas_mtd'] - df_sku['faturado_mtd'] - df_sku['corte_mtd'])
-        demanda_total = df_sku['meta_togo'] + df_sku['carteira_aberto']
-        
-        df_sku['ruptura_vol'] = np.maximum(0, demanda_total - df_sku['estoque_atual'])
-        df_sku['sobra_vol'] = np.maximum(0, df_sku['estoque_atual'] - demanda_total)
+        # 1. TRILHA DE VOLUMES (CAIXAS)
+        df_sku['carteira_aberto_vol'] = np.maximum(0, df_sku['vendas_mtd_vol'] - df_sku['faturado_mtd_vol'] - df_sku['corte_mtd_vol'])
+        df_sku['meta_togo_vol'] = np.maximum(0, df_sku['meta_mes_vol'] - df_sku['vendas_mtd_vol'])
+        demanda_total_vol = df_sku['meta_togo_vol'] + df_sku['carteira_aberto_vol']
+        df_sku['ruptura_vol'] = np.maximum(0, demanda_total_vol - df_sku['estoque_atual'])
+        df_sku['sobra_vol'] = np.maximum(0, df_sku['estoque_atual'] - demanda_total_vol)
+
+        # 2. TRILHA FINANCEIRA (REAIS - R$)
+        # Carteira usa dinheiro REAL do ERP. Meta, Ruptura e Sobra usam projeção do PMV.
+        df_sku['meta_mes_rs'] = df_sku['meta_mes_vol'] * df_sku['pmv']
+        df_sku['carteira_aberto_rs'] = np.maximum(0, df_sku['vl_pedido'] - df_sku['vl_faturado'] - df_sku['vl_corte'])
+        df_sku['meta_togo_rs'] = df_sku['meta_togo_vol'] * df_sku['pmv']
         df_sku['ruptura_rs'] = df_sku['ruptura_vol'] * df_sku['pmv']
         df_sku['sobra_rs'] = df_sku['sobra_vol'] * df_sku['pmv']
 
-        kpis = {"total_ruptura_rs": float(df_sku['ruptura_rs'].sum()), "total_sobra_rs": float(df_sku['sobra_rs'].sum()), "meta_caixas": float(df_sku['meta_mes'].sum()), "realizado_caixas": float(df_sku['vendas_mtd'].sum())}
+        kpis = {
+            "total_ruptura_rs": float(df_sku['ruptura_rs'].sum()), 
+            "total_ruptura_vol": float(df_sku['ruptura_vol'].sum()), 
+            "total_sobra_rs": float(df_sku['sobra_rs'].sum()), 
+            "total_sobra_vol": float(df_sku['sobra_vol'].sum()),
+            "meta_caixas": float(df_sku['meta_mes_vol'].sum()), 
+            "realizado_caixas": float(df_sku['vendas_mtd_vol'].sum())
+        }
         return {"estoque_sku": df_sku.sort_values(by=["ruptura_rs", "sobra_rs"], ascending=[False, False]).to_dict(orient="records"), "kpis_globais": kpis}
+        
     except Exception as e: 
+        import traceback
+        print(traceback.format_exc())
+        from fastapi import HTTPException
         raise HTTPException(status_code=500, detail=str(e))
