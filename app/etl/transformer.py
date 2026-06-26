@@ -31,6 +31,14 @@ class NexusTransformer:
         ]).with_columns([
             pl.concat_str([pl.col("cliente"), pl.lit("_"), pl.col("loja")]).alias("cliente_loja")
         ])
+        
+        # --- GARANTIA FINANCEIRA: Adicionando colunas de valores reais com fallback 0 se vier nulo ---
+        colunas_disponiveis = lf_vendas.collect_schema().names()
+        for col_fin in ["qtfatura", "vlfatura", "qtcorte", "vlcorte"]:
+            if col_fin not in colunas_disponiveis:
+                lf_vendas = lf_vendas.with_columns(pl.lit(0.0).alias(col_fin))
+            else:
+                lf_vendas = lf_vendas.with_columns(pl.col(col_fin).cast(pl.Float64).fill_null(0.0))
 
         colunas_vendas = lf_vendas.columns
         colunas_conflito = ["vendedor_nome", "gerente_nome", "supervisor_nome", "cgc", "razao social", "cliente_razaosocial", "bloqueado"]
@@ -108,11 +116,14 @@ class NexusTransformer:
         lf_silver = lf_silver.with_columns(pl.col("cliente").alias("cod_cliente"))
         lf_final = lf_silver.with_columns(pl.col("2026").alias("curva_2026"))
         
+        # --- A GRANDE CORREÇÃO (O FUNIL): Agora os Reais (R$) passam aqui! ---
         lf_final = lf_final.group_by(["pedido", "produto", "cgc"]).agg([
             pl.col("qtpedido").sum().alias("qtpedido"),
             pl.col("vlpedido").sum().alias("vlpedido"),
             pl.col("qtfatura").sum().alias("qtfatura"),
             pl.col("qtcorte").sum().alias("qtcorte"),
+            pl.col("vlfatura").sum().alias("vlfatura"), # -> Nova Coluna Passando
+            pl.col("vlcorte").sum().alias("vlcorte"),   # -> Nova Coluna Passando
             pl.col("dtapedido").first().alias("dtapedido"),
             pl.col("cod_cliente").first().alias("cod_cliente"),
             pl.col("loja").first().alias("loja"),

@@ -57,7 +57,7 @@ class NexusLoader:
                 else:
                     dt_obj = row['dtapedido'] 
 
-                # MAPEAMENTO ATUALIZADO COM OS VALORES FINANCEIROS E VENDEDOR
+                # MAPEAMENTO ATUALIZADO COM OS NOMES CORRETOS DO BANCO
                 vendas_dicts.append({
                     "pedido": row.get('pedido', 'S/N'),
                     "sku": row['produto'],
@@ -66,8 +66,10 @@ class NexusLoader:
                     "vendedor_nome": row.get('vendedor_nome', 'S/I'),
                     "qt_pedido": row.get('qtpedido', 0.0) or 0.0,
                     "vl_pedido": row.get('vlpedido', 0.0) or 0.0,
-                    "qt_faturada": row.get('qtfatura', 0.0) or 0.0,
-                    "qt_corte": row.get('qtcorte', 0.0) or 0.0,
+                    
+                    # CORREÇÃO: Removido o underline para bater com o PostgreSQL
+                    "qtfatura": row.get('qtfatura', 0.0) or 0.0,
+                    "qtcorte": row.get('qtcorte', 0.0) or 0.0,
                     "vlfatura": row.get('vlfatura', 0.0) or 0.0,
                     "vlcorte": row.get('vlcorte', 0.0) or 0.0
                 })
