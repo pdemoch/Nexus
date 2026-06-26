@@ -33,7 +33,7 @@ class NexusTransformer:
         ])
         
         # --- GARANTIA FINANCEIRA: Adicionando colunas de valores reais com fallback 0 se vier nulo ---
-        colunas_disponiveis = lf_vendas.collect_schema().names()
+        colunas_disponiveis = lf_vendas.columns
         for col_fin in ["qtfatura", "vlfatura", "qtcorte", "vlcorte"]:
             if col_fin not in colunas_disponiveis:
                 lf_vendas = lf_vendas.with_columns(pl.lit(0.0).alias(col_fin))
