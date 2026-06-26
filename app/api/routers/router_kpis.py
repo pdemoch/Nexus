@@ -130,7 +130,13 @@ async def carregar_auditoria_cpfr(
                     WHERE TO_CHAR(i.mes_projetado, 'YYYY-MM') = :mes_sql AND i.ciclo_sop = :ciclo_congelado {filtro_cliente}
                     GROUP BY i.sku
                 ),
-                Estoque AS (SELECT DISTINCT ON (sku) sku, estoque_atual_caixas, dias_cobertura FROM fato_mtrix_snapshot WHERE ciclo_sop = :ciclo_congelado ORDER BY sku, id DESC)
+                Estoque AS (
+                    SELECT e.sku, SUM(e.estoque_atual_caixas) AS estoque_atual_caixas, AVG(e.dias_cobertura) AS dias_cobertura 
+                    FROM fato_mtrix_snapshot e
+                    LEFT JOIN dim_clientes c ON e.cgc = c.cgc
+                    WHERE e.ciclo_sop = (SELECT max_ciclo FROM Ultimo_Ciclo_Mtrix) {filtro_cliente}
+                    GROUP BY e.sku
+                )
                 SELECT p.sku, p.descricao, p.categoria, p.segmento, :mes_str AS mes_ano, COALESCE(s.vol_sellout_real, 0) AS vol_real, COALESCE(m.vol_ia_congelado, 0) AS vol_ia_congelado, COALESCE(m.vol_comercial_congelado, 0) AS vol_comercial_congelado, COALESCE(e.estoque_atual_caixas, 0) AS estoque_canal, COALESCE(e.dias_cobertura, 0) AS dias_cobertura
                 FROM dim_produtos p 
                 LEFT JOIN Sellout s ON p.sku = s.sku 

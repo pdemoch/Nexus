@@ -70,7 +70,7 @@ class NexusBypassWindows:
         """
         hoje = datetime.now()
         # Recua 1 mês para garantir que só pegamos o mês fechado
-        mes_fim = hoje - relativedelta(months=1) 
+        mes_fim = hoje
         ultimo_dia = calendar.monthrange(mes_fim.year, mes_fim.month)[1]
         
         data_fim = datetime(mes_fim.year, mes_fim.month, ultimo_dia)
@@ -128,16 +128,23 @@ class NexusBypassWindows:
         total_paginas = data.get("pagination", {}).get("total_pages", 1)
 
         if total_paginas > 1:
+            # 1. Semáforo: Trava o Python para não mandar mais de 5 pedidos simultâneos e derrubar a MTRIX
+            semaforo = asyncio.Semaphore(5)
+            
             async def fetch_page(page_num):
                 p = params.copy()
                 p["page"] = page_num
-                for _ in range(3): 
+                for tentativa in range(5): 
                     try:
-                        async with session.get(url, headers=headers, params=p, timeout=self.timeout) as r:
-                            if r.status == 200: return (await r.json()).get("dados", [])
+                        async with semaforo:
+                            async with session.get(url, headers=headers, params=p, timeout=self.timeout) as r:
+                                if r.status == 200: 
+                                    return (await r.json()).get("dados", [])
                     except Exception:
-                        await asyncio.sleep(2)
-                return []
+                        await asyncio.sleep(2 ** tentativa) # Recuo inteligente (1s, 2s, 4s...)
+                        
+                # 2. A Trava: Se esgotar as tentativas, CRASHA o sistema para não gerar arquivo vazio
+                raise Exception(f"Falha fatal ao baixar página {page_num} da MTRIX. Abortando para evitar perda de dados.")
 
             tasks = [fetch_page(pag) for pag in range(2, total_paginas + 1)]
             resultados = await asyncio.gather(*tasks)
