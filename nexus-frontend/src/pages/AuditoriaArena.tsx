@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { 
   ShoppingCart, TrendingUp, TrendingDown, Factory, Target, Activity, 
-  Search, RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, DollarSign, Users
+  Search, RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, DollarSign, Users, Download
 } from 'lucide-react';
 import { ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, LineChart, Line, ReferenceLine, ComposedChart, Bar, Legend } from 'recharts';
 
@@ -287,6 +287,42 @@ export default function AuditoriaArena() {
     return sortable;
   }, [skus, sortConfig, buscaSku]);
 
+  // 🔥 FUNÇÃO DE EXPORTAÇÃO CSV DE ALTA FIDELIDADE
+  const handleExportCSV = () => {
+    if (!sortedSkus || sortedSkus.length === 0) return;
+
+    const headers = [
+      "SKU", "Descrição", "Categoria", "Meta S&OP (Cx)", "Estoque Fábrica (Cx)",
+      "Pedido (Cx)", "Pedido (R$)", "Faturado (Cx)", "Faturado (R$)", 
+      "Corte (Cx)", "Corte (R$)", "Carteira em Aberto (Cx)", "Meta To-Go Restante (Cx)", 
+      "Ruptura (Cx)", "Ruptura (R$)", "Sobra (Cx)", "Sobra (R$)"
+    ];
+
+    const rows = sortedSkus.map((r: any) => [
+      r.sku, r.descricao, r.categoria, r.meta_mes || 0, r.estoque_atual || 0,
+      r.vendas_mtd || 0, r.vl_pedido || 0, r.faturado_mtd || 0, r.vl_faturado || 0,
+      r.corte_mtd || 0, r.vl_corte || 0, r.carteira_aberto || 0, r.meta_togo || 0,
+      r.ruptura_vol || 0, r.ruptura_rs || 0, r.sobra_vol || 0, r.sobra_rs || 0
+    ]);
+
+    const csvContent = [
+      headers.join(";"),
+      ...rows.map(row => row.map(val => 
+        typeof val === 'number' ? val.toString().replace('.', ',') : `"${val}"`
+      ).join(";"))
+    ].join("\n");
+
+    const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `Riscos_Estoque_${new Date().toISOString().slice(0,10)}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   return (
     <div className="p-6 bg-slate-950 min-h-screen text-slate-100 font-sans">
       
@@ -298,14 +334,25 @@ export default function AuditoriaArena() {
           <p className="text-xs text-slate-400 mt-1 font-medium">Cockpit Executivo: Consequências Financeiras e Mapeamento de Erro</p>
         </div>
 
-        <div className="flex flex-col md:flex-row gap-3">
+        <div className="flex flex-col md:flex-row gap-3 items-center">
+          {lente === 'estoque' && (
+            <button 
+              onClick={handleExportCSV}
+              className="flex items-center px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-black tracking-wider transition-all shadow-lg shadow-emerald-900/20 text-[10px] sm:text-xs uppercase h-full"
+            >
+              <Download className="w-4 h-4 mr-2" />
+              Extrair CSV
+            </button>
+          )}
+
           {(lente === 'kpis' || lente === 'estoque') && (
-            <div className="flex bg-slate-950 p-1.5 rounded-xl border border-slate-800 shadow-inner">
-              <button onClick={() => setVisao('caixas')} className={`px-4 py-2 text-xs font-black uppercase tracking-wider rounded-lg flex items-center gap-2 ${visao === 'caixas' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}><Package className="w-4 h-4"/> Caixas</button>
-              <button onClick={() => setVisao('financeiro')} className={`px-4 py-2 text-xs font-black uppercase tracking-wider rounded-lg flex items-center gap-2 ${visao === 'financeiro' ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}><DollarSign className="w-4 h-4"/> Reais (R$)</button>
+            <div className="flex bg-slate-950 p-1.5 rounded-xl border border-slate-800 shadow-inner h-full">
+              <button onClick={() => setVisao('caixas')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg flex items-center gap-2 ${visao === 'caixas' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}><Package className="w-4 h-4"/> Caixas</button>
+              <button onClick={() => setVisao('financeiro')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg flex items-center gap-2 ${visao === 'financeiro' ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}><DollarSign className="w-4 h-4"/> Reais (R$)</button>
             </div>
           )}
-          <div className="flex bg-slate-950 p-1.5 rounded-xl border border-slate-800 shadow-inner overflow-x-auto">
+          
+          <div className="flex bg-slate-950 p-1.5 rounded-xl border border-slate-800 shadow-inner overflow-x-auto h-full">
             <button onClick={() => setLente('kpis')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'kpis' ? 'bg-rose-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><Target className="w-4 h-4" /> Desvios MTD</button>
             <button onClick={() => setLente('estoque')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'estoque' ? 'bg-amber-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><Factory className="w-4 h-4" /> Riscos Estoque</button>
             <button onClick={() => setLente('sellout')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'sellout' ? 'bg-teal-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><ShoppingCart className="w-4 h-4" /> Retroativo MTRIX</button>
@@ -409,37 +456,95 @@ export default function AuditoriaArena() {
         {carregando ? (
           <div className="p-20 flex justify-center items-center gap-3 text-indigo-400 font-bold uppercase text-xs"><RefreshCw className="w-6 h-6 animate-spin" /> Processando Tabelas...</div>
         ) : lente === 'estoque' ? (
+          
           <table className="w-full text-left whitespace-nowrap">
             <thead>
               <tr className="bg-slate-950 text-slate-400 text-[10px] font-black uppercase tracking-widest border-b border-slate-800">
                 <SortableHeader field="descricao" label="Produto" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
-                <SortableHeader field="meta_togo" label="Meta To-Go" currentSort={sortConfig} requestSort={requestSort} />
-                <SortableHeader field="estoque_atual" label="Estoque Físico" currentSort={sortConfig} requestSort={requestSort} className="text-indigo-400 text-right" />
-                <SortableHeader field="ruptura_rs" label="Ruptura (Risco)" currentSort={sortConfig} requestSort={requestSort} className="bg-rose-950/10 text-right" />
-                <SortableHeader field="sobra_rs" label="Sobra (Imobilizado)" currentSort={sortConfig} requestSort={requestSort} className="px-6 bg-amber-950/10 text-right" />
+                <SortableHeader field="meta_mes" label="Meta S&OP" currentSort={sortConfig} requestSort={requestSort} className="text-indigo-400 text-right" />
+                <SortableHeader field="estoque_atual" label="Estoque Fab." currentSort={sortConfig} requestSort={requestSort} className="text-slate-300 text-right" />
+                <th className="px-3 py-4 text-right cursor-pointer hover:text-white" onClick={() => requestSort('vendas_mtd')}>Pedido <br/><span className="text-[10px] opacity-70">(Cx / R$)</span></th>
+                <th className="px-3 py-4 text-right cursor-pointer hover:text-white text-emerald-400" onClick={() => requestSort('faturado_mtd')}>Faturado <br/><span className="text-[10px] opacity-70">(Cx / R$)</span></th>
+                <th className="px-3 py-4 text-right cursor-pointer hover:text-white text-rose-400" onClick={() => requestSort('corte_mtd')}>Corte <br/><span className="text-[10px] opacity-70">(Cx / R$)</span></th>
+                <SortableHeader field="carteira_aberto" label="Carteira em Aberto" currentSort={sortConfig} requestSort={requestSort} className="text-amber-500 text-right bg-amber-900/10" />
+                <SortableHeader field="meta_togo" label="Meta To-Go Restante" currentSort={sortConfig} requestSort={requestSort} className="text-amber-300 text-right bg-amber-900/20" />
+                <SortableHeader field="ruptura_rs" label="Ruptura (Risco)" currentSort={sortConfig} requestSort={requestSort} className="bg-rose-950/10 text-right text-rose-500" />
+                <SortableHeader field="sobra_rs" label="Sobra (Imobilizado)" currentSort={sortConfig} requestSort={requestSort} className="px-6 bg-sky-950/10 text-right text-sky-400" />
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 text-xs">
               {sortedSkus.map((d, i) => (
                 <tr key={i} className="hover:bg-slate-800/30">
                   <td className="px-6 py-3.5"><div className="flex flex-col"><span className="font-bold text-slate-200">{d.descricao}</span><span className="text-[10px] text-slate-500 font-mono">{d.sku}</span></div></td>
-                  <td className="px-4 py-3.5 text-right font-black text-white">{formatVol(d.meta_togo)} CX</td>
-                  <td className="px-4 py-3.5 text-right font-black text-indigo-400 bg-indigo-950/10">{formatVol(d.estoque_atual)} CX</td>
-                  <td className="px-4 py-3.5 text-right bg-rose-950/10">{d.ruptura_vol > 0 ? <div className="flex flex-col items-end"><span className="font-black text-rose-400">{visao === 'financeiro' ? formatFin(d.ruptura_rs) : `${formatVol(d.ruptura_vol)} CX`}</span></div> : <span className="text-slate-600 font-black text-[10px] uppercase">Coberto</span>}</td>
-                  <td className="px-6 py-3.5 text-right bg-amber-950/10">{d.sobra_vol > 0 ? <div className="flex flex-col items-end"><span className="font-black text-amber-400">{visao === 'financeiro' ? formatFin(d.sobra_rs) : `${formatVol(d.sobra_vol)} CX`}</span></div> : <span className="text-slate-600 font-black text-[10px] uppercase">Giro Limpo</span>}</td>
+                  <td className="px-3 py-3.5 text-right font-medium text-indigo-300">{formatVol(d.meta_mes)}</td>
+                  <td className="px-3 py-3.5 text-right font-bold text-slate-300">{formatVol(d.estoque_atual)}</td>
+                  
+                  <td className="px-3 py-3.5 text-right bg-slate-800/10">
+                    <div className="font-bold text-white">{formatVol(d.vendas_mtd)}</div>
+                    <div className="text-[11px] text-slate-500 mt-0.5">{formatFin(d.vl_pedido)}</div>
+                  </td>
+                  <td className="px-3 py-3.5 text-right bg-emerald-900/10">
+                    <div className="font-bold text-emerald-400">{formatVol(d.faturado_mtd)}</div>
+                    <div className="text-[11px] text-emerald-500/60 mt-0.5">{formatFin(d.vl_faturado)}</div>
+                  </td>
+                  <td className="px-3 py-3.5 text-right bg-rose-900/10">
+                    <div className="font-bold text-rose-400">{formatVol(d.corte_mtd)}</div>
+                    <div className="text-[11px] text-rose-500/60 mt-0.5">{formatFin(d.vl_corte)}</div>
+                  </td>
+
+                  <td className="px-3 py-3.5 text-right font-bold text-amber-500 bg-amber-900/10">
+                    {formatVol(d.carteira_aberto)}
+                  </td>
+                  <td className="px-3 py-3.5 text-right font-bold text-amber-300 bg-amber-900/20">
+                    {formatVol(d.meta_togo)}
+                  </td>
+
+                  <td className="px-4 py-3.5 text-right bg-rose-500/10">
+                    <div className="font-black text-rose-500">{formatFin(d.ruptura_rs)}</div>
+                    <div className="text-xs text-rose-400/80 mt-0.5">{formatVol(d.ruptura_vol)} cx</div>
+                  </td>
+
+                  <td className="px-6 py-3.5 text-right bg-sky-500/10">
+                    <div className="font-black text-sky-400">{formatFin(d.sobra_rs)}</div>
+                    <div className="text-xs text-sky-400/80 mt-0.5">{formatVol(d.sobra_vol)} cx</div>
+                  </td>
                 </tr>
               ))}
             </tbody>
             <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
               <tr>
                 <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Totais da Visão</td>
-                <td className="px-4 py-4 text-right">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.meta_togo || 0), 0))} CX</td>
-                <td className="px-4 py-4 text-right">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.estoque_atual || 0), 0))} CX</td>
-                <td className="px-4 py-4 text-right text-rose-400">{visao === 'financeiro' ? formatFin(sortedSkus.reduce((sum, r) => sum + (r.ruptura_rs || 0), 0)) : formatVol(sortedSkus.reduce((sum, r) => sum + (r.ruptura_vol || 0), 0)) + ' CX'}</td>
-                <td className="px-6 py-4 text-right text-amber-400">{visao === 'financeiro' ? formatFin(sortedSkus.reduce((sum, r) => sum + (r.sobra_rs || 0), 0)) : formatVol(sortedSkus.reduce((sum, r) => sum + (r.sobra_vol || 0), 0)) + ' CX'}</td>
+                <td className="px-3 py-4 text-right text-indigo-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.meta_mes || 0), 0))}</td>
+                <td className="px-3 py-4 text-right text-slate-300">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.estoque_atual || 0), 0))}</td>
+                
+                <td className="px-3 py-4 text-right bg-slate-800/10">
+                  <div className="font-bold text-white">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vendas_mtd || 0), 0))}</div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">{formatFin(sortedSkus.reduce((sum, r) => sum + (r.vl_pedido || 0), 0))}</div>
+                </td>
+                <td className="px-3 py-4 text-right bg-emerald-900/10">
+                  <div className="font-bold text-emerald-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.faturado_mtd || 0), 0))}</div>
+                  <div className="text-[10px] text-emerald-500/60 mt-0.5">{formatFin(sortedSkus.reduce((sum, r) => sum + (r.vl_faturado || 0), 0))}</div>
+                </td>
+                <td className="px-3 py-4 text-right bg-rose-900/10">
+                  <div className="font-bold text-rose-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.corte_mtd || 0), 0))}</div>
+                  <div className="text-[10px] text-rose-500/60 mt-0.5">{formatFin(sortedSkus.reduce((sum, r) => sum + (r.vl_corte || 0), 0))}</div>
+                </td>
+
+                <td className="px-3 py-4 text-right text-amber-500 bg-amber-900/10">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.carteira_aberto || 0), 0))}</td>
+                <td className="px-3 py-4 text-right text-amber-300 bg-amber-900/20">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.meta_togo || 0), 0))}</td>
+
+                <td className="px-4 py-4 text-right bg-rose-950/10">
+                  <div className="text-rose-500">{formatFin(sortedSkus.reduce((sum, r) => sum + (r.ruptura_rs || 0), 0))}</div>
+                  <div className="text-[10px] text-rose-400/80">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.ruptura_vol || 0), 0))} cx</div>
+                </td>
+                <td className="px-6 py-4 text-right bg-sky-950/10">
+                  <div className="text-sky-400">{formatFin(sortedSkus.reduce((sum, r) => sum + (r.sobra_rs || 0), 0))}</div>
+                  <div className="text-[10px] text-sky-400/80">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.sobra_vol || 0), 0))} cx</div>
+                </td>
               </tr>
             </tfoot>
           </table>
+
         ) : lente === 'sellout' ? (
            <table className="w-full text-left whitespace-nowrap">
              <thead>
@@ -475,8 +580,8 @@ export default function AuditoriaArena() {
                 <td className="px-4 py-4 text-right text-amber-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.estoque_canal || 0), 0))}</td>
                 <td colSpan={2} className="px-4 py-4 bg-slate-950/40 text-right text-slate-500 text-[10px]">Médias Ponderadas nos Cards Topo</td>
               </tr>
-            </tfoot>
-           </table>
+             </tfoot>
+            </table>
         ) : (
            <table className="w-full text-left whitespace-nowrap">
              <thead>
@@ -504,8 +609,8 @@ export default function AuditoriaArena() {
                 <td className="px-3 py-4 text-right bg-slate-950/20 text-slate-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.gap_humano || 0), 0))}</td>
                 <td colSpan={2} className="px-3 py-4 bg-slate-950/40 text-right text-slate-500 text-[10px]">Gap Consolidado</td>
               </tr>
-            </tfoot>
-           </table>
+             </tfoot>
+            </table>
         )}
       </div>
     </div>

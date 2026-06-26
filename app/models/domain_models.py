@@ -72,6 +72,9 @@ class FatoVendas(Base):
     qtfatura = Column(Float, default=0.0) 
     qtcorte = Column(Float, default=0.0)  
 
+    vlfatura = Column(Float, default=0.0)
+    vlcorte = Column(Float, default=0.0)
+
     __table_args__ = (
         UniqueConstraint('pedido', 'sku', 'cgc', name='uix_vendas_pedido'),
     )

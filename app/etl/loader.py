@@ -57,18 +57,23 @@ class NexusLoader:
                 else:
                     dt_obj = row['dtapedido'] 
 
+                # MAPEAMENTO ATUALIZADO COM OS VALORES FINANCEIROS E VENDEDOR
                 vendas_dicts.append({
                     "pedido": row.get('pedido', 'S/N'),
                     "sku": row['produto'],
                     "cgc": row['cgc'],
                     "data_pedido": dt_obj,
-                    "qt_pedido": row.get('qtpedido', 0.0),
-                    "vl_pedido": row.get('vlpedido', 0.0),
-                    "qt_faturada": row.get('qtfatura', 0.0),
-                    "qt_corte": row.get('qtcorte', 0.0)
+                    "vendedor_nome": row.get('vendedor_nome', 'S/I'),
+                    "qt_pedido": row.get('qtpedido', 0.0) or 0.0,
+                    "vl_pedido": row.get('vlpedido', 0.0) or 0.0,
+                    "qt_faturada": row.get('qtfatura', 0.0) or 0.0,
+                    "qt_corte": row.get('qtcorte', 0.0) or 0.0,
+                    "vlfatura": row.get('vlfatura', 0.0) or 0.0,
+                    "vlcorte": row.get('vlcorte', 0.0) or 0.0
                 })
 
             if vendas_dicts:
+                # O bulk_insert_mappings é extremamente veloz!
                 db.bulk_insert_mappings(FatoVendas, vendas_dicts)
 
             db.commit()
@@ -293,8 +298,6 @@ class NexusLoader:
             # =================================================================
             log_callback("      • Mapeando posições de estoque no canal (Filtrando Último Dia Válido)...")
             
-            # NOTA: Aqui está QTY_CONV2 (48.66 caixas). Se você achar que a coluna correta era 
-            # QTY_UNIT (3504) ou QTY_CONV6 (292.0), basta trocar aqui na linha de baixo.
             coluna_estoque_alvo = "QTY_CONV2"
 
             try:
@@ -309,8 +312,6 @@ class NexusLoader:
                     ])
                     .group_by(["DISTRIBUTOR_CODE", "PRODUCT_CODE"])
                     .agg(
-                        # 🔒 TRAVA MATEMÁTICA: Ordena por data DENTRO da agregação
-                        # Isso anula a aleatoriedade das threads e força o motor a capturar o dia 31!
                         pl.col(coluna_estoque_alvo).sort_by("STOCK_DATE", descending=True).first().alias("estoque_atual_caixas")
                     )
                 ).collect()

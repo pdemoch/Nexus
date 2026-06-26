@@ -134,7 +134,7 @@ async def carregar_auditoria_cpfr(
                     SELECT e.sku, SUM(e.estoque_atual_caixas) AS estoque_atual_caixas, AVG(e.dias_cobertura) AS dias_cobertura 
                     FROM fato_mtrix_snapshot e
                     LEFT JOIN dim_clientes c ON e.cgc = c.cgc
-                    WHERE e.ciclo_sop = (SELECT max_ciclo FROM Ultimo_Ciclo_Mtrix) {filtro_cliente}
+                    WHERE e.ciclo_sop = (SELECT MAX(ciclo_sop) FROM fato_mtrix_snapshot) {filtro_cliente}
                     GROUP BY e.sku
                 )
                 SELECT p.sku, p.descricao, p.categoria, p.segmento, :mes_str AS mes_ano, COALESCE(s.vol_sellout_real, 0) AS vol_real, COALESCE(m.vol_ia_congelado, 0) AS vol_ia_congelado, COALESCE(m.vol_comercial_congelado, 0) AS vol_comercial_congelado, COALESCE(e.estoque_atual_caixas, 0) AS estoque_canal, COALESCE(e.dias_cobertura, 0) AS dias_cobertura
@@ -311,7 +311,7 @@ async def drilldown_clientes_kpis(sku: str, visao: str = "caixas", meses_horizon
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 # ==============================================================================
-# 4. INTELIGÊNCIA DE ESTOQUE (RISCOS) - COM FALLBACK DE MOCK DATA
+# 4. INTELIGÊNCIA DE ESTOQUE (RISCOS) - COM DADOS FINANCEIROS REAIS DO ERP
 # ==============================================================================
 @router.post("/sync-stock")
 async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
@@ -373,6 +373,7 @@ async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("/riscos-estoque")
 async def carregar_riscos_estoque(
     categoria: str = "Todas", segmento: str = "Todos", razaosocial: str = "Todos",
@@ -394,7 +395,14 @@ async def carregar_riscos_estoque(
         query_sku = text(f"""
             WITH Estoque AS (SELECT sku, SUM(qtd_dispo) as estoque_atual FROM fato_estoque_d0 GROUP BY sku),
             Vendas AS (
-                SELECT v.sku, SUM(v.qt_pedido) as vendas_mtd 
+                SELECT 
+                    v.sku, 
+                    SUM(v.qt_pedido) as vendas_mtd,
+                    SUM(v.qtfatura) as faturado_mtd,
+                    SUM(v.qtcorte) as corte_mtd,
+                    SUM(v.vl_pedido) as vl_pedido,
+                    SUM(v.vlfatura) as vl_faturado,
+                    SUM(v.vlcorte) as vl_corte
                 FROM fato_vendas v
                 LEFT JOIN dim_clientes c ON v.cgc = c.cgc
                 WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql {filtro_cliente}
@@ -408,7 +416,17 @@ async def carregar_riscos_estoque(
                 WHERE TO_CHAR(m.mes_projetado, 'YYYY-MM') = :mes_sql AND m.ciclo_sop = :ciclo_congelado {filtro_cliente}
                 GROUP BY m.sku
             )
-            SELECT p.sku, p.descricao, p.categoria, COALESCE(e.estoque_atual, 0) as estoque_atual, COALESCE(v.vendas_mtd, 0) as vendas_mtd, COALESCE(m.meta_mes, 0) as meta_mes, COALESCE(m.pmv, 0) as pmv
+            SELECT 
+                p.sku, p.descricao, p.categoria, 
+                COALESCE(e.estoque_atual, 0) as estoque_atual, 
+                COALESCE(v.vendas_mtd, 0) as vendas_mtd, 
+                COALESCE(v.faturado_mtd, 0) as faturado_mtd,
+                COALESCE(v.corte_mtd, 0) as corte_mtd,
+                COALESCE(v.vl_pedido, 0) as vl_pedido,
+                COALESCE(v.vl_faturado, 0) as vl_faturado,
+                COALESCE(v.vl_corte, 0) as vl_corte,
+                COALESCE(m.meta_mes, 0) as meta_mes, 
+                COALESCE(m.pmv, 0) as pmv
             FROM dim_produtos p 
             LEFT JOIN Estoque e ON p.sku = e.sku 
             LEFT JOIN Vendas v ON p.sku = v.sku 
@@ -419,13 +437,19 @@ async def carregar_riscos_estoque(
         df_sku = pd.read_sql(query_sku, db.bind, params=params_query)
         if df_sku.empty: return {"estoque_sku": [], "kpis_globais": {"total_ruptura_rs": 0, "total_sobra_rs": 0, "meta_caixas": 0, "realizado_caixas": 0}}
 
-        for col in ['meta_mes', 'vendas_mtd', 'estoque_atual', 'pmv']: df_sku[col] = pd.to_numeric(df_sku[col], errors='coerce').fillna(0)
+        colunas_numericas = ['meta_mes', 'vendas_mtd', 'faturado_mtd', 'corte_mtd', 'estoque_atual', 'pmv', 'vl_pedido', 'vl_faturado', 'vl_corte']
+        for col in colunas_numericas: df_sku[col] = pd.to_numeric(df_sku[col], errors='coerce').fillna(0)
+            
         df_sku['meta_togo'] = np.maximum(0, df_sku['meta_mes'] - df_sku['vendas_mtd'])
-        df_sku['ruptura_vol'] = np.maximum(0, df_sku['meta_togo'] - df_sku['estoque_atual'])
-        df_sku['sobra_vol'] = np.maximum(0, df_sku['estoque_atual'] - df_sku['meta_togo'])
+        df_sku['carteira_aberto'] = np.maximum(0, df_sku['vendas_mtd'] - df_sku['faturado_mtd'] - df_sku['corte_mtd'])
+        demanda_total = df_sku['meta_togo'] + df_sku['carteira_aberto']
+        
+        df_sku['ruptura_vol'] = np.maximum(0, demanda_total - df_sku['estoque_atual'])
+        df_sku['sobra_vol'] = np.maximum(0, df_sku['estoque_atual'] - demanda_total)
         df_sku['ruptura_rs'] = df_sku['ruptura_vol'] * df_sku['pmv']
         df_sku['sobra_rs'] = df_sku['sobra_vol'] * df_sku['pmv']
 
         kpis = {"total_ruptura_rs": float(df_sku['ruptura_rs'].sum()), "total_sobra_rs": float(df_sku['sobra_rs'].sum()), "meta_caixas": float(df_sku['meta_mes'].sum()), "realizado_caixas": float(df_sku['vendas_mtd'].sum())}
         return {"estoque_sku": df_sku.sort_values(by=["ruptura_rs", "sobra_rs"], ascending=[False, False]).to_dict(orient="records"), "kpis_globais": kpis}
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e: 
+        raise HTTPException(status_code=500, detail=str(e))
