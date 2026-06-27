@@ -404,13 +404,24 @@ async def carregar_riscos_estoque(
                     SUM(v.qt_pedido) as vendas_mtd,
                     SUM(v.qtfatura) as faturado_mtd,
                     SUM(v.qtcorte) as corte_mtd,
-                    -- FINANCEIRO REAL (ERP)
                     SUM(v.vl_pedido) as vl_pedido,
                     SUM(v.vlfatura) as vl_faturado,
                     SUM(v.vlcorte) as vl_corte
                 FROM fato_vendas v
                 LEFT JOIN dim_clientes c ON v.cgc = c.cgc
                 WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql {filtro_cliente}
+                GROUP BY v.sku
+            ),
+            Vendas_Hist AS (
+                SELECT 
+                    v.sku,
+                    SUM(CASE WHEN TO_CHAR(v.data_pedido, 'YYYY-MM') = TO_CHAR(TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '1 month', 'YYYY-MM') THEN v.qt_pedido ELSE 0 END) as vol_m1,
+                    SUM(CASE WHEN TO_CHAR(v.data_pedido, 'YYYY-MM') = TO_CHAR(TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '2 month', 'YYYY-MM') THEN v.qt_pedido ELSE 0 END) as vol_m2,
+                    SUM(CASE WHEN TO_CHAR(v.data_pedido, 'YYYY-MM') = TO_CHAR(TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '3 month', 'YYYY-MM') THEN v.qt_pedido ELSE 0 END) as vol_m3
+                FROM fato_vendas v
+                LEFT JOIN dim_clientes c ON v.cgc = c.cgc
+                WHERE v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '3 months'
+                  AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM') {filtro_cliente}
                 GROUP BY v.sku
             ),
             Metas AS (
@@ -430,11 +441,15 @@ async def carregar_riscos_estoque(
                 COALESCE(v.vl_pedido, 0) as vl_pedido,
                 COALESCE(v.vl_faturado, 0) as vl_faturado,
                 COALESCE(v.vl_corte, 0) as vl_corte,
+                COALESCE(vh.vol_m1, 0) as vol_m1,
+                COALESCE(vh.vol_m2, 0) as vol_m2,
+                COALESCE(vh.vol_m3, 0) as vol_m3,
                 COALESCE(m.meta_mes, 0) as meta_mes_vol, 
                 COALESCE(m.pmv, 0) as pmv
             FROM dim_produtos p 
             LEFT JOIN Estoque e ON p.sku = e.sku 
             LEFT JOIN Vendas v ON p.sku = v.sku 
+            LEFT JOIN Vendas_Hist vh ON p.sku = vh.sku
             LEFT JOIN Metas m ON p.sku = m.sku
             WHERE 1=1 {clausula_filtro} AND (COALESCE(e.estoque_atual, 0) > 0 OR COALESCE(v.vendas_mtd, 0) > 0 OR COALESCE(m.meta_mes, 0) > 0)
         """)
@@ -442,19 +457,23 @@ async def carregar_riscos_estoque(
         df_sku = pd.read_sql(query_sku, db.bind, params=params_query)
         if df_sku.empty: return {"estoque_sku": [], "kpis_globais": {"total_ruptura_rs": 0, "total_sobra_rs": 0, "meta_caixas": 0, "realizado_caixas": 0}}
 
-        colunas_numericas = ['meta_mes_vol', 'vendas_mtd_vol', 'faturado_mtd_vol', 'corte_mtd_vol', 'estoque_atual', 'pmv', 'vl_pedido', 'vl_faturado', 'vl_corte']
+        colunas_numericas = ['meta_mes_vol', 'vendas_mtd_vol', 'faturado_mtd_vol', 'corte_mtd_vol', 'estoque_atual', 'pmv', 'vl_pedido', 'vl_faturado', 'vl_corte', 'vol_m1', 'vol_m2', 'vol_m3']
         for col in colunas_numericas: 
             df_sku[col] = pd.to_numeric(df_sku[col], errors='coerce').fillna(0)
             
-        # 1. TRILHA DE VOLUMES (CAIXAS)
+        # 1. TRILHA DE VOLUMES E RUN RATE
         df_sku['carteira_aberto_vol'] = np.maximum(0, df_sku['vendas_mtd_vol'] - df_sku['faturado_mtd_vol'] - df_sku['corte_mtd_vol'])
         df_sku['meta_togo_vol'] = np.maximum(0, df_sku['meta_mes_vol'] - df_sku['vendas_mtd_vol'])
         demanda_total_vol = df_sku['meta_togo_vol'] + df_sku['carteira_aberto_vol']
         df_sku['ruptura_vol'] = np.maximum(0, demanda_total_vol - df_sku['estoque_atual'])
         df_sku['sobra_vol'] = np.maximum(0, df_sku['estoque_atual'] - demanda_total_vol)
 
-        # 2. TRILHA FINANCEIRA (REAIS - R$)
-        # Carteira usa dinheiro REAL do ERP. Meta, Ruptura e Sobra usam projeção do PMV.
+        # Cálculo do Giro (Venda Média Diária baseada em 90 dias)
+        df_sku['vmd_90d'] = (df_sku['vol_m1'] + df_sku['vol_m2'] + df_sku['vol_m3']) / 90.0
+        df_sku['dias_cobertura'] = np.where(df_sku['vmd_90d'] > 0, df_sku['estoque_atual'] / df_sku['vmd_90d'], 999)
+        df_sku['dias_cobertura'] = df_sku['dias_cobertura'].astype(int)
+
+        # 2. TRILHA FINANCEIRA
         df_sku['meta_mes_rs'] = df_sku['meta_mes_vol'] * df_sku['pmv']
         df_sku['carteira_aberto_rs'] = np.maximum(0, df_sku['vl_pedido'] - df_sku['vl_faturado'] - df_sku['vl_corte'])
         df_sku['meta_togo_rs'] = df_sku['meta_togo_vol'] * df_sku['pmv']

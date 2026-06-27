@@ -77,7 +77,7 @@ const SortableHeader = ({ field, label, currentSort, requestSort, className = "t
   );
 }
 
-// --- DRILL-DOWN CLIENTES ---
+// --- DRILL-DOWN CLIENTES (USADO NA ABA DESVIOS MTD) ---
 const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => {
   const [expandido, setExpandido] = useState(false);
   const [clientes, setClientes] = useState<any[]>([]);
@@ -154,6 +154,139 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
                 </div>
               </div>
             )}
+          </td>
+        </tr>
+      )}
+    </React.Fragment>
+  );
+};
+
+// --- NOVO: DRILL-DOWN EXCLUSIVO PARA RISCOS DE ESTOQUE (COM GRÁFICO HISTÓRICO) ---
+const RowRiscoDrillDown = ({ row, visao, formatador }: any) => {
+  const [expandido, setExpandido] = useState(false);
+
+  // Calcula Atingimento Respeitando o Toggle (Caixas ou Reais)
+  const ating_vol = row.meta_mes_vol > 0 ? (row.vendas_mtd_vol / row.meta_mes_vol) * 100 : 0;
+  const ating_rs = row.meta_mes_rs > 0 ? (row.vl_pedido / row.meta_mes_rs) * 100 : 0;
+  const atingimento = visao === 'caixas' ? ating_vol : ating_rs;
+  const isOversales = atingimento > 100;
+
+  // Lógica da "Saúde (Giro)" baseada no Histórico de 90 dias
+  let status = { text: "Giro Saudável", color: "text-emerald-400 bg-emerald-900/20" };
+  if (row.dias_cobertura < 15 && row.meta_togo_vol > 0) {
+    status = { text: `Ruptura em ~${row.dias_cobertura}d`, color: "text-rose-400 bg-rose-900/20" };
+  } else if (row.dias_cobertura > 60 || row.dias_cobertura === 999) {
+    status = { text: "Tendência Sobra", color: "text-amber-400 bg-amber-900/20" };
+  }
+
+  // Dados para o Gráfico Histórico (Volumes Físicos que escoam o estoque)
+  const dataChart = [
+    { name: 'M-3', vol: row.vol_m3 || 0 },
+    { name: 'M-2', vol: row.vol_m2 || 0 },
+    { name: 'M-1', vol: row.vol_m1 || 0 },
+    { name: 'MTD', vol: row.vendas_mtd_vol || 0 }
+  ];
+
+  const demanda_pendente = visao === 'caixas' 
+    ? (row.meta_togo_vol + row.carteira_aberto_vol) 
+    : (row.meta_togo_rs + row.carteira_aberto_rs);
+
+  return (
+    <React.Fragment>
+      {/* LINHA MACRO: O RADAR DE ALERTAS */}
+      <tr className="hover:bg-slate-800/30 transition-colors cursor-pointer group" onClick={() => setExpandido(!expandido)}>
+        <td className="px-6 py-4 border-b border-slate-800/50">
+          <div className="flex items-center gap-3">
+            <button className="text-slate-500 group-hover:text-indigo-400">{expandido ? <ChevronDown className="w-5 h-5"/> : <ChevronRight className="w-5 h-5"/>}</button>
+            <div className="flex flex-col"><span className="font-bold text-slate-200">{row.descricao}</span><span className="text-[10px] text-slate-500 font-mono">{row.sku}</span></div>
+          </div>
+        </td>
+        
+        <td className="px-4 py-4 text-right font-bold text-slate-300 border-b border-slate-800/50">{formatVol(row.estoque_atual)} cx</td>
+        
+        <td className="px-4 py-4 border-b border-slate-800/50 w-48">
+          <div className="flex flex-col items-end gap-1">
+            <div className="flex items-center gap-2">
+              <span className={`font-black text-xs ${isOversales ? 'text-rose-400' : 'text-indigo-400'}`}>{atingimento.toFixed(1)}%</span>
+              {isOversales && <span className="text-[9px] px-1.5 py-0.5 bg-rose-500 text-white rounded font-black tracking-wider uppercase">Oversales</span>}
+            </div>
+            <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+              <div className={`h-1.5 rounded-full ${isOversales ? 'bg-rose-500' : 'bg-indigo-500'}`} style={{ width: `${Math.min(atingimento, 100)}%` }}></div>
+            </div>
+          </div>
+        </td>
+
+        <td className="px-4 py-4 text-center border-b border-slate-800/50">
+          <span className={`text-[10px] font-black uppercase tracking-wider px-2 py-1 rounded ${status.color}`}>{status.text}</span>
+        </td>
+
+        <td className="px-4 py-4 text-right border-b border-slate-800/50 font-bold text-amber-400">
+          {formatador(demanda_pendente)}
+        </td>
+
+        <td className="px-4 py-4 text-right border-b border-slate-800/50">
+          {row.ruptura_vol > 0 ? (
+            <span className="font-black text-rose-500">{visao === 'financeiro' ? formatFin(row.ruptura_rs) : formatVol(row.ruptura_vol) + ' cx'}</span>
+          ) : row.sobra_vol > 0 ? (
+            <span className="font-black text-sky-400">{visao === 'financeiro' ? formatFin(row.sobra_rs) : formatVol(row.sobra_vol) + ' cx'}</span>
+          ) : (
+             <span className="text-slate-600 font-black text-[10px] uppercase">Estável</span>
+          )}
+        </td>
+      </tr>
+
+      {/* LINHA MICRO: O DOSSIÊ EXPANDIDO */}
+      {expandido && (
+        <tr className="bg-slate-950/80 shadow-inner">
+          <td colSpan={6} className="p-6 border-b border-slate-800">
+            <div className="flex flex-col xl:flex-row gap-6">
+              
+              {/* Cards de Detalhamento Físico e Financeiro */}
+              <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 flex-1">
+                <div className="bg-slate-900 p-3 rounded border border-slate-800">
+                  <span className="text-[10px] text-slate-500 uppercase font-black">Meta S&OP ({visao})</span>
+                  <div className="font-bold text-indigo-400">{formatador(visao === 'caixas' ? row.meta_mes_vol : row.meta_mes_rs)}</div>
+                </div>
+                <div className="bg-slate-900 p-3 rounded border border-slate-800">
+                  <span className="text-[10px] text-slate-500 uppercase font-black">Pedido Implantado ({visao})</span>
+                  <div className="font-bold text-white">{formatador(visao === 'caixas' ? row.vendas_mtd_vol : row.vl_pedido)}</div>
+                </div>
+                <div className="bg-emerald-950/20 p-3 rounded border border-emerald-900/30">
+                  <span className="text-[10px] text-emerald-500/70 uppercase font-black">Faturado Real ({visao})</span>
+                  <div className="font-bold text-emerald-400">{formatador(visao === 'caixas' ? row.faturado_mtd_vol : row.vl_faturado)}</div>
+                </div>
+                <div className="bg-rose-950/20 p-3 rounded border border-rose-900/30">
+                  <span className="text-[10px] text-rose-500/70 uppercase font-black">Cortes Real ({visao})</span>
+                  <div className="font-bold text-rose-400">{formatador(visao === 'caixas' ? row.corte_mtd_vol : row.vl_corte)}</div>
+                </div>
+                <div className="bg-amber-950/20 p-3 rounded border border-amber-900/30">
+                  <span className="text-[10px] text-amber-500/70 uppercase font-black">Carteira em Aberto ({visao})</span>
+                  <div className="font-bold text-amber-400">{formatador(visao === 'caixas' ? row.carteira_aberto_vol : row.carteira_aberto_rs)}</div>
+                </div>
+                <div className="bg-amber-950/20 p-3 rounded border border-amber-900/30">
+                  <span className="text-[10px] text-amber-500/70 uppercase font-black">Meta To-Go Restante ({visao})</span>
+                  <div className="font-bold text-amber-400">{formatador(visao === 'caixas' ? row.meta_togo_vol : row.meta_togo_rs)}</div>
+                </div>
+              </div>
+
+              {/* Gráfico Histórico de Run Rate */}
+              <div className="w-full xl:w-96 bg-slate-900 p-3 rounded border border-slate-800">
+                 <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Run Rate Físico (90 Dias) vs Estoque</h4>
+                 <div className="h-32 w-full">
+                    <ResponsiveContainer>
+                      <ComposedChart data={dataChart} margin={{ top: 10, right: 10, bottom: 0, left: -20 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                        <XAxis dataKey="name" stroke="#64748b" tick={{fontSize: 9}} />
+                        <YAxis stroke="#64748b" tickFormatter={(v) => formatVol(v)} tick={{fontSize: 9}} />
+                        <RechartsTooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', fontSize: '12px' }} formatter={(v:any) => formatVol(v) + ' cx'} />
+                        <Bar dataKey="vol" name="Vol. Vendas" fill="#3b82f6" radius={[2,2,0,0]} barSize={20} />
+                        <ReferenceLine y={row.estoque_atual} stroke="#f43f5e" strokeWidth={2} strokeDasharray="4 4" label={{ position: 'top', value: 'Estoque Fab.', fill: '#f43f5e', fontSize: 10, fontWeight: 'bold' }} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                 </div>
+              </div>
+
+            </div>
           </td>
         </tr>
       )}
@@ -289,7 +422,7 @@ export default function AuditoriaArena() {
     return sortable;
   }, [skus, sortConfig, buscaSku]);
 
-  // 🔥 FUNÇÃO DE EXPORTAÇÃO CSV ADAPTÁVEL (Lê a visão atual)
+  // 🔥 FUNÇÃO DE EXPORTAÇÃO CSV MANTÉM OS 12 DADOS COMPLETOS PARA O EXCEL
   const handleExportCSV = () => {
     if (!sortedSkus || sortedSkus.length === 0) return;
 
@@ -467,55 +600,24 @@ export default function AuditoriaArena() {
             <thead>
               <tr className="bg-slate-950 text-slate-400 text-[10px] font-black uppercase tracking-widest border-b border-slate-800">
                 <SortableHeader field="descricao" label="Produto" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
-                <SortableHeader field="estoque_atual" label="Estoque Fab. (Cx)" currentSort={sortConfig} requestSort={requestSort} className="text-slate-300 text-right" />
-                <SortableHeader field={visao === 'caixas' ? 'meta_mes_vol' : 'meta_mes_rs'} label={`Meta S&OP (${visao === 'caixas' ? 'Cx' : 'R$'})`} currentSort={sortConfig} requestSort={requestSort} className="text-indigo-400 text-right" />
-                <SortableHeader field={visao === 'caixas' ? 'vendas_mtd_vol' : 'vl_pedido'} label={`Pedido (${visao === 'caixas' ? 'Cx' : 'R$'})`} currentSort={sortConfig} requestSort={requestSort} className="text-white text-right bg-slate-950/20" />
-                <SortableHeader field={visao === 'caixas' ? 'faturado_mtd_vol' : 'vl_faturado'} label={`Faturado (${visao === 'caixas' ? 'Cx' : 'R$'})`} currentSort={sortConfig} requestSort={requestSort} className="text-emerald-400 text-right bg-emerald-950/10" />
-                <SortableHeader field={visao === 'caixas' ? 'corte_mtd_vol' : 'vl_corte'} label={`Corte (${visao === 'caixas' ? 'Cx' : 'R$'})`} currentSort={sortConfig} requestSort={requestSort} className="text-rose-400 text-right bg-rose-950/10" />
-                <SortableHeader field={visao === 'caixas' ? 'carteira_aberto_vol' : 'carteira_aberto_rs'} label={`Carteira Aberto (${visao === 'caixas' ? 'Cx' : 'R$'})`} currentSort={sortConfig} requestSort={requestSort} className="text-amber-500 text-right bg-amber-900/10" />
-                <SortableHeader field={visao === 'caixas' ? 'meta_togo_vol' : 'meta_togo_rs'} label={`Meta To-Go (${visao === 'caixas' ? 'Cx' : 'R$'})`} currentSort={sortConfig} requestSort={requestSort} className="text-amber-300 text-right bg-amber-900/20" />
-                <SortableHeader field={visao === 'caixas' ? 'ruptura_vol' : 'ruptura_rs'} label={`Ruptura (${visao === 'caixas' ? 'Cx' : 'R$'})`} currentSort={sortConfig} requestSort={requestSort} className="bg-rose-950/20 text-right text-rose-500" />
-                <SortableHeader field={visao === 'caixas' ? 'sobra_vol' : 'sobra_rs'} label={`Sobra (${visao === 'caixas' ? 'Cx' : 'R$'})`} currentSort={sortConfig} requestSort={requestSort} className="px-6 bg-sky-950/20 text-right text-sky-400" />
+                <SortableHeader field="estoque_atual" label="Estoque Físico" currentSort={sortConfig} requestSort={requestSort} className="text-slate-300 text-right" />
+                <SortableHeader field={visao === 'caixas' ? 'meta_mes_vol' : 'meta_mes_rs'} label={`Atingimento S&OP (${visao === 'caixas' ? 'Cx' : 'R$'})`} currentSort={sortConfig} requestSort={requestSort} className="text-indigo-400 text-right" />
+                <SortableHeader field="dias_cobertura" label="Saúde (Giro Histórico)" currentSort={sortConfig} requestSort={requestSort} className="text-center" />
+                <th className="px-4 py-4 text-right">Demanda Pendente</th>
+                <SortableHeader field={visao === 'caixas' ? 'ruptura_vol' : 'ruptura_rs'} label={`Risco Previsto (${visao === 'caixas' ? 'Cx' : 'R$'})`} currentSort={sortConfig} requestSort={requestSort} className="bg-rose-950/20 text-right text-rose-500" />
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 text-xs">
-              {sortedSkus.map((d, i) => (
-                <tr key={i} className="hover:bg-slate-800/30">
-                  <td className="px-6 py-3.5"><div className="flex flex-col"><span className="font-bold text-slate-200">{d.descricao}</span><span className="text-[10px] text-slate-500 font-mono">{d.sku}</span></div></td>
-                  <td className="px-3 py-3.5 text-right font-bold text-slate-300">{formatVol(d.estoque_atual)}</td>
-                  
-                  <td className="px-3 py-3.5 text-right font-medium text-indigo-300">{formatador(visao === 'caixas' ? d.meta_mes_vol : d.meta_mes_rs)}</td>
-                  <td className="px-3 py-3.5 text-right font-bold text-white bg-slate-800/10">{formatador(visao === 'caixas' ? d.vendas_mtd_vol : d.vl_pedido)}</td>
-                  <td className="px-3 py-3.5 text-right font-bold text-emerald-400 bg-emerald-900/10">{formatador(visao === 'caixas' ? d.faturado_mtd_vol : d.vl_faturado)}</td>
-                  <td className="px-3 py-3.5 text-right font-bold text-rose-400 bg-rose-900/10">{formatador(visao === 'caixas' ? d.corte_mtd_vol : d.vl_corte)}</td>
-
-                  <td className="px-3 py-3.5 text-right font-bold text-amber-500 bg-amber-900/10">{formatador(visao === 'caixas' ? d.carteira_aberto_vol : d.carteira_aberto_rs)}</td>
-                  <td className="px-3 py-3.5 text-right font-bold text-amber-300 bg-amber-900/20">{formatador(visao === 'caixas' ? d.meta_togo_vol : d.meta_togo_rs)}</td>
-
-                  <td className="px-4 py-3.5 text-right bg-rose-500/10">
-                    {(visao === 'caixas' ? d.ruptura_vol : d.ruptura_rs) > 0 ? <span className="font-black text-rose-500">{formatador(visao === 'caixas' ? d.ruptura_vol : d.ruptura_rs)}</span> : <span className="text-slate-600 font-black text-[10px] uppercase">OK</span>}
-                  </td>
-                  <td className="px-6 py-3.5 text-right bg-sky-500/10">
-                    {(visao === 'caixas' ? d.sobra_vol : d.sobra_rs) > 0 ? <span className="font-black text-sky-400">{formatador(visao === 'caixas' ? d.sobra_vol : d.sobra_rs)}</span> : <span className="text-slate-600 font-black text-[10px] uppercase">Giro</span>}
-                  </td>
-                </tr>
-              ))}
+              {sortedSkus.map((row) => <RowRiscoDrillDown key={row.sku} row={row} visao={visao} formatador={formatador} />)}
             </tbody>
             <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
               <tr>
-                <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Total da Visão ({visao})</td>
-                <td className="px-3 py-4 text-right text-slate-300">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.estoque_atual || 0), 0))}</td>
-                <td className="px-3 py-4 text-right text-indigo-400">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.meta_mes_vol : r.meta_mes_rs) || 0, 0))}</td>
-                
-                <td className="px-3 py-4 text-right bg-slate-800/10 text-white">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.vendas_mtd_vol : r.vl_pedido) || 0, 0))}</td>
-                <td className="px-3 py-4 text-right bg-emerald-900/10 text-emerald-400">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.faturado_mtd_vol : r.vl_faturado) || 0, 0))}</td>
-                <td className="px-3 py-4 text-right bg-rose-900/10 text-rose-400">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.corte_mtd_vol : r.vl_corte) || 0, 0))}</td>
-
-                <td className="px-3 py-4 text-right text-amber-500 bg-amber-900/10">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.carteira_aberto_vol : r.carteira_aberto_rs) || 0, 0))}</td>
-                <td className="px-3 py-4 text-right text-amber-300 bg-amber-900/20">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.meta_togo_vol : r.meta_togo_rs) || 0, 0))}</td>
-
-                <td className="px-4 py-4 text-right bg-rose-950/10 text-rose-500">{formatador(visao === 'caixas' ? kpisGerais?.total_ruptura_vol : kpisGerais?.total_ruptura_rs)}</td>
-                <td className="px-6 py-4 text-right bg-sky-950/10 text-sky-400">{formatador(visao === 'caixas' ? kpisGerais?.total_sobra_vol : kpisGerais?.total_sobra_rs)}</td>
+                <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Totais da Visão ({visao})</td>
+                <td className="px-4 py-4 text-right">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.estoque_atual || 0), 0))} cx</td>
+                <td className="px-4 py-4 text-right">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.meta_mes_vol : r.meta_mes_rs) || 0, 0))}</td>
+                <td className="px-4 py-4 text-center text-slate-500">-</td>
+                <td className="px-4 py-4 text-right">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.meta_togo_vol + r.carteira_aberto_vol : r.meta_togo_rs + r.carteira_aberto_rs) || 0, 0))}</td>
+                <td className="px-4 py-4 text-right text-rose-400 bg-rose-950/20">{formatador(visao === 'caixas' ? kpisGerais?.total_ruptura_vol : kpisGerais?.total_ruptura_rs)} (Falta)</td>
               </tr>
             </tfoot>
           </table>
