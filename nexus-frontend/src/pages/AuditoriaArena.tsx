@@ -161,30 +161,64 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
   );
 };
 
-// --- NOVO: DRILL-DOWN EXCLUSIVO PARA RISCOS DE ESTOQUE (COM GRÁFICO HISTÓRICO) ---
+// --- NOVO: DRILL-DOWN EXCLUSIVO PARA RISCOS DE ESTOQUE (PROJEÇÃO DE FIM DE MÊS) ---
 const RowRiscoDrillDown = ({ row, visao, formatador }: any) => {
   const [expandido, setExpandido] = useState(false);
 
-  // Calcula Atingimento Respeitando o Toggle (Caixas ou Reais)
-  const ating_vol = row.meta_mes_vol > 0 ? (row.vendas_mtd_vol / row.meta_mes_vol) * 100 : 0;
-  const ating_rs = row.meta_mes_rs > 0 ? (row.vl_pedido / row.meta_mes_rs) * 100 : 0;
-  const atingimento = visao === 'caixas' ? ating_vol : ating_rs;
-  const isOversales = atingimento > 100;
+  // Lógica Avançada de Atingimento (Regra do Zero)
+  const meta = visao === 'caixas' ? row.meta_mes_vol : row.meta_mes_rs;
+  const realizado = visao === 'caixas' ? row.vendas_mtd_vol : row.vl_pedido;
 
-  // Lógica da "Saúde (Giro)" baseada no Histórico de 90 dias
-  let status = { text: "Giro Saudável", color: "text-emerald-400 bg-emerald-900/20" };
-  if (row.dias_cobertura < 15 && row.meta_togo_vol > 0) {
-    status = { text: `Ruptura em ~${row.dias_cobertura}d`, color: "text-rose-400 bg-rose-900/20" };
-  } else if (row.dias_cobertura > 60 || row.dias_cobertura === 999) {
-    status = { text: "Tendência Sobra", color: "text-amber-400 bg-amber-900/20" };
+  let atingimento = 0;
+  let isOversales = false;
+  let oversalesSemMeta = false;
+
+  if (meta === 0 && realizado === 0) {
+    atingimento = 100;
+  } else if (meta === 0 && realizado > 0) {
+    atingimento = 100; // Barra enche visualmente
+    isOversales = true;
+    oversalesSemMeta = true;
+  } else {
+    atingimento = (realizado / meta) * 100;
+    isOversales = atingimento > 100;
   }
 
-  // Dados para o Gráfico Histórico (Volumes Físicos que escoam o estoque)
+  // Cálculos de Projeção até o fim do Mês
+  const hoje = new Date();
+  const diasNoMes = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0).getDate();
+  const diasRestantes = Math.max(diasNoMes - hoje.getDate(), 1); 
+
+  const vmd = ((row.vol_m1 || 0) + (row.vol_m2 || 0) + (row.vol_m3 || 0)) / 90;
+  const tendencia_restante_vol = vmd * diasRestantes;
+  const demanda_tendencia_vol = row.carteira_aberto_vol + tendencia_restante_vol;
+  const demanda_sop_vol = row.carteira_aberto_vol + row.meta_togo_vol;
+
+  // Lógica da "Saúde (Giro Fim do Mês)"
+  let status = { text: "-", color: "" };
+  if (row.carteira_aberto_vol > row.estoque_atual) {
+    status = { text: "RUPTURA INSTALADA", color: "text-white bg-rose-600 font-black animate-pulse shadow-lg shadow-rose-900/50" };
+  } else if (row.ruptura_vol > 0 || demanda_tendencia_vol > row.estoque_atual) {
+    status = { text: "RUPTURA FIM DO MÊS", color: "text-rose-400 bg-rose-950/50 border border-rose-800/50" };
+  } else if (row.sobra_vol > 0) {
+    const sobra_dias = vmd > 0 ? row.sobra_vol / vmd : 999;
+    if (sobra_dias > 30) {
+      status = { text: "ALTA SOBRA PROJETADA", color: "text-amber-400 bg-amber-950/50 border border-amber-800/50" };
+    } else {
+      status = { text: "SOBRA CONTROLADA", color: "text-sky-400 bg-sky-950/50 border border-sky-800/50" };
+    }
+  } else {
+    status = { text: "ESTOQUE PERFEITO", color: "text-emerald-400 bg-emerald-950/50 border border-emerald-800/50" };
+  }
+
+  // Dados para o Gráfico de Simulador (Fim do Mês)
   const dataChart = [
-    { name: 'M-3', vol: row.vol_m3 || 0 },
-    { name: 'M-2', vol: row.vol_m2 || 0 },
-    { name: 'M-1', vol: row.vol_m1 || 0 },
-    { name: 'MTD', vol: row.vendas_mtd_vol || 0 }
+    { 
+      name: 'Projeção (Fim do Mês)', 
+      'Estoque Fábrica': row.estoque_atual, 
+      'Consumo S&OP': Math.round(demanda_sop_vol), 
+      'Consumo Tendência (Run Rate)': Math.round(demanda_tendencia_vol) 
+    }
   ];
 
   const demanda_pendente = visao === 'caixas' 
@@ -204,11 +238,13 @@ const RowRiscoDrillDown = ({ row, visao, formatador }: any) => {
         
         <td className="px-4 py-4 text-right font-bold text-slate-300 border-b border-slate-800/50">{formatVol(row.estoque_atual)} cx</td>
         
-        <td className="px-4 py-4 border-b border-slate-800/50 w-48">
+        <td className="px-4 py-4 border-b border-slate-800/50 w-56">
           <div className="flex flex-col items-end gap-1">
             <div className="flex items-center gap-2">
-              <span className={`font-black text-xs ${isOversales ? 'text-rose-400' : 'text-indigo-400'}`}>{atingimento.toFixed(1)}%</span>
-              {isOversales && <span className="text-[9px] px-1.5 py-0.5 bg-rose-500 text-white rounded font-black tracking-wider uppercase">Oversales</span>}
+              <span className={`font-black text-xs ${isOversales ? 'text-rose-400' : 'text-indigo-400'}`}>
+                {oversalesSemMeta ? '100% (+)' : `${atingimento.toFixed(1)}%`}
+              </span>
+              {isOversales && <span className="text-[9px] px-1.5 py-0.5 bg-rose-500 text-white rounded font-black tracking-wider uppercase">{oversalesSemMeta ? 'Oversales (S/ Meta)' : 'Oversales'}</span>}
             </div>
             <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
               <div className={`h-1.5 rounded-full ${isOversales ? 'bg-rose-500' : 'bg-indigo-500'}`} style={{ width: `${Math.min(atingimento, 100)}%` }}></div>
@@ -269,18 +305,21 @@ const RowRiscoDrillDown = ({ row, visao, formatador }: any) => {
                 </div>
               </div>
 
-              {/* Gráfico Histórico de Run Rate */}
+              {/* Simulador Fim do Mês (O Gráfico Matador) */}
               <div className="w-full xl:w-96 bg-slate-900 p-3 rounded border border-slate-800">
-                 <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Run Rate Físico (90 Dias) vs Estoque</h4>
+                 <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Simulador Fim do Mês vs Estoque Atual</h4>
                  <div className="h-32 w-full">
                     <ResponsiveContainer>
-                      <ComposedChart data={dataChart} margin={{ top: 10, right: 10, bottom: 0, left: -20 }}>
+                      <ComposedChart data={dataChart} margin={{ top: 20, right: 10, bottom: 0, left: -20 }}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
-                        <XAxis dataKey="name" stroke="#64748b" tick={{fontSize: 9}} />
+                        <XAxis dataKey="name" stroke="#64748b" tick={false} axisLine={false} />
                         <YAxis stroke="#64748b" tickFormatter={(v) => formatVol(v)} tick={{fontSize: 9}} />
-                        <RechartsTooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', fontSize: '12px' }} formatter={(v:any) => formatVol(v) + ' cx'} />
-                        <Bar dataKey="vol" name="Vol. Vendas" fill="#3b82f6" radius={[2,2,0,0]} barSize={20} />
-                        <ReferenceLine y={row.estoque_atual} stroke="#f43f5e" strokeWidth={2} strokeDasharray="4 4" label={{ position: 'top', value: 'Estoque Fab.', fill: '#f43f5e', fontSize: 10, fontWeight: 'bold' }} />
+                        <RechartsTooltip cursor={{fill: 'transparent'}} contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '8px', fontSize: '12px' }} formatter={(v:any) => formatVol(v) + ' cx'} />
+                        <Legend verticalAlign="top" height={36} wrapperStyle={{ fontSize: '9px', fontWeight: 'bold' }}/>
+                        
+                        <Bar dataKey="Estoque Fábrica" fill="#3b82f6" radius={[4,4,0,0]} barSize={25} />
+                        <Bar dataKey="Consumo S&OP" fill="#8b5cf6" radius={[4,4,0,0]} barSize={25} />
+                        <Bar dataKey="Consumo Tendência (Run Rate)" fill="#f59e0b" radius={[4,4,0,0]} barSize={25} />
                       </ComposedChart>
                     </ResponsiveContainer>
                  </div>
@@ -595,14 +634,13 @@ export default function AuditoriaArena() {
         {carregando ? (
           <div className="p-20 flex justify-center items-center gap-3 text-indigo-400 font-bold uppercase text-xs"><RefreshCw className="w-6 h-6 animate-spin" /> Processando Tabelas...</div>
         ) : lente === 'estoque' ? (
-          
           <table className="w-full text-left whitespace-nowrap">
             <thead>
               <tr className="bg-slate-950 text-slate-400 text-[10px] font-black uppercase tracking-widest border-b border-slate-800">
                 <SortableHeader field="descricao" label="Produto" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
                 <SortableHeader field="estoque_atual" label="Estoque Físico" currentSort={sortConfig} requestSort={requestSort} className="text-slate-300 text-right" />
                 <SortableHeader field={visao === 'caixas' ? 'meta_mes_vol' : 'meta_mes_rs'} label={`Atingimento S&OP (${visao === 'caixas' ? 'Cx' : 'R$'})`} currentSort={sortConfig} requestSort={requestSort} className="text-indigo-400 text-right" />
-                <SortableHeader field="dias_cobertura" label="Saúde (Giro Histórico)" currentSort={sortConfig} requestSort={requestSort} className="text-center" />
+                <SortableHeader field="dias_cobertura" label="Saúde (Giro Fim do Mês)" currentSort={sortConfig} requestSort={requestSort} className="text-center" />
                 <th className="px-4 py-4 text-right">Demanda Pendente</th>
                 <SortableHeader field={visao === 'caixas' ? 'ruptura_vol' : 'ruptura_rs'} label={`Risco Previsto (${visao === 'caixas' ? 'Cx' : 'R$'})`} currentSort={sortConfig} requestSort={requestSort} className="bg-rose-950/20 text-right text-rose-500" />
               </tr>
@@ -621,7 +659,6 @@ export default function AuditoriaArena() {
               </tr>
             </tfoot>
           </table>
-
         ) : lente === 'sellout' ? (
            <table className="w-full text-left whitespace-nowrap">
              <thead>
