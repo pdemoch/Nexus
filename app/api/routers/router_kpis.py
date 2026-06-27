@@ -311,7 +311,7 @@ async def drilldown_clientes_kpis(sku: str, visao: str = "caixas", meses_horizon
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 # ==============================================================================
-# 4. INTELIGÊNCIA DE ESTOQUE (RISCOS) - COM DADOS FINANCEIROS REAIS DO ERP
+# 4. INTELIGÊNCIA DE ESTOQUE (RISCOS E DEMANDA OCULTA)
 # ==============================================================================
 @router.post("/sync-stock")
 async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
@@ -393,36 +393,36 @@ async def carregar_riscos_estoque(
         if razaosocial != "Todos": filtro_cliente = " AND c.razaosocial = :razaosocial"; params_query["razaosocial"] = razaosocial
 
         query_sku = text(f"""
-            WITH Estoque AS (
-                SELECT sku, SUM(qtd_dispo) as estoque_atual 
-                FROM fato_estoque_d0 
-                GROUP BY sku
-            ),
+            WITH Estoque AS (SELECT sku, SUM(qtd_dispo) as estoque_atual FROM fato_estoque_d0 GROUP BY sku),
             Vendas AS (
-                SELECT 
-                    v.sku, 
-                    SUM(v.qt_pedido) as vendas_mtd,
-                    SUM(v.qtfatura) as faturado_mtd,
-                    SUM(v.qtcorte) as corte_mtd,
-                    SUM(v.vl_pedido) as vl_pedido,
-                    SUM(v.vlfatura) as vl_faturado,
-                    SUM(v.vlcorte) as vl_corte
+                SELECT v.sku, SUM(v.qt_pedido) as vendas_mtd, SUM(v.qtfatura) as faturado_mtd, SUM(v.qtcorte) as corte_mtd,
+                       SUM(v.vl_pedido) as vl_pedido, SUM(v.vlfatura) as vl_faturado, SUM(v.vlcorte) as vl_corte
                 FROM fato_vendas v
                 LEFT JOIN dim_clientes c ON v.cgc = c.cgc
                 WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql {filtro_cliente}
                 GROUP BY v.sku
             ),
-            Vendas_Hist AS (
-                SELECT 
-                    v.sku,
-                    SUM(CASE WHEN TO_CHAR(v.data_pedido, 'YYYY-MM') = TO_CHAR(TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '1 month', 'YYYY-MM') THEN v.qt_pedido ELSE 0 END) as vol_m1,
-                    SUM(CASE WHEN TO_CHAR(v.data_pedido, 'YYYY-MM') = TO_CHAR(TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '2 month', 'YYYY-MM') THEN v.qt_pedido ELSE 0 END) as vol_m2,
-                    SUM(CASE WHEN TO_CHAR(v.data_pedido, 'YYYY-MM') = TO_CHAR(TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '3 month', 'YYYY-MM') THEN v.qt_pedido ELSE 0 END) as vol_m3
+            Hist_Clientes AS (
+                SELECT v.sku, c.regional, c.razaosocial, SUM(v.qt_pedido) / 3.0 as media_hist_vol
                 FROM fato_vendas v
-                LEFT JOIN dim_clientes c ON v.cgc = c.cgc
-                WHERE v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '3 months'
-                  AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM') {filtro_cliente}
-                GROUP BY v.sku
+                JOIN dim_clientes c ON v.cgc = c.cgc
+                WHERE v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '3 months' AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM') {filtro_cliente}
+                GROUP BY v.sku, c.regional, c.razaosocial
+            ),
+            MTD_Clientes AS (
+                SELECT v.sku, c.regional, c.razaosocial, SUM(v.qt_pedido) as mtd_vol
+                FROM fato_vendas v
+                JOIN dim_clientes c ON v.cgc = c.cgc
+                WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql {filtro_cliente}
+                GROUP BY v.sku, c.regional, c.razaosocial
+            ),
+            Previsao_Clientes AS (
+                SELECT h.sku, GREATEST(0, h.media_hist_vol - COALESCE(m.mtd_vol, 0)) as previsao_vol
+                FROM Hist_Clientes h
+                LEFT JOIN MTD_Clientes m ON h.sku = m.sku AND h.regional = m.regional AND h.razaosocial = m.razaosocial
+            ),
+            Previsao_SKU AS (
+                SELECT sku, SUM(previsao_vol) as previsao_entrada_vol FROM Previsao_Clientes GROUP BY sku
             ),
             Metas AS (
                 SELECT m.sku, SUM(m.vol_final) as meta_mes, 
@@ -432,52 +432,50 @@ async def carregar_riscos_estoque(
                 WHERE TO_CHAR(m.mes_projetado, 'YYYY-MM') = :mes_sql AND m.ciclo_sop = :ciclo_congelado {filtro_cliente}
                 GROUP BY m.sku
             )
-            SELECT 
-                p.sku, p.descricao, p.categoria, 
-                COALESCE(e.estoque_atual, 0) as estoque_atual, 
-                COALESCE(v.vendas_mtd, 0) as vendas_mtd_vol, 
-                COALESCE(v.faturado_mtd, 0) as faturado_mtd_vol,
-                COALESCE(v.corte_mtd, 0) as corte_mtd_vol,
-                COALESCE(v.vl_pedido, 0) as vl_pedido,
-                COALESCE(v.vl_faturado, 0) as vl_faturado,
-                COALESCE(v.vl_corte, 0) as vl_corte,
-                COALESCE(vh.vol_m1, 0) as vol_m1,
-                COALESCE(vh.vol_m2, 0) as vol_m2,
-                COALESCE(vh.vol_m3, 0) as vol_m3,
-                COALESCE(m.meta_mes, 0) as meta_mes_vol, 
-                COALESCE(m.pmv, 0) as pmv
+            SELECT p.sku, p.descricao, p.categoria, COALESCE(e.estoque_atual, 0) as estoque_atual, COALESCE(v.vendas_mtd, 0) as vendas_mtd_vol, 
+                   COALESCE(v.faturado_mtd, 0) as faturado_mtd_vol, COALESCE(v.corte_mtd, 0) as corte_mtd_vol, COALESCE(v.vl_pedido, 0) as vl_pedido,
+                   COALESCE(v.vl_faturado, 0) as vl_faturado, COALESCE(v.vl_corte, 0) as vl_corte, COALESCE(prev.previsao_entrada_vol, 0) as previsao_entrada_vol,
+                   COALESCE(m.meta_mes, 0) as meta_mes_vol, COALESCE(m.pmv, 0) as pmv
             FROM dim_produtos p 
             LEFT JOIN Estoque e ON p.sku = e.sku 
             LEFT JOIN Vendas v ON p.sku = v.sku 
-            LEFT JOIN Vendas_Hist vh ON p.sku = vh.sku
+            LEFT JOIN Previsao_SKU prev ON p.sku = prev.sku
             LEFT JOIN Metas m ON p.sku = m.sku
-            WHERE 1=1 {clausula_filtro} AND (COALESCE(e.estoque_atual, 0) > 0 OR COALESCE(v.vendas_mtd, 0) > 0 OR COALESCE(m.meta_mes, 0) > 0)
+            WHERE 1=1 {clausula_filtro} AND (COALESCE(e.estoque_atual, 0) > 0 OR COALESCE(v.vendas_mtd, 0) > 0 OR COALESCE(m.meta_mes, 0) > 0 OR COALESCE(prev.previsao_entrada_vol, 0) > 0)
         """)
         
         df_sku = pd.read_sql(query_sku, db.bind, params=params_query)
-        if df_sku.empty: return {"estoque_sku": [], "kpis_globais": {"total_ruptura_rs": 0, "total_sobra_rs": 0, "meta_caixas": 0, "realizado_caixas": 0}}
+        if df_sku.empty: 
+            return {
+                "estoque_sku": [], 
+                "kpis_globais": {
+                    "total_ruptura_rs": 0, "total_sobra_rs": 0, "total_ruptura_vol": 0, "total_sobra_vol": 0, "meta_caixas": 0, "realizado_caixas": 0
+                }
+            }
 
-        colunas_numericas = ['meta_mes_vol', 'vendas_mtd_vol', 'faturado_mtd_vol', 'corte_mtd_vol', 'estoque_atual', 'pmv', 'vl_pedido', 'vl_faturado', 'vl_corte', 'vol_m1', 'vol_m2', 'vol_m3']
-        for col in colunas_numericas: 
+        for col in ['meta_mes_vol', 'vendas_mtd_vol', 'faturado_mtd_vol', 'corte_mtd_vol', 'estoque_atual', 'pmv', 'vl_pedido', 'vl_faturado', 'vl_corte', 'previsao_entrada_vol']: 
             df_sku[col] = pd.to_numeric(df_sku[col], errors='coerce').fillna(0)
             
-        # 1. TRILHA DE VOLUMES E RUN RATE
-        df_sku['carteira_aberto_vol'] = np.maximum(0, df_sku['vendas_mtd_vol'] - df_sku['faturado_mtd_vol'] - df_sku['corte_mtd_vol'])
-        df_sku['meta_togo_vol'] = np.maximum(0, df_sku['meta_mes_vol'] - df_sku['vendas_mtd_vol'])
-        demanda_total_vol = df_sku['meta_togo_vol'] + df_sku['carteira_aberto_vol']
-        df_sku['ruptura_vol'] = np.maximum(0, demanda_total_vol - df_sku['estoque_atual'])
-        df_sku['sobra_vol'] = np.maximum(0, df_sku['estoque_atual'] - demanda_total_vol)
-
-        # Cálculo do Giro (Venda Média Diária baseada em 90 dias)
-        df_sku['vmd_90d'] = (df_sku['vol_m1'] + df_sku['vol_m2'] + df_sku['vol_m3']) / 90.0
-        df_sku['dias_cobertura'] = np.where(df_sku['vmd_90d'] > 0, df_sku['estoque_atual'] / df_sku['vmd_90d'], 999)
-        df_sku['dias_cobertura'] = df_sku['dias_cobertura'].astype(int)
-
-        # 2. TRILHA FINANCEIRA
+        # Físico e Financeiro Espelhados no PMV (Inclusive o Estoque!)
+        df_sku['estoque_rs'] = df_sku['estoque_atual'] * df_sku['pmv']
         df_sku['meta_mes_rs'] = df_sku['meta_mes_vol'] * df_sku['pmv']
+        
+        df_sku['carteira_aberto_vol'] = np.maximum(0, df_sku['vendas_mtd_vol'] - df_sku['faturado_mtd_vol'] - df_sku['corte_mtd_vol'])
         df_sku['carteira_aberto_rs'] = np.maximum(0, df_sku['vl_pedido'] - df_sku['vl_faturado'] - df_sku['vl_corte'])
-        df_sku['meta_togo_rs'] = df_sku['meta_togo_vol'] * df_sku['pmv']
+        
+        df_sku['previsao_entrada_rs'] = df_sku['previsao_entrada_vol'] * df_sku['pmv']
+        
+        df_sku['projecao_fim_mes_vol'] = df_sku['vendas_mtd_vol'] + df_sku['previsao_entrada_vol']
+        df_sku['projecao_fim_mes_rs'] = df_sku['vl_pedido'] + df_sku['previsao_entrada_rs']
+        
+        df_sku['gap_meta_vol'] = df_sku['projecao_fim_mes_vol'] - df_sku['meta_mes_vol']
+        df_sku['gap_meta_rs'] = df_sku['projecao_fim_mes_rs'] - df_sku['meta_mes_rs']
+
+        # Cálculo de Ruptura e Sobra Baseado na Projeção Fim do Mês
+        df_sku['ruptura_vol'] = np.maximum(0, df_sku['projecao_fim_mes_vol'] - df_sku['estoque_atual'])
         df_sku['ruptura_rs'] = df_sku['ruptura_vol'] * df_sku['pmv']
+        
+        df_sku['sobra_vol'] = np.maximum(0, df_sku['estoque_atual'] - df_sku['projecao_fim_mes_vol'])
         df_sku['sobra_rs'] = df_sku['sobra_vol'] * df_sku['pmv']
 
         kpis = {
@@ -488,10 +486,38 @@ async def carregar_riscos_estoque(
             "meta_caixas": float(df_sku['meta_mes_vol'].sum()), 
             "realizado_caixas": float(df_sku['vendas_mtd_vol'].sum())
         }
-        return {"estoque_sku": df_sku.sort_values(by=["ruptura_rs", "sobra_rs"], ascending=[False, False]).to_dict(orient="records"), "kpis_globais": kpis}
-        
-    except Exception as e: 
-        import traceback
-        print(traceback.format_exc())
-        from fastapi import HTTPException
-        raise HTTPException(status_code=500, detail=str(e))
+
+        return {"estoque_sku": df_sku.to_dict(orient="records"), "kpis_globais": kpis}
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/riscos-estoque/drilldown-clientes/{sku}")
+async def drilldown_riscos_clientes(sku: str, meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)):
+    if not meses_horizonte: meses_horizonte = ["06/2026"]
+    mes_alvo = meses_horizonte[0] 
+    mes_sql = f"{mes_alvo.split('/')[1]}-{mes_alvo.split('/')[0]}"
+    
+    query = text("""
+        WITH Hist_Clientes AS (
+            SELECT c.regional, c.razaosocial, SUM(v.qt_pedido) / 3.0 as media_hist_vol
+            FROM fato_vendas v
+            JOIN dim_clientes c ON v.cgc = c.cgc
+            WHERE v.sku = :sku AND v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '3 months' AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM')
+            GROUP BY c.regional, c.razaosocial
+        ),
+        MTD_Clientes AS (
+            SELECT c.regional, c.razaosocial, SUM(v.qt_pedido) as mtd_vol
+            FROM fato_vendas v
+            JOIN dim_clientes c ON v.cgc = c.cgc
+            WHERE v.sku = :sku AND TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql
+            GROUP BY c.regional, c.razaosocial
+        )
+        SELECT COALESCE(h.regional, m.regional) as regional, COALESCE(h.razaosocial, m.razaosocial) as razaosocial,
+               COALESCE(h.media_hist_vol, 0) as media_hist_vol, COALESCE(m.mtd_vol, 0) as mtd_vol,
+               GREATEST(0, COALESCE(h.media_hist_vol, 0) - COALESCE(m.mtd_vol, 0)) as previsao_vol
+        FROM Hist_Clientes h
+        FULL OUTER JOIN MTD_Clientes m ON h.regional = m.regional AND h.razaosocial = m.razaosocial
+        WHERE GREATEST(0, COALESCE(h.media_hist_vol, 0) - COALESCE(m.mtd_vol, 0)) > 0 OR COALESCE(m.mtd_vol, 0) > 0
+        ORDER BY previsao_vol DESC, mtd_vol DESC
+    """)
+    df = pd.read_sql(query, db.bind, params={"mes_sql": mes_sql, "sku": sku})
+    return df.to_dict(orient="records")

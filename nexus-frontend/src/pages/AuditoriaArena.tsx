@@ -96,24 +96,24 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
 
   return (
     <React.Fragment>
-      <tr className="hover:bg-slate-800/30 transition-colors cursor-pointer group" onClick={carregarClientes}>
-        <td className="px-4 py-3 border-b border-slate-800">
+      <tr className="hover:bg-slate-800/30 transition-colors cursor-pointer group border-b border-slate-800/50" onClick={carregarClientes}>
+        <td className="px-4 py-3">
           <div className="flex items-center gap-3">
             <button className="text-slate-500 group-hover:text-indigo-400">{expandido ? <ChevronDown className="w-5 h-5"/> : <ChevronRight className="w-5 h-5"/>}</button>
             <div className="flex flex-col"><span className="font-bold text-slate-200">{row.descricao}</span><span className="text-[10px] text-slate-500 font-mono">{row.sku}</span></div>
           </div>
         </td>
-        <td className="px-3 py-3 text-right font-semibold text-indigo-400 border-b border-slate-800">{formatador(row.val_meta_ia)}</td>
-        <td className="px-3 py-3 text-right font-semibold text-sky-400 border-b border-slate-800">{formatador(row.val_meta_hum)}</td>
-        <td className="px-3 py-3 text-right font-black text-white border-b border-slate-800">{formatador(row.val_real)}</td>
-        <td className="px-3 py-3 text-right font-bold border-b border-slate-800 bg-slate-950/20">
+        <td className="px-3 py-3 text-right font-semibold text-indigo-400">{formatador(row.val_meta_ia)}</td>
+        <td className="px-3 py-3 text-right font-semibold text-sky-400">{formatador(row.val_meta_hum)}</td>
+        <td className="px-3 py-3 text-right font-black text-white">{formatador(row.val_real)}</td>
+        <td className="px-3 py-3 text-right font-bold bg-slate-950/20 border-l border-slate-800/50">
            <span className={row.gap_ia > 0 ? 'text-rose-400' : 'text-emerald-400'}>{row.gap_ia > 0 ? 'Falta ' : 'Over '}{formatador(Math.abs(row.gap_ia))}</span>
         </td>
-        <td className="px-3 py-3 text-right font-bold border-b border-slate-800 bg-slate-950/20">
+        <td className="px-3 py-3 text-right font-bold bg-slate-950/20">
            <span className={row.gap_humano > 0 ? 'text-rose-400' : 'text-emerald-400'}>{row.gap_humano > 0 ? 'Falta ' : 'Over '}{formatador(Math.abs(row.gap_humano))}</span>
         </td>
-        <td className="px-3 py-3 text-right font-mono font-bold text-rose-400 border-b border-slate-800 bg-slate-950/40">{formatPct(row.mape_ia)}</td>
-        <td className="px-3 py-3 text-right font-mono font-bold text-rose-400 border-b border-slate-800 bg-slate-950/40">{formatPct(row.mape_humano)}</td>
+        <td className="px-3 py-3 text-right font-mono font-bold text-rose-400 bg-slate-950/40 border-l border-slate-800/50">{formatPct(row.mape_ia)}</td>
+        <td className="px-3 py-3 text-right font-mono font-bold text-rose-400 bg-slate-950/40">{formatPct(row.mape_humano)}</td>
       </tr>
       {expandido && (
         <tr className="bg-slate-900/50 shadow-inner">
@@ -161,171 +161,127 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
   );
 };
 
-// --- NOVO: DRILL-DOWN EXCLUSIVO PARA RISCOS DE ESTOQUE (PROJEÇÃO DE FIM DE MÊS) ---
-const RowRiscoDrillDown = ({ row, visao, formatador }: any) => {
+// --- DRILL-DOWN EXCLUSIVO PARA RISCOS DE ESTOQUE (ACCOUNT-BASED S&OP) ---
+const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => {
   const [expandido, setExpandido] = useState(false);
+  const [clientes, setClientes] = useState<any[]>([]);
+  const [carregando, setCarregando] = useState(false);
 
-  // Lógica Avançada de Atingimento (Regra do Zero)
+  // Controle de Reais vs Caixas
   const meta = visao === 'caixas' ? row.meta_mes_vol : row.meta_mes_rs;
-  const realizado = visao === 'caixas' ? row.vendas_mtd_vol : row.vl_pedido;
+  const pedido = visao === 'caixas' ? row.vendas_mtd_vol : row.vl_pedido;
+  const faturado = visao === 'caixas' ? row.faturado_mtd_vol : row.vl_faturado;
+  const corte = visao === 'caixas' ? row.corte_mtd_vol : row.vl_corte;
+  const carteira = visao === 'caixas' ? row.carteira_aberto_vol : row.carteira_aberto_rs;
+  const estoque = visao === 'caixas' ? row.estoque_atual : row.estoque_rs;
+  
+  // Preditivo
+  const previsao_entrada = visao === 'caixas' ? row.previsao_entrada_vol : row.previsao_entrada_rs;
+  const projecao_fim_mes = visao === 'caixas' ? row.projecao_fim_mes_vol : row.projecao_fim_mes_rs;
+  const gap_meta = visao === 'caixas' ? row.gap_meta_vol : row.gap_meta_rs;
 
-  let atingimento = 0;
-  let isOversales = false;
-  let oversalesSemMeta = false;
-
-  if (meta === 0 && realizado === 0) {
-    atingimento = 100;
-  } else if (meta === 0 && realizado > 0) {
-    atingimento = 100; // Barra enche visualmente
-    isOversales = true;
-    oversalesSemMeta = true;
-  } else {
-    atingimento = (realizado / meta) * 100;
-    isOversales = atingimento > 100;
+  const atingimento = meta > 0 ? (pedido / meta) * 100 : (pedido > 0 ? 100 : 0);
+  
+  // Ação Dinâmica
+  let acao = { text: "🟢 COBERTO", cor: "text-emerald-400 bg-emerald-950/30 border border-emerald-900/50" };
+  const risco_falta = projecao_fim_mes - row.estoque_atual; // Volume projetado que excede a fábrica
+  
+  if (risco_falta > 0) {
+    acao = { text: `🔴 PRODUZIR: +${formatador(visao === 'caixas' ? risco_falta : risco_falta * row.pmv)}`, cor: "text-rose-400 bg-rose-950/30 font-black animate-pulse shadow-rose-900/50 shadow-md border-rose-500/50 border" };
+  } else if (estoque > projecao_fim_mes * 1.5) { // 50% de sobra sobre a projeção
+    acao = { text: `🟡 R. SOBRA: ${formatador(estoque - projecao_fim_mes)}`, cor: "text-amber-400 bg-amber-950/30 border border-amber-900/50" };
   }
 
-  // Cálculos de Projeção até o fim do Mês
-  const hoje = new Date();
-  const diasNoMes = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0).getDate();
-  const diasRestantes = Math.max(diasNoMes - hoje.getDate(), 1); 
-
-  const vmd = ((row.vol_m1 || 0) + (row.vol_m2 || 0) + (row.vol_m3 || 0)) / 90;
-  const tendencia_restante_vol = vmd * diasRestantes;
-  const demanda_tendencia_vol = row.carteira_aberto_vol + tendencia_restante_vol;
-  const demanda_sop_vol = row.carteira_aberto_vol + row.meta_togo_vol;
-
-  // Lógica da "Saúde (Giro Fim do Mês)"
-  let status = { text: "-", color: "" };
-  if (row.carteira_aberto_vol > row.estoque_atual) {
-    status = { text: "RUPTURA INSTALADA", color: "text-white bg-rose-600 font-black animate-pulse shadow-lg shadow-rose-900/50" };
-  } else if (row.ruptura_vol > 0 || demanda_tendencia_vol > row.estoque_atual) {
-    status = { text: "RUPTURA FIM DO MÊS", color: "text-rose-400 bg-rose-950/50 border border-rose-800/50" };
-  } else if (row.sobra_vol > 0) {
-    const sobra_dias = vmd > 0 ? row.sobra_vol / vmd : 999;
-    if (sobra_dias > 30) {
-      status = { text: "ALTA SOBRA PROJETADA", color: "text-amber-400 bg-amber-950/50 border border-amber-800/50" };
-    } else {
-      status = { text: "SOBRA CONTROLADA", color: "text-sky-400 bg-sky-950/50 border border-sky-800/50" };
+  const carregarClientes = async () => {
+    setExpandido(!expandido);
+    if (!expandido && clientes.length === 0) {
+      setCarregando(true);
+      try {
+        const params = new URLSearchParams();
+        mesesSelecionados.forEach((m: string) => params.append('meses_horizonte', m));
+        const res = await axios.get(`/api/v1/kpis/riscos-estoque/drilldown-clientes/${row.sku}?${params.toString()}`);
+        setClientes(res.data);
+      } catch (e) {} finally { setCarregando(false); }
     }
-  } else {
-    status = { text: "ESTOQUE PERFEITO", color: "text-emerald-400 bg-emerald-950/50 border border-emerald-800/50" };
-  }
-
-  // Dados para o Gráfico de Simulador (Fim do Mês)
-  const dataChart = [
-    { 
-      name: 'Projeção (Fim do Mês)', 
-      'Estoque Fábrica': row.estoque_atual, 
-      'Consumo S&OP': Math.round(demanda_sop_vol), 
-      'Consumo Tendência (Run Rate)': Math.round(demanda_tendencia_vol) 
-    }
-  ];
-
-  const demanda_pendente = visao === 'caixas' 
-    ? (row.meta_togo_vol + row.carteira_aberto_vol) 
-    : (row.meta_togo_rs + row.carteira_aberto_rs);
+  };
 
   return (
     <React.Fragment>
-      {/* LINHA MACRO: O RADAR DE ALERTAS */}
-      <tr className="hover:bg-slate-800/30 transition-colors cursor-pointer group" onClick={() => setExpandido(!expandido)}>
-        <td className="px-6 py-4 border-b border-slate-800/50">
+      <tr className="hover:bg-slate-800/30 transition-colors cursor-pointer group border-b border-slate-800/50" onClick={carregarClientes}>
+        <td className="px-6 py-4">
           <div className="flex items-center gap-3">
             <button className="text-slate-500 group-hover:text-indigo-400">{expandido ? <ChevronDown className="w-5 h-5"/> : <ChevronRight className="w-5 h-5"/>}</button>
             <div className="flex flex-col"><span className="font-bold text-slate-200">{row.descricao}</span><span className="text-[10px] text-slate-500 font-mono">{row.sku}</span></div>
           </div>
         </td>
-        
-        <td className="px-4 py-4 text-right font-bold text-slate-300 border-b border-slate-800/50">{formatVol(row.estoque_atual)} cx</td>
-        
-        <td className="px-4 py-4 border-b border-slate-800/50 w-56">
-          <div className="flex flex-col items-end gap-1">
-            <div className="flex items-center gap-2">
-              <span className={`font-black text-xs ${isOversales ? 'text-rose-400' : 'text-indigo-400'}`}>
-                {oversalesSemMeta ? '100% (+)' : `${atingimento.toFixed(1)}%`}
-              </span>
-              {isOversales && <span className="text-[9px] px-1.5 py-0.5 bg-rose-500 text-white rounded font-black tracking-wider uppercase">{oversalesSemMeta ? 'Oversales (S/ Meta)' : 'Oversales'}</span>}
-            </div>
-            <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-              <div className={`h-1.5 rounded-full ${isOversales ? 'bg-rose-500' : 'bg-indigo-500'}`} style={{ width: `${Math.min(atingimento, 100)}%` }}></div>
-            </div>
+        <td className="px-3 py-4 text-right font-black text-slate-300 bg-slate-900/40" title="Estoque Físico na Fábrica. Em Reais, é o Volume Físico x PMV.">
+          {formatador(estoque)}
+        </td>
+        <td className="px-3 py-4 text-right text-indigo-400 font-bold" title="Meta S&OP (O que a Diretoria estipulou)">{formatador(meta)}</td>
+        <td className="px-3 py-4 w-24">
+          <div className="flex flex-col gap-1 items-end" title="Atingimento: Pedido / Meta S&OP">
+             <span className={`text-[10px] font-black ${atingimento > 100 ? 'text-rose-400' : 'text-slate-400'}`}>
+                {meta === 0 && pedido > 0 ? '100% (+)' : `${atingimento.toFixed(1)}%`}
+             </span>
+             <div className="w-full bg-slate-800 h-1 rounded-full"><div className={`h-1 rounded-full ${atingimento > 100 ? 'bg-rose-500' : 'bg-indigo-500'}`} style={{width: `${Math.min(atingimento, 100)}%`}}></div></div>
           </div>
         </td>
-
-        <td className="px-4 py-4 text-center border-b border-slate-800/50">
-          <span className={`text-[10px] font-black uppercase tracking-wider px-2 py-1 rounded ${status.color}`}>{status.text}</span>
+        <td className="px-3 py-4 text-right text-slate-200 border-l border-slate-800/50">{formatador(pedido)}</td>
+        <td className="px-3 py-4 text-right text-emerald-400">{formatador(faturado)}</td>
+        <td className="px-3 py-4 text-right text-rose-400">{formatador(corte)}</td>
+        <td className="px-3 py-4 text-right text-amber-500 font-bold">{formatador(carteira)}</td>
+        <td className="px-3 py-4 text-right text-fuchsia-400 font-bold border-l border-slate-800/50 bg-fuchsia-950/10 cursor-help" title="Fórmula: Σ MAX(0, Média(M-3 a M-1) - Realizado MTD) agrupado por Razão Social.">
+          {formatador(previsao_entrada)}
         </td>
-
-        <td className="px-4 py-4 text-right border-b border-slate-800/50 font-bold text-amber-400">
-          {formatador(demanda_pendente)}
+        <td className="px-3 py-4 text-right text-white font-black bg-slate-800/30 cursor-help" title="Fórmula: Pedido Implantado + Previsão de Entrada.">
+          {formatador(projecao_fim_mes)}
         </td>
-
-        <td className="px-4 py-4 text-right border-b border-slate-800/50">
-          {row.ruptura_vol > 0 ? (
-            <span className="font-black text-rose-500">{visao === 'financeiro' ? formatFin(row.ruptura_rs) : formatVol(row.ruptura_vol) + ' cx'}</span>
-          ) : row.sobra_vol > 0 ? (
-            <span className="font-black text-sky-400">{visao === 'financeiro' ? formatFin(row.sobra_rs) : formatVol(row.sobra_vol) + ' cx'}</span>
-          ) : (
-             <span className="text-slate-600 font-black text-[10px] uppercase">Estável</span>
-          )}
+        <td className={`px-3 py-4 text-right font-bold ${gap_meta > 0 ? 'text-emerald-400' : 'text-rose-400'}`} title="Fórmula: Projeção Fim do Mês - Meta S&OP.">
+          {gap_meta > 0 ? '+' : ''}{formatador(gap_meta)}
+        </td>
+        <td className="px-4 py-4 text-right border-l border-slate-800/50 cursor-help" title="Fórmula: (Projeção Fim do Mês - Estoque Fábrica). Se positivo, produzir. Se negativo, sobra.">
+          <span className={`px-2 py-1 rounded text-[10px] tracking-wider ${acao.cor}`}>{acao.text}</span>
         </td>
       </tr>
 
-      {/* LINHA MICRO: O DOSSIÊ EXPANDIDO */}
       {expandido && (
-        <tr className="bg-slate-950/80 shadow-inner">
-          <td colSpan={6} className="p-6 border-b border-slate-800">
-            <div className="flex flex-col xl:flex-row gap-6">
-              
-              {/* Cards de Detalhamento Físico e Financeiro */}
-              <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 flex-1">
-                <div className="bg-slate-900 p-3 rounded border border-slate-800">
-                  <span className="text-[10px] text-slate-500 uppercase font-black">Meta S&OP ({visao})</span>
-                  <div className="font-bold text-indigo-400">{formatador(visao === 'caixas' ? row.meta_mes_vol : row.meta_mes_rs)}</div>
-                </div>
-                <div className="bg-slate-900 p-3 rounded border border-slate-800">
-                  <span className="text-[10px] text-slate-500 uppercase font-black">Pedido Implantado ({visao})</span>
-                  <div className="font-bold text-white">{formatador(visao === 'caixas' ? row.vendas_mtd_vol : row.vl_pedido)}</div>
-                </div>
-                <div className="bg-emerald-950/20 p-3 rounded border border-emerald-900/30">
-                  <span className="text-[10px] text-emerald-500/70 uppercase font-black">Faturado Real ({visao})</span>
-                  <div className="font-bold text-emerald-400">{formatador(visao === 'caixas' ? row.faturado_mtd_vol : row.vl_faturado)}</div>
-                </div>
-                <div className="bg-rose-950/20 p-3 rounded border border-rose-900/30">
-                  <span className="text-[10px] text-rose-500/70 uppercase font-black">Cortes Real ({visao})</span>
-                  <div className="font-bold text-rose-400">{formatador(visao === 'caixas' ? row.corte_mtd_vol : row.vl_corte)}</div>
-                </div>
-                <div className="bg-amber-950/20 p-3 rounded border border-amber-900/30">
-                  <span className="text-[10px] text-amber-500/70 uppercase font-black">Carteira em Aberto ({visao})</span>
-                  <div className="font-bold text-amber-400">{formatador(visao === 'caixas' ? row.carteira_aberto_vol : row.carteira_aberto_rs)}</div>
-                </div>
-                <div className="bg-amber-950/20 p-3 rounded border border-amber-900/30">
-                  <span className="text-[10px] text-amber-500/70 uppercase font-black">Meta To-Go Restante ({visao})</span>
-                  <div className="font-bold text-amber-400">{formatador(visao === 'caixas' ? row.meta_togo_vol : row.meta_togo_rs)}</div>
-                </div>
-              </div>
-
-              {/* Simulador Fim do Mês (O Gráfico Matador) */}
-              <div className="w-full xl:w-96 bg-slate-900 p-3 rounded border border-slate-800">
-                 <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Simulador Fim do Mês vs Estoque Atual</h4>
-                 <div className="h-32 w-full">
-                    <ResponsiveContainer>
-                      <ComposedChart data={dataChart} margin={{ top: 20, right: 10, bottom: 0, left: -20 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
-                        <XAxis dataKey="name" stroke="#64748b" tick={false} axisLine={false} />
-                        <YAxis stroke="#64748b" tickFormatter={(v) => formatVol(v)} tick={{fontSize: 9}} />
-                        <RechartsTooltip cursor={{fill: 'transparent'}} contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '8px', fontSize: '12px' }} formatter={(v:any) => formatVol(v) + ' cx'} />
-                        <Legend verticalAlign="top" height={36} wrapperStyle={{ fontSize: '9px', fontWeight: 'bold' }}/>
-                        
-                        <Bar dataKey="Estoque Fábrica" fill="#3b82f6" radius={[4,4,0,0]} barSize={25} />
-                        <Bar dataKey="Consumo S&OP" fill="#8b5cf6" radius={[4,4,0,0]} barSize={25} />
-                        <Bar dataKey="Consumo Tendência (Run Rate)" fill="#f59e0b" radius={[4,4,0,0]} barSize={25} />
-                      </ComposedChart>
-                    </ResponsiveContainer>
-                 </div>
-              </div>
-
-            </div>
+        <tr className="bg-slate-950/90 shadow-inner">
+          <td colSpan={12} className="p-6 border-b border-slate-800">
+             <div className="flex flex-col gap-3">
+                <h4 className="text-[10px] font-black uppercase tracking-widest text-fuchsia-400 flex items-center gap-2"><Target className="w-4 h-4"/> Detalhamento da Demanda Oculta (Média M-3 a M-1 por Razão Social)</h4>
+                {carregando ? (
+                   <div className="text-xs text-slate-400 flex gap-2"><RefreshCw className="w-4 h-4 animate-spin"/> Mapeando Histórico de Clientes...</div>
+                ) : clientes.length === 0 ? (
+                   <div className="text-xs text-slate-600">Sem histórico relevante nos últimos 90 dias para projetar entradas.</div>
+                ) : (
+                   <div className="max-h-64 overflow-y-auto border border-slate-800 rounded-lg">
+                      <table className="w-full text-left text-xs whitespace-nowrap">
+                         <thead className="bg-slate-900 text-[9px] text-slate-500 uppercase sticky top-0 z-10">
+                            <tr>
+                               <th className="px-4 py-2 border-b border-slate-800">Regional</th>
+                               <th className="px-4 py-2 border-b border-slate-800">Razão Social</th>
+                               <th className="px-4 py-2 text-right border-b border-slate-800">Média Hist. M-3 a M-1 (Cx)</th>
+                               <th className="px-4 py-2 text-right border-b border-slate-800">Realizado MTD (Cx)</th>
+                               <th className="px-4 py-2 text-right text-fuchsia-400 border-b border-slate-800">Previsão Faltante (Cx)</th>
+                            </tr>
+                         </thead>
+                         <tbody className="divide-y divide-slate-800/50">
+                            {clientes.map((c, idx) => (
+                               <tr key={idx} className="hover:bg-slate-800/30 text-slate-300">
+                                  <td className="px-4 py-2 font-mono text-slate-500">{c.regional}</td>
+                                  <td className="px-4 py-2 font-bold">{c.razaosocial}</td>
+                                  <td className="px-4 py-2 text-right">{formatVol(c.media_hist_vol)}</td>
+                                  <td className="px-4 py-2 text-right">{formatVol(c.mtd_vol)}</td>
+                                  <td className="px-4 py-2 text-right font-black text-fuchsia-400">
+                                     {c.previsao_vol > 0 ? `+ ${formatVol(c.previsao_vol)}` : <span className="text-emerald-500">Atingido</span>}
+                                  </td>
+                               </tr>
+                            ))}
+                         </tbody>
+                      </table>
+                   </div>
+                )}
+             </div>
           </td>
         </tr>
       )}
@@ -461,28 +417,34 @@ export default function AuditoriaArena() {
     return sortable;
   }, [skus, sortConfig, buscaSku]);
 
-  // 🔥 FUNÇÃO DE EXPORTAÇÃO CSV MANTÉM OS 12 DADOS COMPLETOS PARA O EXCEL
+  // 🔥 FUNÇÃO DE EXPORTAÇÃO CSV MANTÉM OS DADOS COMPLETOS PARA O EXCEL
   const handleExportCSV = () => {
     if (!sortedSkus || sortedSkus.length === 0) return;
 
-    const headers = [
-      "SKU", "Descrição", "Categoria", "Estoque Fábrica (Cx)", 
-      `Meta S&OP (${visao})`, `Pedido (${visao})`, `Faturado (${visao})`, 
-      `Corte (${visao})`, `Carteira em Aberto (${visao})`, `Meta To-Go Restante (${visao})`, 
-      `Ruptura/Risco (${visao})`, `Sobra/Imobilizado (${visao})`
-    ];
+    let headers, rows;
 
-    const rows = sortedSkus.map((d: any) => [
-      d.sku, d.descricao, d.categoria, d.estoque_atual || 0,
-      visao === 'caixas' ? d.meta_mes_vol : d.meta_mes_rs,
-      visao === 'caixas' ? d.vendas_mtd_vol : d.vl_pedido,
-      visao === 'caixas' ? d.faturado_mtd_vol : d.vl_faturado,
-      visao === 'caixas' ? d.corte_mtd_vol : d.vl_corte,
-      visao === 'caixas' ? d.carteira_aberto_vol : d.carteira_aberto_rs,
-      visao === 'caixas' ? d.meta_togo_vol : d.meta_togo_rs,
-      visao === 'caixas' ? d.ruptura_vol : d.ruptura_rs,
-      visao === 'caixas' ? d.sobra_vol : d.sobra_rs
-    ]);
+    if (lente === 'estoque') {
+      headers = [
+        "SKU", "Descrição", "Categoria", `Estoque Fábrica (${visao})`, 
+        `Meta S&OP (${visao})`, `Pedido (${visao})`, `Faturado (${visao})`, 
+        `Corte (${visao})`, `Carteira em Aberto (${visao})`, 
+        `Previsão de Entrada (${visao})`, `Projeção Fim do Mês (${visao})`, `Gap vs Meta (${visao})`
+      ];
+      rows = sortedSkus.map((d: any) => [
+        d.sku, d.descricao, d.categoria, visao === 'caixas' ? d.estoque_atual : d.estoque_rs,
+        visao === 'caixas' ? d.meta_mes_vol : d.meta_mes_rs,
+        visao === 'caixas' ? d.vendas_mtd_vol : d.vl_pedido,
+        visao === 'caixas' ? d.faturado_mtd_vol : d.vl_faturado,
+        visao === 'caixas' ? d.corte_mtd_vol : d.vl_corte,
+        visao === 'caixas' ? d.carteira_aberto_vol : d.carteira_aberto_rs,
+        visao === 'caixas' ? d.previsao_entrada_vol : d.previsao_entrada_rs,
+        visao === 'caixas' ? d.projecao_fim_mes_vol : d.projecao_fim_mes_rs,
+        visao === 'caixas' ? d.gap_meta_vol : d.gap_meta_rs
+      ]);
+    } else {
+      headers = ["SKU", "Descrição"];
+      rows = sortedSkus.map((d: any) => [d.sku, d.descricao]);
+    }
 
     const csvContent = [
       headers.join(";"),
@@ -494,7 +456,7 @@ export default function AuditoriaArena() {
     const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `Riscos_Estoque_${visao.toUpperCase()}_${new Date().toISOString().slice(0,10)}.csv`;
+    link.download = `Extracao_${lente.toUpperCase()}_${visao.toUpperCase()}_${new Date().toISOString().slice(0,10)}.csv`;
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();
@@ -624,41 +586,65 @@ export default function AuditoriaArena() {
         </div>
       ) : lente === 'estoque' ? (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-          <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-rose-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><TrendingDown className="w-4 h-4 text-rose-500"/> Faturamento em Risco</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_ruptura_rs) : formatVol(kpisGerais.total_ruptura_vol) + ' Cx'}</p></div>
-          <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-amber-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><Package className="w-4 h-4 text-amber-500"/> Capital Imobilizado</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_sobra_rs) : formatVol(kpisGerais.total_sobra_vol) + ' Cx'}</p></div>
+          <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-rose-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><TrendingDown className="w-4 h-4 text-rose-500"/> Risco Produtivo (Projeção)</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_ruptura_rs) : formatVol(kpisGerais.total_ruptura_vol) + ' Cx'}</p></div>
+          <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-amber-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><Package className="w-4 h-4 text-amber-500"/> Capital Imobilizado (Projeção)</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_sobra_rs) : formatVol(kpisGerais.total_sobra_vol) + ' Cx'}</p></div>
         </div>
       ) : null}
 
       {/* RENDERIZAÇÃO DAS TABELAS COM SORT E TFOOT */}
-      <div className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-2xl">
+      <div className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-2xl overflow-x-auto">
         {carregando ? (
           <div className="p-20 flex justify-center items-center gap-3 text-indigo-400 font-bold uppercase text-xs"><RefreshCw className="w-6 h-6 animate-spin" /> Processando Tabelas...</div>
         ) : lente === 'estoque' ? (
+          
           <table className="w-full text-left whitespace-nowrap">
             <thead>
+              {/* LINHA DE CATEGORIZAÇÃO (SUPER-HEADER) */}
+              <tr className="bg-slate-900 border-b border-slate-800">
+                <th colSpan={4} className="px-6 py-2 text-center text-[10px] font-black tracking-widest text-slate-500 uppercase border-r border-slate-800/50">📦 Planejamento & Fábrica</th>
+                <th colSpan={4} className="px-6 py-2 text-center text-[10px] font-black tracking-widest text-emerald-500/70 uppercase border-r border-slate-800/50">🤝 Realidade Comercial (MTD)</th>
+                <th colSpan={4} className="px-6 py-2 text-center text-[10px] font-black tracking-widest text-fuchsia-400/80 uppercase">🔮 Projeção Bottom-Up & Ação</th>
+              </tr>
               <tr className="bg-slate-950 text-slate-400 text-[10px] font-black uppercase tracking-widest border-b border-slate-800">
                 <SortableHeader field="descricao" label="Produto" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
-                <SortableHeader field="estoque_atual" label="Estoque Físico" currentSort={sortConfig} requestSort={requestSort} className="text-slate-300 text-right" />
-                <SortableHeader field={visao === 'caixas' ? 'meta_mes_vol' : 'meta_mes_rs'} label={`Atingimento S&OP (${visao === 'caixas' ? 'Cx' : 'R$'})`} currentSort={sortConfig} requestSort={requestSort} className="text-indigo-400 text-right" />
-                <SortableHeader field="dias_cobertura" label="Saúde (Giro Fim do Mês)" currentSort={sortConfig} requestSort={requestSort} className="text-center" />
-                <th className="px-4 py-4 text-right">Demanda Pendente</th>
-                <SortableHeader field={visao === 'caixas' ? 'ruptura_vol' : 'ruptura_rs'} label={`Risco Previsto (${visao === 'caixas' ? 'Cx' : 'R$'})`} currentSort={sortConfig} requestSort={requestSort} className="bg-rose-950/20 text-right text-rose-500" />
+                <SortableHeader field={visao === 'caixas' ? 'estoque_atual' : 'estoque_rs'} label={`Estoque Fáb. (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-slate-300 text-right bg-slate-900/40" />
+                <SortableHeader field={visao === 'caixas' ? 'meta_mes_vol' : 'meta_mes_rs'} label={`Meta S&OP (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-indigo-400 text-right" />
+                <th className="px-3 py-4 text-right">Atingido %</th>
+                
+                <SortableHeader field={visao === 'caixas' ? 'vendas_mtd_vol' : 'vl_pedido'} label={`Pedido (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-white text-right border-l border-slate-800/50" />
+                <SortableHeader field={visao === 'caixas' ? 'faturado_mtd_vol' : 'vl_faturado'} label={`Faturado (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-emerald-400 text-right" />
+                <SortableHeader field={visao === 'caixas' ? 'corte_mtd_vol' : 'vl_corte'} label={`Corte (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-rose-400 text-right" />
+                <SortableHeader field={visao === 'caixas' ? 'carteira_aberto_vol' : 'carteira_aberto_rs'} label={`Carteira Aberto (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-amber-500 text-right" />
+                
+                <SortableHeader field={visao === 'caixas' ? 'previsao_entrada_vol' : 'previsao_entrada_rs'} label={`Prev. Entrada (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-fuchsia-400 text-right border-l border-slate-800/50 bg-fuchsia-950/10" />
+                <SortableHeader field={visao === 'caixas' ? 'projecao_fim_mes_vol' : 'projecao_fim_mes_rs'} label={`Projeção Fim do Mês`} currentSort={sortConfig} requestSort={requestSort} className="text-white text-right bg-slate-800/30" />
+                <SortableHeader field={visao === 'caixas' ? 'gap_meta_vol' : 'gap_meta_rs'} label={`Gap vs Meta`} currentSort={sortConfig} requestSort={requestSort} className="text-slate-300 text-right" />
+                <th className="px-4 py-4 text-right border-l border-slate-800/50">Alerta de Supply</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 text-xs">
-              {sortedSkus.map((row) => <RowRiscoDrillDown key={row.sku} row={row} visao={visao} formatador={formatador} />)}
+              {sortedSkus.map((row) => <RowRiscoDrillDown key={row.sku} row={row} visao={visao} mesesSelecionados={mesesSelecionados} formatador={formatador} />)}
             </tbody>
             <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
               <tr>
                 <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Totais da Visão ({visao})</td>
-                <td className="px-4 py-4 text-right">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.estoque_atual || 0), 0))} cx</td>
-                <td className="px-4 py-4 text-right">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.meta_mes_vol : r.meta_mes_rs) || 0, 0))}</td>
-                <td className="px-4 py-4 text-center text-slate-500">-</td>
-                <td className="px-4 py-4 text-right">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.meta_togo_vol + r.carteira_aberto_vol : r.meta_togo_rs + r.carteira_aberto_rs) || 0, 0))}</td>
-                <td className="px-4 py-4 text-right text-rose-400 bg-rose-950/20">{formatador(visao === 'caixas' ? kpisGerais?.total_ruptura_vol : kpisGerais?.total_ruptura_rs)} (Falta)</td>
+                <td className="px-3 py-4 text-right bg-slate-900/40">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.estoque_atual : r.estoque_rs) || 0, 0))}</td>
+                <td className="px-3 py-4 text-right text-indigo-400">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.meta_mes_vol : r.meta_mes_rs) || 0, 0))}</td>
+                <td className="px-3 py-4 text-right text-slate-500">-</td>
+                
+                <td className="px-3 py-4 text-right border-l border-slate-800/50">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.vendas_mtd_vol : r.vl_pedido) || 0, 0))}</td>
+                <td className="px-3 py-4 text-right text-emerald-400">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.faturado_mtd_vol : r.vl_faturado) || 0, 0))}</td>
+                <td className="px-3 py-4 text-right text-rose-400">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.corte_mtd_vol : r.vl_corte) || 0, 0))}</td>
+                <td className="px-3 py-4 text-right text-amber-500">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.carteira_aberto_vol : r.carteira_aberto_rs) || 0, 0))}</td>
+                
+                <td className="px-3 py-4 text-right text-fuchsia-400 border-l border-slate-800/50 bg-fuchsia-950/10">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.previsao_entrada_vol : r.previsao_entrada_rs) || 0, 0))}</td>
+                <td className="px-3 py-4 text-right bg-slate-800/30">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.projecao_fim_mes_vol : r.projecao_fim_mes_rs) || 0, 0))}</td>
+                <td className="px-3 py-4 text-right text-slate-300">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.gap_meta_vol : r.gap_meta_rs) || 0, 0))}</td>
+                <td className="px-4 py-4 text-right border-l border-slate-800/50 text-slate-500">-</td>
               </tr>
             </tfoot>
           </table>
+
         ) : lente === 'sellout' ? (
            <table className="w-full text-left whitespace-nowrap">
              <thead>
