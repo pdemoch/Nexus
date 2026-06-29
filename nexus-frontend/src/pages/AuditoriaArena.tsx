@@ -126,7 +126,7 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                 <div className="bg-slate-950 p-3 rounded-lg border border-rose-900/50">
                   <h4 className="text-[10px] font-black uppercase tracking-widest text-rose-400 mb-2 flex items-center gap-2"><TrendingDown className="w-3 h-3"/> Alerta: Inadimplência de Meta</h4>
-                  <div className="max-h-48 overflow-y-auto pr-2 space-y-1 custom-scrollbar">
+                  <div className="max-h-48 overflow-y-auto pr-2 space-y-1">
                     {clientes.filter(c => c.gap_humano > 0).map(c => (
                       <div key={c.cgc} className="flex justify-between items-center bg-slate-900 p-2 rounded border border-slate-800 text-xs">
                          <div className="truncate pr-4"><span className="font-bold text-slate-300 block truncate">{c.razaosocial}</span><span className="text-[9px] text-slate-500 font-mono block">{c.cgc}</span></div>
@@ -140,7 +140,7 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
                 </div>
                 <div className="bg-slate-950 p-3 rounded-lg border border-emerald-900/50">
                   <h4 className="text-[10px] font-black uppercase tracking-widest text-emerald-400 mb-2 flex items-center gap-2"><AlertTriangle className="w-3 h-3"/> Alerta: Over-Forecast</h4>
-                  <div className="max-h-48 overflow-y-auto pr-2 space-y-1 custom-scrollbar">
+                  <div className="max-h-48 overflow-y-auto pr-2 space-y-1">
                     {clientes.filter(c => c.gap_humano < 0).map(c => (
                       <div key={c.cgc} className="flex justify-between items-center bg-slate-900 p-2 rounded border border-slate-800 text-xs">
                          <div className="truncate pr-4"><span className="font-bold text-slate-300 block truncate">{c.razaosocial}</span><span className="text-[9px] text-slate-500 font-mono block">{c.cgc}</span></div>
@@ -167,7 +167,7 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) =
   const [clientes, setClientes] = useState<any[]>([]);
   const [carregando, setCarregando] = useState(false);
 
-  // Ação Dinâmica (Usando os Campos Enriquecidos do React)
+  // Ação Dinâmica
   let acao = { text: "🟢 COBERTO", cor: "text-emerald-400 bg-emerald-950/30 border border-emerald-900/50" };
   
   if (row.__risco_falta > 0) {
@@ -190,7 +190,7 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) =
     }
   };
 
-  // Helper para mostrar Caixas ou Reais na tabela de clientes (a média vem sempre em caixas físicas do BD)
+  // Helper para mostrar Caixas ou Reais na tabela de clientes
   const formatFinV2 = (val: number) => visao === 'caixas' ? formatVol(val) : formatFin(val * (row.pmv || 0));
 
   return (
@@ -242,9 +242,9 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) =
                 ) : clientes.length === 0 ? (
                    <div className="text-xs text-slate-600">Nenhum cliente qualificado (Frequência Mínima 4/6) com demanda pendente.</div>
                 ) : (
-                   <div className="max-h-64 overflow-y-auto border border-slate-800 rounded-lg custom-scrollbar">
+                   <div className="border border-slate-800 rounded-lg">
                       <table className="w-full text-left text-xs whitespace-nowrap">
-                         <thead className="bg-slate-900 text-[9px] text-slate-500 uppercase sticky top-0 z-10">
+                         <thead className="bg-slate-900 text-[9px] text-slate-500 uppercase">
                             <tr>
                                <th className="px-4 py-2 border-b border-slate-800">Regional</th>
                                <th className="px-4 py-2 border-b border-slate-800">Razão Social</th>
@@ -364,7 +364,7 @@ export default function AuditoriaArena() {
         setSkus(res.data.estoque_sku || []); 
         setKpisGerais(res.data.kpis_globais || {});
         
-        // Sort Inicial Perfeito
+        // Sort Inicial
         setSortConfig({ key: '__risco_falta', direction: 'desc' });
       }
       else {
@@ -438,11 +438,12 @@ export default function AuditoriaArena() {
     return sortable;
   }, [enrichedSkus, skus, sortConfig, buscaSku, lente]);
 
-  // FUNÇÃO DE EXPORTAÇÃO CSV
+  // 🔥 FUNÇÃO DE EXPORTAÇÃO CSV 100% DINÂMICA (Estoque, MTRIX e KPIs)
   const handleExportCSV = () => {
     if (!sortedSkus || sortedSkus.length === 0) return;
 
-    let headers, rows;
+    let headers: string[] = [];
+    let rows: any[] = [];
 
     if (lente === 'estoque') {
       headers = [
@@ -452,17 +453,40 @@ export default function AuditoriaArena() {
         `Previsão de Entrada (${visao})`, `Projeção Fim do Mês (${visao})`, `Gap vs Meta (${visao})`
       ];
       rows = sortedSkus.map((d: any) => [
-        d.sku, d.descricao, d.categoria, d.__estoque, d.__meta, d.__pedido,
-        d.__faturado, d.__corte, d.__carteira, d.__previsao, d.__projecao, d.__gap
+        d.sku, d.descricao, d.categoria, d.__estoque || 0, d.__meta || 0, d.__pedido || 0,
+        d.__faturado || 0, d.__corte || 0, d.__carteira || 0, d.__previsao || 0, d.__projecao || 0, d.__gap || 0
       ]);
-    } else {
-      headers = ["SKU", "Descrição"];
-      rows = sortedSkus.map((d: any) => [d.sku, d.descricao]);
+    } 
+    else if (lente === 'sellout') {
+      headers = [
+        "SKU", "Descrição", "Categoria", "Segmento", 
+        "Realizado Sell-out (Cx)", "Meta IA (Cx)", "Meta S&OP (Cx)", 
+        "Estoque Canal (Cx)", "% MAPE IA", "% MAPE S&OP", "FVA (Melhoria %)"
+      ];
+      rows = sortedSkus.map((d: any) => [
+        d.sku, d.descricao, d.categoria, d.segmento,
+        d.vol_real || 0, d.vol_ia_congelado || 0, d.vol_comercial_congelado || 0,
+        d.estoque_canal || 0, d.mape_ia || 0, d.mape_comercial || 0, d.fva || 0
+      ]);
+    }
+    else if (lente === 'kpis') {
+      headers = [
+        "SKU", "Descrição", "Categoria", "Segmento", 
+        `Meta IA (${visao})`, `Meta S&OP (${visao})`, `Realizado MTD (${visao})`, 
+        `Gap IA (${visao})`, `Gap S&OP (${visao})`, "% MAPE IA", "% MAPE S&OP"
+      ];
+      rows = sortedSkus.map((d: any) => [
+        d.sku, d.descricao, d.categoria, d.segmento,
+        d.val_meta_ia || 0, d.val_meta_hum || 0, d.val_real || 0,
+        d.gap_ia || 0, d.gap_humano || 0, d.mape_ia || 0, d.mape_humano || 0
+      ]);
     }
 
     const csvContent = [
       headers.join(";"),
-      ...rows.map(row => row.map(val => typeof val === 'number' ? val.toString().replace('.', ',') : `"${val}"`).join(";"))
+      ...rows.map(row => row.map((val: any) => 
+        typeof val === 'number' ? val.toString().replace('.', ',') : `"${val || ''}"`
+      ).join(";"))
     ].join("\n");
 
     const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -487,7 +511,7 @@ export default function AuditoriaArena() {
         </div>
 
         <div className="flex flex-col md:flex-row gap-3 items-center">
-          {lente === 'estoque' && (
+          {lente !== 'kpis' && (
             <button onClick={handleExportCSV} className="flex items-center px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-black tracking-wider transition-all shadow-lg shadow-emerald-900/20 text-[10px] sm:text-xs uppercase h-full">
               <Download className="w-4 h-4 mr-2" /> Extrair CSV
             </button>
@@ -600,15 +624,15 @@ export default function AuditoriaArena() {
         </div>
       ) : null}
 
-      {/* RENDERIZAÇÃO DAS TABELAS COM CAIXA FIXA E SCROLL BAR */}
-      <div className="bg-slate-900 rounded-2xl border border-slate-800 shadow-2xl flex flex-col">
+      {/* RENDERIZAÇÃO DAS TABELAS (SEM SCROLL INTERNO) */}
+      <div className="bg-slate-900 rounded-2xl border border-slate-800 shadow-2xl flex flex-col overflow-hidden">
         {carregando ? (
           <div className="p-20 flex justify-center items-center gap-3 text-indigo-400 font-bold uppercase text-xs"><RefreshCw className="w-6 h-6 animate-spin" /> Processando Tabelas...</div>
         ) : lente === 'estoque' ? (
           
-          <div className="overflow-y-auto overflow-x-auto w-full max-h-[70vh] rounded-2xl custom-scrollbar">
-            <table className="w-full text-left whitespace-nowrap relative">
-              <thead className="sticky top-0 z-20 shadow-md bg-slate-950">
+          <div className="w-full">
+            <table className="w-full text-left whitespace-nowrap">
+              <thead className="bg-slate-950">
                 <tr className="bg-slate-900 border-b border-slate-800">
                   <th colSpan={4} className="px-6 py-2 text-center text-[10px] font-black tracking-widest text-slate-500 uppercase border-r border-slate-800/50">📦 Planejamento & Fábrica</th>
                   <th colSpan={4} className="px-6 py-2 text-center text-[10px] font-black tracking-widest text-emerald-500/70 uppercase border-r border-slate-800/50">🤝 Realidade Comercial (MTD)</th>
@@ -634,7 +658,7 @@ export default function AuditoriaArena() {
               <tbody className="divide-y divide-slate-800/60 text-xs">
                 {sortedSkus.map((row) => <RowRiscoDrillDown key={row.sku} row={row} visao={visao} mesesSelecionados={mesesSelecionados} formatador={formatador} />)}
               </tbody>
-              <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs sticky bottom-0 z-20 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.3)]">
+              <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
                 <tr>
                   <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Totais da Visão ({visao})</td>
                   <td className="px-3 py-4 text-right bg-slate-900/40">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__estoque || 0), 0))}</td>
@@ -656,71 +680,75 @@ export default function AuditoriaArena() {
           </div>
 
         ) : lente === 'sellout' ? (
-           <table className="w-full text-left whitespace-nowrap">
-             <thead>
-               <tr className="bg-slate-950 text-slate-400 border-b border-slate-800 text-[10px] font-black uppercase tracking-widest">
-                 <SortableHeader field="descricao" label="Produto" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
-                 <SortableHeader field="vol_real" label="Realizado (Sell-out)" currentSort={sortConfig} requestSort={requestSort} />
-                 <SortableHeader field="vol_ia_congelado" label="Meta IA" currentSort={sortConfig} requestSort={requestSort} />
-                 <SortableHeader field="vol_comercial_congelado" label="Meta S&OP" currentSort={sortConfig} requestSort={requestSort} />
-                 <SortableHeader field="estoque_canal" label="Estoque Canal" currentSort={sortConfig} requestSort={requestSort} />
-                 <SortableHeader field="mape_ia" label="% MAPE IA" currentSort={sortConfig} requestSort={requestSort} className="border-l border-slate-800 bg-slate-950/40 text-rose-400 text-right" />
-                 <SortableHeader field="mape_comercial" label="% MAPE S&OP" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/40 text-rose-400 text-right" />
-               </tr>
-             </thead>
-             <tbody className="divide-y divide-slate-800/60 text-xs">
-               {sortedSkus.map(row => (
-                 <tr key={row.sku} className="hover:bg-slate-800/30">
-                   <td className="px-6 py-3.5"><div className="flex flex-col"><span className="font-bold text-slate-200">{row.descricao}</span><span className="text-[10px] text-slate-500 font-mono mt-0.5">{row.sku}</span></div></td>
-                   <td className="px-4 py-3.5 text-right font-black text-white">{formatVol(row.vol_real || 0)}</td>
-                   <td className="px-4 py-3.5 text-right font-semibold text-indigo-400 bg-indigo-950/10">{formatVol(row.vol_ia_congelado || 0)}</td>
-                   <td className="px-4 py-3.5 text-right font-semibold text-sky-400 bg-sky-950/10">{formatVol(row.vol_comercial_congelado || 0)}</td>
-                   <td className="px-4 py-3.5 text-right font-semibold text-amber-400">{formatVol(row.estoque_canal || 0)}</td>
-                   <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 border-l border-slate-800 bg-slate-950/40">{formatPct(row.mape_ia || 0)}</td>
-                   <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 bg-slate-950/40">{formatPct(row.mape_comercial || 0)}</td>
+           <div className="w-full">
+             <table className="w-full text-left whitespace-nowrap">
+               <thead className="bg-slate-950">
+                 <tr className="text-slate-400 border-b border-slate-800 text-[10px] font-black uppercase tracking-widest">
+                   <SortableHeader field="descricao" label="Produto" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
+                   <SortableHeader field="vol_real" label="Realizado (Sell-out)" currentSort={sortConfig} requestSort={requestSort} />
+                   <SortableHeader field="vol_ia_congelado" label="Meta IA" currentSort={sortConfig} requestSort={requestSort} />
+                   <SortableHeader field="vol_comercial_congelado" label="Meta S&OP" currentSort={sortConfig} requestSort={requestSort} />
+                   <SortableHeader field="estoque_canal" label="Estoque Canal" currentSort={sortConfig} requestSort={requestSort} />
+                   <SortableHeader field="mape_ia" label="% MAPE IA" currentSort={sortConfig} requestSort={requestSort} className="border-l border-slate-800 bg-slate-950/40 text-rose-400 text-right" />
+                   <SortableHeader field="mape_comercial" label="% MAPE S&OP" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/40 text-rose-400 text-right" />
                  </tr>
-               ))}
-             </tbody>
-             <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
-              <tr>
-                <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Somas do Portfólio</td>
-                <td className="px-4 py-4 text-right">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_real || 0), 0))}</td>
-                <td className="px-4 py-4 text-right text-indigo-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_ia_congelado || 0), 0))}</td>
-                <td className="px-4 py-4 text-right text-sky-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_comercial_congelado || 0), 0))}</td>
-                <td className="px-4 py-4 text-right text-amber-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.estoque_canal || 0), 0))}</td>
-                <td colSpan={2} className="px-4 py-4 bg-slate-950/40 text-right text-slate-500 text-[10px]">Médias Ponderadas nos Cards Topo</td>
-              </tr>
-             </tfoot>
-            </table>
+               </thead>
+               <tbody className="divide-y divide-slate-800/60 text-xs">
+                 {sortedSkus.map(row => (
+                   <tr key={row.sku} className="hover:bg-slate-800/30">
+                     <td className="px-6 py-3.5"><div className="flex flex-col"><span className="font-bold text-slate-200">{row.descricao}</span><span className="text-[10px] text-slate-500 font-mono mt-0.5">{row.sku}</span></div></td>
+                     <td className="px-4 py-3.5 text-right font-black text-white">{formatVol(row.vol_real || 0)}</td>
+                     <td className="px-4 py-3.5 text-right font-semibold text-indigo-400 bg-indigo-950/10">{formatVol(row.vol_ia_congelado || 0)}</td>
+                     <td className="px-4 py-3.5 text-right font-semibold text-sky-400 bg-sky-950/10">{formatVol(row.vol_comercial_congelado || 0)}</td>
+                     <td className="px-4 py-3.5 text-right font-semibold text-amber-400">{formatVol(row.estoque_canal || 0)}</td>
+                     <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 border-l border-slate-800 bg-slate-950/40">{formatPct(row.mape_ia || 0)}</td>
+                     <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 bg-slate-950/40">{formatPct(row.mape_comercial || 0)}</td>
+                   </tr>
+                 ))}
+               </tbody>
+               <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
+                <tr>
+                  <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Somas do Portfólio</td>
+                  <td className="px-4 py-4 text-right">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_real || 0), 0))}</td>
+                  <td className="px-4 py-4 text-right text-indigo-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_ia_congelado || 0), 0))}</td>
+                  <td className="px-4 py-4 text-right text-sky-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_comercial_congelado || 0), 0))}</td>
+                  <td className="px-4 py-4 text-right text-amber-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.estoque_canal || 0), 0))}</td>
+                  <td colSpan={2} className="px-4 py-4 bg-slate-950/40 text-right text-slate-500 text-[10px]">Médias Ponderadas nos Cards Topo</td>
+                </tr>
+               </tfoot>
+              </table>
+           </div>
         ) : (
-           <table className="w-full text-left whitespace-nowrap">
-             <thead>
-               <tr className="bg-slate-950 text-slate-400 border-b border-slate-800 text-[10px] font-black uppercase tracking-widest">
-                 <SortableHeader field="descricao" label="Produto (Clique p/ Clientes)" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
-                 <SortableHeader field="val_meta_ia" label="Meta IA" currentSort={sortConfig} requestSort={requestSort} className="text-indigo-400 text-right" />
-                 <SortableHeader field="val_meta_hum" label="Meta S&OP" currentSort={sortConfig} requestSort={requestSort} className="text-sky-400 text-right" />
-                 <SortableHeader field="val_real" label="Realizado MTD" currentSort={sortConfig} requestSort={requestSort} className="text-white text-right" />
-                 <SortableHeader field="gap_ia" label="Gap IA" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/20 text-right" />
-                 <SortableHeader field="gap_humano" label="Gap S&OP" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/20 text-right" />
-                 <SortableHeader field="mape_ia" label="% MAPE IA" currentSort={sortConfig} requestSort={requestSort} className="border-l border-slate-800 bg-slate-950/40 text-rose-400 text-right" />
-                 <SortableHeader field="mape_humano" label="% MAPE S&OP" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/40 text-rose-400 text-right" />
-               </tr>
-             </thead>
-             <tbody className="divide-y divide-slate-800/60 text-xs">
-               {sortedSkus.map((row) => <RowSKUDrillDown key={row.sku} row={row} visao={visao} mesesSelecionados={mesesSelecionados} formatador={formatador} />)}
-             </tbody>
-             <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
-              <tr>
-                <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Acumulado MTD</td>
-                <td className="px-3 py-4 text-right text-indigo-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.val_meta_ia || 0), 0))}</td>
-                <td className="px-3 py-4 text-right text-sky-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.val_meta_hum || 0), 0))}</td>
-                <td className="px-3 py-4 text-right">{formatador(sortedSkus.reduce((sum, r) => sum + (r.val_real || 0), 0))}</td>
-                <td className="px-3 py-4 text-right bg-slate-950/20 text-slate-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.gap_ia || 0), 0))}</td>
-                <td className="px-3 py-4 text-right bg-slate-950/20 text-slate-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.gap_humano || 0), 0))}</td>
-                <td colSpan={2} className="px-3 py-4 bg-slate-950/40 text-right text-slate-500 text-[10px]">Gap Consolidado</td>
-              </tr>
-             </tfoot>
-            </table>
+           <div className="w-full">
+             <table className="w-full text-left whitespace-nowrap">
+               <thead className="bg-slate-950">
+                 <tr className="text-slate-400 border-b border-slate-800 text-[10px] font-black uppercase tracking-widest">
+                   <SortableHeader field="descricao" label="Produto (Clique p/ Clientes)" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
+                   <SortableHeader field="val_meta_ia" label="Meta IA" currentSort={sortConfig} requestSort={requestSort} className="text-indigo-400 text-right" />
+                   <SortableHeader field="val_meta_hum" label="Meta S&OP" currentSort={sortConfig} requestSort={requestSort} className="text-sky-400 text-right" />
+                   <SortableHeader field="val_real" label="Realizado MTD" currentSort={sortConfig} requestSort={requestSort} className="text-white text-right" />
+                   <SortableHeader field="gap_ia" label="Gap IA" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/20 text-right" />
+                   <SortableHeader field="gap_humano" label="Gap S&OP" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/20 text-right" />
+                   <SortableHeader field="mape_ia" label="% MAPE IA" currentSort={sortConfig} requestSort={requestSort} className="border-l border-slate-800 bg-slate-950/40 text-rose-400 text-right" />
+                   <SortableHeader field="mape_humano" label="% MAPE S&OP" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/40 text-rose-400 text-right" />
+                 </tr>
+               </thead>
+               <tbody className="divide-y divide-slate-800/60 text-xs">
+                 {sortedSkus.map((row) => <RowSKUDrillDown key={row.sku} row={row} visao={visao} mesesSelecionados={mesesSelecionados} formatador={formatador} />)}
+               </tbody>
+               <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
+                <tr>
+                  <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Acumulado MTD</td>
+                  <td className="px-3 py-4 text-right text-indigo-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.val_meta_ia || 0), 0))}</td>
+                  <td className="px-3 py-4 text-right text-sky-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.val_meta_hum || 0), 0))}</td>
+                  <td className="px-3 py-4 text-right">{formatador(sortedSkus.reduce((sum, r) => sum + (r.val_real || 0), 0))}</td>
+                  <td className="px-3 py-4 text-right bg-slate-950/20 text-slate-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.gap_ia || 0), 0))}</td>
+                  <td className="px-3 py-4 text-right bg-slate-950/20 text-slate-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.gap_humano || 0), 0))}</td>
+                  <td colSpan={2} className="px-3 py-4 bg-slate-950/40 text-right text-slate-500 text-[10px]">Gap Consolidado</td>
+                </tr>
+               </tfoot>
+              </table>
+           </div>
         )}
       </div>
     </div>
