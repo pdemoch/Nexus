@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { 
   ShoppingCart, TrendingUp, TrendingDown, Factory, Target, Activity, 
-  Search, RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, DollarSign, Users, Download
+  Search, RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, DollarSign, Users, Download, Calendar, Clock
 } from 'lucide-react';
 import { ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, LineChart, Line, ReferenceLine, ComposedChart, Bar, Legend } from 'recharts';
 
@@ -78,7 +78,7 @@ const SortableHeader = ({ field, label, currentSort, requestSort, className = "t
 }
 
 // --- DRILL-DOWN CLIENTES (USADO NA ABA DESVIOS MTD) ---
-const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => {
+const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador, dataSnapshot }: any) => {
   const [expandido, setExpandido] = useState(false);
   const [clientes, setClientes] = useState<any[]>([]);
   const [carregando, setCarregando] = useState(false);
@@ -87,7 +87,7 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
     if (expandido) { setExpandido(false); return; }
     setCarregando(true); setExpandido(true);
     try {
-      const params = new URLSearchParams({ visao });
+      const params = new URLSearchParams({ visao, data_snapshot: dataSnapshot });
       mesesSelecionados.forEach((m: string) => params.append('meses_horizonte', m));
       const res = await axios.get(`/api/v1/kpis/torre-controle/clientes/${row.sku}?${params.toString()}`);
       setClientes(res.data);
@@ -126,7 +126,7 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                 <div className="bg-slate-950 p-3 rounded-lg border border-rose-900/50">
                   <h4 className="text-[10px] font-black uppercase tracking-widest text-rose-400 mb-2 flex items-center gap-2"><TrendingDown className="w-3 h-3"/> Alerta: Inadimplência de Meta</h4>
-                  <div className="max-h-48 overflow-y-auto pr-2 space-y-1">
+                  <div className="max-h-48 overflow-y-auto pr-2 space-y-1 custom-scrollbar">
                     {clientes.filter(c => c.gap_humano > 0).map(c => (
                       <div key={c.cgc} className="flex justify-between items-center bg-slate-900 p-2 rounded border border-slate-800 text-xs">
                          <div className="truncate pr-4"><span className="font-bold text-slate-300 block truncate">{c.razaosocial}</span><span className="text-[9px] text-slate-500 font-mono block">{c.cgc}</span></div>
@@ -140,7 +140,7 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
                 </div>
                 <div className="bg-slate-950 p-3 rounded-lg border border-emerald-900/50">
                   <h4 className="text-[10px] font-black uppercase tracking-widest text-emerald-400 mb-2 flex items-center gap-2"><AlertTriangle className="w-3 h-3"/> Alerta: Over-Forecast</h4>
-                  <div className="max-h-48 overflow-y-auto pr-2 space-y-1">
+                  <div className="max-h-48 overflow-y-auto pr-2 space-y-1 custom-scrollbar">
                     {clientes.filter(c => c.gap_humano < 0).map(c => (
                       <div key={c.cgc} className="flex justify-between items-center bg-slate-900 p-2 rounded border border-slate-800 text-xs">
                          <div className="truncate pr-4"><span className="font-bold text-slate-300 block truncate">{c.razaosocial}</span><span className="text-[9px] text-slate-500 font-mono block">{c.cgc}</span></div>
@@ -162,18 +162,16 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
 };
 
 // --- DRILL-DOWN EXCLUSIVO PARA RISCOS DE ESTOQUE (ACCOUNT-BASED S&OP) ---
-const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => {
+const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador, dataSnapshot }: any) => {
   const [expandido, setExpandido] = useState(false);
   const [clientes, setClientes] = useState<any[]>([]);
   const [carregando, setCarregando] = useState(false);
 
-  // Ação Dinâmica
   let acao = { text: "🟢 COBERTO", cor: "text-emerald-400 bg-emerald-950/30 border border-emerald-900/50" };
   
   if (row.__risco_falta > 0) {
     acao = { text: `🔴 PRODUZIR: +${formatador(row.__risco_falta)}`, cor: "text-rose-400 bg-rose-950/30 font-black animate-pulse shadow-rose-900/50 shadow-md border-rose-500/50 border" };
   } else if (row.__sobra > row.__projecao * 0.5) { 
-    // Alerta se tiver mais de 50% de sobra do que a projeção do mês
     acao = { text: `🟡 R. SOBRA: ${formatador(row.__sobra)}`, cor: "text-amber-400 bg-amber-950/30 border border-amber-900/50" };
   }
 
@@ -182,7 +180,7 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) =
     if (!expandido && clientes.length === 0) {
       setCarregando(true);
       try {
-        const params = new URLSearchParams();
+        const params = new URLSearchParams({ data_snapshot: dataSnapshot });
         mesesSelecionados.forEach((m: string) => params.append('meses_horizonte', m));
         const res = await axios.get(`/api/v1/kpis/riscos-estoque/drilldown-clientes/${row.sku}?${params.toString()}`);
         setClientes(res.data);
@@ -190,7 +188,6 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) =
     }
   };
 
-  // Helper para mostrar Caixas ou Reais na tabela de clientes
   const formatFinV2 = (val: number) => visao === 'caixas' ? formatVol(val) : formatFin(val * (row.pmv || 0));
 
   return (
@@ -242,9 +239,9 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) =
                 ) : clientes.length === 0 ? (
                    <div className="text-xs text-slate-600">Nenhum cliente qualificado (Frequência Mínima 4/6) com demanda pendente.</div>
                 ) : (
-                   <div className="border border-slate-800 rounded-lg">
+                   <div className="max-h-64 overflow-y-auto border border-slate-800 rounded-lg custom-scrollbar">
                       <table className="w-full text-left text-xs whitespace-nowrap">
-                         <thead className="bg-slate-900 text-[9px] text-slate-500 uppercase">
+                         <thead className="bg-slate-900 text-[9px] text-slate-500 uppercase sticky top-0 z-10">
                             <tr>
                                <th className="px-4 py-2 border-b border-slate-800">Regional</th>
                                <th className="px-4 py-2 border-b border-slate-800">Razão Social</th>
@@ -293,7 +290,9 @@ export default function AuditoriaArena() {
   const [clienteSel, setClienteSel] = useState('Todos');
   const [buscaSku, setBuscaSku] = useState('');
   
-  // Dicionários para o Filtro Dinâmico em Cascata
+  // 🔥 NOVO: Máquina do Tempo (Snapshot)
+  const [dataSnapshot, setDataSnapshot] = useState<string>(new Date().toISOString().slice(0, 10));
+  
   const [paresCatSeg, setParesCatSeg] = useState<any[]>([]);
   const [listaClientes, setListaClientes] = useState<string[]>([]);
 
@@ -314,11 +313,9 @@ export default function AuditoriaArena() {
         setListaClientes(res.data.clientes || []);
         setMesesDisponiveis(res.data.meses_disponiveis || []);
         
-        // CORREÇÃO: Força a seleção sempre no Mês Atual
         if (res.data.meses_disponiveis?.length > 0) {
           const dataAtual = new Date();
           const mesAtualStr = `${String(dataAtual.getMonth() + 1).padStart(2, '0')}/${dataAtual.getFullYear()}`;
-          
           if (res.data.meses_disponiveis.includes(mesAtualStr)) {
             setMesesSelecionados([mesAtualStr]);
           } else {
@@ -330,7 +327,6 @@ export default function AuditoriaArena() {
     fetchFiltros();
   }, [lente]);
 
-  // LÓGICA DE FILTRO EM CASCATA INSTANTÂNEA NO FRONTEND
   const categoriasExibidas = useMemo(() => {
       if (segmentoSel === 'Todos') return Array.from(new Set(paresCatSeg.map(f => f.categoria))).sort();
       return Array.from(new Set(paresCatSeg.filter(f => f.segmento === segmentoSel).map(f => f.categoria))).sort();
@@ -349,6 +345,7 @@ export default function AuditoriaArena() {
       params.append('categoria', categoriaSel);
       params.append('segmento', segmentoSel);
       params.append('razaosocial', clienteSel);
+      params.append('data_snapshot', dataSnapshot); // O backend lerá isso em breve para buscar o parquet!
 
       if (lente === 'kpis') {
         params.append('visao', visao);
@@ -363,8 +360,6 @@ export default function AuditoriaArena() {
         const res = await axios.get(`/api/v1/kpis/riscos-estoque?${params.toString()}`);
         setSkus(res.data.estoque_sku || []); 
         setKpisGerais(res.data.kpis_globais || {});
-        
-        // Sort Inicial
         setSortConfig({ key: '__risco_falta', direction: 'desc' });
       }
       else {
@@ -378,15 +373,17 @@ export default function AuditoriaArena() {
     } catch (err) {} finally { setCarregando(false); }
   };
 
-  useEffect(() => { carregarDadosCore(); }, [lente, visao, categoriaSel, segmentoSel, clienteSel, mesesSelecionados]);
+  useEffect(() => { carregarDadosCore(); }, [lente, visao, categoriaSel, segmentoSel, clienteSel, mesesSelecionados, dataSnapshot]);
 
-  const handleSyncStock = async () => {
+  // 🔥 NOVO: Botão Único de Atualização Mestra (Pipeline + Estoque)
+  const handleSyncAll = async () => {
     setIsSyncing(true);
     try {
-      await axios.post('/api/v1/kpis/sync-stock');
+      // Quando fizermos o backend, essa rota acionará a API 90 e o Pipeline.
+      await axios.post('/api/v1/kpis/sync-all');
       await carregarDadosCore();
     } catch (e) {
-      alert("Erro ao sincronizar com ERP GOBI.");
+      alert("Erro ao sincronizar dados. O servidor pode estar ocupado.");
     } finally { setIsSyncing(false); }
   };
 
@@ -396,10 +393,8 @@ export default function AuditoriaArena() {
     setSortConfig({ key, direction });
   };
 
-  // 🔥 ENRIQUECIMENTO (Para que TUDO seja classificável no React, previnindo NaN)
   const enrichedSkus = useMemo(() => {
     if (lente !== 'estoque') return skus;
-    
     return skus.map((row: any) => {
       const meta = visao === 'caixas' ? (row.meta_mes_vol || 0) : (row.meta_mes_rs || 0);
       const pedido = visao === 'caixas' ? (row.vendas_mtd_vol || 0) : (row.vl_pedido || 0);
@@ -438,7 +433,6 @@ export default function AuditoriaArena() {
     return sortable;
   }, [enrichedSkus, skus, sortConfig, buscaSku, lente]);
 
-  // 🔥 FUNÇÃO DE EXPORTAÇÃO CSV 100% DINÂMICA (Estoque, MTRIX e KPIs)
   const handleExportCSV = () => {
     if (!sortedSkus || sortedSkus.length === 0) return;
 
@@ -484,9 +478,7 @@ export default function AuditoriaArena() {
 
     const csvContent = [
       headers.join(";"),
-      ...rows.map(row => row.map((val: any) => 
-        typeof val === 'number' ? val.toString().replace('.', ',') : `"${val || ''}"`
-      ).join(";"))
+      ...rows.map(row => row.map((val: any) => typeof val === 'number' ? val.toString().replace('.', ',') : `"${val || ''}"`).join(";"))
     ].join("\n");
 
     const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -501,7 +493,8 @@ export default function AuditoriaArena() {
 
   return (
     <div className="p-6 bg-slate-950 min-h-screen text-slate-100 font-sans">
-      {/* HEADER PRINCIPAL */}
+      
+      {/* HEADER PRINCIPAL COM BOTÃO ÚNICO DE ATUALIZAÇÃO */}
       <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 bg-slate-900 p-5 rounded-2xl border border-slate-800 mb-6 shadow-xl">
         <div>
           <h1 className="text-2xl font-black text-white tracking-tight flex items-center gap-3">
@@ -511,30 +504,63 @@ export default function AuditoriaArena() {
         </div>
 
         <div className="flex flex-col md:flex-row gap-3 items-center">
-          {lente !== 'kpis' && (
-            <button onClick={handleExportCSV} className="flex items-center px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-black tracking-wider transition-all shadow-lg shadow-emerald-900/20 text-[10px] sm:text-xs uppercase h-full">
-              <Download className="w-4 h-4 mr-2" /> Extrair CSV
-            </button>
-          )}
-
-          {(lente === 'kpis' || lente === 'estoque') && (
-            <div className="flex bg-slate-950 p-1.5 rounded-xl border border-slate-800 shadow-inner h-full">
-              <button onClick={() => setVisao('caixas')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg flex items-center gap-2 ${visao === 'caixas' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}><Package className="w-4 h-4"/> Caixas</button>
-              <button onClick={() => setVisao('financeiro')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg flex items-center gap-2 ${visao === 'financeiro' ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}><DollarSign className="w-4 h-4"/> Reais (R$)</button>
-            </div>
-          )}
           
-          <div className="flex bg-slate-950 p-1.5 rounded-xl border border-slate-800 shadow-inner overflow-x-auto h-full">
-            <button onClick={() => setLente('kpis')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'kpis' ? 'bg-rose-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><Target className="w-4 h-4" /> Desvios MTD</button>
-            <button onClick={() => setLente('estoque')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'estoque' ? 'bg-amber-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><Factory className="w-4 h-4" /> Riscos Estoque</button>
-            <button onClick={() => setLente('sellout')} className={`px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 ${lente === 'sellout' ? 'bg-teal-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}><ShoppingCart className="w-4 h-4" /> Retroativo MTRIX</button>
+          <div className="flex items-center gap-3 bg-slate-950 p-1.5 rounded-xl border border-slate-800 shadow-inner mr-2">
+            <div className="flex flex-col items-end px-3">
+              <span className="text-[9px] font-black uppercase tracking-widest text-slate-500 mb-1">Última Atualização</span>
+              <div className="flex items-center gap-1.5 text-xs font-mono text-emerald-400">
+                <Clock className="w-3 h-3" />
+                {kpisGerais.ultima_atualizacao || 'Ao Vivo'}
+              </div>
+            </div>
+            <div className="h-6 w-px bg-slate-800"></div>
+            <button 
+              onClick={handleSyncAll} 
+              disabled={isSyncing} 
+              className="flex items-center px-4 py-2 bg-slate-800 hover:bg-slate-700 text-sky-400 rounded-lg font-black tracking-wider transition-all text-[10px] uppercase h-full disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 mr-2 ${isSyncing ? 'animate-spin' : ''}`} />
+              {isSyncing ? 'Sincronizando...' : 'Atualizar Dados'}
+            </button>
+          </div>
+
+          <button onClick={handleExportCSV} className="flex items-center px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-black tracking-wider transition-all shadow-lg shadow-emerald-900/20 text-[10px] uppercase">
+            <Download className="w-4 h-4 mr-2" /> Extrair CSV
+          </button>
+
+          <div className="flex bg-slate-950 p-1.5 rounded-xl border border-slate-800 shadow-inner">
+            <button onClick={() => setVisao('caixas')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg flex items-center gap-2 ${visao === 'caixas' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}><Package className="w-4 h-4"/> Caixas</button>
+            <button onClick={() => setVisao('financeiro')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg flex items-center gap-2 ${visao === 'financeiro' ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}><DollarSign className="w-4 h-4"/> Reais</button>
+          </div>
+          
+          <div className="flex bg-slate-950 p-1.5 rounded-xl border border-slate-800 shadow-inner">
+            <button onClick={() => setLente('kpis')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg flex items-center gap-2 ${lente === 'kpis' ? 'bg-rose-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}><Target className="w-4 h-4" /> Desvios MTD</button>
+            <button onClick={() => setLente('estoque')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg flex items-center gap-2 ${lente === 'estoque' ? 'bg-amber-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}><Factory className="w-4 h-4" /> Riscos Estoque</button>
+            <button onClick={() => setLente('sellout')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg flex items-center gap-2 ${lente === 'sellout' ? 'bg-teal-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}><ShoppingCart className="w-4 h-4" /> MTRIX</button>
           </div>
         </div>
       </div>
 
-      {/* FILTROS GLOBAIS */}
+      {/* FILTROS GLOBAIS COM A "MÁQUINA DO TEMPO" NO LUGAR DO HORIZONTE */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
-        {lente !== 'estoque' && <div className="lg:col-span-1"><ExcelTreeDropdown titulo="Horizonte S&OP" options={mesesDisponiveis} selected={mesesSelecionados} onChange={setMesesSelecionados} /></div>}
+        
+        {/* SNAPSHOT DE DATA NO LUGAR DO HORIZONTE QUANDO ESTIVER EM ESTOQUE */}
+        {lente === 'estoque' ? (
+          <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
+            <label className="text-[10px] font-black uppercase tracking-widest text-emerald-500 mb-2 flex items-center gap-2">
+              <Calendar className="w-3 h-3"/> Posição (Snapshot)
+            </label>
+            <input 
+              type="date" 
+              value={dataSnapshot}
+              max={new Date().toISOString().slice(0, 10)}
+              onChange={(e) => setDataSnapshot(e.target.value)} 
+              className="w-full bg-slate-950 border border-slate-800 text-sm p-2 rounded-lg text-emerald-400 font-mono focus:outline-none" 
+            />
+          </div>
+        ) : (
+          <div className="lg:col-span-1"><ExcelTreeDropdown titulo="Horizonte S&OP" options={mesesDisponiveis} selected={mesesSelecionados} onChange={setMesesSelecionados} /></div>
+        )}
         
         <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
           <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2 flex items-center gap-2"><Users className="w-3 h-3"/> Razão Social (Cliente)</label>
@@ -551,16 +577,10 @@ export default function AuditoriaArena() {
           <select value={segmentoSel} onChange={(e) => setSegmentoSel(e.target.value)} className="w-full bg-slate-950 border border-slate-800 text-sm p-2 rounded-lg text-slate-300 focus:outline-none"><option value="Todos">Todos os Segmentos</option>{segmentosExibidos.map((s:any) => <option key={s} value={s}>{s}</option>)}</select>
         </div>
 
-        <div className={`bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md ${lente === 'estoque' ? 'col-span-2' : ''}`}>
+        <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
           <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2 flex justify-between">Pesquisar SKU <span className="text-indigo-400 font-bold">{sortedSkus.length} Itens</span></label>
           <div className="relative"><Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-500" /><input type="text" value={buscaSku} onChange={(e) => setBuscaSku(e.target.value)} placeholder="Código ou nome..." className="w-full bg-slate-950 border border-slate-800 text-sm py-2 pl-9 pr-3 rounded-lg text-slate-300 focus:outline-none" /></div>
         </div>
-        
-        {lente === 'estoque' && (
-          <button onClick={handleSyncStock} disabled={isSyncing} className="col-span-1 h-full bg-slate-800 hover:bg-slate-700 rounded-xl border border-slate-700 text-xs font-black uppercase text-sky-400 flex items-center justify-center gap-2 transition-all">
-            {isSyncing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} Sync ERP (API 90)
-          </button>
-        )}
       </div>
 
       {/* RENDERIZAÇÃO DOS GRÁFICOS */}
@@ -624,8 +644,8 @@ export default function AuditoriaArena() {
         </div>
       ) : null}
 
-      {/* RENDERIZAÇÃO DAS TABELAS (SEM SCROLL INTERNO) */}
-      <div className="bg-slate-900 rounded-2xl border border-slate-800 shadow-2xl flex flex-col overflow-hidden">
+      {/* RENDERIZAÇÃO DAS TABELAS (REMOVIDO OVERFLOW INTERNO - ROLAGEM PELO NAVEGADOR) */}
+      <div className="bg-slate-900 rounded-2xl border border-slate-800 shadow-2xl flex flex-col">
         {carregando ? (
           <div className="p-20 flex justify-center items-center gap-3 text-indigo-400 font-bold uppercase text-xs"><RefreshCw className="w-6 h-6 animate-spin" /> Processando Tabelas...</div>
         ) : lente === 'estoque' ? (
@@ -656,7 +676,7 @@ export default function AuditoriaArena() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 text-xs">
-                {sortedSkus.map((row) => <RowRiscoDrillDown key={row.sku} row={row} visao={visao} mesesSelecionados={mesesSelecionados} formatador={formatador} />)}
+                {sortedSkus.map((row) => <RowRiscoDrillDown key={row.sku} row={row} visao={visao} mesesSelecionados={mesesSelecionados} formatador={formatador} dataSnapshot={dataSnapshot} />)}
               </tbody>
               <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
                 <tr>
@@ -734,7 +754,7 @@ export default function AuditoriaArena() {
                  </tr>
                </thead>
                <tbody className="divide-y divide-slate-800/60 text-xs">
-                 {sortedSkus.map((row) => <RowSKUDrillDown key={row.sku} row={row} visao={visao} mesesSelecionados={mesesSelecionados} formatador={formatador} />)}
+                 {sortedSkus.map((row) => <RowSKUDrillDown key={row.sku} row={row} visao={visao} mesesSelecionados={mesesSelecionados} formatador={formatador} dataSnapshot={dataSnapshot} />)}
                </tbody>
                <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
                 <tr>

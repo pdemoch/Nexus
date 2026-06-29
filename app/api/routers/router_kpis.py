@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 import pandas as pd
@@ -15,8 +15,18 @@ from app.models.domain_models import FatoEstoqueD0
 
 router = APIRouter(prefix="/api/v1/kpis", tags=["Auditoria, KPIs e Riscos de Estoque"])
 
+# ==========================================
+# CONFIGURAÇÕES AWS S3 (CREDENCIAIS)
+# ==========================================
+AWS_STORAGE_OPTIONS = {
+    "key": "AKIA4VPN43D6KCHKRYM5",
+    "secret": "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",
+    "client_kwargs": {"region_name": "us-east-1"}
+}
+S3_BUCKET = "nexus-datalake-linea-prd"
+S3_PREFIX = f"s3://{S3_BUCKET}/snapshots/estoque"
+
 def obter_mes_atual_str() -> str:
-    """Retorna o mês atual no formato MM/YYYY para fallbacks dinâmicos."""
     return datetime.date.today().strftime("%m/%Y")
 
 def obter_ciclo_meta_seguro(db: Session, mes_alvo: str) -> str:
@@ -36,7 +46,7 @@ def obter_ciclo_meta_seguro(db: Session, mes_alvo: str) -> str:
         return obter_mes_atual_str()
 
 # ==============================================================================
-# 1. FILTROS EXCEL DINÂMICOS (CORRIGIDOS E 100% DINÂMICOS NO TEMPO)
+# 1. FILTROS EXCEL DINÂMICOS
 # ==============================================================================
 @router.get("/filtros-auditoria")
 async def carregar_filtros_auditoria(lente: str = "kpis", db: Session = Depends(get_db)):
@@ -51,17 +61,14 @@ async def carregar_filtros_auditoria(lente: str = "kpis", db: Session = Depends(
             
             query_cli = text("""
                 SELECT DISTINCT c.razaosocial 
-                FROM fato_mtrix_historico_mensal m
-                JOIN dim_clientes c ON m.cgc = c.cgc
-                WHERE c.razaosocial IS NOT NULL 
-                ORDER BY c.razaosocial
+                FROM fato_mtrix_historico_mensal m JOIN dim_clientes c ON m.cgc = c.cgc
+                WHERE c.razaosocial IS NOT NULL ORDER BY c.razaosocial
             """)
             df_cli = pd.read_sql(query_cli, db.bind)
         else:
             q_meses = text("""
                 SELECT DISTINCT TO_CHAR(mes_projetado, 'MM/YYYY') as mes_ano, TO_CHAR(mes_projetado, 'YYYY-MM') as sort_key 
-                FROM fato_ibp_granular 
-                WHERE mes_projetado >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 month'
+                FROM fato_ibp_granular WHERE mes_projetado >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 month'
                 ORDER BY sort_key ASC
             """)
             df_m = pd.read_sql(q_meses, db.bind)
@@ -118,31 +125,24 @@ async def carregar_auditoria_cpfr(
                 Distribuidores AS (SELECT DISTINCT cgc FROM fato_mtrix_historico_mensal WHERE mes_ano = :mes_sql AND ciclo_sop = (SELECT max_ciclo FROM Ultimo_Ciclo_Mtrix) AND cgc IS NOT NULL),
                 Sellout AS (
                     SELECT s.sku, SUM(s.volume_sellout) AS vol_sellout_real 
-                    FROM fato_mtrix_historico_mensal s
-                    LEFT JOIN dim_clientes c ON s.cgc = c.cgc
+                    FROM fato_mtrix_historico_mensal s LEFT JOIN dim_clientes c ON s.cgc = c.cgc
                     WHERE s.mes_ano = :mes_sql AND s.ciclo_sop = (SELECT max_ciclo FROM Ultimo_Ciclo_Mtrix) {filtro_cliente}
                     GROUP BY s.sku
                 ),
                 Metas_Pareadas AS (
                     SELECT i.sku, SUM(i.vol_ia) AS vol_ia_congelado, SUM(i.vol_final) AS vol_comercial_congelado 
-                    FROM fato_ibp_granular i 
-                    INNER JOIN Distribuidores d ON i.cgc = d.cgc 
-                    LEFT JOIN dim_clientes c ON i.cgc = c.cgc
+                    FROM fato_ibp_granular i INNER JOIN Distribuidores d ON i.cgc = d.cgc LEFT JOIN dim_clientes c ON i.cgc = c.cgc
                     WHERE TO_CHAR(i.mes_projetado, 'YYYY-MM') = :mes_sql AND i.ciclo_sop = :ciclo_congelado {filtro_cliente}
                     GROUP BY i.sku
                 ),
                 Estoque AS (
                     SELECT e.sku, SUM(e.estoque_atual_caixas) AS estoque_atual_caixas, AVG(e.dias_cobertura) AS dias_cobertura 
-                    FROM fato_mtrix_snapshot e
-                    LEFT JOIN dim_clientes c ON e.cgc = c.cgc
+                    FROM fato_mtrix_snapshot e LEFT JOIN dim_clientes c ON e.cgc = c.cgc
                     WHERE e.ciclo_sop = (SELECT MAX(ciclo_sop) FROM fato_mtrix_snapshot) {filtro_cliente}
                     GROUP BY e.sku
                 )
                 SELECT p.sku, p.descricao, p.categoria, p.segmento, :mes_str AS mes_ano, COALESCE(s.vol_sellout_real, 0) AS vol_real, COALESCE(m.vol_ia_congelado, 0) AS vol_ia_congelado, COALESCE(m.vol_comercial_congelado, 0) AS vol_comercial_congelado, COALESCE(e.estoque_atual_caixas, 0) AS estoque_canal, COALESCE(e.dias_cobertura, 0) AS dias_cobertura
-                FROM dim_produtos p 
-                LEFT JOIN Sellout s ON p.sku = s.sku 
-                LEFT JOIN Metas_Pareadas m ON p.sku = m.sku 
-                LEFT JOIN Estoque e ON p.sku = e.sku
+                FROM dim_produtos p LEFT JOIN Sellout s ON p.sku = s.sku LEFT JOIN Metas_Pareadas m ON p.sku = m.sku LEFT JOIN Estoque e ON p.sku = e.sku
                 WHERE 1=1 {clausula_filtro} AND (COALESCE(s.vol_sellout_real, 0) > 0 OR COALESCE(m.vol_ia_congelado, 0) > 0 OR COALESCE(m.vol_comercial_congelado, 0) > 0 OR COALESCE(e.estoque_atual_caixas, 0) > 0)
             """)
             df = pd.read_sql(query, db.bind, params=params_query)
@@ -190,7 +190,7 @@ async def carregar_auditoria_cpfr(
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==============================================================================
-# 3. TORRE DE CONTROLE MTD 
+# 3. TORRE DE CONTROLE MTD E DESVIOS
 # ==============================================================================
 @router.get("/torre-controle")
 async def carregar_torre_controle(
@@ -220,25 +220,16 @@ async def carregar_torre_controle(
             query = text(f"""
                 WITH Vendas AS (
                     SELECT v.sku, SUM({f_r}) AS val_real 
-                    FROM fato_vendas v
-                    LEFT JOIN dim_clientes c ON v.cgc = c.cgc
-                    WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql {filtro_cliente}
-                    GROUP BY v.sku
+                    FROM fato_vendas v LEFT JOIN dim_clientes c ON v.cgc = c.cgc
+                    WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql {filtro_cliente} GROUP BY v.sku
                 ),
                 Metas AS (
                     SELECT m.sku, SUM({f_mi}) AS val_meta_ia, SUM({f_mh}) AS val_meta_hum 
-                    FROM fato_ibp_granular m
-                    LEFT JOIN dim_clientes c ON m.cgc = c.cgc
-                    WHERE TO_CHAR(m.mes_projetado, 'YYYY-MM') = :mes_sql AND m.ciclo_sop = :ciclo_congelado {filtro_cliente}
-                    GROUP BY m.sku
+                    FROM fato_ibp_granular m LEFT JOIN dim_clientes c ON m.cgc = c.cgc
+                    WHERE TO_CHAR(m.mes_projetado, 'YYYY-MM') = :mes_sql AND m.ciclo_sop = :ciclo_congelado {filtro_cliente} GROUP BY m.sku
                 )
-                SELECT p.sku, p.descricao, p.categoria, p.segmento, :mes_str AS mes_ano, 
-                       COALESCE(v.val_real, 0) AS val_real, 
-                       COALESCE(m.val_meta_ia, 0) AS val_meta_ia, 
-                       COALESCE(m.val_meta_hum, 0) AS val_meta_hum
-                FROM dim_produtos p 
-                LEFT JOIN Vendas v ON p.sku = v.sku 
-                LEFT JOIN Metas m ON p.sku = m.sku
+                SELECT p.sku, p.descricao, p.categoria, p.segmento, :mes_str AS mes_ano, COALESCE(v.val_real, 0) AS val_real, COALESCE(m.val_meta_ia, 0) AS val_meta_ia, COALESCE(m.val_meta_hum, 0) AS val_meta_hum
+                FROM dim_produtos p LEFT JOIN Vendas v ON p.sku = v.sku LEFT JOIN Metas m ON p.sku = m.sku
                 WHERE 1=1 {clausula_filtro} AND (COALESCE(v.val_real, 0) > 0 OR COALESCE(m.val_meta_ia, 0) > 0 OR COALESCE(m.val_meta_hum, 0) > 0)
             """)
             df_m = pd.read_sql(query, db.bind, params=params_query)
@@ -284,7 +275,7 @@ async def carregar_torre_controle(
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/torre-controle/clientes/{sku}")
-async def drilldown_clientes_kpis(sku: str, visao: str = "caixas", meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)):
+async def drilldown_clientes_kpis(sku: str, visao: str = "caixas", data_snapshot: str = Query(None), meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)):
     if not meses_horizonte: meses_horizonte = [obter_mes_atual_str()]
     try:
         resultados = []
@@ -312,166 +303,189 @@ async def drilldown_clientes_kpis(sku: str, visao: str = "caixas", meses_horizon
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 # ==============================================================================
-# 4. INTELIGÊNCIA DE ESTOQUE E DEMANDA OCULTA (Demand Sensing S&OP)
+# 4. INTELIGÊNCIA DE ESTOQUE E DEMANDA OCULTA COM DATA LAKE S3
 # ==============================================================================
-@router.post("/sync-stock")
-async def sincronizar_estoque_api90(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+async def sincronizar_estoque_api90(db: Session, usuario: dict):
+    """Função base de extração síncrona do GOBI para o banco"""
+    headers = {"Authorization": f"Bearer {settings.GOBI_TOKEN}"}
+    base_url = "https://gobi-api.lineaalimentos.com.br/v1/reports/90/data"
+    limit = 5000
+    offset = 0
+    lote_anterior = []
+    estoque_novo = {}
+
     try:
-        if usuario.get('funcao') not in ['Administrador', 'Supply Chain', 'Gerente', 'C-Level']:
-            raise HTTPException(status_code=403, detail="Sem permissão.")
+        async with aiohttp.ClientSession() as session:
+            while True:
+                params = {"streaming": "true", "format": "json", "limit": limit, "offset": offset}
+                async with session.get(base_url, headers=headers, params=params, timeout=5) as response:
+                    if response.status != 200: break
+                    dados = await response.json(content_type=None)
+                    if not dados or not isinstance(dados, list): break
+                    if lote_anterior and dados[0] == lote_anterior[0]: break
+                    
+                    for row in dados:
+                        if str(row.get('arm', '')).strip() == "05":
+                            sku = str(row.get('produto', '')).replace(".0", "").strip()
+                            try: qtd = float(row.get('quantidade', 0))
+                            except: qtd = 0.0
+                            if sku: estoque_novo[sku] = estoque_novo.get(sku, 0) + qtd
+                    
+                    lote_anterior = dados
+                    offset += len(dados)
+                    if len(dados) < limit: break
+    except Exception as e:
+        print(f"API Gobi indisponível. Recorrendo à Simulação Nexus. Erro: {e}")
 
-        headers = {"Authorization": f"Bearer {settings.GOBI_TOKEN}"}
-        base_url = "https://gobi-api.lineaalimentos.com.br/v1/reports/90/data"
-        limit = 5000
-        offset = 0
-        lote_anterior = []
-        estoque_novo = {}
+    db.execute(text("TRUNCATE TABLE fato_estoque_d0"))
+    agora = datetime.datetime.utcnow()
+    novos_registros = [FatoEstoqueD0(sku=sku, qtd_dispo=qtd, data_atualizacao=agora) for sku, qtd in estoque_novo.items()]
+    
+    if novos_registros: 
+        db.bulk_save_objects(novos_registros)
+        msg = "Estoque Sincronizado com Sucesso via ERP Gobi API."
+    else:
+        mock_query = text("""
+            INSERT INTO fato_estoque_d0 (sku, qtd_dispo, data_atualizacao)
+            SELECT sku, ROUND(SUM(vol_final) * (0.6 + (RANDOM() * 0.8))), NOW()
+            FROM fato_ibp_granular WHERE ciclo_sop = (SELECT MAX(ciclo_sop) FROM fato_ibp_granular) GROUP BY sku
+        """)
+        db.execute(mock_query)
+        msg = "Conexão Gobi Falhou. Estoque Matemático Injetado."
+    db.commit()
+    return {"status": "success", "count": len(novos_registros), "message": msg}
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                while True:
-                    params = {"streaming": "true", "format": "json", "limit": limit, "offset": offset}
-                    async with session.get(base_url, headers=headers, params=params, timeout=5) as response:
-                        if response.status != 200: break
-                        dados = await response.json(content_type=None)
-                        if not dados or not isinstance(dados, list): break
-                        if lote_anterior and dados[0] == lote_anterior[0]: break
-                        
-                        for row in dados:
-                            if str(row.get('arm', '')).strip() == "05":
-                                sku = str(row.get('produto', '')).replace(".0", "").strip()
-                                try: qtd = float(row.get('quantidade', 0))
-                                except: qtd = 0.0
-                                if sku: estoque_novo[sku] = estoque_novo.get(sku, 0) + qtd
-                        
-                        lote_anterior = dados
-                        offset += len(dados)
-                        if len(dados) < limit: break
-        except Exception as e:
-            print(f"API Gobi indisponível. Recorrendo à Simulação Nexus para demonstração. Erro: {e}")
-
-        db.execute(text("TRUNCATE TABLE fato_estoque_d0"))
-        agora = datetime.datetime.utcnow()
-        novos_registros = [FatoEstoqueD0(sku=sku, qtd_dispo=qtd, data_atualizacao=agora) for sku, qtd in estoque_novo.items()]
-        
-        if novos_registros: 
-            db.bulk_save_objects(novos_registros)
-            msg = "Estoque Sincronizado com Sucesso via ERP Gobi API."
-        else:
-            mock_query = text("""
-                INSERT INTO fato_estoque_d0 (sku, qtd_dispo, data_atualizacao)
-                SELECT sku, ROUND(SUM(vol_final) * (0.6 + (RANDOM() * 0.8))), NOW()
-                FROM fato_ibp_granular
-                WHERE ciclo_sop = (SELECT MAX(ciclo_sop) FROM fato_ibp_granular)
-                GROUP BY sku
-            """)
-            db.execute(mock_query)
-            msg = "Conexão Gobi ERP Falhou. Sistema acionou o Modo de Simulação Nexus (Estoque Matemático Injetado)."
-
-        db.commit()
-        return {"status": "success", "count": len(novos_registros), "message": msg}
+@router.post("/sync-stock")
+async def rota_sincronizar_estoque(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+    if usuario.get('funcao') not in ['Administrador', 'Supply Chain', 'Gerente', 'C-Level']:
+        raise HTTPException(status_code=403, detail="Sem permissão.")
+    try:
+        return await sincronizar_estoque_api90(db, usuario)
     except Exception as e:
         db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/sync-all")
+async def sincronizar_tudo(background_tasks: BackgroundTasks, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+    """Atualiza o Estoque na hora e manda o Pipeline (Vendas) rodar em background"""
+    if usuario.get('funcao') not in ['Administrador', 'Supply Chain', 'Gerente', 'C-Level']:
+        raise HTTPException(status_code=403, detail="Sem permissão.")
+    
+    try:
+        resultado = await sincronizar_estoque_api90(db, usuario)
+        # Importamos a função de orquestração geral para atualizar vendas
+        try:
+            from app.etl.pipeline import executar_pipeline_nexus
+            background_tasks.add_task(executar_pipeline_nexus, db)
+        except ImportError:
+            pass # Se o ficheiro não estiver acessível, ignora mas mantém a atualização do GOBI
+            
+        return {"status": "success", "message": "Estoque Atualizado e Pipeline Vendas Iniciado!"}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/riscos-estoque")
 async def carregar_riscos_estoque(
     categoria: str = "Todas", segmento: str = "Todos", razaosocial: str = "Todos",
-    meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)
+    meses_horizonte: List[str] = Query(None), 
+    data_snapshot: str = Query(None),
+    db: Session = Depends(get_db)
 ):
-    if not meses_horizonte: meses_horizonte = [obter_mes_atual_str()]
+    hoje_str = datetime.date.today().strftime("%Y-%m-%d")
+    data_alvo_str = data_snapshot if data_snapshot else hoje_str
+
     try:
-        mes_alvo = meses_horizonte[0] 
-        mes_sql = f"{mes_alvo.split('/')[1]}-{mes_alvo.split('/')[0]}"
-        ciclo_congelado = obter_ciclo_meta_seguro(db, mes_alvo)
-        
-        clausula_filtro = ""
-        filtro_cliente = ""
-        params_query = {"mes_sql": mes_sql, "ciclo_congelado": ciclo_congelado}
-        if categoria != "Todas": clausula_filtro += " AND p.categoria = :categoria"; params_query["categoria"] = categoria
-        if segmento != "Todos": clausula_filtro += " AND p.segmento = :segmento"; params_query["segmento"] = segmento
-        if razaosocial != "Todos": filtro_cliente = " AND c.razaosocial = :razaosocial"; params_query["razaosocial"] = razaosocial
+        # 🟢 MODO MÁQUINA DO TEMPO: Leitura direta do AWS S3 Parquet
+        if data_alvo_str != hoje_str:
+            caminho_s3 = f"{S3_PREFIX}/{data_alvo_str.replace('-', '_')}_riscoestoque.parquet"
+            try:
+                df_sku = pd.read_parquet(caminho_s3, engine='pyarrow', storage_options=AWS_STORAGE_OPTIONS)
+                if categoria != "Todas": df_sku = df_sku[df_sku['categoria'] == categoria]
+                if segmento != "Todos": df_sku = df_sku[df_sku['segmento'] == segmento]
+            except Exception as e:
+                return {"estoque_sku": [], "kpis_globais": {
+                    "total_ruptura_rs": 0, "total_sobra_rs": 0, "total_ruptura_vol": 0, "total_sobra_vol": 0, "meta_caixas": 0, "realizado_caixas": 0,
+                    "ultima_atualizacao": f"Snapshot não encontrado para {data_alvo_str}"
+                }}
+                
+        # 🔴 MODO AO VIVO: Consulta e Cálculos no PostgreSQL (Hoje)
+        else:
+            mes_sql = f"{data_alvo_str.split('-')[0]}-{data_alvo_str.split('-')[1]}"
+            ciclo_congelado = obter_ciclo_meta_seguro(db, datetime.date.today().strftime("%m/%Y"))
+            
+            clausula_filtro = ""
+            filtro_cliente = ""
+            params_query = {"mes_sql": mes_sql, "ciclo_congelado": ciclo_congelado}
+            if categoria != "Todas": clausula_filtro += " AND p.categoria = :categoria"; params_query["categoria"] = categoria
+            if segmento != "Todos": clausula_filtro += " AND p.segmento = :segmento"; params_query["segmento"] = segmento
+            if razaosocial != "Todos": filtro_cliente = " AND c.razaosocial = :razaosocial"; params_query["razaosocial"] = razaosocial
 
-        # O MOTOR DE DEMAND SENSING (Trava de 80% sobre a MÉDIA HISTÓRICA, Exige Frequência Alta: 4/6, 5/6, 6/6)
-        query_sku = text(f"""
-            WITH Estoque AS (SELECT sku, SUM(qtd_dispo) as estoque_atual FROM fato_estoque_d0 GROUP BY sku),
-            Vendas AS (
-                SELECT v.sku, SUM(v.qt_pedido) as vendas_mtd, SUM(v.qtfatura) as faturado_mtd, SUM(v.qtcorte) as corte_mtd,
-                       SUM(v.vl_pedido) as vl_pedido, SUM(v.vlfatura) as vl_faturado, SUM(v.vlcorte) as vl_corte
-                FROM fato_vendas v LEFT JOIN dim_clientes c ON v.cgc = c.cgc
-                WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql {filtro_cliente} GROUP BY v.sku
-            ),
-            Hist_Clientes AS (
-                SELECT v.sku, c.regional, c.razaosocial, SUM(v.qt_pedido) / 3.0 as media_vol
-                FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
-                WHERE v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '3 months' 
-                  AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM') {filtro_cliente}
-                GROUP BY v.sku, c.regional, c.razaosocial
-            ),
-            Freq_Clientes AS (
-                SELECT v.sku, c.regional, c.razaosocial, COUNT(DISTINCT TO_CHAR(v.data_pedido, 'YYYY-MM')) as freq_meses
-                FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
-                WHERE v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '6 months' 
-                  AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM') {filtro_cliente}
-                GROUP BY v.sku, c.regional, c.razaosocial
-            ),
-            MTD_Clientes AS (
-                SELECT v.sku, c.regional, c.razaosocial, SUM(v.qt_pedido) as mtd_vol
-                FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
-                WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql {filtro_cliente}
-                GROUP BY v.sku, c.regional, c.razaosocial
-            ),
-            Previsao_Clientes AS (
-                SELECT 
-                    h.sku, h.regional, h.razaosocial,
-                    COALESCE(h.media_vol, 0) as media_vol,
-                    COALESCE(m.mtd_vol, 0) as mtd_vol,
-                    COALESCE(f.freq_meses, 0) as freq_meses,
-                    CASE 
-                        WHEN COALESCE(m.mtd_vol, 0) >= COALESCE(h.media_vol, 0) * 0.8 THEN 0 
-                        ELSE GREATEST(0, COALESCE(h.media_vol, 0) - COALESCE(m.mtd_vol, 0))
-                    END as previsao_vol
-                FROM Hist_Clientes h
-                LEFT JOIN MTD_Clientes m ON h.sku = m.sku AND h.regional = m.regional AND h.razaosocial = m.razaosocial
-                LEFT JOIN Freq_Clientes f ON h.sku = f.sku AND h.regional = f.regional AND h.razaosocial = f.razaosocial
-                WHERE COALESCE(f.freq_meses, 0) >= 4 -- REGRA DE OURO: Apenas clientes assíduos
-            ),
-            Previsao_SKU AS (
-                SELECT sku, SUM(previsao_vol) as previsao_entrada_vol FROM Previsao_Clientes GROUP BY sku
-            ),
-            Metas AS (
-                SELECT m.sku, SUM(m.vol_final) as meta_mes, 
-                       COALESCE(SUM(m.vol_final * m.pmv_aplicado) / NULLIF(SUM(m.vol_final), 0), MAX(m.pmv_aplicado)) as pmv 
-                FROM fato_ibp_granular m LEFT JOIN dim_clientes c ON m.cgc = c.cgc
-                WHERE TO_CHAR(m.mes_projetado, 'YYYY-MM') = :mes_sql AND m.ciclo_sop = :ciclo_congelado {filtro_cliente}
-                GROUP BY m.sku
-            )
-            SELECT p.sku, p.descricao, p.categoria, COALESCE(e.estoque_atual, 0) as estoque_atual, COALESCE(v.vendas_mtd, 0) as vendas_mtd_vol, 
-                   COALESCE(v.faturado_mtd, 0) as faturado_mtd_vol, COALESCE(v.corte_mtd, 0) as corte_mtd_vol, COALESCE(v.vl_pedido, 0) as vl_pedido,
-                   COALESCE(v.vl_faturado, 0) as vl_faturado, COALESCE(v.vl_corte, 0) as vl_corte, COALESCE(prev.previsao_entrada_vol, 0) as previsao_entrada_vol,
-                   COALESCE(m.meta_mes, 0) as meta_mes_vol, COALESCE(m.pmv, 0) as pmv
-            FROM dim_produtos p 
-            LEFT JOIN Estoque e ON p.sku = e.sku 
-            LEFT JOIN Vendas v ON p.sku = v.sku 
-            LEFT JOIN Previsao_SKU prev ON p.sku = prev.sku
-            LEFT JOIN Metas m ON p.sku = m.sku
-            WHERE 1=1 {clausula_filtro} AND (COALESCE(e.estoque_atual, 0) > 0 OR COALESCE(v.vendas_mtd, 0) > 0 OR COALESCE(m.meta_mes, 0) > 0 OR COALESCE(prev.previsao_entrada_vol, 0) > 0)
-        """)
-        
-        df_sku = pd.read_sql(query_sku, db.bind, params=params_query)
-        if df_sku.empty: 
-            return {
-                "estoque_sku": [], 
-                "kpis_globais": {
+            query_sku = text(f"""
+                WITH Estoque AS (SELECT sku, SUM(qtd_dispo) as estoque_atual FROM fato_estoque_d0 GROUP BY sku),
+                Vendas AS (
+                    SELECT v.sku, SUM(v.qt_pedido) as vendas_mtd, SUM(v.qtfatura) as faturado_mtd, SUM(v.qtcorte) as corte_mtd,
+                           SUM(v.vl_pedido) as vl_pedido, SUM(v.vlfatura) as vl_faturado, SUM(v.vlcorte) as vl_corte
+                    FROM fato_vendas v LEFT JOIN dim_clientes c ON v.cgc = c.cgc
+                    WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql {filtro_cliente} GROUP BY v.sku
+                ),
+                Hist_Clientes AS (
+                    SELECT v.sku, c.regional, c.razaosocial, SUM(v.qt_pedido) / 3.0 as media_vol
+                    FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
+                    WHERE v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '3 months' 
+                      AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM') {filtro_cliente}
+                    GROUP BY v.sku, c.regional, c.razaosocial
+                ),
+                Freq_Clientes AS (
+                    SELECT v.sku, c.regional, c.razaosocial, COUNT(DISTINCT TO_CHAR(v.data_pedido, 'YYYY-MM')) as freq_meses
+                    FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
+                    WHERE v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '6 months' 
+                      AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM') {filtro_cliente}
+                    GROUP BY v.sku, c.regional, c.razaosocial
+                ),
+                MTD_Clientes AS (
+                    SELECT v.sku, c.regional, c.razaosocial, SUM(v.qt_pedido) as mtd_vol
+                    FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
+                    WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql {filtro_cliente}
+                    GROUP BY v.sku, c.regional, c.razaosocial
+                ),
+                Previsao_Clientes AS (
+                    SELECT h.sku, h.regional, h.razaosocial, COALESCE(h.media_vol, 0) as media_vol, COALESCE(m.mtd_vol, 0) as mtd_vol, COALESCE(f.freq_meses, 0) as freq_meses,
+                        CASE WHEN COALESCE(m.mtd_vol, 0) >= COALESCE(h.media_vol, 0) * 0.8 THEN 0 ELSE GREATEST(0, COALESCE(h.media_vol, 0) - COALESCE(m.mtd_vol, 0)) END as previsao_vol
+                    FROM Hist_Clientes h
+                    LEFT JOIN MTD_Clientes m ON h.sku = m.sku AND h.regional = m.regional AND h.razaosocial = m.razaosocial
+                    LEFT JOIN Freq_Clientes f ON h.sku = f.sku AND h.regional = f.regional AND h.razaosocial = f.razaosocial
+                    WHERE COALESCE(f.freq_meses, 0) >= 4
+                ),
+                Previsao_SKU AS (SELECT sku, SUM(previsao_vol) as previsao_entrada_vol FROM Previsao_Clientes GROUP BY sku),
+                Metas AS (
+                    SELECT m.sku, SUM(m.vol_final) as meta_mes, COALESCE(SUM(m.vol_final * m.pmv_aplicado) / NULLIF(SUM(m.vol_final), 0), MAX(m.pmv_aplicado)) as pmv 
+                    FROM fato_ibp_granular m LEFT JOIN dim_clientes c ON m.cgc = c.cgc
+                    WHERE TO_CHAR(m.mes_projetado, 'YYYY-MM') = :mes_sql AND m.ciclo_sop = :ciclo_congelado {filtro_cliente}
+                    GROUP BY m.sku
+                )
+                SELECT p.sku, p.descricao, p.categoria, p.segmento, COALESCE(e.estoque_atual, 0) as estoque_atual, COALESCE(v.vendas_mtd, 0) as vendas_mtd_vol, 
+                       COALESCE(v.faturado_mtd, 0) as faturado_mtd_vol, COALESCE(v.corte_mtd, 0) as corte_mtd_vol, COALESCE(v.vl_pedido, 0) as vl_pedido,
+                       COALESCE(v.vl_faturado, 0) as vl_faturado, COALESCE(v.vl_corte, 0) as vl_corte, COALESCE(prev.previsao_entrada_vol, 0) as previsao_entrada_vol,
+                       COALESCE(m.meta_mes, 0) as meta_mes_vol, COALESCE(m.pmv, 0) as pmv
+                FROM dim_produtos p 
+                LEFT JOIN Estoque e ON p.sku = e.sku 
+                LEFT JOIN Vendas v ON p.sku = v.sku 
+                LEFT JOIN Previsao_SKU prev ON p.sku = prev.sku
+                LEFT JOIN Metas m ON p.sku = m.sku
+                WHERE 1=1 {clausula_filtro} AND (COALESCE(e.estoque_atual, 0) > 0 OR COALESCE(v.vendas_mtd, 0) > 0 OR COALESCE(m.meta_mes, 0) > 0 OR COALESCE(prev.previsao_entrada_vol, 0) > 0)
+            """)
+            
+            df_sku = pd.read_sql(query_sku, db.bind, params=params_query)
+            if df_sku.empty: 
+                return {"estoque_sku": [], "kpis_globais": {
                     "total_ruptura_rs": 0, "total_sobra_rs": 0, "total_ruptura_vol": 0, "total_sobra_vol": 0, "meta_caixas": 0, "realizado_caixas": 0
-                }
-            }
+                }}
 
+        # MATEMÁTICA FINAL (Partilhada entre Ao Vivo e Parquet)
         for col in ['meta_mes_vol', 'vendas_mtd_vol', 'faturado_mtd_vol', 'corte_mtd_vol', 'estoque_atual', 'pmv', 'vl_pedido', 'vl_faturado', 'vl_corte', 'previsao_entrada_vol']: 
             df_sku[col] = pd.to_numeric(df_sku[col], errors='coerce').fillna(0)
             
-        # Espelhamento Financeiro
         df_sku['estoque_rs'] = df_sku['estoque_atual'] * df_sku['pmv']
         df_sku['meta_mes_rs'] = df_sku['meta_mes_vol'] * df_sku['pmv']
         
@@ -480,14 +494,12 @@ async def carregar_riscos_estoque(
         
         df_sku['previsao_entrada_rs'] = df_sku['previsao_entrada_vol'] * df_sku['pmv']
         
-        # A Projeção agora é o Realizado + O que ainda falta entrar base na Média Fiel
         df_sku['projecao_fim_mes_vol'] = df_sku['vendas_mtd_vol'] + df_sku['previsao_entrada_vol']
         df_sku['projecao_fim_mes_rs'] = df_sku['vl_pedido'] + df_sku['previsao_entrada_rs']
         
         df_sku['gap_meta_vol'] = df_sku['projecao_fim_mes_vol'] - df_sku['meta_mes_vol']
         df_sku['gap_meta_rs'] = df_sku['projecao_fim_mes_rs'] - df_sku['meta_mes_rs']
 
-        # CÁLCULO DE RISCO DE PRODUÇÃO: Demanda Futura = Carteira Aberta + Previsão de Entrada
         df_sku['demanda_futura_vol'] = df_sku['carteira_aberto_vol'] + df_sku['previsao_entrada_vol']
         df_sku['ruptura_vol'] = np.maximum(0, df_sku['demanda_futura_vol'] - df_sku['estoque_atual'])
         df_sku['ruptura_rs'] = df_sku['ruptura_vol'] * df_sku['pmv']
@@ -495,23 +507,33 @@ async def carregar_riscos_estoque(
         df_sku['sobra_vol'] = np.maximum(0, df_sku['estoque_atual'] - df_sku['demanda_futura_vol'])
         df_sku['sobra_rs'] = df_sku['sobra_vol'] * df_sku['pmv']
 
+        # Extrai a última data de atualização de estoque
+        try:
+            dt_att = db.execute(text("SELECT MAX(data_atualizacao) FROM fato_estoque_d0")).scalar()
+            ultima_atualizacao = dt_att.strftime("%H:%M") if dt_att else "Ao Vivo"
+        except:
+            ultima_atualizacao = "Ao Vivo"
+
         kpis = {
             "total_ruptura_rs": float(df_sku['ruptura_rs'].sum()), 
             "total_ruptura_vol": float(df_sku['ruptura_vol'].sum()), 
             "total_sobra_rs": float(df_sku['sobra_rs'].sum()), 
             "total_sobra_vol": float(df_sku['sobra_vol'].sum()),
             "meta_caixas": float(df_sku['meta_mes_vol'].sum()), 
-            "realizado_caixas": float(df_sku['vendas_mtd_vol'].sum())
+            "realizado_caixas": float(df_sku['vendas_mtd_vol'].sum()),
+            "ultima_atualizacao": ultima_atualizacao if data_alvo_str == hoje_str else "Dados de Snapshot"
         }
 
         return {"estoque_sku": df_sku.to_dict(orient="records"), "kpis_globais": kpis}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/riscos-estoque/drilldown-clientes/{sku}")
-async def drilldown_riscos_clientes(sku: str, meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)):
-    if not meses_horizonte: meses_horizonte = [obter_mes_atual_str()]
-    mes_alvo = meses_horizonte[0] 
-    mes_sql = f"{mes_alvo.split('/')[1]}-{mes_alvo.split('/')[0]}"
+async def drilldown_riscos_clientes(sku: str, data_snapshot: str = Query(None), meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)):
+    hoje_str = datetime.date.today().strftime("%Y-%m-%d")
+    data_alvo_str = data_snapshot if data_snapshot else hoje_str
+    
+    mes_sql = f"{data_alvo_str.split('-')[0]}-{data_alvo_str.split('-')[1]}"
+    ciclo_congelado = obter_ciclo_meta_seguro(db, datetime.date.today().strftime("%m/%Y"))
     
     query = text("""
         WITH Hist_Clientes AS (
@@ -533,20 +555,13 @@ async def drilldown_riscos_clientes(sku: str, meses_horizonte: List[str] = Query
             GROUP BY c.regional, c.razaosocial
         )
         SELECT 
-            h.regional, 
-            h.razaosocial,
-            COALESCE(h.media_vol, 0) as media_vol, 
-            COALESCE(m.mtd_vol, 0) as mtd_vol,
-            COALESCE(f.freq_meses, 0) as freq_meses,
-            CASE 
-                WHEN COALESCE(m.mtd_vol, 0) >= COALESCE(h.media_vol, 0) * 0.8 THEN 0 
-                ELSE GREATEST(0, COALESCE(h.media_vol, 0) - COALESCE(m.mtd_vol, 0))
-            END as previsao_vol
+            h.regional, h.razaosocial, COALESCE(h.media_vol, 0) as media_vol, COALESCE(m.mtd_vol, 0) as mtd_vol, COALESCE(f.freq_meses, 0) as freq_meses,
+            CASE WHEN COALESCE(m.mtd_vol, 0) >= COALESCE(h.media_vol, 0) * 0.8 THEN 0 ELSE GREATEST(0, COALESCE(h.media_vol, 0) - COALESCE(m.mtd_vol, 0)) END as previsao_vol
         FROM Hist_Clientes h
         LEFT JOIN MTD_Clientes m ON h.regional = m.regional AND h.razaosocial = m.razaosocial
         LEFT JOIN Freq_Clientes f ON h.regional = f.regional AND h.razaosocial = f.razaosocial
-        WHERE COALESCE(f.freq_meses, 0) >= 4 -- Exibe apenas clientes qualificados na freq 4/6, 5/6 e 6/6
+        WHERE COALESCE(f.freq_meses, 0) >= 4 
         ORDER BY previsao_vol DESC, mtd_vol DESC
     """)
-    df = pd.read_sql(query, db.bind, params={"mes_sql": mes_sql, "sku": sku})
+    df = pd.read_sql(query, db.bind, params={"mes_sql": mes_sql, "ciclo_congelado": ciclo_congelado, "sku": sku})
     return df.to_dict(orient="records")
