@@ -310,8 +310,6 @@ export default function AuditoriaArena() {
   // ESTADOS DO PIPELINE AO VIVO
   const [isSyncing, setIsSyncing] = useState(false);
   const [pipelineLog, setPipelineLog] = useState<string>('');
-  
-  // Tipagem corrigida para evitar erro NodeJS.Timeout
   const pollInterval = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [sortConfig, setSortConfig] = useState({ key: '__risco_falta', direction: 'desc' });
@@ -327,8 +325,7 @@ export default function AuditoriaArena() {
         setMesesDisponiveis(res.data.meses_disponiveis || []);
         
         if (res.data.meses_disponiveis?.length > 0) {
-          const dataAtual = new Date();
-          const mesAtualStr = `${String(dataAtual.getMonth() + 1).padStart(2, '0')}/${dataAtual.getFullYear()}`;
+          const mesAtualStr = `${String(new Date().getMonth() + 1).padStart(2, '0')}/${new Date().getFullYear()}`;
           if (res.data.meses_disponiveis.includes(mesAtualStr)) {
             setMesesSelecionados([mesAtualStr]);
           } else {
@@ -388,18 +385,23 @@ export default function AuditoriaArena() {
 
   useEffect(() => { carregarDadosCore(); }, [lente, visao, categoriaSel, segmentoSel, clienteSel, mesesSelecionados, dataSnapshot]);
 
-  // 🔥 MONITORAMENTO DO PIPELINE AO VIVO (POLLING)
+  // 🔥 MONITORAMENTO DO PIPELINE AO VIVO (POLLING COM TRAVA RIGOROSA)
   const monitorarPipeline = () => {
     if (pollInterval.current) clearInterval(pollInterval.current);
     
+    let contagemCiclos = 0;
+
     pollInterval.current = setInterval(async () => {
+      contagemCiclos++;
       try {
         const res = await axios.get('/api/v1/admin/pipeline/status');
         if (res.data.logs && res.data.logs.length > 0) {
           setPipelineLog(res.data.logs[res.data.logs.length - 1]); 
         }
         
-        if (!res.data.is_running) {
+        // Apenas permite desbloquear a tela se o backend confirmar que não está a rodar,
+        // mas APENAS após passar 3 ciclos (6 segundos) para dar tempo à rotina de ligar.
+        if (!res.data.is_running && contagemCiclos > 3) {
           if (pollInterval.current) clearInterval(pollInterval.current);
           setIsSyncing(false);
           setPipelineLog('');
@@ -596,12 +598,14 @@ export default function AuditoriaArena() {
             <label className="text-[10px] font-black uppercase tracking-widest text-emerald-500 mb-2 flex items-center gap-2">
               <Calendar className="w-3 h-3"/> Posição (Snapshot)
             </label>
+            {/* O style={{ colorScheme: 'dark' }} força o ícone do calendário a aparecer visível no Chrome/Edge */}
             <input 
               type="date" 
               value={dataSnapshot}
               max={getBrazilDate()} 
               onChange={(e) => setDataSnapshot(e.target.value)} 
               className="w-full bg-slate-950 border border-slate-800 text-sm p-2 rounded-lg text-emerald-400 font-mono focus:outline-none" 
+              style={{ colorScheme: 'dark' }}
             />
           </div>
         ) : (
@@ -690,7 +694,7 @@ export default function AuditoriaArena() {
         </div>
       ) : null}
 
-      {/* RENDERIZAÇÃO DAS TABELAS (SEM SCROLL INTERNO, ROLAGEM DEIXADA PARA O NAVEGADOR E ACOMPANHA FUNDO) */}
+      {/* RENDERIZAÇÃO DAS TABELAS */}
       <div className="w-full bg-slate-900 rounded-2xl border border-slate-800 shadow-2xl flex flex-col overflow-hidden">
         {carregando ? (
           <div className="p-20 flex justify-center items-center gap-3 text-indigo-400 font-bold uppercase text-xs"><RefreshCw className="w-6 h-6 animate-spin" /> Processando Tabelas...</div>

@@ -27,9 +27,11 @@ S3_BUCKET = "nexus-datalake-linea-prd"
 S3_PREFIX = f"s3://{S3_BUCKET}/snapshots/estoque"
 
 def obter_mes_atual_str() -> str:
+    """Retorna o mês atual no formato MM/YYYY para fallbacks dinâmicos."""
     return datetime.date.today().strftime("%m/%Y")
 
 def obter_ciclo_meta_seguro(db: Session, mes_alvo: str) -> str:
+    """Retorna o ciclo de S&OP correspondente de forma segura."""
     try:
         mes, ano = mes_alvo.split('/')
         dt_alvo = datetime.date(int(ano), int(mes), 1)
@@ -373,10 +375,10 @@ async def sincronizar_tudo(background_tasks: BackgroundTasks, db: Session = Depe
     
     try:
         resultado = await sincronizar_estoque_api90(db, usuario)
-        # Importamos a função de orquestração geral para atualizar vendas
+        
+        # Inicia a orquestração geral em background (Atenção: sem passar db)
         try:
             from app.etl.pipeline import executar_pipeline_nexus
-            # CORREÇÃO AQUI: Removido o 'db', pois a função não exige parâmetros
             background_tasks.add_task(executar_pipeline_nexus)
         except ImportError:
             pass # Se o ficheiro não estiver acessível, ignora mas mantém a atualização do GOBI
@@ -508,10 +510,14 @@ async def carregar_riscos_estoque(
         df_sku['sobra_vol'] = np.maximum(0, df_sku['estoque_atual'] - df_sku['demanda_futura_vol'])
         df_sku['sobra_rs'] = df_sku['sobra_vol'] * df_sku['pmv']
 
-        # Extrai a última data de atualização de estoque
+        # Extrai a última data de atualização de estoque (Ajustado para Fuso de Brasília UTC-3)
         try:
             dt_att = db.execute(text("SELECT MAX(data_atualizacao) FROM fato_estoque_d0")).scalar()
-            ultima_atualizacao = dt_att.strftime("%H:%M") if dt_att else "Ao Vivo"
+            if dt_att:
+                dt_brasilia = dt_att - datetime.timedelta(hours=3)
+                ultima_atualizacao = dt_brasilia.strftime("%H:%M")
+            else:
+                ultima_atualizacao = "Ao Vivo"
         except:
             ultima_atualizacao = "Ao Vivo"
 
