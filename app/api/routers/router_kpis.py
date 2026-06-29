@@ -9,6 +9,7 @@ from typing import List, Optional
 import aiohttp
 
 from app.core.database import get_db
+from app.core.state import AppState
 from app.api.routers.router_auth import get_current_user
 from app.core.config import settings
 from app.models.domain_models import FatoEstoqueD0
@@ -196,7 +197,7 @@ async def carregar_auditoria_cpfr(
 # ==============================================================================
 @router.get("/torre-controle")
 async def carregar_torre_controle(
-    visao: str = "caixas", categoria: str = "Todas", segmento: str = "Todos", razaosocial: str = "Todos",
+    visao: str = "caixas", categoria: str = "Todas", segmento: str = "Tomados", razaosocial: str = "Todos",
     meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)
 ):
     if not meses_horizonte: meses_horizonte = [obter_mes_atual_str()]
@@ -337,7 +338,7 @@ async def sincronizar_estoque_api90(db: Session, usuario: dict):
                     offset += len(dados)
                     if len(dados) < limit: break
     except Exception as e:
-        print(f"API Gobi indisponível. Recorrendo à Simulação Nexus. Erro: {e}")
+        print(f"API Gobi Inacessível. Pulando injeção em tempo real: {e}")
 
     db.execute(text("TRUNCATE TABLE fato_estoque_d0"))
     agora = datetime.datetime.utcnow()
@@ -349,7 +350,7 @@ async def sincronizar_estoque_api90(db: Session, usuario: dict):
     else:
         mock_query = text("""
             INSERT INTO fato_estoque_d0 (sku, qtd_dispo, data_atualizacao)
-            SELECT sku, ROUND(SUM(vol_final) * (0.6 + (RANDOM() * 0.8))), NOW()
+            SELECT sku, ROUND(SUM(vol_final) * (0.6 + (RANDOM() * 0.6))), NOW()
             FROM fato_ibp_granular WHERE ciclo_sop = (SELECT MAX(ciclo_sop) FROM fato_ibp_granular) GROUP BY sku
         """)
         db.execute(mock_query)
@@ -374,19 +375,25 @@ async def sincronizar_tudo(background_tasks: BackgroundTasks, db: Session = Depe
         raise HTTPException(status_code=403, detail="Sem permissão.")
     
     try:
-        resultado = await sincronizar_estoque_api90(db, usuario)
+        # 🔥 BLINDAGEM CONTRA TRANCAMENTO PRECOCE E DOUBLE CLICK
+        # Seta as flags globais imediatamente no ato do clique para travar o Frontend
+        AppState.pipeline_rodando = True
+        AppState.logs = ["[SYSTEM] Sincronização Mestra acionada pelo painel de auditoria...", "[EXTRACT] Atualizando base quente do ERP Gobi (API 90)..."]
         
-        # Inicia a orquestração geral em background (Atenção: sem passar db)
+        # Sincroniza o estoque físico de forma síncrona
+        await sincronizar_estoque_api90(db, usuario)
+        
+        # Adiciona o pipeline pesado para rodar em segundo plano
         try:
             from app.etl.pipeline import executar_pipeline_nexus
             background_tasks.add_task(executar_pipeline_nexus)
         except ImportError:
-            pass # Se o ficheiro não estiver acessível, ignora mas mantém a atualização do GOBI
+            AppState.pipeline_rodando = False # Fallback de proteção
             
-        return {"status": "success", "message": "Estoque Atualizado e Pipeline Vendas Iniciado!"}
+        return {"status": "success", "message": "Estoque atualizado na base. Pipeline de vendas disparado."}
     except Exception as e:
+        AppState.pipeline_rodando = False
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.get("/riscos-estoque")
 async def carregar_riscos_estoque(
@@ -409,7 +416,7 @@ async def carregar_riscos_estoque(
             except Exception as e:
                 return {"estoque_sku": [], "kpis_globais": {
                     "total_ruptura_rs": 0, "total_sobra_rs": 0, "total_ruptura_vol": 0, "total_sobra_vol": 0, "meta_caixas": 0, "realizado_caixas": 0,
-                    "ultima_atualizacao": f"Snapshot não encontrado para {data_alvo_str}"
+                    "ultima_atualizacao": f"Snapshot não encontrado"
                 }}
                 
         # 🔴 MODO AO VIVO: Consulta e Cálculos no PostgreSQL (Hoje)
@@ -454,7 +461,7 @@ async def carregar_riscos_estoque(
                 ),
                 Previsao_Clientes AS (
                     SELECT h.sku, h.regional, h.razaosocial, COALESCE(h.media_vol, 0) as media_vol, COALESCE(m.mtd_vol, 0) as mtd_vol, COALESCE(f.freq_meses, 0) as freq_meses,
-                        CASE WHEN COALESCE(m.mtd_vol, 0) >= COALESCE(h.media_vol, 0) * 0.8 THEN 0 ELSE GREATEST(0, COALESCE(h.media_vol, 0) - COALESCE(m.mtd_vol, 0)) END as previsao_vol
+                        CASE WHEN COALESCE(m.mtd_vol, 0) >= COALESCE(h.media_vol, 0) * 0.6 THEN 0 ELSE GREATEST(0, COALESCE(h.media_vol, 0) - COALESCE(m.mtd_vol, 0)) END as previsao_vol
                     FROM Hist_Clientes h
                     LEFT JOIN MTD_Clientes m ON h.sku = m.sku AND h.regional = m.regional AND h.razaosocial = m.razaosocial
                     LEFT JOIN Freq_Clientes f ON h.sku = f.sku AND h.regional = f.regional AND h.razaosocial = f.razaosocial
@@ -562,8 +569,15 @@ async def drilldown_riscos_clientes(sku: str, data_snapshot: str = Query(None), 
             GROUP BY c.regional, c.razaosocial
         )
         SELECT 
-            h.regional, h.razaosocial, COALESCE(h.media_vol, 0) as media_vol, COALESCE(m.mtd_vol, 0) as mtd_vol, COALESCE(f.freq_meses, 0) as freq_meses,
-            CASE WHEN COALESCE(m.mtd_vol, 0) >= COALESCE(h.media_vol, 0) * 0.8 THEN 0 ELSE GREATEST(0, COALESCE(h.media_vol, 0) - COALESCE(m.mtd_vol, 0)) END as previsao_vol
+            h.regional, 
+            h.razaosocial, 
+            COALESCE(h.media_vol, 0) as media_vol, 
+            COALESCE(m.mtd_vol, 0) as mtd_vol, 
+            COALESCE(f.freq_meses, 0) as freq_meses,
+            CASE 
+                WHEN COALESCE(m.mtd_vol, 0) >= COALESCE(h.media_vol, 0) * 0.6 THEN 0 
+                ELSE GREATEST(0, COALESCE(h.media_vol, 0) - COALESCE(m.mtd_vol, 0)) 
+            END as previsao_vol
         FROM Hist_Clientes h
         LEFT JOIN MTD_Clientes m ON h.regional = m.regional AND h.razaosocial = m.razaosocial
         LEFT JOIN Freq_Clientes f ON h.regional = f.regional AND h.razaosocial = f.razaosocial

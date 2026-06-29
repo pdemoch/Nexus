@@ -11,11 +11,11 @@ const formatFin = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'cu
 const formatVol = (val: number) => Math.round(val || 0).toLocaleString('pt-BR');
 const formatPct = (val: number) => new Intl.NumberFormat('pt-BR', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(val || 0);
 
-// Força a data de hoje para o fuso horário de Brasília (UTC-3)
-const getBrazilDate = () => {
+// Captura a data corrente sob o fuso de Brasília (UTC-3)
+const obterDataBrasilia = () => {
   const d = new Date();
-  d.setHours(d.getHours() - 3); 
-  return d.toISOString().slice(0, 10);
+  const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
+  return new Date(utc + (3600000 * -3));
 };
 
 // --- COMPONENTE DROPDOWN MESES ---
@@ -84,7 +84,7 @@ const SortableHeader = ({ field, label, currentSort, requestSort, className = "t
   );
 }
 
-// --- DRILL-DOWN CLIENTES (USADO NA ABA DESVIOS MTD) ---
+// --- DRILL-DOWN CLIENTES ---
 const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador, dataSnapshot }: any) => {
   const [expandido, setExpandido] = useState(false);
   const [clientes, setClientes] = useState<any[]>([]);
@@ -168,7 +168,7 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador, dataSnapsh
   );
 };
 
-// --- DRILL-DOWN EXCLUSIVO PARA RISCOS DE ESTOQUE (ACCOUNT-BASED S&OP) ---
+// --- DRILL-DOWN EXCLUSIVO PARA RISCOS DE ESTOQUE ---
 const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador, dataSnapshot }: any) => {
   const [expandido, setExpandido] = useState(false);
   const [clientes, setClientes] = useState<any[]>([]);
@@ -296,8 +296,21 @@ export default function AuditoriaArena() {
   const [clienteSel, setClienteSel] = useState('Todos');
   const [buscaSku, setBuscaSku] = useState('');
   
-  // MÁQUINA DO TEMPO: Inicializada no fuso correto (Brasília)
-  const [dataSnapshot, setDataSnapshot] = useState<string>(getBrazilDate());
+  // MÁQUINA DO TEMPO EM CASCATA DIÁRIA (CONSTRUTORES EXPLICITADOS)
+  const dataHojeFC = obterDataBrasilia();
+  const [selDia, setSelDia] = useState<string>(String(dataHojeFC.getDate()).padStart(2, '0'));
+  const [selMes, setSelMês] = useState<string>(String(dataHojeFC.getMonth() + 1).padStart(2, '0'));
+  const [selAno, setSelAno] = useState<string>(String(dataHojeFC.getFullYear()));
+
+  const dataSnapshot = useMemo(() => {
+    return `${selAno}-${selMes}-${selDia}`;
+  }, [selDia, selMes, selAno]);
+
+  // Monta as opções dinâmicas de dias do seletor conforme o faturamento do mês comercial
+  const listaDiasDisponiveis = useMemo(() => {
+    const numDias = new Date(Number(selAno), Number(selMes), 0).getDate();
+    return Array.from({ length: numDias }, (_, i) => String(i + 1).padStart(2, '0'));
+  }, [selMes, selAno]);
   
   const [paresCatSeg, setParesCatSeg] = useState<any[]>([]);
   const [listaClientes, setListaClientes] = useState<string[]>([]);
@@ -307,13 +320,12 @@ export default function AuditoriaArena() {
   const [kpisGerais, setKpisGerais] = useState<any>({});
   const [carregando, setCarregando] = useState(false);
   
-  // ESTADOS DO PIPELINE AO VIVO
+  // POLLING DO STATUS DO BACKEND
   const [isSyncing, setIsSyncing] = useState(false);
   const [pipelineLog, setPipelineLog] = useState<string>('');
   const pollInterval = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [sortConfig, setSortConfig] = useState({ key: '__risco_falta', direction: 'desc' });
-
   const formatador = visao === 'caixas' ? formatVol : formatFin;
 
   useEffect(() => {
@@ -385,27 +397,25 @@ export default function AuditoriaArena() {
 
   useEffect(() => { carregarDadosCore(); }, [lente, visao, categoriaSel, segmentoSel, clienteSel, mesesSelecionados, dataSnapshot]);
 
-  // 🔥 MONITORAMENTO DO PIPELINE AO VIVO (POLLING COM TRAVA RIGOROSA)
+  // MONITORAMENTO DO PIPELINE TRAVADO SEM BRECHAS
   const monitorarPipeline = () => {
     if (pollInterval.current) clearInterval(pollInterval.current);
     
-    let contagemCiclos = 0;
-
     pollInterval.current = setInterval(async () => {
-      contagemCiclos++;
       try {
         const res = await axios.get('/api/v1/admin/pipeline/status');
-        if (res.data.logs && res.data.logs.length > 0) {
-          setPipelineLog(res.data.logs[res.data.logs.length - 1]); 
-        }
         
-        // Apenas permite desbloquear a tela se o backend confirmar que não está a rodar,
-        // mas APENAS após passar 3 ciclos (6 segundos) para dar tempo à rotina de ligar.
-        if (!res.data.is_running && contagemCiclos > 3) {
-          if (pollInterval.current) clearInterval(pollInterval.current);
-          setIsSyncing(false);
-          setPipelineLog('');
-          await carregarDadosCore(); 
+        if (res.data.logs && res.data.logs.length > 0) {
+          const ultimoLog = res.data.logs[res.data.logs.length - 1];
+          setPipelineLog(ultimoLog);
+          
+          // Libera o travamento somente se o pipeline não estiver rodando ou encontrar a bandeira de chegada 🏁
+          if (!res.data.is_running || ultimoLog.includes('🏁')) {
+            if (pollInterval.current) clearInterval(pollInterval.current);
+            setIsSyncing(false);
+            setPipelineLog('');
+            await carregarDadosCore(); 
+          }
         }
       } catch (e) {
         if (pollInterval.current) clearInterval(pollInterval.current);
@@ -417,12 +427,12 @@ export default function AuditoriaArena() {
   const handleSyncAll = async () => {
     if (isSyncing) return; 
     setIsSyncing(true);
-    setPipelineLog('Iniciando sincronização...');
+    setPipelineLog('Iniciando carga ERP Gobi...');
     try {
       await axios.post('/api/v1/kpis/sync-all');
       monitorarPipeline(); 
     } catch (e) {
-      alert("Erro ao acionar a rotina do Pipeline.");
+      alert("Erro ao acionar a rotina mestre.");
       setIsSyncing(false);
     }
   };
@@ -439,7 +449,6 @@ export default function AuditoriaArena() {
 
   const enrichedSkus = useMemo(() => {
     if (lente !== 'estoque') return skus;
-    
     return skus.map((row: any) => {
       const meta = visao === 'caixas' ? (row.meta_mes_vol || 0) : (row.meta_mes_rs || 0);
       const pedido = visao === 'caixas' ? (row.vendas_mtd_vol || 0) : (row.vl_pedido || 0);
@@ -539,7 +548,7 @@ export default function AuditoriaArena() {
   return (
     <div className="p-6 bg-slate-950 min-h-screen inline-block min-w-full text-slate-100 font-sans">
       
-      {/* HEADER PRINCIPAL COM BOTÃO ÚNICO DE ATUALIZAÇÃO */}
+      {/* HEADER PRINCIPAL COM STATUS COMPLETO DO MONITOR */}
       <div className="w-full flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 bg-slate-900 p-5 rounded-2xl border border-slate-800 mb-6 shadow-xl">
         <div>
           <h1 className="text-2xl font-black text-white tracking-tight flex items-center gap-3">
@@ -560,11 +569,11 @@ export default function AuditoriaArena() {
             </div>
             <div className="h-6 w-px bg-slate-800"></div>
             
-            {/* O BOTÃO INTELIGENTE: Fica bloqueado e mostra o log se estiver a sincronizar */}
+            {/* O BOTÃO TRAVADO ATÉ O FIM REAL */}
             {isSyncing ? (
-               <div className="flex items-center px-4 py-2 bg-slate-900 text-amber-400 rounded-lg font-black tracking-wider text-[10px] uppercase h-full border border-amber-900/30">
+               <div className="flex items-center px-4 py-2 bg-slate-900 text-amber-400 rounded-lg font-black tracking-wider尊 text-[10px] uppercase h-full border border-amber-900/30">
                   <RefreshCw className="w-3.5 h-3.5 mr-2 animate-spin" />
-                  <span className="max-w-[150px] truncate" title={pipelineLog}>{pipelineLog || 'Processando...'}</span>
+                  <span className="max-w-[180px] truncate font-mono" title={pipelineLog}>{pipelineLog || 'Processando...'}</span>
                </div>
             ) : (
                <button onClick={handleSyncAll} className="flex items-center px-4 py-2 bg-slate-800 hover:bg-slate-700 text-sky-400 rounded-lg font-black tracking-wider transition-all text-[10px] uppercase h-full">
@@ -590,7 +599,7 @@ export default function AuditoriaArena() {
         </div>
       </div>
 
-      {/* FILTROS GLOBAIS COM A "MÁQUINA DO TEMPO" USANDO FUSO DE BRASÍLIA */}
+      {/* FILTROS GLOBAIS COM SELETORES EM CASCATA EXPLICITADOS (MÁQUINA DO TEMPO) */}
       <div className="w-full grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
         
         {lente === 'estoque' ? (
@@ -598,15 +607,17 @@ export default function AuditoriaArena() {
             <label className="text-[10px] font-black uppercase tracking-widest text-emerald-500 mb-2 flex items-center gap-2">
               <Calendar className="w-3 h-3"/> Posição (Snapshot)
             </label>
-            {/* O style={{ colorScheme: 'dark' }} força o ícone do calendário a aparecer visível no Chrome/Edge */}
-            <input 
-              type="date" 
-              value={dataSnapshot}
-              max={getBrazilDate()} 
-              onChange={(e) => setDataSnapshot(e.target.value)} 
-              className="w-full bg-slate-950 border border-slate-800 text-sm p-2 rounded-lg text-emerald-400 font-mono focus:outline-none" 
-              style={{ colorScheme: 'dark' }}
-            />
+            <div className="flex gap-1.5">
+              <select value={selDia} onChange={(e) => setSelDia(e.target.value)} className="w-1/3 bg-slate-950 border border-slate-800 p-2 text-xs font-mono rounded text-emerald-400 focus:outline-none">
+                {listaDiasDisponiveis.map(d => <option key={d} value={d}>{d}</option>)}
+              </select>
+              <select value={selMes} onChange={(e) => setSelMês(e.target.value)} className="w-1/3 bg-slate-950 border border-slate-800 p-2 text-xs font-mono rounded text-emerald-400 focus:outline-none">
+                {['01','02','03','04','05','06','07','08','09','10','11','12'].map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <select value={selAno} onChange={(e) => setSelAno(e.target.value)} className="w-1/3 bg-slate-950 border border-slate-800 p-2 text-xs font-mono rounded text-emerald-400 focus:outline-none">
+                {['2025', '2026', '2027'].map(a => <option key={a} value={a}>{a}</option>)}
+              </select>
+            </div>
           </div>
         ) : (
           <div className="lg:col-span-1"><ExcelTreeDropdown titulo="Horizonte S&OP" options={mesesDisponiveis} selected={mesesSelecionados} onChange={setMesesSelecionados} /></div>
@@ -694,7 +705,7 @@ export default function AuditoriaArena() {
         </div>
       ) : null}
 
-      {/* RENDERIZAÇÃO DAS TABELAS */}
+      {/* RENDERIZAÇÃO DAS TABELAS COM FUNDO ESTICADO EM INLINE-BLOCK */}
       <div className="w-full bg-slate-900 rounded-2xl border border-slate-800 shadow-2xl flex flex-col overflow-hidden">
         {carregando ? (
           <div className="p-20 flex justify-center items-center gap-3 text-indigo-400 font-bold uppercase text-xs"><RefreshCw className="w-6 h-6 animate-spin" /> Processando Tabelas...</div>
