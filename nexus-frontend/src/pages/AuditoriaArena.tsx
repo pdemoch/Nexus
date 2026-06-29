@@ -42,7 +42,7 @@ const ExcelTreeDropdown = ({ titulo, options, selected, onChange }: any) => {
          <span className="text-[10px] text-slate-500">▼</span>
       </div>
       {open && (
-        <div className="absolute top-full left-0 mt-1 w-full min-w-[220px] bg-slate-800 border border-slate-700 rounded-lg shadow-2xl z-50 p-2 max-h-72 overflow-y-auto z-[60]">
+        <div className="absolute top-full left-0 mt-1 w-full min-w-[220px] bg-slate-800 border border-slate-700 rounded-lg shadow-2xl z-50 p-2 max-h-72 overflow-y-auto">
            {Object.entries(groupedOptions).sort(([a], [b]) => Number(b) - Number(a)).map(([ano, meses]: any) => {
              const todosSelecionados = meses.every((m: string) => selected.includes(m));
              return (
@@ -126,7 +126,7 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                 <div className="bg-slate-950 p-3 rounded-lg border border-rose-900/50">
                   <h4 className="text-[10px] font-black uppercase tracking-widest text-rose-400 mb-2 flex items-center gap-2"><TrendingDown className="w-3 h-3"/> Alerta: Inadimplência de Meta</h4>
-                  <div className="max-h-48 overflow-y-auto pr-2 space-y-1">
+                  <div className="max-h-48 overflow-y-auto pr-2 space-y-1 custom-scrollbar">
                     {clientes.filter(c => c.gap_humano > 0).map(c => (
                       <div key={c.cgc} className="flex justify-between items-center bg-slate-900 p-2 rounded border border-slate-800 text-xs">
                          <div className="truncate pr-4"><span className="font-bold text-slate-300 block truncate">{c.razaosocial}</span><span className="text-[9px] text-slate-500 font-mono block">{c.cgc}</span></div>
@@ -140,7 +140,7 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
                 </div>
                 <div className="bg-slate-950 p-3 rounded-lg border border-emerald-900/50">
                   <h4 className="text-[10px] font-black uppercase tracking-widest text-emerald-400 mb-2 flex items-center gap-2"><AlertTriangle className="w-3 h-3"/> Alerta: Over-Forecast</h4>
-                  <div className="max-h-48 overflow-y-auto pr-2 space-y-1">
+                  <div className="max-h-48 overflow-y-auto pr-2 space-y-1 custom-scrollbar">
                     {clientes.filter(c => c.gap_humano < 0).map(c => (
                       <div key={c.cgc} className="flex justify-between items-center bg-slate-900 p-2 rounded border border-slate-800 text-xs">
                          <div className="truncate pr-4"><span className="font-bold text-slate-300 block truncate">{c.razaosocial}</span><span className="text-[9px] text-slate-500 font-mono block">{c.cgc}</span></div>
@@ -190,7 +190,7 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) =
     }
   };
 
-  // Helper para mostrar Caixas ou Reais na tabela de clientes
+  // Helper para mostrar Caixas ou Reais na tabela de clientes (a média vem sempre em caixas físicas do BD)
   const formatFinV2 = (val: number) => visao === 'caixas' ? formatVol(val) : formatFin(val * (row.pmv || 0));
 
   return (
@@ -218,7 +218,7 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) =
         <td className="px-3 py-4 text-right text-emerald-400">{formatador(row.__faturado)}</td>
         <td className="px-3 py-4 text-right text-rose-400">{formatador(row.__corte)}</td>
         <td className="px-3 py-4 text-right text-amber-500 font-bold">{formatador(row.__carteira)}</td>
-        <td className="px-3 py-4 text-right text-fuchsia-400 font-bold border-l border-slate-800/50 bg-fuchsia-950/10 cursor-help" title="Fórmula: Σ MAX(0, Meta S&OP - Realizado MTD) por Razão Social. Se o cliente atingir 80% da meta dele, a previsão zera.">
+        <td className="px-3 py-4 text-right text-fuchsia-400 font-bold border-l border-slate-800/50 bg-fuchsia-950/10 cursor-help" title="Fórmula: Σ MAX(0, Média(M-3 a M-1) - Realizado MTD) por Razão Social. Apenas clientes com Freq >= 4/6. Zera se MTD atingir 80% da Média.">
           {formatador(row.__previsao)}
         </td>
         <td className="px-3 py-4 text-right text-white font-black bg-slate-800/30 cursor-help" title="Fórmula: Pedido Implantado MTD + Previsão de Entrada Oculta.">
@@ -236,22 +236,22 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) =
         <tr className="bg-slate-950/90 shadow-inner">
           <td colSpan={12} className="p-6 border-b border-slate-800">
              <div className="flex flex-col gap-3">
-                <h4 className="text-[10px] font-black uppercase tracking-widest text-fuchsia-400 flex items-center gap-2"><Target className="w-4 h-4"/> Detalhamento da Demanda Oculta S&OP (Meta vs Realizado por Razão Social)</h4>
+                <h4 className="text-[10px] font-black uppercase tracking-widest text-fuchsia-400 flex items-center gap-2"><Target className="w-4 h-4"/> Detalhamento da Demanda Oculta de Clientes Leais (Média Histórica M-3 a M-1)</h4>
                 {carregando ? (
                    <div className="text-xs text-slate-400 flex gap-2"><RefreshCw className="w-4 h-4 animate-spin"/> Analisando Account-Based Forecast...</div>
                 ) : clientes.length === 0 ? (
-                   <div className="text-xs text-slate-600">Nenhum cliente mapeado com Meta S&OP ou Vendas para o período selecionado.</div>
+                   <div className="text-xs text-slate-600">Nenhum cliente qualificado (Frequência Mínima 4/6) com demanda pendente.</div>
                 ) : (
-                   <div className="max-h-64 overflow-y-auto border border-slate-800 rounded-lg">
+                   <div className="max-h-64 overflow-y-auto border border-slate-800 rounded-lg custom-scrollbar">
                       <table className="w-full text-left text-xs whitespace-nowrap">
                          <thead className="bg-slate-900 text-[9px] text-slate-500 uppercase sticky top-0 z-10">
                             <tr>
                                <th className="px-4 py-2 border-b border-slate-800">Regional</th>
                                <th className="px-4 py-2 border-b border-slate-800">Razão Social</th>
-                               <th className="px-4 py-2 text-right border-b border-slate-800">Freq. Compras (Últ 6m)</th>
-                               <th className="px-4 py-2 text-right border-b border-slate-800">Meta S&OP ({visao})</th>
+                               <th className="px-4 py-2 text-right border-b border-slate-800" title="Quantidade de meses com pedidos nos últimos 6 meses">Freq. Compras (Últ 6m)</th>
+                               <th className="px-4 py-2 text-right border-b border-slate-800" title="Média de compras dos meses M-3 a M-1">Média Hist. M-3 a M-1 ({visao})</th>
                                <th className="px-4 py-2 text-right border-b border-slate-800">Realizado MTD ({visao})</th>
-                               <th className="px-4 py-2 text-right text-fuchsia-400 border-b border-slate-800" title="Zera automaticamente se MTD bater 80% da Meta">Previsão Faltante ({visao})</th>
+                               <th className="px-4 py-2 text-right text-fuchsia-400 border-b border-slate-800" title="Zera automaticamente se MTD bater 80% da Média Histórica">Previsão Faltante ({visao})</th>
                             </tr>
                          </thead>
                          <tbody className="divide-y divide-slate-800/50">
@@ -260,7 +260,7 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) =
                                   <td className="px-4 py-2 font-mono text-slate-500">{c.regional}</td>
                                   <td className="px-4 py-2 font-bold">{c.razaosocial}</td>
                                   <td className="px-4 py-2 text-right font-mono text-slate-400">{c.freq_meses}/6</td>
-                                  <td className="px-4 py-2 text-right text-indigo-300">{formatFinV2(c.meta_vol || 0)}</td>
+                                  <td className="px-4 py-2 text-right text-indigo-300">{formatFinV2(c.media_vol || 0)}</td>
                                   <td className="px-4 py-2 text-right">{formatFinV2(c.mtd_vol || 0)}</td>
                                   <td className="px-4 py-2 text-right font-black text-fuchsia-400">
                                      {(c.previsao_vol || 0) > 0 ? `+ ${formatFinV2(c.previsao_vol)}` : <span className="text-emerald-500">Atendido</span>}
@@ -606,7 +606,7 @@ export default function AuditoriaArena() {
           <div className="p-20 flex justify-center items-center gap-3 text-indigo-400 font-bold uppercase text-xs"><RefreshCw className="w-6 h-6 animate-spin" /> Processando Tabelas...</div>
         ) : lente === 'estoque' ? (
           
-          <div className="overflow-y-auto overflow-x-auto w-full max-h-[70vh] rounded-2xl">
+          <div className="overflow-y-auto overflow-x-auto w-full max-h-[70vh] rounded-2xl custom-scrollbar">
             <table className="w-full text-left whitespace-nowrap relative">
               <thead className="sticky top-0 z-20 shadow-md bg-slate-950">
                 <tr className="bg-slate-900 border-b border-slate-800">

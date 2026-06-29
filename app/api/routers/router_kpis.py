@@ -15,6 +15,10 @@ from app.models.domain_models import FatoEstoqueD0
 
 router = APIRouter(prefix="/api/v1/kpis", tags=["Auditoria, KPIs e Riscos de Estoque"])
 
+def obter_mes_atual_str() -> str:
+    """Retorna o mês atual no formato MM/YYYY para fallbacks dinâmicos."""
+    return datetime.date.today().strftime("%m/%Y")
+
 def obter_ciclo_meta_seguro(db: Session, mes_alvo: str) -> str:
     try:
         mes, ano = mes_alvo.split('/')
@@ -27,12 +31,12 @@ def obter_ciclo_meta_seguro(db: Session, mes_alvo: str) -> str:
             return ciclo_ideal
             
         max_ciclo = db.execute(text("SELECT MAX(ciclo_sop) FROM fato_ibp_granular")).scalar()
-        return max_ciclo or "06/2026"
+        return max_ciclo or obter_mes_atual_str()
     except:
-        return "06/2026"
+        return obter_mes_atual_str()
 
 # ==============================================================================
-# 1. FILTROS EXCEL DINÂMICOS (CORRIGIDOS PARA MTRIX)
+# 1. FILTROS EXCEL DINÂMICOS (CORRIGIDOS E 100% DINÂMICOS NO TEMPO)
 # ==============================================================================
 @router.get("/filtros-auditoria")
 async def carregar_filtros_auditoria(lente: str = "kpis", db: Session = Depends(get_db)):
@@ -57,7 +61,7 @@ async def carregar_filtros_auditoria(lente: str = "kpis", db: Session = Depends(
             q_meses = text("""
                 SELECT DISTINCT TO_CHAR(mes_projetado, 'MM/YYYY') as mes_ano, TO_CHAR(mes_projetado, 'YYYY-MM') as sort_key 
                 FROM fato_ibp_granular 
-                WHERE mes_projetado >= '2026-06-01' 
+                WHERE mes_projetado >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 month'
                 ORDER BY sort_key ASC
             """)
             df_m = pd.read_sql(q_meses, db.bind)
@@ -66,7 +70,7 @@ async def carregar_filtros_auditoria(lente: str = "kpis", db: Session = Depends(
             query_cli = text("SELECT DISTINCT razaosocial FROM dim_clientes WHERE razaosocial IS NOT NULL ORDER BY razaosocial")
             df_cli = pd.read_sql(query_cli, db.bind)
 
-        if not meses: meses = ["06/2026"]
+        if not meses: meses = [obter_mes_atual_str()]
 
         return {
             "pares_cat_seg": df_f.to_dict(orient="records") if not df_f.empty else [],
@@ -86,7 +90,7 @@ async def carregar_auditoria_cpfr(
     lente: str = "sellout", categoria: str = "Todas", segmento: str = "Todos", razaosocial: str = "Todos",
     meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)
 ):
-    if not meses_horizonte: meses_horizonte = ["06/2026"]
+    if not meses_horizonte: meses_horizonte = [obter_mes_atual_str()]
 
     try:
         resultados_meses = []
@@ -193,7 +197,7 @@ async def carregar_torre_controle(
     visao: str = "caixas", categoria: str = "Todas", segmento: str = "Todos", razaosocial: str = "Todos",
     meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)
 ):
-    if not meses_horizonte: meses_horizonte = ["06/2026"]
+    if not meses_horizonte: meses_horizonte = [obter_mes_atual_str()]
 
     try:
         resultados = []
@@ -281,7 +285,7 @@ async def carregar_torre_controle(
 
 @router.get("/torre-controle/clientes/{sku}")
 async def drilldown_clientes_kpis(sku: str, visao: str = "caixas", meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)):
-    if not meses_horizonte: meses_horizonte = ["06/2026"]
+    if not meses_horizonte: meses_horizonte = [obter_mes_atual_str()]
     try:
         resultados = []
         for mes_str in meses_horizonte:
@@ -376,7 +380,7 @@ async def carregar_riscos_estoque(
     categoria: str = "Todas", segmento: str = "Todos", razaosocial: str = "Todos",
     meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)
 ):
-    if not meses_horizonte: meses_horizonte = ["06/2026"]
+    if not meses_horizonte: meses_horizonte = [obter_mes_atual_str()]
     try:
         mes_alvo = meses_horizonte[0] 
         mes_sql = f"{mes_alvo.split('/')[1]}-{mes_alvo.split('/')[0]}"
@@ -389,7 +393,7 @@ async def carregar_riscos_estoque(
         if segmento != "Todos": clausula_filtro += " AND p.segmento = :segmento"; params_query["segmento"] = segmento
         if razaosocial != "Todos": filtro_cliente = " AND c.razaosocial = :razaosocial"; params_query["razaosocial"] = razaosocial
 
-        # O MOTOR DE DEMAND SENSING (Trava de 80% sobre a Meta S&OP)
+        # O MOTOR DE DEMAND SENSING (Trava de 80% sobre a MÉDIA HISTÓRICA, Exige Frequência Alta: 4/6, 5/6, 6/6)
         query_sku = text(f"""
             WITH Estoque AS (SELECT sku, SUM(qtd_dispo) as estoque_atual FROM fato_estoque_d0 GROUP BY sku),
             Vendas AS (
@@ -398,11 +402,19 @@ async def carregar_riscos_estoque(
                 FROM fato_vendas v LEFT JOIN dim_clientes c ON v.cgc = c.cgc
                 WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql {filtro_cliente} GROUP BY v.sku
             ),
-            Metas_Clientes AS (
-                SELECT m.sku, c.regional, c.razaosocial, SUM(m.vol_final) as meta_vol
-                FROM fato_ibp_granular m JOIN dim_clientes c ON m.cgc = c.cgc
-                WHERE TO_CHAR(m.mes_projetado, 'YYYY-MM') = :mes_sql AND m.ciclo_sop = :ciclo_congelado {filtro_cliente}
-                GROUP BY m.sku, c.regional, c.razaosocial
+            Hist_Clientes AS (
+                SELECT v.sku, c.regional, c.razaosocial, SUM(v.qt_pedido) / 3.0 as media_vol
+                FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
+                WHERE v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '3 months' 
+                  AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM') {filtro_cliente}
+                GROUP BY v.sku, c.regional, c.razaosocial
+            ),
+            Freq_Clientes AS (
+                SELECT v.sku, c.regional, c.razaosocial, COUNT(DISTINCT TO_CHAR(v.data_pedido, 'YYYY-MM')) as freq_meses
+                FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
+                WHERE v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '6 months' 
+                  AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM') {filtro_cliente}
+                GROUP BY v.sku, c.regional, c.razaosocial
             ),
             MTD_Clientes AS (
                 SELECT v.sku, c.regional, c.razaosocial, SUM(v.qt_pedido) as mtd_vol
@@ -412,15 +424,18 @@ async def carregar_riscos_estoque(
             ),
             Previsao_Clientes AS (
                 SELECT 
-                    COALESCE(m.sku, v.sku) as sku,
-                    COALESCE(m.meta_vol, 0) as meta_vol,
-                    COALESCE(v.mtd_vol, 0) as mtd_vol,
+                    h.sku, h.regional, h.razaosocial,
+                    COALESCE(h.media_vol, 0) as media_vol,
+                    COALESCE(m.mtd_vol, 0) as mtd_vol,
+                    COALESCE(f.freq_meses, 0) as freq_meses,
                     CASE 
-                        WHEN COALESCE(v.mtd_vol, 0) >= COALESCE(m.meta_vol, 0) * 0.8 THEN 0 
-                        ELSE GREATEST(0, COALESCE(m.meta_vol, 0) - COALESCE(v.mtd_vol, 0))
+                        WHEN COALESCE(m.mtd_vol, 0) >= COALESCE(h.media_vol, 0) * 0.8 THEN 0 
+                        ELSE GREATEST(0, COALESCE(h.media_vol, 0) - COALESCE(m.mtd_vol, 0))
                     END as previsao_vol
-                FROM Metas_Clientes m
-                FULL OUTER JOIN MTD_Clientes v ON m.sku = v.sku AND m.regional = v.regional AND m.razaosocial = v.razaosocial
+                FROM Hist_Clientes h
+                LEFT JOIN MTD_Clientes m ON h.sku = m.sku AND h.regional = m.regional AND h.razaosocial = m.razaosocial
+                LEFT JOIN Freq_Clientes f ON h.sku = f.sku AND h.regional = f.regional AND h.razaosocial = f.razaosocial
+                WHERE COALESCE(f.freq_meses, 0) >= 4 -- REGRA DE OURO: Apenas clientes assíduos
             ),
             Previsao_SKU AS (
                 SELECT sku, SUM(previsao_vol) as previsao_entrada_vol FROM Previsao_Clientes GROUP BY sku
@@ -465,14 +480,14 @@ async def carregar_riscos_estoque(
         
         df_sku['previsao_entrada_rs'] = df_sku['previsao_entrada_vol'] * df_sku['pmv']
         
-        # A Projeção agora é o Realizado + O que ainda falta entrar base no S&OP
+        # A Projeção agora é o Realizado + O que ainda falta entrar base na Média Fiel
         df_sku['projecao_fim_mes_vol'] = df_sku['vendas_mtd_vol'] + df_sku['previsao_entrada_vol']
         df_sku['projecao_fim_mes_rs'] = df_sku['vl_pedido'] + df_sku['previsao_entrada_rs']
         
         df_sku['gap_meta_vol'] = df_sku['projecao_fim_mes_vol'] - df_sku['meta_mes_vol']
         df_sku['gap_meta_rs'] = df_sku['projecao_fim_mes_rs'] - df_sku['meta_mes_rs']
 
-        # CÁLCULO DE RISCO DE PRODUÇÃO: Demanda Futura = Carteira + Previsão de Entrada
+        # CÁLCULO DE RISCO DE PRODUÇÃO: Demanda Futura = Carteira Aberta + Previsão de Entrada
         df_sku['demanda_futura_vol'] = df_sku['carteira_aberto_vol'] + df_sku['previsao_entrada_vol']
         df_sku['ruptura_vol'] = np.maximum(0, df_sku['demanda_futura_vol'] - df_sku['estoque_atual'])
         df_sku['ruptura_rs'] = df_sku['ruptura_vol'] * df_sku['pmv']
@@ -494,22 +509,15 @@ async def carregar_riscos_estoque(
 
 @router.get("/riscos-estoque/drilldown-clientes/{sku}")
 async def drilldown_riscos_clientes(sku: str, meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)):
-    if not meses_horizonte: meses_horizonte = ["06/2026"]
+    if not meses_horizonte: meses_horizonte = [obter_mes_atual_str()]
     mes_alvo = meses_horizonte[0] 
     mes_sql = f"{mes_alvo.split('/')[1]}-{mes_alvo.split('/')[0]}"
-    ciclo_congelado = obter_ciclo_meta_seguro(db, mes_alvo)
     
     query = text("""
-        WITH Metas_Clientes AS (
-            SELECT c.regional, c.razaosocial, SUM(m.vol_final) as meta_vol
-            FROM fato_ibp_granular m JOIN dim_clientes c ON m.cgc = c.cgc
-            WHERE m.sku = :sku AND TO_CHAR(m.mes_projetado, 'YYYY-MM') = :mes_sql AND m.ciclo_sop = :ciclo_congelado
-            GROUP BY c.regional, c.razaosocial
-        ),
-        MTD_Clientes AS (
-            SELECT c.regional, c.razaosocial, SUM(v.qt_pedido) as mtd_vol
+        WITH Hist_Clientes AS (
+            SELECT c.regional, c.razaosocial, SUM(v.qt_pedido) / 3.0 as media_vol
             FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
-            WHERE v.sku = :sku AND TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql
+            WHERE v.sku = :sku AND v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '3 months' AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM')
             GROUP BY c.regional, c.razaosocial
         ),
         Freq_Clientes AS (
@@ -517,22 +525,28 @@ async def drilldown_riscos_clientes(sku: str, meses_horizonte: List[str] = Query
             FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
             WHERE v.sku = :sku AND v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '6 months' AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM')
             GROUP BY c.regional, c.razaosocial
+        ),
+        MTD_Clientes AS (
+            SELECT c.regional, c.razaosocial, SUM(v.qt_pedido) as mtd_vol
+            FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
+            WHERE v.sku = :sku AND TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql
+            GROUP BY c.regional, c.razaosocial
         )
         SELECT 
-            COALESCE(m.regional, v.regional, f.regional) as regional, 
-            COALESCE(m.razaosocial, v.razaosocial, f.razaosocial) as razaosocial,
-            COALESCE(m.meta_vol, 0) as meta_vol, 
-            COALESCE(v.mtd_vol, 0) as mtd_vol,
+            h.regional, 
+            h.razaosocial,
+            COALESCE(h.media_vol, 0) as media_vol, 
+            COALESCE(m.mtd_vol, 0) as mtd_vol,
             COALESCE(f.freq_meses, 0) as freq_meses,
             CASE 
-                WHEN COALESCE(v.mtd_vol, 0) >= COALESCE(m.meta_vol, 0) * 0.8 THEN 0 
-                ELSE GREATEST(0, COALESCE(m.meta_vol, 0) - COALESCE(v.mtd_vol, 0))
+                WHEN COALESCE(m.mtd_vol, 0) >= COALESCE(h.media_vol, 0) * 0.8 THEN 0 
+                ELSE GREATEST(0, COALESCE(h.media_vol, 0) - COALESCE(m.mtd_vol, 0))
             END as previsao_vol
-        FROM Metas_Clientes m
-        FULL OUTER JOIN MTD_Clientes v ON m.regional = v.regional AND m.razaosocial = v.razaosocial
-        FULL OUTER JOIN Freq_Clientes f ON COALESCE(m.regional, v.regional) = f.regional AND COALESCE(m.razaosocial, v.razaosocial) = f.razaosocial
-        WHERE GREATEST(0, COALESCE(m.meta_vol, 0) - COALESCE(v.mtd_vol, 0)) > 0 OR COALESCE(v.mtd_vol, 0) > 0 OR COALESCE(m.meta_vol, 0) > 0
+        FROM Hist_Clientes h
+        LEFT JOIN MTD_Clientes m ON h.regional = m.regional AND h.razaosocial = m.razaosocial
+        LEFT JOIN Freq_Clientes f ON h.regional = f.regional AND h.razaosocial = f.razaosocial
+        WHERE COALESCE(f.freq_meses, 0) >= 4 -- Exibe apenas clientes qualificados na freq 4/6, 5/6 e 6/6
         ORDER BY previsao_vol DESC, mtd_vol DESC
     """)
-    df = pd.read_sql(query, db.bind, params={"mes_sql": mes_sql, "ciclo_congelado": ciclo_congelado, "sku": sku})
+    df = pd.read_sql(query, db.bind, params={"mes_sql": mes_sql, "sku": sku})
     return df.to_dict(orient="records")
