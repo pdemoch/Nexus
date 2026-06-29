@@ -230,7 +230,8 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
                 l.vol_final = rateado
 
             nome_user = usuario.get('nome', usuario.get('email', 'Desconhecido'))
-            registrar_log_auditoria(db=db, ciclo=ciclo, origen="S&OP Global (Dashboard Final)", usuario=nome_user, sku=sku, cliente="TODOS_OS_CLIENTES", mes=data_alvo, v_antigo=int(total_base_antigo), v_novo=volume_alvo)
+            # CORREÇÃO: "origem" no lugar de "origen"
+            registrar_log_auditoria(db=db, ciclo=ciclo, origem="S&OP Global (Dashboard Final)", usuario=nome_user, sku=sku, cliente="TODOS_OS_CLIENTES", mes=data_alvo, v_antigo=int(total_base_antigo), v_novo=volume_alvo)
 
         registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
         if not registro: db.add(ControleCiclo(ciclo_sop=ciclo, origem='S&OP-Final', status='Fechado'))
