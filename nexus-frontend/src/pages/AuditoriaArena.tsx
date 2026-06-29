@@ -1,15 +1,22 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import axios from 'axios';
 import { 
   ShoppingCart, TrendingUp, TrendingDown, Factory, Target, Activity, 
-  Search, RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, DollarSign, Users, Download, Calendar, Clock
+  Search, RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, DollarSign, Users, Download, Calendar, Clock, Terminal
 } from 'lucide-react';
 import { ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, LineChart, Line, ReferenceLine, ComposedChart, Bar, Legend } from 'recharts';
 
-// --- HELPERS DE FORMATAÇÃO ---
+// --- HELPERS DE FORMATAÇÃO E FUSO HORÁRIO ---
 const formatFin = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor || 0));
 const formatVol = (val: number) => Math.round(val || 0).toLocaleString('pt-BR');
 const formatPct = (val: number) => new Intl.NumberFormat('pt-BR', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(val || 0);
+
+// Força a data de hoje para o fuso horário de Brasília (UTC-3)
+const getBrazilDate = () => {
+  const d = new Date();
+  d.setHours(d.getHours() - 3); 
+  return d.toISOString().slice(0, 10);
+};
 
 // --- COMPONENTE DROPDOWN MESES ---
 const ExcelTreeDropdown = ({ titulo, options, selected, onChange }: any) => {
@@ -119,7 +126,7 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador, dataSnapsh
         <tr className="bg-slate-900/50 shadow-inner">
           <td colSpan={8} className="p-4 border-b border-slate-800">
             {carregando ? (
-              <div className="text-xs text-indigo-400 flex items-center gap-2 font-bold"><RefreshCw className="w-4 h-4 animate-spin"/> Mapeando Clientes GOBI...</div>
+              <div className="text-xs text-indigo-400 flex items-center gap-2 font-bold"><RefreshCw className="w-4 h-4 animate-spin"/> Mapeando Clientes...</div>
             ) : clientes.length === 0 ? (
               <div className="text-xs text-slate-500 italic">Sem volume carteirado.</div>
             ) : (
@@ -239,9 +246,9 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador, dataSnap
                 ) : clientes.length === 0 ? (
                    <div className="text-xs text-slate-600">Nenhum cliente qualificado (Frequência Mínima 4/6) com demanda pendente.</div>
                 ) : (
-                   <div className="max-h-64 overflow-y-auto border border-slate-800 rounded-lg custom-scrollbar">
+                   <div className="border border-slate-800 rounded-lg">
                       <table className="w-full text-left text-xs whitespace-nowrap">
-                         <thead className="bg-slate-900 text-[9px] text-slate-500 uppercase sticky top-0 z-10">
+                         <thead className="bg-slate-900 text-[9px] text-slate-500 uppercase">
                             <tr>
                                <th className="px-4 py-2 border-b border-slate-800">Regional</th>
                                <th className="px-4 py-2 border-b border-slate-800">Razão Social</th>
@@ -260,7 +267,7 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador, dataSnap
                                   <td className="px-4 py-2 text-right text-indigo-300">{formatFinV2(c.media_vol || 0)}</td>
                                   <td className="px-4 py-2 text-right">{formatFinV2(c.mtd_vol || 0)}</td>
                                   <td className="px-4 py-2 text-right font-black text-fuchsia-400">
-                                     {(c.previsao_vol || 0) > 0 ? `+ ${formatFinV2(c.previsao_vol)}` : <span className="text-emerald-500">Atendido</span>}
+                                     {(c.previsao_vol || 0) > 0 ? `+ ${formatFinV2(c.previsao_vol)}` : <span className="text-emerald-500">Atendido ({'>='} 80%)</span>}
                                   </td>
                                </tr>
                             ))}
@@ -284,14 +291,13 @@ export default function AuditoriaArena() {
   const [mesesDisponiveis, setMesesDisponiveis] = useState<string[]>([]);
   const [mesesSelecionados, setMesesSelecionados] = useState<string[]>([]);
   
-  // Filtros Globais da Tela
   const [categoriaSel, setCategoriaSel] = useState('Todas');
   const [segmentoSel, setSegmentoSel] = useState('Todos');
   const [clienteSel, setClienteSel] = useState('Todos');
   const [buscaSku, setBuscaSku] = useState('');
   
-  // 🔥 NOVO: Máquina do Tempo (Snapshot)
-  const [dataSnapshot, setDataSnapshot] = useState<string>(new Date().toISOString().slice(0, 10));
+  // MÁQUINA DO TEMPO: Inicializada no fuso correto (Brasília)
+  const [dataSnapshot, setDataSnapshot] = useState<string>(getBrazilDate());
   
   const [paresCatSeg, setParesCatSeg] = useState<any[]>([]);
   const [listaClientes, setListaClientes] = useState<string[]>([]);
@@ -300,7 +306,14 @@ export default function AuditoriaArena() {
   const [skus, setSkus] = useState<any[]>([]);
   const [kpisGerais, setKpisGerais] = useState<any>({});
   const [carregando, setCarregando] = useState(false);
+  
+  // ESTADOS DO PIPELINE AO VIVO
   const [isSyncing, setIsSyncing] = useState(false);
+  const [pipelineLog, setPipelineLog] = useState<string>('');
+  
+  // Tipagem corrigida para evitar erro NodeJS.Timeout
+  const pollInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+
   const [sortConfig, setSortConfig] = useState({ key: '__risco_falta', direction: 'desc' });
 
   const formatador = visao === 'caixas' ? formatVol : formatFin;
@@ -345,7 +358,7 @@ export default function AuditoriaArena() {
       params.append('categoria', categoriaSel);
       params.append('segmento', segmentoSel);
       params.append('razaosocial', clienteSel);
-      params.append('data_snapshot', dataSnapshot); // O backend lerá isso em breve para buscar o parquet!
+      params.append('data_snapshot', dataSnapshot); 
 
       if (lente === 'kpis') {
         params.append('visao', visao);
@@ -375,17 +388,46 @@ export default function AuditoriaArena() {
 
   useEffect(() => { carregarDadosCore(); }, [lente, visao, categoriaSel, segmentoSel, clienteSel, mesesSelecionados, dataSnapshot]);
 
-  // 🔥 NOVO: Botão Único de Atualização Mestra (Pipeline + Estoque)
-  const handleSyncAll = async () => {
-    setIsSyncing(true);
-    try {
-      // Quando fizermos o backend, essa rota acionará a API 90 e o Pipeline.
-      await axios.post('/api/v1/kpis/sync-all');
-      await carregarDadosCore();
-    } catch (e) {
-      alert("Erro ao sincronizar dados. O servidor pode estar ocupado.");
-    } finally { setIsSyncing(false); }
+  // 🔥 MONITORAMENTO DO PIPELINE AO VIVO (POLLING)
+  const monitorarPipeline = () => {
+    if (pollInterval.current) clearInterval(pollInterval.current);
+    
+    pollInterval.current = setInterval(async () => {
+      try {
+        const res = await axios.get('/api/v1/admin/pipeline/status');
+        if (res.data.logs && res.data.logs.length > 0) {
+          setPipelineLog(res.data.logs[res.data.logs.length - 1]); 
+        }
+        
+        if (!res.data.is_running) {
+          if (pollInterval.current) clearInterval(pollInterval.current);
+          setIsSyncing(false);
+          setPipelineLog('');
+          await carregarDadosCore(); 
+        }
+      } catch (e) {
+        if (pollInterval.current) clearInterval(pollInterval.current);
+        setIsSyncing(false);
+      }
+    }, 2000); 
   };
+
+  const handleSyncAll = async () => {
+    if (isSyncing) return; 
+    setIsSyncing(true);
+    setPipelineLog('Iniciando sincronização...');
+    try {
+      await axios.post('/api/v1/kpis/sync-all');
+      monitorarPipeline(); 
+    } catch (e) {
+      alert("Erro ao acionar a rotina do Pipeline.");
+      setIsSyncing(false);
+    }
+  };
+
+  useEffect(() => {
+    return () => { if (pollInterval.current) clearInterval(pollInterval.current); };
+  }, []);
 
   const requestSort = (key: string) => {
     let direction = 'desc';
@@ -395,6 +437,7 @@ export default function AuditoriaArena() {
 
   const enrichedSkus = useMemo(() => {
     if (lente !== 'estoque') return skus;
+    
     return skus.map((row: any) => {
       const meta = visao === 'caixas' ? (row.meta_mes_vol || 0) : (row.meta_mes_rs || 0);
       const pedido = visao === 'caixas' ? (row.vendas_mtd_vol || 0) : (row.vl_pedido || 0);
@@ -492,10 +535,10 @@ export default function AuditoriaArena() {
   };
 
   return (
-    <div className="p-6 bg-slate-950 min-h-screen text-slate-100 font-sans">
+    <div className="p-6 bg-slate-950 min-h-screen inline-block min-w-full text-slate-100 font-sans">
       
       {/* HEADER PRINCIPAL COM BOTÃO ÚNICO DE ATUALIZAÇÃO */}
-      <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 bg-slate-900 p-5 rounded-2xl border border-slate-800 mb-6 shadow-xl">
+      <div className="w-full flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 bg-slate-900 p-5 rounded-2xl border border-slate-800 mb-6 shadow-xl">
         <div>
           <h1 className="text-2xl font-black text-white tracking-tight flex items-center gap-3">
             <Activity className="text-indigo-500 w-7 h-7" /> Torre de Controle S&OP
@@ -514,14 +557,18 @@ export default function AuditoriaArena() {
               </div>
             </div>
             <div className="h-6 w-px bg-slate-800"></div>
-            <button 
-              onClick={handleSyncAll} 
-              disabled={isSyncing} 
-              className="flex items-center px-4 py-2 bg-slate-800 hover:bg-slate-700 text-sky-400 rounded-lg font-black tracking-wider transition-all text-[10px] uppercase h-full disabled:opacity-50"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 mr-2 ${isSyncing ? 'animate-spin' : ''}`} />
-              {isSyncing ? 'Sincronizando...' : 'Atualizar Dados'}
-            </button>
+            
+            {/* O BOTÃO INTELIGENTE: Fica bloqueado e mostra o log se estiver a sincronizar */}
+            {isSyncing ? (
+               <div className="flex items-center px-4 py-2 bg-slate-900 text-amber-400 rounded-lg font-black tracking-wider text-[10px] uppercase h-full border border-amber-900/30">
+                  <RefreshCw className="w-3.5 h-3.5 mr-2 animate-spin" />
+                  <span className="max-w-[150px] truncate" title={pipelineLog}>{pipelineLog || 'Processando...'}</span>
+               </div>
+            ) : (
+               <button onClick={handleSyncAll} className="flex items-center px-4 py-2 bg-slate-800 hover:bg-slate-700 text-sky-400 rounded-lg font-black tracking-wider transition-all text-[10px] uppercase h-full">
+                 <Terminal className="w-3.5 h-3.5 mr-2" /> Atualizar Dados
+               </button>
+            )}
           </div>
 
           <button onClick={handleExportCSV} className="flex items-center px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-black tracking-wider transition-all shadow-lg shadow-emerald-900/20 text-[10px] uppercase">
@@ -541,10 +588,9 @@ export default function AuditoriaArena() {
         </div>
       </div>
 
-      {/* FILTROS GLOBAIS COM A "MÁQUINA DO TEMPO" NO LUGAR DO HORIZONTE */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+      {/* FILTROS GLOBAIS COM A "MÁQUINA DO TEMPO" USANDO FUSO DE BRASÍLIA */}
+      <div className="w-full grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
         
-        {/* SNAPSHOT DE DATA NO LUGAR DO HORIZONTE QUANDO ESTIVER EM ESTOQUE */}
         {lente === 'estoque' ? (
           <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
             <label className="text-[10px] font-black uppercase tracking-widest text-emerald-500 mb-2 flex items-center gap-2">
@@ -553,7 +599,7 @@ export default function AuditoriaArena() {
             <input 
               type="date" 
               value={dataSnapshot}
-              max={new Date().toISOString().slice(0, 10)}
+              max={getBrazilDate()} 
               onChange={(e) => setDataSnapshot(e.target.value)} 
               className="w-full bg-slate-950 border border-slate-800 text-sm p-2 rounded-lg text-emerald-400 font-mono focus:outline-none" 
             />
@@ -585,7 +631,7 @@ export default function AuditoriaArena() {
 
       {/* RENDERIZAÇÃO DOS GRÁFICOS */}
       {lente === 'kpis' || lente === 'sellout' ? (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <div className="w-full grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-indigo-500 shadow-md"><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">% WMAPE IA</div><div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_ia || 0)}</div></div>
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-sky-500 shadow-md"><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">{lente === 'kpis' ? '% WMAPE S&OP' : 'Erro Escoamento'}</div><div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_comercial || 0)}</div></div>
           <div className={`bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md border-l-4 ${(kpisGerais.fva || 0) >= 0 ? 'border-l-emerald-500' : 'border-l-rose-500'}`}><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2 flex justify-between">FVA (Melhoria) {(kpisGerais.fva || 0) >= 0 ? <TrendingUp className="w-4 h-4 text-emerald-500"/> : <TrendingDown className="w-4 h-4 text-rose-500"/>}</div><div className={`text-3xl font-black ${(kpisGerais.fva || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.fva || 0)}</div></div>
@@ -602,7 +648,7 @@ export default function AuditoriaArena() {
       ) : null}
       
       {lente === 'kpis' ? (
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
+        <div className="w-full grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md">
             <h3 className="text-sm font-black text-white uppercase tracking-widest mb-4 flex items-center gap-2">% WMAPE Temporal (IA vs S&OP)</h3>
             <div className="h-[220px] w-full">
@@ -638,14 +684,14 @@ export default function AuditoriaArena() {
           </div>
         </div>
       ) : lente === 'estoque' ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+        <div className="w-full grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
           <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-rose-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><TrendingDown className="w-4 h-4 text-rose-500"/> Risco Produtivo (Projeção)</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_ruptura_rs || 0) : formatVol(kpisGerais.total_ruptura_vol || 0) + ' Cx'}</p></div>
           <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-amber-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><Package className="w-4 h-4 text-amber-500"/> Capital Imobilizado (Projeção)</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_sobra_rs || 0) : formatVol(kpisGerais.total_sobra_vol || 0) + ' Cx'}</p></div>
         </div>
       ) : null}
 
-      {/* RENDERIZAÇÃO DAS TABELAS (REMOVIDO OVERFLOW INTERNO - ROLAGEM PELO NAVEGADOR) */}
-      <div className="bg-slate-900 rounded-2xl border border-slate-800 shadow-2xl flex flex-col">
+      {/* RENDERIZAÇÃO DAS TABELAS (SEM SCROLL INTERNO, ROLAGEM DEIXADA PARA O NAVEGADOR E ACOMPANHA FUNDO) */}
+      <div className="w-full bg-slate-900 rounded-2xl border border-slate-800 shadow-2xl flex flex-col overflow-hidden">
         {carregando ? (
           <div className="p-20 flex justify-center items-center gap-3 text-indigo-400 font-bold uppercase text-xs"><RefreshCw className="w-6 h-6 animate-spin" /> Processando Tabelas...</div>
         ) : lente === 'estoque' ? (
