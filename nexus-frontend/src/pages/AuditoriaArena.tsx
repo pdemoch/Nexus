@@ -42,7 +42,7 @@ const ExcelTreeDropdown = ({ titulo, options, selected, onChange }: any) => {
          <span className="text-[10px] text-slate-500">▼</span>
       </div>
       {open && (
-        <div className="absolute top-full left-0 mt-1 w-full min-w-[220px] bg-slate-800 border border-slate-700 rounded-lg shadow-2xl z-50 p-2 max-h-72 overflow-y-auto">
+        <div className="absolute top-full left-0 mt-1 w-full min-w-[220px] bg-slate-800 border border-slate-700 rounded-lg shadow-2xl z-50 p-2 max-h-72 overflow-y-auto z-[60]">
            {Object.entries(groupedOptions).sort(([a], [b]) => Number(b) - Number(a)).map(([ano, meses]: any) => {
              const todosSelecionados = meses.every((m: string) => selected.includes(m));
              return (
@@ -103,17 +103,17 @@ const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) => 
             <div className="flex flex-col"><span className="font-bold text-slate-200">{row.descricao}</span><span className="text-[10px] text-slate-500 font-mono">{row.sku}</span></div>
           </div>
         </td>
-        <td className="px-3 py-3 text-right font-semibold text-indigo-400">{formatador(row.val_meta_ia)}</td>
-        <td className="px-3 py-3 text-right font-semibold text-sky-400">{formatador(row.val_meta_hum)}</td>
-        <td className="px-3 py-3 text-right font-black text-white">{formatador(row.val_real)}</td>
+        <td className="px-3 py-3 text-right font-semibold text-indigo-400">{formatador(row.val_meta_ia || 0)}</td>
+        <td className="px-3 py-3 text-right font-semibold text-sky-400">{formatador(row.val_meta_hum || 0)}</td>
+        <td className="px-3 py-3 text-right font-black text-white">{formatador(row.val_real || 0)}</td>
         <td className="px-3 py-3 text-right font-bold bg-slate-950/20 border-l border-slate-800/50">
-           <span className={row.gap_ia > 0 ? 'text-rose-400' : 'text-emerald-400'}>{row.gap_ia > 0 ? 'Falta ' : 'Over '}{formatador(Math.abs(row.gap_ia))}</span>
+           <span className={(row.gap_ia || 0) > 0 ? 'text-rose-400' : 'text-emerald-400'}>{(row.gap_ia || 0) > 0 ? 'Falta ' : 'Over '}{formatador(Math.abs(row.gap_ia || 0))}</span>
         </td>
         <td className="px-3 py-3 text-right font-bold bg-slate-950/20">
-           <span className={row.gap_humano > 0 ? 'text-rose-400' : 'text-emerald-400'}>{row.gap_humano > 0 ? 'Falta ' : 'Over '}{formatador(Math.abs(row.gap_humano))}</span>
+           <span className={(row.gap_humano || 0) > 0 ? 'text-rose-400' : 'text-emerald-400'}>{(row.gap_humano || 0) > 0 ? 'Falta ' : 'Over '}{formatador(Math.abs(row.gap_humano || 0))}</span>
         </td>
-        <td className="px-3 py-3 text-right font-mono font-bold text-rose-400 bg-slate-950/40 border-l border-slate-800/50">{formatPct(row.mape_ia)}</td>
-        <td className="px-3 py-3 text-right font-mono font-bold text-rose-400 bg-slate-950/40">{formatPct(row.mape_humano)}</td>
+        <td className="px-3 py-3 text-right font-mono font-bold text-rose-400 bg-slate-950/40 border-l border-slate-800/50">{formatPct(row.mape_ia || 0)}</td>
+        <td className="px-3 py-3 text-right font-mono font-bold text-rose-400 bg-slate-950/40">{formatPct(row.mape_humano || 0)}</td>
       </tr>
       {expandido && (
         <tr className="bg-slate-900/50 shadow-inner">
@@ -167,29 +167,14 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) =
   const [clientes, setClientes] = useState<any[]>([]);
   const [carregando, setCarregando] = useState(false);
 
-  // Controle de Reais vs Caixas
-  const meta = visao === 'caixas' ? row.meta_mes_vol : row.meta_mes_rs;
-  const pedido = visao === 'caixas' ? row.vendas_mtd_vol : row.vl_pedido;
-  const faturado = visao === 'caixas' ? row.faturado_mtd_vol : row.vl_faturado;
-  const corte = visao === 'caixas' ? row.corte_mtd_vol : row.vl_corte;
-  const carteira = visao === 'caixas' ? row.carteira_aberto_vol : row.carteira_aberto_rs;
-  const estoque = visao === 'caixas' ? row.estoque_atual : row.estoque_rs;
-  
-  // Preditivo
-  const previsao_entrada = visao === 'caixas' ? row.previsao_entrada_vol : row.previsao_entrada_rs;
-  const projecao_fim_mes = visao === 'caixas' ? row.projecao_fim_mes_vol : row.projecao_fim_mes_rs;
-  const gap_meta = visao === 'caixas' ? row.gap_meta_vol : row.gap_meta_rs;
-
-  const atingimento = meta > 0 ? (pedido / meta) * 100 : (pedido > 0 ? 100 : 0);
-  
-  // Ação Dinâmica
+  // Ação Dinâmica (Usando os Campos Enriquecidos do React)
   let acao = { text: "🟢 COBERTO", cor: "text-emerald-400 bg-emerald-950/30 border border-emerald-900/50" };
-  const risco_falta = projecao_fim_mes - row.estoque_atual; // Volume projetado que excede a fábrica
   
-  if (risco_falta > 0) {
-    acao = { text: `🔴 PRODUZIR: +${formatador(visao === 'caixas' ? risco_falta : risco_falta * row.pmv)}`, cor: "text-rose-400 bg-rose-950/30 font-black animate-pulse shadow-rose-900/50 shadow-md border-rose-500/50 border" };
-  } else if (estoque > projecao_fim_mes * 1.5) { // 50% de sobra sobre a projeção
-    acao = { text: `🟡 R. SOBRA: ${formatador(estoque - projecao_fim_mes)}`, cor: "text-amber-400 bg-amber-950/30 border border-amber-900/50" };
+  if (row.__risco_falta > 0) {
+    acao = { text: `🔴 PRODUZIR: +${formatador(row.__risco_falta)}`, cor: "text-rose-400 bg-rose-950/30 font-black animate-pulse shadow-rose-900/50 shadow-md border-rose-500/50 border" };
+  } else if (row.__sobra > row.__projecao * 0.5) { 
+    // Alerta se tiver mais de 50% de sobra do que a projeção do mês
+    acao = { text: `🟡 R. SOBRA: ${formatador(row.__sobra)}`, cor: "text-amber-400 bg-amber-950/30 border border-amber-900/50" };
   }
 
   const carregarClientes = async () => {
@@ -205,6 +190,9 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) =
     }
   };
 
+  // Helper para mostrar Caixas ou Reais na tabela de clientes
+  const formatFinV2 = (val: number) => visao === 'caixas' ? formatVol(val) : formatFin(val * (row.pmv || 0));
+
   return (
     <React.Fragment>
       <tr className="hover:bg-slate-800/30 transition-colors cursor-pointer group border-b border-slate-800/50" onClick={carregarClientes}>
@@ -215,32 +203,32 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) =
           </div>
         </td>
         <td className="px-3 py-4 text-right font-black text-slate-300 bg-slate-900/40" title="Estoque Físico na Fábrica. Em Reais, é o Volume Físico x PMV.">
-          {formatador(estoque)}
+          {formatador(row.__estoque)}
         </td>
-        <td className="px-3 py-4 text-right text-indigo-400 font-bold" title="Meta S&OP (O que a Diretoria estipulou)">{formatador(meta)}</td>
+        <td className="px-3 py-4 text-right text-indigo-400 font-bold" title="Meta S&OP Total (Conforme planejamento)">{formatador(row.__meta)}</td>
         <td className="px-3 py-4 w-24">
           <div className="flex flex-col gap-1 items-end" title="Atingimento: Pedido / Meta S&OP">
-             <span className={`text-[10px] font-black ${atingimento > 100 ? 'text-rose-400' : 'text-slate-400'}`}>
-                {meta === 0 && pedido > 0 ? '100% (+)' : `${atingimento.toFixed(1)}%`}
+             <span className={`text-[10px] font-black ${row.__atingimento > 100 ? 'text-rose-400' : 'text-slate-400'}`}>
+                {row.__meta === 0 && row.__pedido > 0 ? '100% (+)' : `${row.__atingimento.toFixed(1)}%`}
              </span>
-             <div className="w-full bg-slate-800 h-1 rounded-full"><div className={`h-1 rounded-full ${atingimento > 100 ? 'bg-rose-500' : 'bg-indigo-500'}`} style={{width: `${Math.min(atingimento, 100)}%`}}></div></div>
+             <div className="w-full bg-slate-800 h-1 rounded-full"><div className={`h-1 rounded-full ${row.__atingimento > 100 ? 'bg-rose-500' : 'bg-indigo-500'}`} style={{width: `${Math.min(row.__atingimento, 100)}%`}}></div></div>
           </div>
         </td>
-        <td className="px-3 py-4 text-right text-slate-200 border-l border-slate-800/50">{formatador(pedido)}</td>
-        <td className="px-3 py-4 text-right text-emerald-400">{formatador(faturado)}</td>
-        <td className="px-3 py-4 text-right text-rose-400">{formatador(corte)}</td>
-        <td className="px-3 py-4 text-right text-amber-500 font-bold">{formatador(carteira)}</td>
-        <td className="px-3 py-4 text-right text-fuchsia-400 font-bold border-l border-slate-800/50 bg-fuchsia-950/10 cursor-help" title="Fórmula: Σ MAX(0, Média(M-3 a M-1) - Realizado MTD) agrupado por Razão Social.">
-          {formatador(previsao_entrada)}
+        <td className="px-3 py-4 text-right text-slate-200 border-l border-slate-800/50">{formatador(row.__pedido)}</td>
+        <td className="px-3 py-4 text-right text-emerald-400">{formatador(row.__faturado)}</td>
+        <td className="px-3 py-4 text-right text-rose-400">{formatador(row.__corte)}</td>
+        <td className="px-3 py-4 text-right text-amber-500 font-bold">{formatador(row.__carteira)}</td>
+        <td className="px-3 py-4 text-right text-fuchsia-400 font-bold border-l border-slate-800/50 bg-fuchsia-950/10 cursor-help" title="Fórmula: Σ MAX(0, Meta S&OP - Realizado MTD) por Razão Social. Se o cliente atingir 80% da meta dele, a previsão zera.">
+          {formatador(row.__previsao)}
         </td>
-        <td className="px-3 py-4 text-right text-white font-black bg-slate-800/30 cursor-help" title="Fórmula: Pedido Implantado + Previsão de Entrada.">
-          {formatador(projecao_fim_mes)}
+        <td className="px-3 py-4 text-right text-white font-black bg-slate-800/30 cursor-help" title="Fórmula: Pedido Implantado MTD + Previsão de Entrada Oculta.">
+          {formatador(row.__projecao)}
         </td>
-        <td className={`px-3 py-4 text-right font-bold ${gap_meta > 0 ? 'text-emerald-400' : 'text-rose-400'}`} title="Fórmula: Projeção Fim do Mês - Meta S&OP.">
-          {gap_meta > 0 ? '+' : ''}{formatador(gap_meta)}
+        <td className={`px-3 py-4 text-right font-bold ${row.__gap > 0 ? 'text-emerald-400' : 'text-rose-400'}`} title="Fórmula: Projeção Fim do Mês - Meta S&OP.">
+          {row.__gap > 0 ? '+' : ''}{formatador(row.__gap)}
         </td>
-        <td className="px-4 py-4 text-right border-l border-slate-800/50 cursor-help" title="Fórmula: (Projeção Fim do Mês - Estoque Fábrica). Se positivo, produzir. Se negativo, sobra.">
-          <span className={`px-2 py-1 rounded text-[10px] tracking-wider ${acao.cor}`}>{acao.text}</span>
+        <td className="px-4 py-4 text-right border-l border-slate-800/50 cursor-help" title="Fórmula: Demanda Futura (Carteira + Previsão) - Estoque Atual.">
+          <span className={`px-2 py-1 rounded text-[10px] tracking-wider whitespace-nowrap ${acao.cor}`}>{acao.text}</span>
         </td>
       </tr>
 
@@ -248,11 +236,11 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) =
         <tr className="bg-slate-950/90 shadow-inner">
           <td colSpan={12} className="p-6 border-b border-slate-800">
              <div className="flex flex-col gap-3">
-                <h4 className="text-[10px] font-black uppercase tracking-widest text-fuchsia-400 flex items-center gap-2"><Target className="w-4 h-4"/> Detalhamento da Demanda Oculta (Média M-3 a M-1 por Razão Social)</h4>
+                <h4 className="text-[10px] font-black uppercase tracking-widest text-fuchsia-400 flex items-center gap-2"><Target className="w-4 h-4"/> Detalhamento da Demanda Oculta S&OP (Meta vs Realizado por Razão Social)</h4>
                 {carregando ? (
-                   <div className="text-xs text-slate-400 flex gap-2"><RefreshCw className="w-4 h-4 animate-spin"/> Mapeando Histórico de Clientes...</div>
+                   <div className="text-xs text-slate-400 flex gap-2"><RefreshCw className="w-4 h-4 animate-spin"/> Analisando Account-Based Forecast...</div>
                 ) : clientes.length === 0 ? (
-                   <div className="text-xs text-slate-600">Sem histórico relevante nos últimos 90 dias para projetar entradas.</div>
+                   <div className="text-xs text-slate-600">Nenhum cliente mapeado com Meta S&OP ou Vendas para o período selecionado.</div>
                 ) : (
                    <div className="max-h-64 overflow-y-auto border border-slate-800 rounded-lg">
                       <table className="w-full text-left text-xs whitespace-nowrap">
@@ -260,9 +248,10 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) =
                             <tr>
                                <th className="px-4 py-2 border-b border-slate-800">Regional</th>
                                <th className="px-4 py-2 border-b border-slate-800">Razão Social</th>
-                               <th className="px-4 py-2 text-right border-b border-slate-800">Média Hist. M-3 a M-1 (Cx)</th>
-                               <th className="px-4 py-2 text-right border-b border-slate-800">Realizado MTD (Cx)</th>
-                               <th className="px-4 py-2 text-right text-fuchsia-400 border-b border-slate-800">Previsão Faltante (Cx)</th>
+                               <th className="px-4 py-2 text-right border-b border-slate-800">Freq. Compras (Últ 6m)</th>
+                               <th className="px-4 py-2 text-right border-b border-slate-800">Meta S&OP ({visao})</th>
+                               <th className="px-4 py-2 text-right border-b border-slate-800">Realizado MTD ({visao})</th>
+                               <th className="px-4 py-2 text-right text-fuchsia-400 border-b border-slate-800" title="Zera automaticamente se MTD bater 80% da Meta">Previsão Faltante ({visao})</th>
                             </tr>
                          </thead>
                          <tbody className="divide-y divide-slate-800/50">
@@ -270,10 +259,11 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador }: any) =
                                <tr key={idx} className="hover:bg-slate-800/30 text-slate-300">
                                   <td className="px-4 py-2 font-mono text-slate-500">{c.regional}</td>
                                   <td className="px-4 py-2 font-bold">{c.razaosocial}</td>
-                                  <td className="px-4 py-2 text-right">{formatVol(c.media_hist_vol)}</td>
-                                  <td className="px-4 py-2 text-right">{formatVol(c.mtd_vol)}</td>
+                                  <td className="px-4 py-2 text-right font-mono text-slate-400">{c.freq_meses}/6</td>
+                                  <td className="px-4 py-2 text-right text-indigo-300">{formatFinV2(c.meta_vol || 0)}</td>
+                                  <td className="px-4 py-2 text-right">{formatFinV2(c.mtd_vol || 0)}</td>
                                   <td className="px-4 py-2 text-right font-black text-fuchsia-400">
-                                     {c.previsao_vol > 0 ? `+ ${formatVol(c.previsao_vol)}` : <span className="text-emerald-500">Atingido</span>}
+                                     {(c.previsao_vol || 0) > 0 ? `+ ${formatFinV2(c.previsao_vol)}` : <span className="text-emerald-500">Atendido</span>}
                                   </td>
                                </tr>
                             ))}
@@ -312,7 +302,7 @@ export default function AuditoriaArena() {
   const [kpisGerais, setKpisGerais] = useState<any>({});
   const [carregando, setCarregando] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [sortConfig, setSortConfig] = useState({ key: 'erro_absoluto', direction: 'desc' });
+  const [sortConfig, setSortConfig] = useState({ key: '__risco_falta', direction: 'desc' });
 
   const formatador = visao === 'caixas' ? formatVol : formatFin;
 
@@ -324,7 +314,7 @@ export default function AuditoriaArena() {
         setListaClientes(res.data.clientes || []);
         setMesesDisponiveis(res.data.meses_disponiveis || []);
         
-        // 🔥 CORREÇÃO: Força a seleção sempre no Mês Atual
+        // CORREÇÃO: Força a seleção sempre no Mês Atual
         if (res.data.meses_disponiveis?.length > 0) {
           const dataAtual = new Date();
           const mesAtualStr = `${String(dataAtual.getMonth() + 1).padStart(2, '0')}/${dataAtual.getFullYear()}`;
@@ -332,7 +322,6 @@ export default function AuditoriaArena() {
           if (res.data.meses_disponiveis.includes(mesAtualStr)) {
             setMesesSelecionados([mesAtualStr]);
           } else {
-            // Se o mês atual ainda não existir na base, marca o mais recente
             setMesesSelecionados([res.data.meses_disponiveis[0]]);
           }
         } 
@@ -341,7 +330,7 @@ export default function AuditoriaArena() {
     fetchFiltros();
   }, [lente]);
 
-  // 🔥 LÓGICA DE FILTRO EM CASCATA INSTANTÂNEA NO FRONTEND
+  // LÓGICA DE FILTRO EM CASCATA INSTANTÂNEA NO FRONTEND
   const categoriasExibidas = useMemo(() => {
       if (segmentoSel === 'Todos') return Array.from(new Set(paresCatSeg.map(f => f.categoria))).sort();
       return Array.from(new Set(paresCatSeg.filter(f => f.segmento === segmentoSel).map(f => f.categoria))).sort();
@@ -375,8 +364,8 @@ export default function AuditoriaArena() {
         setSkus(res.data.estoque_sku || []); 
         setKpisGerais(res.data.kpis_globais || {});
         
-        // Seta o sort inicial correto dependendo da visão
-        setSortConfig({ key: visao === 'caixas' ? 'ruptura_vol' : 'ruptura_rs', direction: 'desc' });
+        // Sort Inicial Perfeito
+        setSortConfig({ key: '__risco_falta', direction: 'desc' });
       }
       else {
         params.append('lente', lente);
@@ -407,17 +396,49 @@ export default function AuditoriaArena() {
     setSortConfig({ key, direction });
   };
 
+  // 🔥 ENRIQUECIMENTO (Para que TUDO seja classificável no React, previnindo NaN)
+  const enrichedSkus = useMemo(() => {
+    if (lente !== 'estoque') return skus;
+    
+    return skus.map((row: any) => {
+      const meta = visao === 'caixas' ? (row.meta_mes_vol || 0) : (row.meta_mes_rs || 0);
+      const pedido = visao === 'caixas' ? (row.vendas_mtd_vol || 0) : (row.vl_pedido || 0);
+      const faturado = visao === 'caixas' ? (row.faturado_mtd_vol || 0) : (row.vl_faturado || 0);
+      const corte = visao === 'caixas' ? (row.corte_mtd_vol || 0) : (row.vl_corte || 0);
+      const estoque = visao === 'caixas' ? (row.estoque_atual || 0) : (row.estoque_rs || 0);
+      const carteira = visao === 'caixas' ? (row.carteira_aberto_vol || 0) : (row.carteira_aberto_rs || 0);
+      const previsao = visao === 'caixas' ? (row.previsao_entrada_vol || 0) : (row.previsao_entrada_rs || 0);
+      const projecao = visao === 'caixas' ? (row.projecao_fim_mes_vol || 0) : (row.projecao_fim_mes_rs || 0);
+      const gap = visao === 'caixas' ? (row.gap_meta_vol || 0) : (row.gap_meta_rs || 0);
+      
+      const atingimento = meta > 0 ? (pedido / meta) * 100 : (pedido > 0 ? 100 : 0);
+      const demanda_futura = carteira + previsao;
+      const risco_falta = demanda_futura - estoque;
+      const sobra = estoque > demanda_futura ? (estoque - demanda_futura) : 0;
+
+      return { 
+        ...row, 
+        __estoque: estoque, __meta: meta, __pedido: pedido, __faturado: faturado,
+        __corte: corte, __carteira: carteira, __previsao: previsao, __projecao: projecao,
+        __gap: gap, __atingimento: atingimento, __demanda_futura: demanda_futura,
+        __risco_falta: risco_falta, __sobra: sobra
+      };
+    });
+  }, [skus, visao, lente]);
+
   const sortedSkus = useMemo(() => {
-    let sortable = [...skus].filter(r => r.descricao?.toLowerCase().includes(buscaSku.toLowerCase()) || r.sku?.toLowerCase().includes(buscaSku.toLowerCase()));
+    let baseData = lente === 'estoque' ? enrichedSkus : skus;
+    let sortable = [...baseData].filter(r => r.descricao?.toLowerCase().includes(buscaSku.toLowerCase()) || r.sku?.toLowerCase().includes(buscaSku.toLowerCase()));
+    
     sortable.sort((a, b) => {
       if (a[sortConfig.key] < b[sortConfig.key]) return sortConfig.direction === 'asc' ? -1 : 1;
       if (a[sortConfig.key] > b[sortConfig.key]) return sortConfig.direction === 'asc' ? 1 : -1;
       return 0;
     });
     return sortable;
-  }, [skus, sortConfig, buscaSku]);
+  }, [enrichedSkus, skus, sortConfig, buscaSku, lente]);
 
-  // 🔥 FUNÇÃO DE EXPORTAÇÃO CSV MANTÉM OS DADOS COMPLETOS PARA O EXCEL
+  // FUNÇÃO DE EXPORTAÇÃO CSV
   const handleExportCSV = () => {
     if (!sortedSkus || sortedSkus.length === 0) return;
 
@@ -431,15 +452,8 @@ export default function AuditoriaArena() {
         `Previsão de Entrada (${visao})`, `Projeção Fim do Mês (${visao})`, `Gap vs Meta (${visao})`
       ];
       rows = sortedSkus.map((d: any) => [
-        d.sku, d.descricao, d.categoria, visao === 'caixas' ? d.estoque_atual : d.estoque_rs,
-        visao === 'caixas' ? d.meta_mes_vol : d.meta_mes_rs,
-        visao === 'caixas' ? d.vendas_mtd_vol : d.vl_pedido,
-        visao === 'caixas' ? d.faturado_mtd_vol : d.vl_faturado,
-        visao === 'caixas' ? d.corte_mtd_vol : d.vl_corte,
-        visao === 'caixas' ? d.carteira_aberto_vol : d.carteira_aberto_rs,
-        visao === 'caixas' ? d.previsao_entrada_vol : d.previsao_entrada_rs,
-        visao === 'caixas' ? d.projecao_fim_mes_vol : d.projecao_fim_mes_rs,
-        visao === 'caixas' ? d.gap_meta_vol : d.gap_meta_rs
+        d.sku, d.descricao, d.categoria, d.__estoque, d.__meta, d.__pedido,
+        d.__faturado, d.__corte, d.__carteira, d.__previsao, d.__projecao, d.__gap
       ]);
     } else {
       headers = ["SKU", "Descrição"];
@@ -448,9 +462,7 @@ export default function AuditoriaArena() {
 
     const csvContent = [
       headers.join(";"),
-      ...rows.map(row => row.map(val => 
-        typeof val === 'number' ? val.toString().replace('.', ',') : `"${val}"`
-      ).join(";"))
+      ...rows.map(row => row.map(val => typeof val === 'number' ? val.toString().replace('.', ',') : `"${val}"`).join(";"))
     ].join("\n");
 
     const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -465,7 +477,7 @@ export default function AuditoriaArena() {
 
   return (
     <div className="p-6 bg-slate-950 min-h-screen text-slate-100 font-sans">
-      
+      {/* HEADER PRINCIPAL */}
       <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 bg-slate-900 p-5 rounded-2xl border border-slate-800 mb-6 shadow-xl">
         <div>
           <h1 className="text-2xl font-black text-white tracking-tight flex items-center gap-3">
@@ -476,12 +488,8 @@ export default function AuditoriaArena() {
 
         <div className="flex flex-col md:flex-row gap-3 items-center">
           {lente === 'estoque' && (
-            <button 
-              onClick={handleExportCSV}
-              className="flex items-center px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-black tracking-wider transition-all shadow-lg shadow-emerald-900/20 text-[10px] sm:text-xs uppercase h-full"
-            >
-              <Download className="w-4 h-4 mr-2" />
-              Extrair CSV
+            <button onClick={handleExportCSV} className="flex items-center px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-black tracking-wider transition-all shadow-lg shadow-emerald-900/20 text-[10px] sm:text-xs uppercase h-full">
+              <Download className="w-4 h-4 mr-2" /> Extrair CSV
             </button>
           )}
 
@@ -500,6 +508,7 @@ export default function AuditoriaArena() {
         </div>
       </div>
 
+      {/* FILTROS GLOBAIS */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
         {lente !== 'estoque' && <div className="lg:col-span-1"><ExcelTreeDropdown titulo="Horizonte S&OP" options={mesesDisponiveis} selected={mesesSelecionados} onChange={setMesesSelecionados} /></div>}
         
@@ -533,16 +542,16 @@ export default function AuditoriaArena() {
       {/* RENDERIZAÇÃO DOS GRÁFICOS */}
       {lente === 'kpis' || lente === 'sellout' ? (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-indigo-500 shadow-md"><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">% WMAPE IA</div><div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_ia)}</div></div>
-          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-sky-500 shadow-md"><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">{lente === 'kpis' ? '% WMAPE S&OP' : 'Erro Escoamento'}</div><div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_comercial)}</div></div>
-          <div className={`bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md border-l-4 ${kpisGerais.fva >= 0 ? 'border-l-emerald-500' : 'border-l-rose-500'}`}><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2 flex justify-between">FVA (Melhoria) {kpisGerais.fva >= 0 ? <TrendingUp className="w-4 h-4 text-emerald-500"/> : <TrendingDown className="w-4 h-4 text-rose-500"/>}</div><div className={`text-3xl font-black ${kpisGerais.fva >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.fva)}</div></div>
+          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-indigo-500 shadow-md"><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">% WMAPE IA</div><div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_ia || 0)}</div></div>
+          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-sky-500 shadow-md"><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">{lente === 'kpis' ? '% WMAPE S&OP' : 'Erro Escoamento'}</div><div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_comercial || 0)}</div></div>
+          <div className={`bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md border-l-4 ${(kpisGerais.fva || 0) >= 0 ? 'border-l-emerald-500' : 'border-l-rose-500'}`}><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2 flex justify-between">FVA (Melhoria) {(kpisGerais.fva || 0) >= 0 ? <TrendingUp className="w-4 h-4 text-emerald-500"/> : <TrendingDown className="w-4 h-4 text-rose-500"/>}</div><div className={`text-3xl font-black ${(kpisGerais.fva || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.fva || 0)}</div></div>
           <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md">
             <div className="text-[10px] font-black uppercase text-slate-400 tracking-wider mb-2 flex justify-between border-b border-slate-700 pb-1">
               <span>{lente === 'sellout' ? 'BIAS Canal' : 'BIAS S&OP'}</span><span>{lente === 'sellout' ? 'Dias Cob.' : 'BIAS IA'}</span>
             </div>
             <div className="flex justify-between items-center mt-2">
-              <span className={`text-xl font-black ${kpisGerais.bias_humano > 0 ? 'text-amber-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.bias_humano)}</span>
-              <span className={`text-xl font-black ${kpisGerais.bias_ia > 0 ? 'text-amber-400' : 'text-rose-400'}`}>{lente === 'sellout' ? `${kpisGerais.cobertura_media_canal} D` : formatPct(kpisGerais.bias_ia)}</span>
+              <span className={`text-xl font-black ${(kpisGerais.bias_humano || 0) > 0 ? 'text-amber-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.bias_humano || 0)}</span>
+              <span className={`text-xl font-black ${(kpisGerais.bias_ia || 0) > 0 ? 'text-amber-400' : 'text-rose-400'}`}>{lente === 'sellout' ? `${kpisGerais.cobertura_media_canal || 0} D` : formatPct(kpisGerais.bias_ia || 0)}</span>
             </div>
           </div>
         </div>
@@ -586,64 +595,65 @@ export default function AuditoriaArena() {
         </div>
       ) : lente === 'estoque' ? (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-          <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-rose-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><TrendingDown className="w-4 h-4 text-rose-500"/> Risco Produtivo (Projeção)</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_ruptura_rs) : formatVol(kpisGerais.total_ruptura_vol) + ' Cx'}</p></div>
-          <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-amber-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><Package className="w-4 h-4 text-amber-500"/> Capital Imobilizado (Projeção)</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_sobra_rs) : formatVol(kpisGerais.total_sobra_vol) + ' Cx'}</p></div>
+          <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-rose-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><TrendingDown className="w-4 h-4 text-rose-500"/> Risco Produtivo (Projeção)</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_ruptura_rs || 0) : formatVol(kpisGerais.total_ruptura_vol || 0) + ' Cx'}</p></div>
+          <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-amber-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><Package className="w-4 h-4 text-amber-500"/> Capital Imobilizado (Projeção)</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_sobra_rs || 0) : formatVol(kpisGerais.total_sobra_vol || 0) + ' Cx'}</p></div>
         </div>
       ) : null}
 
-      {/* RENDERIZAÇÃO DAS TABELAS COM SORT E TFOOT */}
-      <div className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-2xl overflow-x-auto">
+      {/* RENDERIZAÇÃO DAS TABELAS COM CAIXA FIXA E SCROLL BAR */}
+      <div className="bg-slate-900 rounded-2xl border border-slate-800 shadow-2xl flex flex-col">
         {carregando ? (
           <div className="p-20 flex justify-center items-center gap-3 text-indigo-400 font-bold uppercase text-xs"><RefreshCw className="w-6 h-6 animate-spin" /> Processando Tabelas...</div>
         ) : lente === 'estoque' ? (
           
-          <table className="w-full text-left whitespace-nowrap">
-            <thead>
-              {/* LINHA DE CATEGORIZAÇÃO (SUPER-HEADER) */}
-              <tr className="bg-slate-900 border-b border-slate-800">
-                <th colSpan={4} className="px-6 py-2 text-center text-[10px] font-black tracking-widest text-slate-500 uppercase border-r border-slate-800/50">📦 Planejamento & Fábrica</th>
-                <th colSpan={4} className="px-6 py-2 text-center text-[10px] font-black tracking-widest text-emerald-500/70 uppercase border-r border-slate-800/50">🤝 Realidade Comercial (MTD)</th>
-                <th colSpan={4} className="px-6 py-2 text-center text-[10px] font-black tracking-widest text-fuchsia-400/80 uppercase">🔮 Projeção Bottom-Up & Ação</th>
-              </tr>
-              <tr className="bg-slate-950 text-slate-400 text-[10px] font-black uppercase tracking-widest border-b border-slate-800">
-                <SortableHeader field="descricao" label="Produto" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
-                <SortableHeader field={visao === 'caixas' ? 'estoque_atual' : 'estoque_rs'} label={`Estoque Fáb. (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-slate-300 text-right bg-slate-900/40" />
-                <SortableHeader field={visao === 'caixas' ? 'meta_mes_vol' : 'meta_mes_rs'} label={`Meta S&OP (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-indigo-400 text-right" />
-                <th className="px-3 py-4 text-right">Atingido %</th>
-                
-                <SortableHeader field={visao === 'caixas' ? 'vendas_mtd_vol' : 'vl_pedido'} label={`Pedido (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-white text-right border-l border-slate-800/50" />
-                <SortableHeader field={visao === 'caixas' ? 'faturado_mtd_vol' : 'vl_faturado'} label={`Faturado (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-emerald-400 text-right" />
-                <SortableHeader field={visao === 'caixas' ? 'corte_mtd_vol' : 'vl_corte'} label={`Corte (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-rose-400 text-right" />
-                <SortableHeader field={visao === 'caixas' ? 'carteira_aberto_vol' : 'carteira_aberto_rs'} label={`Carteira Aberto (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-amber-500 text-right" />
-                
-                <SortableHeader field={visao === 'caixas' ? 'previsao_entrada_vol' : 'previsao_entrada_rs'} label={`Prev. Entrada (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-fuchsia-400 text-right border-l border-slate-800/50 bg-fuchsia-950/10" />
-                <SortableHeader field={visao === 'caixas' ? 'projecao_fim_mes_vol' : 'projecao_fim_mes_rs'} label={`Projeção Fim do Mês`} currentSort={sortConfig} requestSort={requestSort} className="text-white text-right bg-slate-800/30" />
-                <SortableHeader field={visao === 'caixas' ? 'gap_meta_vol' : 'gap_meta_rs'} label={`Gap vs Meta`} currentSort={sortConfig} requestSort={requestSort} className="text-slate-300 text-right" />
-                <th className="px-4 py-4 text-right border-l border-slate-800/50">Alerta de Supply</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/60 text-xs">
-              {sortedSkus.map((row) => <RowRiscoDrillDown key={row.sku} row={row} visao={visao} mesesSelecionados={mesesSelecionados} formatador={formatador} />)}
-            </tbody>
-            <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
-              <tr>
-                <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Totais da Visão ({visao})</td>
-                <td className="px-3 py-4 text-right bg-slate-900/40">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.estoque_atual : r.estoque_rs) || 0, 0))}</td>
-                <td className="px-3 py-4 text-right text-indigo-400">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.meta_mes_vol : r.meta_mes_rs) || 0, 0))}</td>
-                <td className="px-3 py-4 text-right text-slate-500">-</td>
-                
-                <td className="px-3 py-4 text-right border-l border-slate-800/50">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.vendas_mtd_vol : r.vl_pedido) || 0, 0))}</td>
-                <td className="px-3 py-4 text-right text-emerald-400">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.faturado_mtd_vol : r.vl_faturado) || 0, 0))}</td>
-                <td className="px-3 py-4 text-right text-rose-400">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.corte_mtd_vol : r.vl_corte) || 0, 0))}</td>
-                <td className="px-3 py-4 text-right text-amber-500">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.carteira_aberto_vol : r.carteira_aberto_rs) || 0, 0))}</td>
-                
-                <td className="px-3 py-4 text-right text-fuchsia-400 border-l border-slate-800/50 bg-fuchsia-950/10">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.previsao_entrada_vol : r.previsao_entrada_rs) || 0, 0))}</td>
-                <td className="px-3 py-4 text-right bg-slate-800/30">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.projecao_fim_mes_vol : r.projecao_fim_mes_rs) || 0, 0))}</td>
-                <td className="px-3 py-4 text-right text-slate-300">{formatador(sortedSkus.reduce((sum, r) => sum + (visao === 'caixas' ? r.gap_meta_vol : r.gap_meta_rs) || 0, 0))}</td>
-                <td className="px-4 py-4 text-right border-l border-slate-800/50 text-slate-500">-</td>
-              </tr>
-            </tfoot>
-          </table>
+          <div className="overflow-y-auto overflow-x-auto w-full max-h-[70vh] rounded-2xl">
+            <table className="w-full text-left whitespace-nowrap relative">
+              <thead className="sticky top-0 z-20 shadow-md bg-slate-950">
+                <tr className="bg-slate-900 border-b border-slate-800">
+                  <th colSpan={4} className="px-6 py-2 text-center text-[10px] font-black tracking-widest text-slate-500 uppercase border-r border-slate-800/50">📦 Planejamento & Fábrica</th>
+                  <th colSpan={4} className="px-6 py-2 text-center text-[10px] font-black tracking-widest text-emerald-500/70 uppercase border-r border-slate-800/50">🤝 Realidade Comercial (MTD)</th>
+                  <th colSpan={4} className="px-6 py-2 text-center text-[10px] font-black tracking-widest text-fuchsia-400/80 uppercase">🔮 Projeção Bottom-Up & Ação</th>
+                </tr>
+                <tr className="bg-slate-950 text-slate-400 text-[10px] font-black uppercase tracking-widest border-b border-slate-800">
+                  <SortableHeader field="descricao" label="Produto" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
+                  <SortableHeader field="__estoque" label={`Estoque Fáb. (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-slate-300 text-right bg-slate-900/40" />
+                  <SortableHeader field="__meta" label={`Meta S&OP (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-indigo-400 text-right" />
+                  <SortableHeader field="__atingimento" label="Atingido %" currentSort={sortConfig} requestSort={requestSort} className="text-right" />
+                  
+                  <SortableHeader field="__pedido" label={`Pedido (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-white text-right border-l border-slate-800/50" />
+                  <SortableHeader field="__faturado" label={`Faturado (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-emerald-400 text-right" />
+                  <SortableHeader field="__corte" label={`Corte (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-rose-400 text-right" />
+                  <SortableHeader field="__carteira" label={`Carteira Aberto (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-amber-500 text-right" />
+                  
+                  <SortableHeader field="__previsao" label={`Prev. Entrada (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-fuchsia-400 text-right border-l border-slate-800/50 bg-fuchsia-950/10" />
+                  <SortableHeader field="__projecao" label={`Projeção Fim do Mês`} currentSort={sortConfig} requestSort={requestSort} className="text-white text-right bg-slate-800/30" />
+                  <SortableHeader field="__gap" label={`Gap vs Meta`} currentSort={sortConfig} requestSort={requestSort} className="text-slate-300 text-right" />
+                  <SortableHeader field="__risco_falta" label="Alerta de Supply" currentSort={sortConfig} requestSort={requestSort} className="text-right border-l border-slate-800/50" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60 text-xs">
+                {sortedSkus.map((row) => <RowRiscoDrillDown key={row.sku} row={row} visao={visao} mesesSelecionados={mesesSelecionados} formatador={formatador} />)}
+              </tbody>
+              <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs sticky bottom-0 z-20 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.3)]">
+                <tr>
+                  <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Totais da Visão ({visao})</td>
+                  <td className="px-3 py-4 text-right bg-slate-900/40">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__estoque || 0), 0))}</td>
+                  <td className="px-3 py-4 text-right text-indigo-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__meta || 0), 0))}</td>
+                  <td className="px-3 py-4 text-right text-slate-500">-</td>
+                  
+                  <td className="px-3 py-4 text-right border-l border-slate-800/50">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__pedido || 0), 0))}</td>
+                  <td className="px-3 py-4 text-right text-emerald-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__faturado || 0), 0))}</td>
+                  <td className="px-3 py-4 text-right text-rose-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__corte || 0), 0))}</td>
+                  <td className="px-3 py-4 text-right text-amber-500">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__carteira || 0), 0))}</td>
+                  
+                  <td className="px-3 py-4 text-right text-fuchsia-400 border-l border-slate-800/50 bg-fuchsia-950/10">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__previsao || 0), 0))}</td>
+                  <td className="px-3 py-4 text-right bg-slate-800/30">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__projecao || 0), 0))}</td>
+                  <td className="px-3 py-4 text-right text-slate-300">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__gap || 0), 0))}</td>
+                  <td className="px-4 py-4 text-right border-l border-slate-800/50 text-slate-500">-</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
 
         ) : lente === 'sellout' ? (
            <table className="w-full text-left whitespace-nowrap">
@@ -662,12 +672,12 @@ export default function AuditoriaArena() {
                {sortedSkus.map(row => (
                  <tr key={row.sku} className="hover:bg-slate-800/30">
                    <td className="px-6 py-3.5"><div className="flex flex-col"><span className="font-bold text-slate-200">{row.descricao}</span><span className="text-[10px] text-slate-500 font-mono mt-0.5">{row.sku}</span></div></td>
-                   <td className="px-4 py-3.5 text-right font-black text-white">{formatVol(row.vol_real)}</td>
-                   <td className="px-4 py-3.5 text-right font-semibold text-indigo-400 bg-indigo-950/10">{formatVol(row.vol_ia_congelado)}</td>
-                   <td className="px-4 py-3.5 text-right font-semibold text-sky-400 bg-sky-950/10">{formatVol(row.vol_comercial_congelado)}</td>
-                   <td className="px-4 py-3.5 text-right font-semibold text-amber-400">{formatVol(row.estoque_canal)}</td>
-                   <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 border-l border-slate-800 bg-slate-950/40">{formatPct(row.mape_ia)}</td>
-                   <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 bg-slate-950/40">{formatPct(row.mape_comercial)}</td>
+                   <td className="px-4 py-3.5 text-right font-black text-white">{formatVol(row.vol_real || 0)}</td>
+                   <td className="px-4 py-3.5 text-right font-semibold text-indigo-400 bg-indigo-950/10">{formatVol(row.vol_ia_congelado || 0)}</td>
+                   <td className="px-4 py-3.5 text-right font-semibold text-sky-400 bg-sky-950/10">{formatVol(row.vol_comercial_congelado || 0)}</td>
+                   <td className="px-4 py-3.5 text-right font-semibold text-amber-400">{formatVol(row.estoque_canal || 0)}</td>
+                   <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 border-l border-slate-800 bg-slate-950/40">{formatPct(row.mape_ia || 0)}</td>
+                   <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 bg-slate-950/40">{formatPct(row.mape_comercial || 0)}</td>
                  </tr>
                ))}
              </tbody>
