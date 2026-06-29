@@ -376,7 +376,8 @@ async def sincronizar_tudo(background_tasks: BackgroundTasks, db: Session = Depe
         # Importamos a função de orquestração geral para atualizar vendas
         try:
             from app.etl.pipeline import executar_pipeline_nexus
-            background_tasks.add_task(executar_pipeline_nexus, db)
+            # CORREÇÃO AQUI: Removido o 'db', pois a função não exige parâmetros
+            background_tasks.add_task(executar_pipeline_nexus)
         except ImportError:
             pass # Se o ficheiro não estiver acessível, ignora mas mantém a atualização do GOBI
             
