@@ -5,7 +5,8 @@ import pandas as pd
 import numpy as np
 import asyncio
 import aiohttp
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
+from dotenv import load_dotenv
 
 # ==========================================
 # INJEÇÃO DINÂMICA DE ROTA (PARA O CRON E SUBPROCESSOS)
@@ -13,7 +14,6 @@ from sqlalchemy import create_engine, text
 if __name__ == "__main__":
     sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from dotenv import load_dotenv
 load_dotenv('/nexus_backend/.env')
 from app.core.config import settings
 
@@ -25,14 +25,9 @@ AWS_STORAGE_OPTIONS = {
     "secret": "M1DZSalEK3rXZb31lqHHHtAK32g9FD5gg8YAIHVI",
     "client_kwargs": {"region_name": "us-east-1"}
 }
-
 S3_BUCKET = "nexus-datalake-linea-prd"
-
-# Note que agora apontamos para pastas que serão particionadas por mês
 S3_PREFIX_PMR_SILVER = f"s3://{S3_BUCKET}/financeiro/pmr"
 S3_PREFIX_PMP_SILVER = f"s3://{S3_BUCKET}/financeiro/pmp"
-
-# Camada Ouro (Agregada por Cliente) para Risco de Estoque (Lida em Milissegundos)
 S3_PREFIX_PMR_GOLD = f"s3://{S3_BUCKET}/financeiro/pmr/pmr_clientes_gold.parquet"
 
 API_GOBI_BASE = "https://gobi-api.lineaalimentos.com.br/v1/reports"
@@ -61,10 +56,34 @@ async def _fetch_json_with_retry(session: aiohttp.ClientSession, url: str, param
             if tentativa < retries - 1: await asyncio.sleep(2 ** tentativa)
     return None
 
+async def extrair_cadastro_clientes_188(session: aiohttp.ClientSession) -> pd.DataFrame:
+    """A 'Pedra de Roseta': Transforma o código do Protheus num CNPJ real."""
+    print("   -> 📥 Puxando API 188 (Tradutor Cliente/Loja para CGC)...")
+    limit, offset, clientes = 5000, 0, []
+    while True:
+        dados = await _fetch_json_with_retry(session, f"{API_GOBI_BASE}/188/data", {"streaming": "true", "format": "json", "limit": limit, "offset": offset})
+        if not dados or len(dados) == 0: break
+        clientes.extend(dados)
+        offset += len(dados)
+        if len(dados) < limit: break
+        
+    df = pd.DataFrame(clientes)
+    if not df.empty:
+        df.columns = [str(x).lower().strip() for x in df.columns]
+        mapa = {'codigo': 'cod', 'a1_cod': 'cod', 'cnpj': 'cgc', 'cgc_cpf': 'cgc', 'a1_cgc': 'cgc'}
+        df.rename(columns=mapa, inplace=True)
+        if 'cod' not in df.columns: df['cod'] = '000000'
+        if 'loja' not in df.columns: df['loja'] = '00'
+        if 'cgc' not in df.columns: df['cgc'] = '00000000000000'
+        
+        df['chave_cl'] = df['cod'].astype(str).str.strip() + "-" + df['loja'].astype(str).str.strip()
+        df['cgc'] = df['cgc'].astype(str).str.replace(r'\D', '', regex=True)
+        return df[['chave_cl', 'cgc']].drop_duplicates()
+    return pd.DataFrame(columns=['chave_cl', 'cgc'])
+
 async def _fetch_dados_dia(session: aiohttp.ClientSession, relatorio_id: int, dia: datetime.date) -> list:
     limit, offset, registros_dia = 5000, 0, []
     dia_str = dia.strftime("%Y-%m-%d")
-    
     while True:
         params = {"start_date": dia_str, "end_date": dia_str, "streaming": "true", "format": "json", "limit": limit, "offset": offset}
         dados = await _fetch_json_with_retry(session, f"{API_GOBI_BASE}/{relatorio_id}/data", params)
@@ -72,7 +91,6 @@ async def _fetch_dados_dia(session: aiohttp.ClientSession, relatorio_id: int, di
         registros_dia.extend(dados)
         offset += len(dados)
         if len(dados) < limit: break
-            
     return registros_dia
 
 async def extrair_dados_financeiros(session: aiohttp.ClientSession, relatorio_id: int, nome_relatorio: str) -> pd.DataFrame:
@@ -81,8 +99,7 @@ async def extrair_dados_financeiros(session: aiohttp.ClientSession, relatorio_id
     data_inicio = hoje - datetime.timedelta(days=180)
     lista_dias = [data_inicio + datetime.timedelta(days=x) for x in range(181)]
     
-    print(f"   -> Iniciando varredura diária de 180 dias - {nome_relatorio} (ID {relatorio_id})...")
-    
+    print(f"   -> Varredura Diária: {nome_relatorio} (ID {relatorio_id})...")
     chunk_size = 5
     for i in range(0, len(lista_dias), chunk_size):
         chunk_dias = lista_dias[i:i + chunk_size]
@@ -90,9 +107,8 @@ async def extrair_dados_financeiros(session: aiohttp.ClientSession, relatorio_id
         resultados = await asyncio.gather(*tasks)
         for lote in resultados:
             if lote: registros_totais.extend(lote)
-        print(f"      Progresso: {min(i + chunk_size, len(lista_dias))}/{len(lista_dias)} dias processados...")
+        print(f"      Progresso: {min(i + chunk_size, len(lista_dias))}/{len(lista_dias)} dias. Títulos: {len(registros_totais)}")
         await asyncio.sleep(0.3) 
-        
     return pd.DataFrame(registros_totais)
 
 # ==========================================
@@ -101,113 +117,123 @@ async def extrair_dados_financeiros(session: aiohttp.ClientSession, relatorio_id
 async def processar_pmp(session: aiohttp.ClientSession):
     print("\n🔄 Processando PMP (Contas a Pagar) - Regra Fiscal Aplicada...")
     
-    # 1. Títulos a Pagar (SE2 - API 590)
     df_se2 = await extrair_dados_financeiros(session, 590, "SE2 Títulos a Pagar")
     if df_se2.empty: return
     df_se2.columns = [c.lower().strip() for c in df_se2.columns]
     
-    # 2. Notas Fiscais Entrada (SF1 - API 589)
     df_sf1 = await extrair_dados_financeiros(session, 589, "SF1 Notas de Entrada")
     if df_sf1.empty: return
     df_sf1.columns = [c.lower().strip() for c in df_sf1.columns]
     
-    # Filtro Fiscal MP/SI/EM (Matéria Prima, Serviço Industrial, Embalagem)
-    df_sf1 = df_sf1[df_sf1['d1_tp'].isin(['MP', 'SI', 'EM'])]
-    df_sf1['chave'] = df_sf1['f1_fornece'].astype(str) + "-" + df_sf1['f1_loja'].astype(str) + "-" + df_sf1['f1_doc'].astype(str)
-    df_sf1 = df_sf1.drop_duplicates(subset=['chave'])
+    # Filtro Fiscal MP/SI/EM
+    if 'd1_tp' in df_sf1.columns:
+        df_sf1 = df_sf1[df_sf1['d1_tp'].isin(['MP', 'SI', 'EM'])]
     
-    # Criar chave no Financeiro e fazer o Inner Join com a Nota Limpa
-    df_se2['chave'] = df_se2['e2_fornece'].astype(str) + "-" + df_se2['e2_loja'].astype(str) + "-" + df_se2['e2_num'].astype(str)
-    df_pmp = pd.merge(df_se2, df_sf1[['chave', 'd1_tp']], on='chave', how='inner')
+    df_sf1['chave_nf'] = df_sf1.get('f1_fornece', '').astype(str).str.strip() + "-" + df_sf1.get('f1_loja', '').astype(str).str.strip() + "-" + df_sf1.get('f1_doc', '').astype(str).str.strip()
+    df_sf1 = df_sf1.drop_duplicates(subset=['chave_nf'])
     
-    # Matemática do Tempo (Dias Reais e Base)
+    df_se2['chave_nf'] = df_se2.get('e2_fornece', '').astype(str).str.strip() + "-" + df_se2.get('e2_loja', '').astype(str).str.strip() + "-" + df_se2.get('e2_num', '').astype(str).str.strip()
+    
+    # Cruzamento Fiscal x Financeiro
+    df_pmp = pd.merge(df_se2, df_sf1[['chave_nf', 'd1_tp']], on='chave_nf', how='inner')
+    
     for col in ['e2_emissao', 'e2_vencto', 'e2_vencrea']:
-        df_pmp[col] = pd.to_datetime(df_pmp[col], errors='coerce')
+        if col in df_pmp.columns: df_pmp[col] = pd.to_datetime(df_pmp[col], errors='coerce')
         
     df_pmp = df_pmp.dropna(subset=['e2_emissao'])
-    df_pmp['base_dias'] = (df_pmp['e2_vencto'] - df_pmp['e2_emissao']).dt.days.fillna(0).astype(int)
-    df_pmp['real_dias'] = (df_pmp['e2_vencrea'] - df_pmp['e2_emissao']).dt.days.fillna(0).astype(int)
+    if 'e2_vencto' in df_pmp.columns: df_pmp['base_dias'] = (df_pmp['e2_vencto'] - df_pmp['e2_emissao']).dt.days.fillna(0).astype(int)
+    else: df_pmp['base_dias'] = 0
+    if 'e2_vencrea' in df_pmp.columns: df_pmp['real_dias'] = (df_pmp['e2_vencrea'] - df_pmp['e2_emissao']).dt.days.fillna(0).astype(int)
+    else: df_pmp['real_dias'] = 0
     
-    df_pmp['e2_valor'] = pd.to_numeric(df_pmp['e2_valor'], errors='coerce').fillna(0)
+    df_pmp['e2_valor'] = pd.to_numeric(df_pmp.get('e2_valor', 0), errors='coerce').fillna(0)
     df_pmp['peso_base'] = df_pmp['base_dias'] * df_pmp['e2_valor']
     df_pmp['peso_real'] = df_pmp['real_dias'] * df_pmp['e2_valor']
     
-    # Particionamento por Mês
     df_pmp['mes_competencia'] = df_pmp['e2_emissao'].dt.strftime('%Y-%m')
     
     colunas_finais = ['e2_filial', 'e2_num', 'e2_tipo', 'e2_fornece', 'e2_loja', 'a2_nome', 'e2_emissao', 'e2_vencto', 'e2_vencrea', 'e2_valor', 'd1_tp', 'base_dias', 'real_dias', 'peso_base', 'peso_real', 'mes_competencia']
     df_export = df_pmp[[c for c in colunas_finais if c in df_pmp.columns]]
     
-    print(f"🚀 Enviando PMP (Silver) para S3 com Particionamento ({len(df_export)} Registros Válidos)...")
-    df_export.to_parquet(S3_PREFIX_PMP_SILVER, engine='pyarrow', partition_cols=['mes_competencia'], existing_data_behavior='delete_matching', storage_options=AWS_STORAGE_OPTIONS)
+    print(f"🚀 Enviando PMP (Silver) para S3 ({len(df_export)} Registros Válidos)...")
+    if not df_export.empty:
+        df_export.to_parquet(S3_PREFIX_PMP_SILVER, engine='pyarrow', partition_cols=['mes_competencia'], existing_data_behavior='delete_matching', storage_options=AWS_STORAGE_OPTIONS)
 
 # ==========================================
 # PIPELINE PMR (CONTAS A RECEBER)
 # ==========================================
 async def processar_pmr(session: aiohttp.ClientSession, engine):
-    print("\n🔄 Processando PMR (Contas a Receber) - Master Data e Regra Fiscal...")
+    print("\n🔄 Processando PMR (Contas a Receber)...")
     
-    # 1. Puxar Master Data Oficial do Postgres Nexus
+    # 1. Tabela 188 (A Ponte: Cliente/Loja -> CGC)
+    df_188 = await extrair_cadastro_clientes_188(session)
+    
+    # 2. Master Data (A Verdade Absoluta: CGC -> Regional/Segmento)
+    print("   -> 📥 Lendo Base Quente (PostgreSQL) para amarrações oficiais...")
     with engine.connect() as conn:
-        df_dim_clientes = pd.read_sql("SELECT cod_cliente, cod_loja, razaosocial, regional, segmento, cgc FROM dim_clientes", conn)
-    df_dim_clientes['chave_cl'] = df_dim_clientes['cod_cliente'].astype(str).str.strip() + "-" + df_dim_clientes['cod_loja'].astype(str).str.strip()
+        df_dim = pd.read_sql("SELECT cgc, razaosocial, regional, segmento FROM dim_clientes", conn)
     
-    # 2. Notas Fiscais Saída (SF2 - API 595) - Filtro de Exceções
+    # 3. SF2 (Notas de Saída)
     df_sf2 = await extrair_dados_financeiros(session, 595, "SF2 Notas de Saída")
     if df_sf2.empty: return
     df_sf2.columns = [c.lower().strip() for c in df_sf2.columns]
     
-    df_sf2 = df_sf2[df_sf2['f2_filial'].astype(str).str.strip() != '0107']
-    df_sf2['chave_cl'] = df_sf2['f2_cliente'].astype(str).str.strip() + "-" + df_sf2['f2_loja'].astype(str).str.strip()
+    # Filtros Fiscais PowerBI
+    if 'f2_filial' in df_sf2.columns: df_sf2 = df_sf2[df_sf2['f2_filial'].astype(str).str.strip() != '0107']
+    df_sf2['chave_cl'] = df_sf2.get('f2_cliente', '').astype(str).str.strip() + "-" + df_sf2.get('f2_loja', '').astype(str).str.strip()
     
-    # Mergir com Dimensão do Banco para herdar Regional, CGC e Segmento
-    df_sf2 = pd.merge(df_sf2, df_dim_clientes[['chave_cl', 'regional', 'segmento', 'cgc', 'razaosocial']], on='chave_cl', how='left')
+    # Enriquecimento com 188 e Postgres ANTES do JOIN Financeiro
+    df_sf2 = pd.merge(df_sf2, df_188, on='chave_cl', how='left') # Ganha o CGC
+    df_sf2 = pd.merge(df_sf2, df_dim, on='cgc', how='left') # Ganha Regional/Segmento
     
-    # Aplicar Limpeza do PowerBI
+    # Filtros de Segmento/Regional (Idêntico ao PowerBI)
     df_sf2 = df_sf2[~df_sf2['segmento'].astype(str).str.contains('AGENCIAS E FORNECEDORES', na=False, case=False)]
     df_sf2 = df_sf2[~df_sf2['regional'].astype(str).str.contains('EIC', na=False, case=False)]
     
-    # Criar chave complexa NF
-    df_sf2['chave'] = df_sf2['f2_cliente'].astype(str).str.strip() + "-" + df_sf2['f2_loja'].astype(str).str.strip() + "-" + df_sf2['f2_doc'].astype(str).str.strip() + "-" + df_sf2['f2_serie'].astype(str).str.strip()
-    df_sf2 = df_sf2.drop_duplicates(subset=['chave'])
+    df_sf2['chave_nf'] = df_sf2.get('f2_cliente','').astype(str).str.strip() + "-" + df_sf2.get('f2_loja','').astype(str).str.strip() + "-" + df_sf2.get('f2_doc','').astype(str).str.strip() + "-" + df_sf2.get('f2_serie','').astype(str).str.strip()
+    df_sf2 = df_sf2.drop_duplicates(subset=['chave_nf'])
     
-    # 3. Títulos a Receber (SE1 - API 596)
+    # 4. SE1 (Títulos a Receber)
     df_se1 = await extrair_dados_financeiros(session, 596, "SE1 Títulos a Receber")
     if df_se1.empty: return
     df_se1.columns = [c.lower().strip() for c in df_se1.columns]
     
-    df_se1['chave'] = df_se1['e1_cliente'].astype(str).str.strip() + "-" + df_se1['e1_loja'].astype(str).str.strip() + "-" + df_se1['e1_num'].astype(str).str.strip() + "-" + df_se1['e1_prefixo'].astype(str).str.strip()
+    df_se1['chave_nf'] = df_se1.get('e1_cliente','').astype(str).str.strip() + "-" + df_se1.get('e1_loja','').astype(str).str.strip() + "-" + df_se1.get('e1_num','').astype(str).str.strip() + "-" + df_se1.get('e1_prefixo','').astype(str).str.strip()
     
-    # O Grande Cruzamento Fisco-Financeiro (Inner Join elimina lixo)
-    df_pmr = pd.merge(df_se1, df_sf2[['chave', 'regional', 'cgc', 'razaosocial', 'segmento']], on='chave', how='inner')
+    # 5. Inner Join Fisco-Financeiro
+    df_pmr = pd.merge(df_se1, df_sf2[['chave_nf', 'regional', 'cgc', 'razaosocial', 'segmento']], on='chave_nf', how='inner')
     
-    # Matemática do Tempo
+    # 6. Matemática
     for col in ['e1_emissao', 'e1_vencto', 'e1_vencrea']:
-        df_pmr[col] = pd.to_datetime(df_pmr[col], errors='coerce')
+        if col in df_pmr.columns: df_pmr[col] = pd.to_datetime(df_pmr[col], errors='coerce')
         
     df_pmr = df_pmr.dropna(subset=['e1_emissao'])
-    df_pmr['base_dias'] = (df_pmr['e1_vencto'] - df_pmr['e1_emissao']).dt.days.fillna(0).astype(int)
-    df_pmr['real_dias'] = (df_pmr['e1_vencrea'] - df_pmr['e1_emissao']).dt.days.fillna(0).astype(int)
+    if 'e1_vencto' in df_pmr.columns: df_pmr['base_dias'] = (df_pmr['e1_vencto'] - df_pmr['e1_emissao']).dt.days.fillna(0).astype(int)
+    else: df_pmr['base_dias'] = 0
+    if 'e1_vencrea' in df_pmr.columns: df_pmr['real_dias'] = (df_pmr['e1_vencrea'] - df_pmr['e1_emissao']).dt.days.fillna(0).astype(int)
+    else: df_pmr['real_dias'] = 0
     
-    df_pmr['e1_valor'] = pd.to_numeric(df_pmr['e1_valor'], errors='coerce').fillna(0)
+    df_pmr['e1_valor'] = pd.to_numeric(df_pmr.get('e1_valor', 0), errors='coerce').fillna(0)
     df_pmr['peso_base'] = df_pmr['base_dias'] * df_pmr['e1_valor']
     df_pmr['peso_real'] = df_pmr['real_dias'] * df_pmr['e1_valor']
     
     df_pmr['mes_competencia'] = df_pmr['e1_emissao'].dt.strftime('%Y-%m')
     
-    # A. Salvar Camada Silver (Detalhe de Títulos)
+    # A. Salvar Silver
     cols_silver = ['e1_filial', 'e1_num', 'e1_prefixo', 'e1_cliente', 'e1_loja', 'cgc', 'razaosocial', 'regional', 'segmento', 'e1_emissao', 'e1_vencto', 'e1_vencrea', 'e1_valor', 'base_dias', 'real_dias', 'peso_base', 'peso_real', 'mes_competencia']
     df_silver = df_pmr[[c for c in cols_silver if c in df_pmr.columns]]
     
-    print(f"🚀 Enviando PMR (Silver) para S3 Particionado ({len(df_silver)} Registros Válidos)...")
-    df_silver.to_parquet(S3_PREFIX_PMR_SILVER, engine='pyarrow', partition_cols=['mes_competencia'], existing_data_behavior='delete_matching', storage_options=AWS_STORAGE_OPTIONS)
+    print(f"🚀 Enviando PMR (Silver) para S3 ({len(df_silver)} Registros)...")
+    if not df_silver.empty:
+        df_silver.to_parquet(S3_PREFIX_PMR_SILVER, engine='pyarrow', partition_cols=['mes_competencia'], existing_data_behavior='delete_matching', storage_options=AWS_STORAGE_OPTIONS)
     
-    # B. Salvar Camada Gold (Hierarquia para Risco de Estoque)
-    print("🥇 Calculando Camada Gold PMR (Master Data)...")
+    # B. Salvar Gold (Risco Estoque)
+    print("🥇 Calculando Camada Gold PMR (Hierarquia para Risco de Estoque)...")
     df_gold = df_pmr.groupby(['cgc', 'regional']).agg({'e1_valor': 'sum', 'peso_real': 'sum'}).reset_index()
     df_gold['pmr_dias'] = np.where(df_gold['e1_valor'] > 0, df_gold['peso_real'] / df_gold['e1_valor'], 0).round(1)
     
-    df_gold[['cgc', 'regional', 'pmr_dias']].to_parquet(S3_PREFIX_PMR_GOLD, engine='pyarrow', compression='snappy', storage_options=AWS_STORAGE_OPTIONS)
+    if not df_gold.empty:
+        df_gold[['cgc', 'regional', 'pmr_dias']].to_parquet(S3_PREFIX_PMR_GOLD, engine='pyarrow', compression='snappy', storage_options=AWS_STORAGE_OPTIONS)
 
 # ==========================================
 # MASTER RUNNER
@@ -223,7 +249,7 @@ async def main():
         async with aiohttp.ClientSession(connector=connector) as session:
             await processar_pmr(session, engine)
             await processar_pmp(session)
-        print("\n✅ Concluído! Engenharia de Caixa e Particionamento OK.")
+        print("\n✅ Concluído! Engenharia de Caixa Atualizada.")
     except Exception as e:
         print(f"\n❌ Falha fatal no pipeline: {e}")
 
