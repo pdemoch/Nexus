@@ -246,7 +246,7 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador, dataSnap
                 ) : clientes.length === 0 ? (
                    <div className="text-xs text-slate-600">Nenhum cliente qualificado (Frequência Mínima 4/6) com demanda pendente.</div>
                 ) : (
-                   <div className="border border-slate-800 rounded-lg">
+                   <div className="border border-slate-800 rounded-lg overflow-x-auto custom-scrollbar">
                       <table className="w-full text-left text-xs whitespace-nowrap">
                          <thead className="bg-slate-900 text-[9px] text-slate-500 uppercase">
                             <tr>
@@ -296,7 +296,7 @@ export default function AuditoriaArena() {
   const [clienteSel, setClienteSel] = useState('Todos');
   const [buscaSku, setBuscaSku] = useState('');
   
-  // MÁQUINA DO TEMPO EM CASCATA DIÁRIA (CONSTRUTORES EXPLICITADOS)
+  // MÁQUINA DO TEMPO EM CASCATA DIÁRIA
   const dataHojeFC = obterDataBrasilia();
   const [selDia, setSelDia] = useState<string>(String(dataHojeFC.getDate()).padStart(2, '0'));
   const [selMes, setSelMês] = useState<string>(String(dataHojeFC.getMonth() + 1).padStart(2, '0'));
@@ -306,7 +306,6 @@ export default function AuditoriaArena() {
     return `${selAno}-${selMes}-${selDia}`;
   }, [selDia, selMes, selAno]);
 
-  // Monta as opções dinâmicas de dias do seletor conforme o faturamento do mês comercial
   const listaDiasDisponiveis = useMemo(() => {
     const numDias = new Date(Number(selAno), Number(selMes), 0).getDate();
     return Array.from({ length: numDias }, (_, i) => String(i + 1).padStart(2, '0'));
@@ -409,12 +408,17 @@ export default function AuditoriaArena() {
           const ultimoLog = res.data.logs[res.data.logs.length - 1];
           setPipelineLog(ultimoLog);
           
-          // Libera o travamento somente se o pipeline não estiver rodando ou encontrar a bandeira de chegada 🏁 ou ⚠️
-          if (!res.data.is_running || ultimoLog.includes('🏁') || ultimoLog.includes('⚠️')) {
+          if (!res.data.is_running || ultimoLog.includes('🏁')) {
             if (pollInterval.current) clearInterval(pollInterval.current);
             setIsSyncing(false);
             setPipelineLog('');
-            await carregarDadosCore(); 
+            
+            const hojeAtual = obterDataBrasilia();
+            setSelAno(String(hojeAtual.getFullYear()));
+            setSelMês(String(hojeAtual.getMonth() + 1).padStart(2, '0'));
+            setSelDia(String(hojeAtual.getDate()).padStart(2, '0'));
+
+            setTimeout(() => carregarDadosCore(), 500);
           }
         }
       } catch (e) {
@@ -427,15 +431,12 @@ export default function AuditoriaArena() {
   const handleSyncAll = () => {
     if (isSyncing) return; 
     setIsSyncing(true);
-    setPipelineLog('Iniciando sincronização...');
+    setPipelineLog('Acionando Maestro Noturno...');
     
-    // Dispara o monitoramento imediatamente
     setTimeout(monitorarPipeline, 500);
 
-    // Envia a ordem para o Backend, mas não aguarda a resposta trancar a rede
     axios.post('/api/v1/kpis/sync-all').catch(() => {
-        // Se a rede der timeout, o monitoramento por trás garantirá que o botão destrava
-        console.warn("O POST demorou, mas o sistema já está monitorando o backend via polling.");
+        console.warn("O POST sofreu Timeout ou erro, mas o sistema continua monitorando a execução do servidor em background.");
     });
   };
 
@@ -548,7 +549,7 @@ export default function AuditoriaArena() {
   };
 
   return (
-    <div className="p-6 bg-slate-950 min-h-screen flex-1 w-full min-w-fit transition-all duration-300 text-slate-100 font-sans">
+    <div className="p-6 bg-slate-950 min-h-screen flex-1 min-w-0 w-full transition-all duration-300 text-slate-100 font-sans">
       
       {/* HEADER PRINCIPAL COM STATUS COMPLETO DO MONITOR */}
       <div className="w-full flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 bg-slate-900 p-5 rounded-2xl border border-slate-800 mb-6 shadow-xl">
@@ -708,12 +709,12 @@ export default function AuditoriaArena() {
       ) : null}
 
       {/* RENDERIZAÇÃO DAS TABELAS COM FUNDO ESTICADO EM INLINE-BLOCK */}
-      <div className="w-full bg-slate-900 rounded-2xl border border-slate-800 shadow-2xl flex flex-col overflow-hidden">
+      <div className="w-full bg-slate-900 rounded-2xl border border-slate-800 shadow-2xl flex flex-col overflow-x-auto custom-scrollbar">
         {carregando ? (
           <div className="p-20 flex justify-center items-center gap-3 text-indigo-400 font-bold uppercase text-xs"><RefreshCw className="w-6 h-6 animate-spin" /> Processando Tabelas...</div>
         ) : lente === 'estoque' ? (
           
-          <div className="w-full">
+          <div className="w-full min-w-max">
             <table className="w-full text-left whitespace-nowrap">
               <thead className="bg-slate-950">
                 <tr className="bg-slate-900 border-b border-slate-800">
@@ -763,7 +764,7 @@ export default function AuditoriaArena() {
           </div>
 
         ) : lente === 'sellout' ? (
-           <div className="w-full">
+           <div className="w-full min-w-max">
              <table className="w-full text-left whitespace-nowrap">
                <thead className="bg-slate-950">
                  <tr className="text-slate-400 border-b border-slate-800 text-[10px] font-black uppercase tracking-widest">
@@ -802,7 +803,7 @@ export default function AuditoriaArena() {
               </table>
            </div>
         ) : (
-           <div className="w-full">
+           <div className="w-full min-w-max">
              <table className="w-full text-left whitespace-nowrap">
                <thead className="bg-slate-950">
                  <tr className="text-slate-400 border-b border-slate-800 text-[10px] font-black uppercase tracking-widest">

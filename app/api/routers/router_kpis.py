@@ -4,6 +4,8 @@ from sqlalchemy import text
 import pandas as pd
 import numpy as np
 import datetime
+import subprocess
+import sys
 from dateutil.relativedelta import relativedelta
 from typing import List, Optional
 import aiohttp
@@ -372,28 +374,20 @@ async def rota_sincronizar_estoque(db: Session = Depends(get_db), usuario: dict 
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/sync-all")
-async def sincronizar_tudo(background_tasks: BackgroundTasks, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
-    """Atualiza o Estoque na hora e manda o Pipeline (Vendas) rodar em background"""
+async def sincronizar_tudo(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+    """Delega a sincronização total para o Worker Independente"""
     if usuario.get('funcao') not in ['Administrador', 'Supply Chain', 'Gerente', 'C-Level']:
         raise HTTPException(status_code=403, detail="Sem permissão.")
     
     try:
-        # 🔥 BLINDAGEM CONTRA TRANCAMENTO PRECOCE E DOUBLE CLICK
-        # Seta as flags globais imediatamente no ato do clique para travar o Frontend
         AppState.pipeline_rodando = True
-        AppState.logs = ["[SYSTEM] Sincronização Mestra acionada pelo painel de auditoria...", "[EXTRACT] Atualizando base quente do ERP Gobi (API 90)..."]
+        AppState.logs = ["[SYSTEM] Sincronização Mestra acionada manualmente..."]
         
-        # Sincroniza o estoque físico de forma síncrona
-        await sincronizar_estoque_api90(db, usuario)
-        
-        # Adiciona o pipeline pesado para rodar em segundo plano
-        try:
-            from app.etl.pipeline import executar_pipeline_nexus
-            background_tasks.add_task(executar_pipeline_nexus)
-        except ImportError:
-            AppState.pipeline_rodando = False # Fallback de proteção
+        # Chama o orquestrador exatamente da mesma forma que o relógio (Cron) do Linux faria.
+        # Desacoplado do FastAPI para garantir robustez máxima.
+        subprocess.Popen([sys.executable, "app/workers/snapshot_worker.py"])
             
-        return {"status": "success", "message": "Estoque atualizado na base. Pipeline de vendas disparado."}
+        return {"status": "success", "message": "Orquestrador mestre disparado em background."}
     except Exception as e:
         AppState.pipeline_rodando = False
         raise HTTPException(status_code=500, detail=str(e))
