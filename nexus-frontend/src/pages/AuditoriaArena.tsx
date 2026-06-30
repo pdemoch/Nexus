@@ -222,7 +222,7 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador, dataSnap
         <td className="px-3 py-4 text-right text-emerald-400">{formatador(row.__faturado)}</td>
         <td className="px-3 py-4 text-right text-rose-400">{formatador(row.__corte)}</td>
         <td className="px-3 py-4 text-right text-amber-500 font-bold">{formatador(row.__carteira)}</td>
-        <td className="px-3 py-4 text-right text-fuchsia-400 font-bold border-l border-slate-800/50 bg-fuchsia-950/10 cursor-help" title="Fórmula: Σ MAX(0, Média(M-3 a M-1) - Realizado MTD) por Razão Social. Apenas clientes com Freq >= 4/6. Zera se MTD atingir 80% da Média.">
+        <td className="px-3 py-4 text-right text-fuchsia-400 font-bold border-l border-slate-800/50 bg-fuchsia-950/10 cursor-help" title="Fórmula: Σ MAX(0, Média(M-3 a M-1) - Realizado MTD) por Razão Social. Apenas clientes com Freq >= 4/6. Zera se MTD atingir 60% da Média.">
           {formatador(row.__previsao)}
         </td>
         <td className="px-3 py-4 text-right text-white font-black bg-slate-800/30 cursor-help" title="Fórmula: Pedido Implantado MTD + Previsão de Entrada Oculta.">
@@ -255,7 +255,7 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador, dataSnap
                                <th className="px-4 py-2 text-right border-b border-slate-800" title="Quantidade de meses com pedidos nos últimos 6 meses">Freq. Compras (Últ 6m)</th>
                                <th className="px-4 py-2 text-right border-b border-slate-800" title="Média de compras dos meses M-3 a M-1">Média Hist. M-3 a M-1 ({visao})</th>
                                <th className="px-4 py-2 text-right border-b border-slate-800">Realizado MTD ({visao})</th>
-                               <th className="px-4 py-2 text-right text-fuchsia-400 border-b border-slate-800" title="Zera automaticamente se MTD bater 80% da Média Histórica">Previsão Faltante ({visao})</th>
+                               <th className="px-4 py-2 text-right text-fuchsia-400 border-b border-slate-800" title="Zera automaticamente se MTD bater 60% da Média Histórica">Previsão Faltante ({visao})</th>
                             </tr>
                          </thead>
                          <tbody className="divide-y divide-slate-800/50">
@@ -267,7 +267,7 @@ const RowRiscoDrillDown = ({ row, visao, mesesSelecionados, formatador, dataSnap
                                   <td className="px-4 py-2 text-right text-indigo-300">{formatFinV2(c.media_vol || 0)}</td>
                                   <td className="px-4 py-2 text-right">{formatFinV2(c.mtd_vol || 0)}</td>
                                   <td className="px-4 py-2 text-right font-black text-fuchsia-400">
-                                     {(c.previsao_vol || 0) > 0 ? `+ ${formatFinV2(c.previsao_vol)}` : <span className="text-emerald-500">Atendido ({'>='} 80%)</span>}
+                                     {(c.previsao_vol || 0) > 0 ? `+ ${formatFinV2(c.previsao_vol)}` : <span className="text-emerald-500">Atendido ({'>='} 60%)</span>}
                                   </td>
                                </tr>
                             ))}
@@ -546,7 +546,7 @@ export default function AuditoriaArena() {
   };
 
   return (
-    <div className="p-6 bg-slate-950 min-h-screen inline-block min-w-full text-slate-100 font-sans">
+    <div className="p-6 bg-slate-950 min-h-screen flex-1 w-full min-w-fit transition-all duration-300 text-slate-100 font-sans">
       
       {/* HEADER PRINCIPAL COM STATUS COMPLETO DO MONITOR */}
       <div className="w-full flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 bg-slate-900 p-5 rounded-2xl border border-slate-800 mb-6 shadow-xl">
@@ -571,7 +571,7 @@ export default function AuditoriaArena() {
             
             {/* O BOTÃO TRAVADO ATÉ O FIM REAL */}
             {isSyncing ? (
-               <div className="flex items-center px-4 py-2 bg-slate-900 text-amber-400 rounded-lg font-black tracking-wider尊 text-[10px] uppercase h-full border border-amber-900/30">
+               <div className="flex items-center px-4 py-2 bg-slate-900 text-amber-400 rounded-lg font-black tracking-wider text-[10px] uppercase h-full border border-amber-900/30">
                   <RefreshCw className="w-3.5 h-3.5 mr-2 animate-spin" />
                   <span className="max-w-[180px] truncate font-mono" title={pipelineLog}>{pipelineLog || 'Processando...'}</span>
                </div>
