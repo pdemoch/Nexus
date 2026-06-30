@@ -5,18 +5,12 @@ import pandas as pd
 import numpy as np
 import asyncio
 import aiohttp
-import json
-from botocore.exceptions import ClientError
-from typing import Dict, List, Optional
-import boto3
 from typing import Optional, Any
-
-# ==========================================
-# BLINDAGEM DO AMBIENTE (O Padrão Dotenv)
-# ==========================================
-# Força o Python a injetar as variáveis do ficheiro .env para este ambiente isolado
-# O caminho é absoluto para a raiz do container Docker
 from dotenv import load_dotenv
+
+if __name__ == "__main__":
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 load_dotenv('/nexus_backend/.env')
 
 from app.core.config import settings
