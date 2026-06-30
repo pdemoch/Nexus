@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { 
   BarChart3, Users, LayoutDashboard, Settings, Rocket, LogOut, 
   UserCircle, ShieldAlert, Factory, Activity, Crosshair, Database, 
-  ChevronLeft, ChevronRight 
+  ChevronLeft, ChevronRight, Landmark
 } from 'lucide-react';
 
 export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout }: any) {
@@ -20,6 +20,7 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
     { id: 'consenso', label: 'Metas da Equipe', icon: Users, roles: ['Administrador', 'Gerente'] },
     { id: 'gerenciamento', label: 'Gestão de Carteiras', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },
     { id: 'admin', label: 'Painel Admin', icon: Settings, roles: ['Administrador'] },
+    { id: 'ccc', label: 'Engenharia de Caixa', icon: Landmark, roles: ['Administrador', 'C-Level', 'Gerente'] },
   ];
 
   // Filtra os itens baseado no papel do usuário

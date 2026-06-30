@@ -16,7 +16,8 @@ from app.api.routers import (
     router_mtrix,
     router_ai,
     router_agent_sql,
-    router_datalake
+    router_datalake,
+    router_ccc
 )
 from app.core.config import settings
 from app.models.domain_models import Base
@@ -71,6 +72,7 @@ app.include_router(router_mtrix.router)
 app.include_router(router_ai.router)
 app.include_router(router_agent_sql.router)
 app.include_router(router_datalake.router)
+app.include_router(router_ccc.router)
 
 @app.get("/", tags=["Health Check"])
 async def root():

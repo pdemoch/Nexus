@@ -409,8 +409,8 @@ export default function AuditoriaArena() {
           const ultimoLog = res.data.logs[res.data.logs.length - 1];
           setPipelineLog(ultimoLog);
           
-          // Libera o travamento somente se o pipeline não estiver rodando ou encontrar a bandeira de chegada 🏁
-          if (!res.data.is_running || ultimoLog.includes('🏁')) {
+          // Libera o travamento somente se o pipeline não estiver rodando ou encontrar a bandeira de chegada 🏁 ou ⚠️
+          if (!res.data.is_running || ultimoLog.includes('🏁') || ultimoLog.includes('⚠️')) {
             if (pollInterval.current) clearInterval(pollInterval.current);
             setIsSyncing(false);
             setPipelineLog('');
@@ -424,17 +424,19 @@ export default function AuditoriaArena() {
     }, 2000); 
   };
 
-  const handleSyncAll = async () => {
+  const handleSyncAll = () => {
     if (isSyncing) return; 
     setIsSyncing(true);
-    setPipelineLog('Iniciando carga ERP Gobi...');
-    try {
-      await axios.post('/api/v1/kpis/sync-all');
-      monitorarPipeline(); 
-    } catch (e) {
-      alert("Erro ao acionar a rotina mestre.");
-      setIsSyncing(false);
-    }
+    setPipelineLog('Iniciando sincronização...');
+    
+    // Dispara o monitoramento imediatamente
+    setTimeout(monitorarPipeline, 500);
+
+    // Envia a ordem para o Backend, mas não aguarda a resposta trancar a rede
+    axios.post('/api/v1/kpis/sync-all').catch(() => {
+        // Se a rede der timeout, o monitoramento por trás garantirá que o botão destrava
+        console.warn("O POST demorou, mas o sistema já está monitorando o backend via polling.");
+    });
   };
 
   useEffect(() => {

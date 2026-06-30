@@ -28,8 +28,9 @@ S3_BUCKET = "nexus-datalake-linea-prd"
 S3_PREFIX = f"s3://{S3_BUCKET}/snapshots/estoque"
 
 def obter_mes_atual_str() -> str:
-    """Retorna o mês atual no formato MM/YYYY para fallbacks dinâmicos."""
-    return datetime.date.today().strftime("%m/%Y")
+    """Retorna o mês atual no formato MM/YYYY ajustado para o fuso de Brasília (UTC-3)."""
+    hoje_brasilia = datetime.datetime.utcnow() - datetime.timedelta(hours=3)
+    return hoje_brasilia.strftime("%m/%Y")
 
 def obter_ciclo_meta_seguro(db: Session, mes_alvo: str) -> str:
     """Retorna o ciclo de S&OP correspondente de forma segura."""
@@ -197,7 +198,7 @@ async def carregar_auditoria_cpfr(
 # ==============================================================================
 @router.get("/torre-controle")
 async def carregar_torre_controle(
-    visao: str = "caixas", categoria: str = "Todas", segmento: str = "Tomados", razaosocial: str = "Todos",
+    visao: str = "caixas", categoria: str = "Todas", segmento: str = "Todos", razaosocial: str = "Todos",
     meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)
 ):
     if not meses_horizonte: meses_horizonte = [obter_mes_atual_str()]
@@ -309,7 +310,8 @@ async def drilldown_clientes_kpis(sku: str, visao: str = "caixas", data_snapshot
 # 4. INTELIGÊNCIA DE ESTOQUE E DEMANDA OCULTA COM DATA LAKE S3
 # ==============================================================================
 async def sincronizar_estoque_api90(db: Session, usuario: dict):
-    """Função base de extração síncrona do GOBI para o banco"""
+    from app.core.state import AppState
+    AppState.logs.append("[EXTRACT] Baixando posições de Estoque da GOBI (Pode demorar)...")
     headers = {"Authorization": f"Bearer {settings.GOBI_TOKEN}"}
     base_url = "https://gobi-api.lineaalimentos.com.br/v1/reports/90/data"
     limit = 5000
@@ -339,6 +341,7 @@ async def sincronizar_estoque_api90(db: Session, usuario: dict):
                     if len(dados) < limit: break
     except Exception as e:
         print(f"API Gobi Inacessível. Pulando injeção em tempo real: {e}")
+        AppState.logs.append("⚠️ API Gobi Inacessível. Gerando baseline matemático...")
 
     db.execute(text("TRUNCATE TABLE fato_estoque_d0"))
     agora = datetime.datetime.utcnow()
@@ -402,7 +405,9 @@ async def carregar_riscos_estoque(
     data_snapshot: str = Query(None),
     db: Session = Depends(get_db)
 ):
-    hoje_str = datetime.date.today().strftime("%Y-%m-%d")
+    # CORREÇÃO DE FUSO HORÁRIO (UTC-3)
+    hoje_brasilia = datetime.datetime.utcnow() - datetime.timedelta(hours=3)
+    hoje_str = hoje_brasilia.strftime("%Y-%m-%d")
     data_alvo_str = data_snapshot if data_snapshot else hoje_str
 
     try:
@@ -543,7 +548,9 @@ async def carregar_riscos_estoque(
 
 @router.get("/riscos-estoque/drilldown-clientes/{sku}")
 async def drilldown_riscos_clientes(sku: str, data_snapshot: str = Query(None), meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)):
-    hoje_str = datetime.date.today().strftime("%Y-%m-%d")
+    # CORREÇÃO DE FUSO HORÁRIO (UTC-3)
+    hoje_brasilia = datetime.datetime.utcnow() - datetime.timedelta(hours=3)
+    hoje_str = hoje_brasilia.strftime("%Y-%m-%d")
     data_alvo_str = data_snapshot if data_snapshot else hoje_str
     
     mes_sql = f"{data_alvo_str.split('-')[0]}-{data_alvo_str.split('-')[1]}"
