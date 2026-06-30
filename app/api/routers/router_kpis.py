@@ -374,19 +374,27 @@ async def rota_sincronizar_estoque(db: Session = Depends(get_db), usuario: dict 
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/sync-all")
-async def sincronizar_tudo(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
-    """Delega a sincronização total para o Worker Independente"""
+async def sincronizar_tudo(background_tasks: BackgroundTasks, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     if usuario.get('funcao') not in ['Administrador', 'Supply Chain', 'Gerente', 'C-Level']:
         raise HTTPException(status_code=403, detail="Sem permissão.")
-    
     try:
+        from app.workers.snapshot_worker import main as rotina_master
+        from app.core.state import AppState
+        import asyncio
+        
         AppState.pipeline_rodando = True
         AppState.logs = ["[SYSTEM] Sincronização Mestra acionada manualmente..."]
         
-        # Chama o orquestrador exatamente da mesma forma que o relógio (Cron) do Linux faria.
-        # Desacoplado do FastAPI para garantir robustez máxima.
-        subprocess.Popen([sys.executable, "app/workers/snapshot_worker.py"])
-            
+        def run_rotina():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(rotina_master(is_manual=True))
+            finally:
+                AppState.pipeline_rodando = False
+                loop.close()
+
+        background_tasks.add_task(run_rotina)
         return {"status": "success", "message": "Orquestrador mestre disparado em background."}
     except Exception as e:
         AppState.pipeline_rodando = False

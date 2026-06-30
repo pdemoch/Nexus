@@ -1,203 +1,236 @@
+import os
+import sys
+import datetime
 import pandas as pd
 import numpy as np
-import datetime
-from dateutil.relativedelta import relativedelta
 import asyncio
 import aiohttp
-import time
-import os
+import json
+from botocore.exceptions import ClientError
+from typing import Dict, List, Optional
+import boto3
 
 # ==========================================
-# CONFIGURAÇÕES (AWS E GOBI)
+# BLINDAGEM DO AMBIENTE (O Padrão Dotenv)
 # ==========================================
-GOBI_TOKEN = "TQWZ7G4UeRzu6zvmyt4b"
-GOBI_BASE_URL = "https://gobi-api.lineaalimentos.com.br"
+# Força o Python a injetar as variáveis do ficheiro .env para este ambiente isolado
+# O caminho é absoluto para a raiz do container Docker
+from dotenv import load_dotenv
+load_dotenv('/nexus_backend/.env')
 
+from app.core.config import settings
+
+# ==========================================
+# CONFIGURAÇÕES AWS S3 E APIs
+# ==========================================
 AWS_STORAGE_OPTIONS = {
     "key": "AKIA4VPN43D6KCHKRYM5",
     "secret": "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",
     "client_kwargs": {"region_name": "us-east-1"}
 }
+
 S3_BUCKET = "nexus-datalake-linea-prd"
+S3_PREFIX_PMR = f"s3://{S3_BUCKET}/financeiro/pmr/pmr_titulos.parquet"
+S3_PREFIX_PMP = f"s3://{S3_BUCKET}/financeiro/pmp/pmp_titulos.parquet"
+
+API_GOBI_BASE = "https://gobi-api.lineaalimentos.com.br/v1/reports"
 
 # ==========================================
-# FUNÇÕES DE EXTRAÇÃO ASSÍNCRONA DA API
+# HELPERS DE EXTRAÇÃO ASSÍNCRONA
 # ==========================================
-async def fetch_gobi_report(session, report_id, start_date, end_date):
-    """Busca um relatório da GOBI para um intervalo específico"""
-    url = f"{GOBI_BASE_URL}/v1/reports/{report_id}/data"
-    params = {
-        "start_date": start_date,
-        "end_date": end_date,
-        "streaming": "true",
-        "format": "json"
-    }
-    headers = {"Authorization": GOBI_TOKEN}
-    
-    try:
-        async with session.get(url, params=params, headers=headers, timeout=60) as response:
-            if response.status == 200:
-                data = await response.json(content_type=None)
-                return data if isinstance(data, list) else []
-            else:
-                print(f"[ERRO] API {report_id} ({start_date} a {end_date}): Status {response.status}")
-                return []
-    except Exception as e:
-        print(f"[ERRO] Falha de conexão API {report_id}: {e}")
-        return []
+async def _fetch_json_with_retry(session: aiohttp.ClientSession, url: str, params: dict, retries: int = 4) -> Optional[Any]:
+    headers = {"Authorization": f"Bearer {settings.GOBI_TOKEN}"}
+    for tentativa in range(retries):
+        try:
+            async with session.get(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=300)) as response:
+                if response.status == 200:
+                    data = await response.json(content_type=None)
+                    return data if isinstance(data, list) else []
+                elif response.status == 429:
+                    await asyncio.sleep(3 ** tentativa)
+                else:
+                    text_erro = await response.text()
+                    print(f"❌ Erro {response.status} em {url}: {text_erro[:100]}")
+        except Exception as e:
+            if tentativa < retries - 1:
+                await asyncio.sleep(2 ** tentativa)
+    return None
 
-async def fetch_report_6_months(report_id):
-    """Divide a consulta de 6 meses em blocos mensais e executa simultaneamente"""
-    hoje = datetime.date.today()
-    meses_atras = hoje - relativedelta(months=6)
-    data_inicio_global = datetime.date(meses_atras.year, meses_atras.month, 1)
+async def extrair_cadastro_clientes(session: aiohttp.ClientSession) -> pd.DataFrame:
+    """Extrai os dados da API 188 (Clientes) para cruzamento de Razão Social e Regional"""
+    limit, offset = 5000, 0
+    lote_anterior, clientes = [], []
     
-    blocos = []
-    data_atual = data_inicio_global
-    while data_atual <= hoje:
-        prox_mes = data_atual + relativedelta(months=1)
-        fim_mes = prox_mes - datetime.timedelta(days=1)
-        if fim_mes > hoje: fim_mes = hoje
-        blocos.append((data_atual.strftime("%Y-%m-%d"), fim_mes.strftime("%Y-%m-%d")))
-        data_atual = prox_mes
-
-    print(f"📥 Baixando Relatório {report_id} em {len(blocos)} blocos paralelos...")
-    
-    async with aiohttp.ClientSession() as session:
-        tarefas = [fetch_gobi_report(session, report_id, b[0], b[1]) for b in blocos]
-        resultados = await asyncio.gather(*tarefas)
+    while True:
+        params = {"streaming": "true", "format": "json", "limit": limit, "offset": offset}
+        dados = await _fetch_json_with_retry(session, f"{API_GOBI_BASE}/188/data", params)
         
-    dados_totais = [linha for bloco in resultados for linha in bloco]
-    return pd.DataFrame(dados_totais)
+        if not dados or len(dados) == 0: break
+        if lote_anterior and dados[0] == lote_anterior[0]: break
+            
+        clientes.extend(dados)
+        lote_anterior = dados
+        offset += len(dados)
+        if len(dados) < limit: break
+            
+    return pd.DataFrame(clientes)
 
-async def fetch_clientes_188():
-    """Busca a tabela inteira de Clientes (Sem data)"""
-    async with aiohttp.ClientSession() as session:
-        return pd.DataFrame(await fetch_gobi_report(session, 188, None, None))
+async def _fetch_bloco_financeiro(session: aiohttp.ClientSession, relatorio_id: int, offset: int, limit: int = 10000):
+    params = {"streaming": "true", "format": "json", "limit": limit, "offset": offset}
+    return await _fetch_json_with_retry(session, f"{API_GOBI_BASE}/{relatorio_id}/data", params)
+
+async def extrair_dados_financeiros(session: aiohttp.ClientSession, relatorio_id: int) -> pd.DataFrame:
+    """Extrai grandes volumes de dados dividindo o trabalho em blocos paralelos"""
+    limit = 10000
+    # Como não sabemos o total, faremos uma amostragem paralela otimista para os primeiros N blocos
+    # Para o financeiro (PMR/PMP) vamos assumir que o volume cabe na RAM e iterar até acabar
+    registros = []
+    offset = 0
+    lote_anterior = []
+    
+    # Vamos extrair em blocos de 5 chamadas simultâneas (50.000 registos por onda)
+    while True:
+        offsets = [offset + (i * limit) for i in range(5)]
+        tasks = [_fetch_bloco_financeiro(session, relatorio_id, o, limit) for o in offsets]
+        resultados = await asyncio.gather(*tasks)
+        
+        for lote in resultados:
+            if lote:
+                registros.extend(lote)
+        
+        # Se algum dos lotes voltou vazio, ou o último lote foi menor que o limite, terminamos
+        if not resultados[-1] or len(resultados[-1]) < limit:
+            break
+            
+        offset += (5 * limit)
+        print(f"   -> Foram lidos {len(registros)} registos...")
+        
+    return pd.DataFrame(registros)
 
 # ==========================================
-# PROCESSAMENTO PMR (RECEBIMENTO DE CLIENTES)
+# PROCESSAMENTO DE NEGÓCIO: CCC
 # ==========================================
 async def processar_pmr():
     print("\n🔄 Iniciando Processamento do PMR (Contas a Receber)...")
-    
-    df_clientes = await fetch_clientes_188()
-    df_se1 = await fetch_report_6_months(596) # Contas a Receber
-    df_sf2 = await fetch_report_6_months(595) # Notas Fiscais Saída
+    connector = aiohttp.TCPConnector(limit=10, keepalive_timeout=30)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        
+        # 1. Puxar o Cadastro de Clientes (API 188)
+        try:
+            df_clientes = await extrair_cadastro_clientes(session)
+        except Exception as e:
+            print(f"[ERRO] Falha de conexão API 188: {e}")
+            df_clientes = None
+            
+        # Blindagem Anti-Crash
+        if df_clientes is None or df_clientes.empty:
+            print("⚠️ [AVISO] A Tabela de Clientes (API 188) está vazia. Prosseguindo sem dados regionais...")
+            df_clientes = pd.DataFrame(columns=['cod', 'loja', 'razaosocial', 'regional', 'cod_loja'])
+        else:
+            if 'codigo' in df_clientes.columns:
+                df_clientes.rename(columns={'codigo': 'cod'}, inplace=True)
+            df_clientes['cod_loja'] = df_clientes['cod'].astype(str) + "-" + df_clientes['loja'].astype(str)
+            df_clientes = df_clientes[['cod_loja', 'razaosocial', 'regional']].drop_duplicates()
 
-    if df_se1.empty or df_sf2.empty:
-        print("❌ Dados insuficientes para calcular PMR.")
-        return
+        # 2. Puxar Títulos a Receber (API 596 - PMR)
+        print("📥 Baixando Relatório 596 (PMR)...")
+        df_pmr = await extrair_dados_financeiros(session, 596)
+        
+        if df_pmr.empty:
+            print("⚠️ Sem dados de PMR retornados da GOBI.")
+            return
 
-    # Tratamento Tabela Clientes
-    df_clientes['cod_loja'] = df_clientes['cod'].astype(str) + "-" + df_clientes['loja'].astype(str)
-    
-    # Tratamento SF2 (Notas Fiscais)
-    df_sf2 = df_sf2[df_sf2['f2_filial'] != '0107']
-    df_sf2['cod_loja'] = df_sf2['f2_cliente'].astype(str) + "-" + df_sf2['f2_loja'].astype(str)
-    
-    # Merge SF2 com Clientes (Para filtrar sucatas/agências)
-    df_sf2 = df_sf2.merge(df_clientes[['cod_loja', 'razao social', 'segmento', 'regional']], on='cod_loja', how='left')
-    df_sf2 = df_sf2[~df_sf2['segmento'].str.contains("AGENCIAS E FORNECEDORES", na=False, case=False)]
-    df_sf2 = df_sf2[~df_sf2['regional'].str.contains("EIC", na=False, case=False)]
-    
-    # Chave Única SF2
-    df_sf2['chave'] = df_sf2['f2_cliente'].astype(str) + "-" + df_sf2['f2_loja'].astype(str) + "-" + df_sf2['f2_doc'].astype(str) + "-" + df_sf2['f2_serie'].astype(str)
-    df_sf2 = df_sf2.drop_duplicates(subset=['chave'])
+        # Limpeza e Cruzamento de Dados
+        df_pmr.columns = [c.lower().strip() for c in df_pmr.columns]
+        
+        # A data de emissão costuma vir com espaços ou como string
+        if 'e1_emissao' in df_pmr.columns:
+            df_pmr['e1_emissao'] = pd.to_datetime(df_pmr['e1_emissao'], errors='coerce')
+        
+        # Converter valores para numérico
+        cols_numericas = ['e1_valor', 'e1_saldo', 'e1_prazob', 'e1_prazor']
+        for col in cols_numericas:
+            if col in df_pmr.columns:
+                df_pmr[col] = pd.to_numeric(df_pmr[col], errors='coerce').fillna(0)
+                
+        # Criar a chave para cruzar com o cadastro de clientes
+        if 'e1_cliente' in df_pmr.columns and 'e1_loja' in df_pmr.columns:
+            df_pmr['cod_loja'] = df_pmr['e1_cliente'].astype(str) + "-" + df_pmr['e1_loja'].astype(str)
+            
+            # Cruzamento
+            df_final = pd.merge(df_pmr, df_clientes, on='cod_loja', how='left')
+            df_final['razao_social'] = df_final['razaosocial'].fillna('Não Identificado')
+            df_final['regional'] = df_final['regional'].fillna('Não Identificada')
+        else:
+             df_final = df_pmr
+             df_final['razao_social'] = 'Não Identificado'
+             df_final['regional'] = 'Não Identificada'
+             
+        # Cálculo dos Pesos para a Média Ponderada
+        df_final['peso_base'] = df_final['e1_valor'] * df_final['e1_prazob']
+        df_final['peso_real'] = df_final['e1_valor'] * df_final['e1_prazor']
+        
+        # Filtrar Apenas o que Importa para o Parquet (Economia de Storage)
+        cols_export = ['e1_filial', 'e1_num', 'e1_tipo', 'e1_cliente', 'e1_loja', 'e1_emissao', 'e1_vencrea', 'e1_baixa', 
+                       'e1_valor', 'e1_saldo', 'e1_prazob', 'e1_prazor', 'razao_social', 'regional', 'peso_base', 'peso_real']
+        
+        cols_export_existentes = [c for c in cols_export if c in df_final.columns]
+        df_final = df_final[cols_export_existentes]
 
-    # Chave Única SE1 (Contas a Receber)
-    df_se1['chave'] = df_se1['e1_cliente'].astype(str) + "-" + df_se1['e1_loja'].astype(str) + "-" + df_se1['e1_num'].astype(str) + "-" + df_se1['e1_prefixo'].astype(str)
+        # Escrever para S3
+        print(f"🚀 Enviando PMR para Data Lake AWS ({len(df_final)} registos)...")
+        df_final.to_parquet(S3_PREFIX_PMR, engine='pyarrow', compression='snappy', storage_options=AWS_STORAGE_OPTIONS)
 
-    # O "LeftOuter" (Cruzamento Fiscal x Financeiro)
-    df_pmr = df_se1.merge(df_sf2[['chave', 'razao social', 'segmento', 'regional']], on='chave', how='inner')
-    
-    # Cálculos Financeiros (Datas e Valores)
-    df_pmr['e1_emissao'] = pd.to_datetime(df_pmr['e1_emissao'], errors='coerce')
-    df_pmr['e1_vencto'] = pd.to_datetime(df_pmr['e1_vencto'], errors='coerce')
-    df_pmr['e1_vencrea'] = pd.to_datetime(df_pmr['e1_vencrea'], errors='coerce') # Pode ser nulo se não pagou
-    df_pmr['e1_valor'] = pd.to_numeric(df_pmr['e1_valor'], errors='coerce').fillna(0)
-
-    # Base (Dias Negociados) - Pega todas as notas
-    df_pmr['dias_base'] = (df_pmr['e1_vencto'] - df_pmr['e1_emissao']).dt.days
-    df_pmr['peso_base'] = df_pmr['dias_base'] * df_pmr['e1_valor']
-
-    # Real (Dias Pagos) - ATENÇÃO: Só calcula onde a data de baixa existe!
-    df_pmr['dias_real'] = np.where(df_pmr['e1_vencrea'].notna(), (df_pmr['e1_vencrea'] - df_pmr['e1_emissao']).dt.days, np.nan)
-    df_pmr['peso_real'] = df_pmr['dias_real'] * df_pmr['e1_valor']
-
-    # Seleciona as colunas finais
-    df_final_pmr = df_pmr[['e1_emissao', 'e1_cliente', 'e1_loja', 'razao social', 'regional', 'segmento', 'e1_valor', 'dias_base', 'peso_base', 'dias_real', 'peso_real']]
-    
-    caminho_pmr = f"s3://{S3_BUCKET}/financeiro/pmr/pmr_titulos.parquet"
-    df_final_pmr.to_parquet(caminho_pmr, engine='pyarrow', index=False, storage_options=AWS_STORAGE_OPTIONS)
-    print(f"✅ PMR Salvo no Data Lake! ({len(df_final_pmr)} Títulos)")
-
-# ==========================================
-# PROCESSAMENTO PMP (PAGAMENTO FORNECEDORES)
-# ==========================================
 async def processar_pmp():
     print("\n🔄 Iniciando Processamento do PMP (Contas a Pagar)...")
-    
-    df_se2 = await fetch_report_6_months(590) # Contas a Pagar
-    df_sf1 = await fetch_report_6_months(589) # Notas Fiscais Entrada
+    connector = aiohttp.TCPConnector(limit=10, keepalive_timeout=30)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        
+        # 1. Puxar Títulos a Pagar (API 595 - PMP)
+        print("📥 Baixando Relatório 595 (PMP)...")
+        df_pmp = await extrair_dados_financeiros(session, 595)
+        
+        if df_pmp.empty:
+            print("⚠️ Sem dados de PMP retornados da GOBI.")
+            return
 
-    if df_se2.empty or df_sf1.empty:
-        print("❌ Dados insuficientes para calcular PMP.")
-        return
+        # Limpeza
+        df_pmp.columns = [c.lower().strip() for c in df_pmp.columns]
+        
+        if 'e2_emissao' in df_pmp.columns:
+            df_pmp['e2_emissao'] = pd.to_datetime(df_pmp['e2_emissao'], errors='coerce')
+            
+        cols_numericas = ['e2_valor', 'e2_saldo', 'e2_prazob', 'e2_prazor']
+        for col in cols_numericas:
+            if col in df_pmp.columns:
+                df_pmp[col] = pd.to_numeric(df_pmp[col], errors='coerce').fillna(0)
+                
+        # Cálculo dos Pesos para a Média Ponderada
+        df_pmp['peso_base'] = df_pmp['e2_valor'] * df_pmp['e2_prazob']
+        df_pmp['peso_real'] = df_pmp['e2_valor'] * df_pmp['e2_prazor']
+        
+        # Exportação
+        cols_export = ['e2_filial', 'e2_num', 'e2_tipo', 'e2_fornece', 'e2_loja', 'e2_emissao', 'e2_vencrea', 'e2_baixa', 
+                       'e2_valor', 'e2_saldo', 'e2_prazob', 'e2_prazor', 'a2_nome', 'd1_tp', 'peso_base', 'peso_real']
+                       
+        cols_export_existentes = [c for c in cols_export if c in df_pmp.columns]
+        df_pmp = df_pmp[cols_export_existentes]
 
-    # Tratamento SF1 (Entradas) - Filtra Materia Prima, Embalagem e Consumo
-    df_sf1 = df_sf1[df_sf1['f1_doc'].notna()]
-    df_sf1 = df_sf1[df_sf1['d1_tp'].isin(['MP', 'EM', 'SI'])]
-    
-    # Chave Única SF1
-    df_sf1['chave'] = df_sf1['f1_fornece'].astype(str) + "-" + df_sf1['f1_loja'].astype(str) + "-" + df_sf1['f1_doc'].astype(str)
-    df_sf1 = df_sf1.drop_duplicates(subset=['chave'])
+        # Escrever para S3
+        print(f"🚀 Enviando PMP para Data Lake AWS ({len(df_pmp)} registos)...")
+        df_pmp.to_parquet(S3_PREFIX_PMP, engine='pyarrow', compression='snappy', storage_options=AWS_STORAGE_OPTIONS)
 
-    # Chave Única SE2 (Contas a Pagar)
-    df_se2 = df_se2[df_se2['e2_emissao'].notna()]
-    df_se2['chave'] = df_se2['e2_fornece'].astype(str) + "-" + df_se2['e2_loja'].astype(str) + "-" + df_se2['e2_num'].astype(str)
-
-    # O "LeftOuter" (Cruzamento Fiscal x Financeiro)
-    df_pmp = df_se2.merge(df_sf1[['chave', 'd1_tp']], on='chave', how='inner')
-
-    # Cálculos Financeiros (Datas e Valores)
-    df_pmp['e2_emissao'] = pd.to_datetime(df_pmp['e2_emissao'], errors='coerce')
-    df_pmp['e2_vencto'] = pd.to_datetime(df_pmp['e2_vencto'], errors='coerce')
-    df_pmp['e2_vencrea'] = pd.to_datetime(df_pmp['e2_vencrea'], errors='coerce')
-    df_pmp['e2_valor'] = pd.to_numeric(df_pmp['e2_valor'], errors='coerce').fillna(0)
-
-    # Base (Dias Negociados)
-    df_pmp['dias_base'] = (df_pmp['e2_vencto'] - df_pmp['e2_emissao']).dt.days
-    df_pmp['peso_base'] = df_pmp['dias_base'] * df_pmp['e2_valor']
-
-    # Real (Dias Pagos) - Só onde a baixa existe
-    df_pmp['dias_real'] = np.where(df_pmp['e2_vencrea'].notna(), (df_pmp['e2_vencrea'] - df_pmp['e2_emissao']).dt.days, np.nan)
-    df_pmp['peso_real'] = df_pmp['dias_real'] * df_pmp['e2_valor']
-
-    # Seleciona as colunas finais
-    df_final_pmp = df_pmp[['e2_emissao', 'e2_fornece', 'a2_nome', 'd1_tp', 'e2_valor', 'dias_base', 'peso_base', 'dias_real', 'peso_real']]
-    
-    caminho_pmp = f"s3://{S3_BUCKET}/financeiro/pmp/pmp_titulos.parquet"
-    df_final_pmp.to_parquet(caminho_pmp, engine='pyarrow', index=False, storage_options=AWS_STORAGE_OPTIONS)
-    print(f"✅ PMP Salvo no Data Lake! ({len(df_final_pmp)} Títulos)")
-
-# ==========================================
-# EXECUÇÃO PRINCIPAL
-# ==========================================
 async def main():
-    inicio = time.time()
     print("==================================================")
     print("💰 INICIANDO ROTINA FINANCEIRA NEXUS (CCC)")
     print("==================================================")
     
-    await processar_pmr()
-    await processar_pmp()
-    
-    fim = time.time()
-    minutos = int((fim - inicio) // 60)
-    segundos = int((fim - inicio) % 60)
-    print(f"==================================================")
-    print(f"🏁 DADOS GRAVADOS COM SUCESSO! Tempo: {minutos}m {segundos}s")
+    try:
+        await processar_pmr()
+        await processar_pmp()
+        print("\n✅ Concluído! Data Lake de Engenharia de Caixa Atualizado.")
+    except Exception as e:
+        print(f"\n❌ Falha fatal no pipeline financeiro: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -1,15 +1,23 @@
 import os
+import sys
 import datetime
 import pandas as pd
 from sqlalchemy import create_engine, text
 import asyncio
 import aiohttp
 
-# Ajuste para importar as configurações do seu projeto Nexus
+# ==========================================
+# INJEÇÃO DINÂMICA DE ROTA (PARA O CRON E SUBPROCESSOS)
+# ==========================================
+# Garante que o Python encontre a pasta "app" independentemente de onde é chamado
+if __name__ == "__main__":
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 from app.core.config import settings
 from app.models.domain_models import FatoEstoqueD0
 from app.core.database import SessionLocal
 from app.etl.pipeline import executar_pipeline_nexus
+from app.core.state import AppState
 
 # ==========================================
 # CONFIGURAÇÕES AWS S3 (CREDENCIAIS)
@@ -27,11 +35,16 @@ def obter_engine():
     """Cria a conexão com o PostgreSQL do Nexus."""
     return create_engine(settings.DATABASE_URL)
 
+def log_sync(msg: str):
+    """Envia o log tanto para o terminal (Cron) quanto para a Interface (FastAPI)"""
+    print(msg)
+    AppState.logs.append(msg)
+
 # ==========================================
 # ETAPA 1: ATUALIZAR ESTOQUE FÍSICO (API 90)
 # ==========================================
 async def atualizar_estoque_api90():
-    print("📦 [ETAPA 1] Sincronizando posições de Estoque Frescas da GOBI (API 90)...")
+    log_sync("📦 [ETAPA 1] Sincronizando posições de Estoque Frescas da GOBI (API 90)...")
     headers = {"Authorization": f"Bearer {settings.GOBI_TOKEN}"}
     base_url = "https://gobi-api.lineaalimentos.com.br/v1/reports/90/data"
     limit, offset = 5000, 0
@@ -58,7 +71,7 @@ async def atualizar_estoque_api90():
                     offset += len(dados)
                     if len(dados) < limit: break
     except Exception as e:
-        print(f"⚠️ [ALERTA] API Gobi (90) falhou: {e}. O sistema usará baseline matemático para o estoque.")
+        log_sync(f"⚠️ [ALERTA] API Gobi (90) falhou: {e}. O sistema usará baseline matemático para o estoque.")
 
     with SessionLocal() as db:
         db.execute(text("TRUNCATE TABLE fato_estoque_d0"))
@@ -67,14 +80,14 @@ async def atualizar_estoque_api90():
         
         if novos_registros: 
             db.bulk_save_objects(novos_registros)
-            print(f"✅ [ETAPA 1] Sucesso. {len(novos_registros)} SKUs atualizados no banco de dados.")
+            log_sync(f"✅ [ETAPA 1] Sucesso. {len(novos_registros)} SKUs atualizados no banco de dados.")
         else:
             db.execute(text("""
                 INSERT INTO fato_estoque_d0 (sku, qtd_dispo, data_atualizacao)
                 SELECT sku, ROUND(SUM(vol_final) * (0.6 + (RANDOM() * 0.6))), NOW()
                 FROM fato_ibp_granular WHERE ciclo_sop = (SELECT MAX(ciclo_sop) FROM fato_ibp_granular) GROUP BY sku
             """))
-            print("🛡️ [ETAPA 1] Fallback ativado. Estoque matemático injetado por segurança.")
+            log_sync("🛡️ [ETAPA 1] Fallback ativado. Estoque matemático injetado por segurança.")
         db.commit()
 
 # ==========================================
@@ -83,22 +96,25 @@ async def atualizar_estoque_api90():
 def processar_virada_ciclo(engine, hoje):
     """Vira o mês automaticamente na tabela configuracao_sistema se for dia 1º"""
     if hoje.day == 1:
-        print("📅 [ETAPA 2] Dia 1º detetado! Iniciando a virada do Ciclo S&OP global...")
-        with engine.begin() as conn:
-            res = conn.execute(text("SELECT ciclo_ativo_global FROM configuracao_sistema ORDER BY id DESC LIMIT 1")).fetchone()
-            if res:
-                ciclo_atual = res[0]
-                mes, ano = map(int, ciclo_atual.split('/'))
-                novo_mes = mes + 1
-                novo_ano = ano
-                if novo_mes > 12:
-                    novo_mes = 1
-                    novo_ano += 1
-                novo_ciclo = f"{novo_mes:02d}/{novo_ano}"
-                conn.execute(text("UPDATE configuracao_sistema SET ciclo_ativo_global = :nc"), {"nc": novo_ciclo})
-                print(f"✅ [ETAPA 2] Ciclo virado com sucesso: {ciclo_atual} -> {novo_ciclo}")
+        log_sync("📅 [ETAPA 2] Dia 1º detetado! Iniciando a virada do Ciclo S&OP global...")
+        try:
+            with engine.begin() as conn:
+                res = conn.execute(text("SELECT ciclo_ativo_global FROM configuracao_sistema ORDER BY id DESC LIMIT 1")).fetchone()
+                if res:
+                    ciclo_atual = res[0]
+                    mes, ano = map(int, ciclo_atual.split('/'))
+                    novo_mes = mes + 1
+                    novo_ano = ano
+                    if novo_mes > 12:
+                        novo_mes = 1
+                        novo_ano += 1
+                    novo_ciclo = f"{novo_mes:02d}/{novo_ano}"
+                    conn.execute(text("UPDATE configuracao_sistema SET ciclo_ativo_global = :nc"), {"nc": novo_ciclo})
+                    log_sync(f"✅ [ETAPA 2] Ciclo virado com sucesso: {ciclo_atual} -> {novo_ciclo}")
+        except Exception as e:
+            log_sync(f"❌ [ETAPA 2] Falha na virada do ciclo: {e}")
     else:
-         print("📅 [ETAPA 2] Sem necessidade de virada de ciclo hoje.")
+         log_sync("📅 [ETAPA 2] Sem necessidade de virada de ciclo hoje.")
 
 # ==========================================
 # ETAPA 4: GERAR SNAPSHOT PARQUET NO S3
@@ -107,7 +123,7 @@ async def gerar_snapshot_parquet(engine, ontem):
     data_snapshot = ontem.strftime("%Y-%m-%d")
     arquivo_parquet = f"{S3_PREFIX}/{data_snapshot.replace('-', '_')}_riscoestoque.parquet"
     
-    print(f"📸 [ETAPA 4] Tirando fotografia do S&OP e Estoque para a data: {data_snapshot}")
+    log_sync(f"📸 [ETAPA 4] Tirando fotografia do S&OP e Estoque para a data: {data_snapshot}")
     
     mes_sql = f"{data_snapshot.split('-')[0]}-{data_snapshot.split('-')[1]}"
     
@@ -171,7 +187,10 @@ async def gerar_snapshot_parquet(engine, ontem):
     """)
     
     try:
-        df_sku = pd.read_sql(query_sku, engine, params={"mes_sql": mes_sql, "ciclo_congelado": ciclo_congelado})
+        # 🔥 Correção Crítica do SQLAlchemy 2.0: Usar conexão direta para o Pandas
+        with engine.connect() as conn:
+            df_sku = pd.read_sql(query_sku, conn, params={"mes_sql": mes_sql, "ciclo_congelado": ciclo_congelado})
+            
         if not df_sku.empty:
             df_sku.to_parquet(
                 arquivo_parquet, 
@@ -179,23 +198,22 @@ async def gerar_snapshot_parquet(engine, ontem):
                 compression='snappy',
                 storage_options=AWS_STORAGE_OPTIONS
             )
-            print(f"🚀 [ETAPA 4] Sucesso Absoluto! Snapshot gravado no S3: {arquivo_parquet} ({len(df_sku)} SKUs)")
+            log_sync(f"🚀 [ETAPA 4] Sucesso Absoluto! Snapshot gravado no S3: {arquivo_parquet} ({len(df_sku)} SKUs)")
         else:
-            print("⚠️ [ETAPA 4] Operação cancelada: Nenhum dado retornado para a fotografia de hoje.")
+            log_sync("⚠️ [ETAPA 4] Operação cancelada: Nenhum dado retornado para a fotografia de hoje.")
     except Exception as e:
-        print(f"❌ [ETAPA 4] Falha crítica ao gerar Snapshot Parquet: {e}")
+        log_sync(f"❌ [ETAPA 4] Falha crítica ao gerar Snapshot Parquet: {e}")
 
 # ==========================================
 # ORQUESTRAÇÃO PRINCIPAL
 # ==========================================
-async def main():
+async def main(is_manual=False):
     engine = obter_engine()
-    
     hoje_brasilia = datetime.datetime.utcnow() - datetime.timedelta(hours=3)
     
-    print("==================================================")
-    print(f"🔄 INICIANDO ROTINA MASTER NEXUS ({hoje_brasilia.strftime('%H:%M')})")
-    print("==================================================")
+    log_sync("==================================================")
+    log_sync(f"🔄 INICIANDO ROTINA MASTER NEXUS ({hoje_brasilia.strftime('%H:%M')})")
+    log_sync("==================================================")
 
     # 1. Sincroniza Estoque
     await atualizar_estoque_api90()
@@ -204,20 +222,20 @@ async def main():
     processar_virada_ciclo(engine, hoje_brasilia)
 
     # 3. Atualiza Pipeline (Vendas, Metas e IA)
-    print("⚙️ [ETAPA 3] Iniciando Pipeline ETL (Vendas / IA / Metas)...")
+    log_sync("⚙️ [ETAPA 3] Iniciando Pipeline ETL (Vendas / IA / Metas)...")
     await executar_pipeline_nexus()
-    print("✅ [ETAPA 3] Pipeline concluído. Banco de Dados Base Quente atualizado!")
+    log_sync("✅ [ETAPA 3] Pipeline concluído. Banco de Dados Base Quente atualizado!")
 
-    # 4. Decisão de Gerar Snapshot (Somente de madrugada)
-    if hoje_brasilia.hour == 0 and hoje_brasilia.minute < 30:
+    # 4. Decisão de Gerar Snapshot
+    if is_manual or (hoje_brasilia.hour == 0 and hoje_brasilia.minute < 30):
         ontem = hoje_brasilia - datetime.timedelta(days=1)
         await gerar_snapshot_parquet(engine, ontem)
     else:
-        print("🕒 [ETAPA 4] Geração de Snapshot ignorada (Não estamos na janela de 00:01).")
+        log_sync("🕒 [ETAPA 4] Geração de Snapshot ignorada (Não estamos na janela de 00:01).")
 
-    print("==================================================")
-    print("🏁 ROTINA MASTER CONCLUÍDA COM SUCESSO.")
-    print("==================================================")
+    log_sync("==================================================")
+    log_sync("🏁 ROTINA MASTER CONCLUÍDA COM SUCESSO.")
+    log_sync("==================================================")
 
 if __name__ == "__main__":
     asyncio.run(main())
