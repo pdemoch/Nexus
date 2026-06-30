@@ -9,6 +9,7 @@ import json
 from botocore.exceptions import ClientError
 from typing import Dict, List, Optional
 import boto3
+from typing import Optional, Any
 
 # ==========================================
 # BLINDAGEM DO AMBIENTE (O Padrão Dotenv)
