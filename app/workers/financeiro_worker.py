@@ -25,12 +25,19 @@ AWS_STORAGE_OPTIONS = {
     "secret": "M1DZSalEK3rXZb31lqHHHtAK32g9FD5gg8YAIHVI",
     "client_kwargs": {"region_name": "us-east-1"}
 }
+
 S3_BUCKET = "nexus-datalake-linea-prd"
+
+# [ALTERADO] Caminhos da Camada Prata (Silver) limpos, sem a pasta /historico
 S3_PREFIX_PMR_SILVER = f"s3://{S3_BUCKET}/financeiro/pmr"
 S3_PREFIX_PMP_SILVER = f"s3://{S3_BUCKET}/financeiro/pmp"
+
+# Caminho da Camada Gold para o Router KPIs ler em milissegundos
 S3_PREFIX_PMR_GOLD = f"s3://{S3_BUCKET}/financeiro/pmr/pmr_clientes_gold.parquet"
 
 API_GOBI_BASE = "https://gobi-api.lineaalimentos.com.br/v1/reports"
+
+# Tenta usar o Token do .env, senão cai para o Token fixo extraído do PowerBI
 TOKEN_GOBI = settings.GOBI_TOKEN if hasattr(settings, 'GOBI_TOKEN') and settings.GOBI_TOKEN else "TQWZ7G4UeRzu6zvmyt4b"
 
 # ==========================================
@@ -50,22 +57,29 @@ async def _fetch_json_with_retry(session: aiohttp.ClientSession, url: str, param
                 elif response.status == 401:
                     headers["Authorization"] = f"Bearer {TOKEN_GOBI}"
                 else:
-                    print(f"      ❌ Erro da Gobi {response.status} em {url}")
+                    text_erro = await response.text()
+                    print(f"      ❌ Erro da Gobi {response.status} em {url}: {text_erro[:100]}")
                     return None
         except Exception as e:
+            print(f"      [!] Timeout/Falha na tentativa {tentativa+1} ({url}): {e}")
             if tentativa < retries - 1: await asyncio.sleep(2 ** tentativa)
     return None
 
 async def extrair_cadastro_clientes_188(session: aiohttp.ClientSession) -> pd.DataFrame:
     """A 'Pedra de Roseta': Transforma o código do Protheus num CNPJ real."""
     print("   -> 📥 Puxando API 188 (Tradutor Cliente/Loja para CGC)...")
-    limit, offset, clientes = 5000, 0, []
+    limit, offset, clientes = 2500, 0, []
+    
     while True:
+        print(f"      - Baixando lote de clientes a partir da linha {offset}...")
         dados = await _fetch_json_with_retry(session, f"{API_GOBI_BASE}/188/data", {"streaming": "true", "format": "json", "limit": limit, "offset": offset})
+        
         if not dados or len(dados) == 0: break
         clientes.extend(dados)
         offset += len(dados)
         if len(dados) < limit: break
+            
+    print(f"   -> ✅ API 188 concluída! {len(clientes)} clientes carregados.")
         
     df = pd.DataFrame(clientes)
     if not df.empty:
