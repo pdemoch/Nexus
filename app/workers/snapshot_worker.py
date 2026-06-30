@@ -119,8 +119,8 @@ def processar_virada_ciclo(engine, hoje):
 # ==========================================
 # ETAPA 4: GERAR SNAPSHOT PARQUET NO S3
 # ==========================================
-async def gerar_snapshot_parquet(engine, ontem):
-    data_snapshot = ontem.strftime("%Y-%m-%d")
+async def gerar_snapshot_parquet(engine, data_ref):
+    data_snapshot = data_ref.strftime("%Y-%m-%d")
     arquivo_parquet = f"{S3_PREFIX}/{data_snapshot.replace('-', '_')}_riscoestoque.parquet"
     
     log_sync(f"📸 [ETAPA 4] Tirando fotografia do S&OP e Estoque para a data: {data_snapshot}")
@@ -129,7 +129,7 @@ async def gerar_snapshot_parquet(engine, ontem):
     
     with engine.connect() as conn:
         ciclo_atual = conn.execute(text("SELECT MAX(ciclo_sop) FROM fato_ibp_granular")).scalar()
-    ciclo_congelado = ciclo_atual if ciclo_atual else ontem.strftime("%m/%Y")
+    ciclo_congelado = ciclo_atual if ciclo_atual else data_ref.strftime("%m/%Y")
 
     query_sku = text(f"""
         WITH Estoque AS (SELECT sku, SUM(qtd_dispo) as estoque_atual FROM fato_estoque_d0 GROUP BY sku),
@@ -226,12 +226,9 @@ async def main(is_manual=False):
     await executar_pipeline_nexus()
     log_sync("✅ [ETAPA 3] Pipeline concluído. Banco de Dados Base Quente atualizado!")
 
-    # 4. Decisão de Gerar Snapshot
-    if is_manual or (hoje_brasilia.hour == 0 and hoje_brasilia.minute < 30):
-        ontem = hoje_brasilia - datetime.timedelta(days=1)
-        await gerar_snapshot_parquet(engine, ontem)
-    else:
-        log_sync("🕒 [ETAPA 4] Geração de Snapshot ignorada (Não estamos na janela de 00:01).")
+    # 4. Decisão de Gerar Snapshot (MODIFICADO: AGORA RODA SEMPRE COM A DATA ATUAL)
+    log_sync("🕒 [ETAPA 4] Gerando/Atualizando Snapshot Parquet para o dia atual...")
+    await gerar_snapshot_parquet(engine, hoje_brasilia)
 
     log_sync("==================================================")
     log_sync("🏁 ROTINA MASTER CONCLUÍDA COM SUCESSO.")

@@ -34,6 +34,9 @@ S3_BUCKET = "nexus-datalake-linea-prd"
 S3_PREFIX_PMR = f"s3://{S3_BUCKET}/financeiro/pmr/pmr_titulos.parquet"
 S3_PREFIX_PMP = f"s3://{S3_BUCKET}/financeiro/pmp/pmp_titulos.parquet"
 
+# [NOVO] Caminho da Camada Gold para o Router KPIs ler em milissegundos
+S3_PREFIX_PMR_GOLD = f"s3://{S3_BUCKET}/financeiro/pmr/pmr_clientes_gold.parquet"
+
 API_GOBI_BASE = "https://gobi-api.lineaalimentos.com.br/v1/reports"
 
 # ==========================================
@@ -76,37 +79,51 @@ async def extrair_cadastro_clientes(session: aiohttp.ClientSession) -> pd.DataFr
             
     return pd.DataFrame(clientes)
 
-async def _fetch_bloco_financeiro(session: aiohttp.ClientSession, relatorio_id: int, offset: int, limit: int = 10000):
-    params = {"streaming": "true", "format": "json", "limit": limit, "offset": offset}
-    return await _fetch_json_with_retry(session, f"{API_GOBI_BASE}/{relatorio_id}/data", params)
-
-async def extrair_dados_financeiros(session: aiohttp.ClientSession, relatorio_id: int) -> pd.DataFrame:
-    """Extrai grandes volumes de dados dividindo o trabalho em blocos paralelos"""
-    limit = 10000
-    # Como não sabemos o total, faremos uma amostragem paralela otimista para os primeiros N blocos
-    # Para o financeiro (PMR/PMP) vamos assumir que o volume cabe na RAM e iterar até acabar
-    registros = []
+# [NOVO/ALTERADO] Varredura cirúrgica dia-a-dia para evitar Timeouts da Gobi
+async def _fetch_dados_dia(session: aiohttp.ClientSession, relatorio_id: int, dia: datetime.date) -> list:
+    limit = 5000
     offset = 0
-    lote_anterior = []
+    registros_dia = []
+    dia_str = dia.strftime("%Y-%m-%d")
     
-    # Vamos extrair em blocos de 5 chamadas simultâneas (50.000 registos por onda)
     while True:
-        offsets = [offset + (i * limit) for i in range(5)]
-        tasks = [_fetch_bloco_financeiro(session, relatorio_id, o, limit) for o in offsets]
+        # ATENÇÃO: Caso a API Gobi use outro nome para filtrar datas (ex: "emissao_de"), ajuste aqui:
+        params = {"streaming": "true", "format": "json", "limit": limit, "offset": offset, "data_inicio": dia_str, "data_fim": dia_str}
+        
+        dados = await _fetch_json_with_retry(session, f"{API_GOBI_BASE}/{relatorio_id}/data", params)
+        if not dados or len(dados) == 0: break
+            
+        registros_dia.extend(dados)
+        offset += len(dados)
+        if len(dados) < limit: break
+            
+    return registros_dia
+
+# [NOVO/ALTERADO] A extração em massa agora usa o histórico dos últimos 180 dias
+async def extrair_dados_financeiros(session: aiohttp.ClientSession, relatorio_id: int) -> pd.DataFrame:
+    """Extrai grandes volumes de dados dividindo o trabalho em blocos diários paralelos (Últimos 180 dias)"""
+    registros_totais = []
+    hoje = datetime.date.today()
+    data_inicio = hoje - datetime.timedelta(days=180)
+    lista_dias = [data_inicio + datetime.timedelta(days=x) for x in range(181)]
+    
+    print(f"   -> Iniciando varredura diária para os últimos 180 dias (Relatório {relatorio_id})...")
+    
+    # Blocos de 5 dias paralelos para ser rápido e não explodir a Gobi
+    chunk_size = 5
+    for i in range(0, len(lista_dias), chunk_size):
+        chunk_dias = lista_dias[i:i + chunk_size]
+        tasks = [_fetch_dados_dia(session, relatorio_id, dia) for dia in chunk_dias]
         resultados = await asyncio.gather(*tasks)
         
         for lote in resultados:
             if lote:
-                registros.extend(lote)
+                registros_totais.extend(lote)
+                
+        print(f"   -> Progresso: {min(i + chunk_size, len(lista_dias))}/{len(lista_dias)} dias lidos. Registos: {len(registros_totais)}")
+        await asyncio.sleep(0.5) 
         
-        # Se algum dos lotes voltou vazio, ou o último lote foi menor que o limite, terminamos
-        if not resultados[-1] or len(resultados[-1]) < limit:
-            break
-            
-        offset += (5 * limit)
-        print(f"   -> Foram lidos {len(registros)} registos...")
-        
-    return pd.DataFrame(registros)
+    return pd.DataFrame(registros_totais)
 
 # ==========================================
 # PROCESSAMENTO DE NEGÓCIO: CCC
@@ -123,15 +140,21 @@ async def processar_pmr():
             print(f"[ERRO] Falha de conexão API 188: {e}")
             df_clientes = None
             
-        # Blindagem Anti-Crash
+        # [NOVO/ALTERADO] Blindagem Anti-Crash e Extração Robusta do CGC (CNPJ)
         if df_clientes is None or df_clientes.empty:
             print("⚠️ [AVISO] A Tabela de Clientes (API 188) está vazia. Prosseguindo sem dados regionais...")
-            df_clientes = pd.DataFrame(columns=['cod', 'loja', 'razaosocial', 'regional', 'cod_loja'])
+            df_clientes = pd.DataFrame(columns=['cod', 'loja', 'razaosocial', 'regional', 'cod_loja', 'cgc'])
         else:
-            if 'codigo' in df_clientes.columns:
-                df_clientes.rename(columns={'codigo': 'cod'}, inplace=True)
-            df_clientes['cod_loja'] = df_clientes['cod'].astype(str) + "-" + df_clientes['loja'].astype(str)
-            df_clientes = df_clientes[['cod_loja', 'razaosocial', 'regional']].drop_duplicates()
+            df_clientes.columns = [str(x).lower().strip() for x in df_clientes.columns]
+            if 'codigo' in df_clientes.columns: df_clientes.rename(columns={'codigo': 'cod'}, inplace=True)
+            if 'cnpj' in df_clientes.columns: df_clientes.rename(columns={'cnpj': 'cgc'}, inplace=True)
+            elif 'cgc_cpf' in df_clientes.columns: df_clientes.rename(columns={'cgc_cpf': 'cgc'}, inplace=True)
+            
+            if 'cgc' not in df_clientes.columns: df_clientes['cgc'] = '00000000000000'
+            
+            df_clientes['cod_loja'] = df_clientes['cod'].astype(str) + "-" + df_clientes.get('loja', '').astype(str)
+            df_clientes['cgc'] = df_clientes['cgc'].astype(str).str.replace(r'\D', '', regex=True)
+            df_clientes = df_clientes[['cod_loja', 'razaosocial', 'regional', 'cgc']].drop_duplicates()
 
         # 2. Puxar Títulos a Receber (API 596 - PMR)
         print("📥 Baixando Relatório 596 (PMR)...")
@@ -162,25 +185,35 @@ async def processar_pmr():
             df_final = pd.merge(df_pmr, df_clientes, on='cod_loja', how='left')
             df_final['razao_social'] = df_final['razaosocial'].fillna('Não Identificado')
             df_final['regional'] = df_final['regional'].fillna('Não Identificada')
+            df_final['cgc'] = df_final.get('cgc', '00000000000000').fillna('00000000000000')
         else:
              df_final = df_pmr
              df_final['razao_social'] = 'Não Identificado'
              df_final['regional'] = 'Não Identificada'
+             df_final['cgc'] = '00000000000000'
              
         # Cálculo dos Pesos para a Média Ponderada
         df_final['peso_base'] = df_final['e1_valor'] * df_final['e1_prazob']
         df_final['peso_real'] = df_final['e1_valor'] * df_final['e1_prazor']
         
-        # Filtrar Apenas o que Importa para o Parquet (Economia de Storage)
-        cols_export = ['e1_filial', 'e1_num', 'e1_tipo', 'e1_cliente', 'e1_loja', 'e1_emissao', 'e1_vencrea', 'e1_baixa', 
+        # [MANTIDO] Exportação 1: Camada Silver (Títulos base para o Cockpit CCC)
+        cols_export = ['e1_filial', 'e1_num', 'e1_tipo', 'e1_cliente', 'e1_loja', 'cgc', 'e1_emissao', 'e1_vencrea', 'e1_baixa', 
                        'e1_valor', 'e1_saldo', 'e1_prazob', 'e1_prazor', 'razao_social', 'regional', 'peso_base', 'peso_real']
         
         cols_export_existentes = [c for c in cols_export if c in df_final.columns]
-        df_final = df_final[cols_export_existentes]
+        df_silver = df_final[cols_export_existentes]
 
-        # Escrever para S3
-        print(f"🚀 Enviando PMR para Data Lake AWS ({len(df_final)} registos)...")
-        df_final.to_parquet(S3_PREFIX_PMR, engine='pyarrow', compression='snappy', storage_options=AWS_STORAGE_OPTIONS)
+        print(f"🚀 Enviando Títulos PMR (Silver) para AWS ({len(df_silver)} registos)...")
+        df_silver.to_parquet(S3_PREFIX_PMR, engine='pyarrow', compression='snappy', storage_options=AWS_STORAGE_OPTIONS)
+
+        # [NOVO] Exportação 2: Camada Gold (Dados Agregados para o Risco de Estoque ler rápido)
+        print("🥇 Calculando Camada Gold de PMR por Cliente...")
+        df_gold = df_final.groupby('cgc').agg({'e1_valor': 'sum', 'peso_real': 'sum'}).reset_index()
+        df_gold['pmr_dias'] = np.where(df_gold['e1_valor'] > 0, df_gold['peso_real'] / df_gold['e1_valor'], 0).round(1)
+        
+        df_gold = df_gold[['cgc', 'pmr_dias']]
+        print(f"🚀 Enviando PMR Clientes (Gold) para AWS ({len(df_gold)} clientes únicos)...")
+        df_gold.to_parquet(S3_PREFIX_PMR_GOLD, engine='pyarrow', compression='snappy', storage_options=AWS_STORAGE_OPTIONS)
 
 async def processar_pmp():
     print("\n🔄 Iniciando Processamento do PMP (Contas a Pagar)...")
@@ -210,7 +243,7 @@ async def processar_pmp():
         df_pmp['peso_base'] = df_pmp['e2_valor'] * df_pmp['e2_prazob']
         df_pmp['peso_real'] = df_pmp['e2_valor'] * df_pmp['e2_prazor']
         
-        # Exportação
+        # Exportação [MANTIDA 100% ORIGINAL]
         cols_export = ['e2_filial', 'e2_num', 'e2_tipo', 'e2_fornece', 'e2_loja', 'e2_emissao', 'e2_vencrea', 'e2_baixa', 
                        'e2_valor', 'e2_saldo', 'e2_prazob', 'e2_prazor', 'a2_nome', 'd1_tp', 'peso_base', 'peso_real']
                        

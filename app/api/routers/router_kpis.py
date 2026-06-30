@@ -4,11 +4,11 @@ from sqlalchemy import text
 import pandas as pd
 import numpy as np
 import datetime
-import subprocess
 import sys
 from dateutil.relativedelta import relativedelta
 from typing import List, Optional
 import aiohttp
+import s3fs  # <-- Biblioteca crucial para buscar os Parquets dinamicamente
 
 from app.core.database import get_db
 from app.core.state import AppState
@@ -309,7 +309,7 @@ async def drilldown_clientes_kpis(sku: str, visao: str = "caixas", data_snapshot
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 # ==============================================================================
-# 4. INTELIGÊNCIA DE ESTOQUE E DEMANDA OCULTA COM DATA LAKE S3
+# 4. INTELIGÊNCIA DE ESTOQUE E DEMANDA OCULTA
 # ==============================================================================
 async def sincronizar_estoque_api90(db: Session, usuario: dict):
     from app.core.state import AppState
@@ -407,7 +407,6 @@ async def carregar_riscos_estoque(
     data_snapshot: str = Query(None),
     db: Session = Depends(get_db)
 ):
-    # CORREÇÃO DE FUSO HORÁRIO (UTC-3)
     hoje_brasilia = datetime.datetime.utcnow() - datetime.timedelta(hours=3)
     hoje_str = hoje_brasilia.strftime("%Y-%m-%d")
     data_alvo_str = data_snapshot if data_snapshot else hoje_str
@@ -499,7 +498,7 @@ async def carregar_riscos_estoque(
                     "total_ruptura_rs": 0, "total_sobra_rs": 0, "total_ruptura_vol": 0, "total_sobra_vol": 0, "meta_caixas": 0, "realizado_caixas": 0
                 }}
 
-        # MATEMÁTICA FINAL (Partilhada entre Ao Vivo e Parquet)
+        # MATEMÁTICA FINAL
         for col in ['meta_mes_vol', 'vendas_mtd_vol', 'faturado_mtd_vol', 'corte_mtd_vol', 'estoque_atual', 'pmv', 'vl_pedido', 'vl_faturado', 'vl_corte', 'previsao_entrada_vol']: 
             df_sku[col] = pd.to_numeric(df_sku[col], errors='coerce').fillna(0)
             
@@ -524,12 +523,10 @@ async def carregar_riscos_estoque(
         df_sku['sobra_vol'] = np.maximum(0, df_sku['estoque_atual'] - df_sku['demanda_futura_vol'])
         df_sku['sobra_rs'] = df_sku['sobra_vol'] * df_sku['pmv']
 
-        # Extrai a última data de atualização de estoque (Ajustado para Fuso de Brasília UTC-3)
         try:
             dt_att = db.execute(text("SELECT MAX(data_atualizacao) FROM fato_estoque_d0")).scalar()
             if dt_att:
-                dt_brasilia = dt_att - datetime.timedelta(hours=3)
-                ultima_atualizacao = dt_brasilia.strftime("%H:%M")
+                ultima_atualizacao = (dt_att - datetime.timedelta(hours=3)).strftime("%H:%M")
             else:
                 ultima_atualizacao = "Ao Vivo"
         except:
@@ -548,50 +545,113 @@ async def carregar_riscos_estoque(
         return {"estoque_sku": df_sku.to_dict(orient="records"), "kpis_globais": kpis}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
+# ==============================================================================
+# 5. DRILL-DOWN HÍBRIDO (POSTGRES + S3 PARQUET: MTRIX E PMR GOLD)
+# ==============================================================================
 @router.get("/riscos-estoque/drilldown-clientes/{sku}")
 async def drilldown_riscos_clientes(sku: str, data_snapshot: str = Query(None), meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)):
-    # CORREÇÃO DE FUSO HORÁRIO (UTC-3)
-    hoje_brasilia = datetime.datetime.utcnow() - datetime.timedelta(hours=3)
-    hoje_str = hoje_brasilia.strftime("%Y-%m-%d")
-    data_alvo_str = data_snapshot if data_snapshot else hoje_str
-    
-    mes_sql = f"{data_alvo_str.split('-')[0]}-{data_alvo_str.split('-')[1]}"
-    ciclo_congelado = obter_ciclo_meta_seguro(db, datetime.date.today().strftime("%m/%Y"))
-    
-    query = text("""
-        WITH Hist_Clientes AS (
-            SELECT c.regional, c.razaosocial, SUM(v.qt_pedido) / 3.0 as media_vol
-            FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
-            WHERE v.sku = :sku AND v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '3 months' AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM')
-            GROUP BY c.regional, c.razaosocial
-        ),
-        Freq_Clientes AS (
-            SELECT c.regional, c.razaosocial, COUNT(DISTINCT TO_CHAR(v.data_pedido, 'YYYY-MM')) as freq_meses
-            FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
-            WHERE v.sku = :sku AND v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '6 months' AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM')
-            GROUP BY c.regional, c.razaosocial
-        ),
-        MTD_Clientes AS (
-            SELECT c.regional, c.razaosocial, SUM(v.qt_pedido) as mtd_vol
-            FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
-            WHERE v.sku = :sku AND TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql
-            GROUP BY c.regional, c.razaosocial
-        )
-        SELECT 
-            h.regional, 
-            h.razaosocial, 
-            COALESCE(h.media_vol, 0) as media_vol, 
-            COALESCE(m.mtd_vol, 0) as mtd_vol, 
-            COALESCE(f.freq_meses, 0) as freq_meses,
-            CASE 
-                WHEN COALESCE(m.mtd_vol, 0) >= COALESCE(h.media_vol, 0) * 0.6 THEN 0 
-                ELSE GREATEST(0, COALESCE(h.media_vol, 0) - COALESCE(m.mtd_vol, 0)) 
-            END as previsao_vol
-        FROM Hist_Clientes h
-        LEFT JOIN MTD_Clientes m ON h.regional = m.regional AND h.razaosocial = m.razaosocial
-        LEFT JOIN Freq_Clientes f ON h.regional = f.regional AND h.razaosocial = f.razaosocial
-        WHERE COALESCE(f.freq_meses, 0) >= 4 
-        ORDER BY previsao_vol DESC, mtd_vol DESC
-    """)
-    df = pd.read_sql(query, db.bind, params={"mes_sql": mes_sql, "ciclo_congelado": ciclo_congelado, "sku": sku})
-    return df.to_dict(orient="records")
+    try:
+        hoje_str = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).strftime("%Y-%m-%d")
+        data_alvo_str = data_snapshot if data_snapshot else hoje_str
+        mes_sql = f"{data_alvo_str.split('-')[0]}-{data_alvo_str.split('-')[1]}"
+        ciclo_congelado = obter_ciclo_meta_seguro(db, datetime.date.today().strftime("%m/%Y"))
+        
+        # 1. BASE QUENTE (PostgreSQL): Buscando Vendas e extraindo o CGC para servir de ponte
+        query = text("""
+            WITH Hist_Clientes AS (
+                SELECT c.cgc, c.regional, c.razaosocial, SUM(v.qt_pedido) / 3.0 as media_vol
+                FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
+                WHERE v.sku = :sku AND v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '3 months' AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM')
+                GROUP BY c.cgc, c.regional, c.razaosocial
+            ),
+            Freq_Clientes AS (
+                SELECT c.cgc, c.regional, c.razaosocial, COUNT(DISTINCT TO_CHAR(v.data_pedido, 'YYYY-MM')) as freq_meses
+                FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
+                WHERE v.sku = :sku AND v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '6 months' AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM')
+                GROUP BY c.cgc, c.regional, c.razaosocial
+            ),
+            MTD_Clientes AS (
+                SELECT c.cgc, c.regional, c.razaosocial, SUM(v.qt_pedido) as mtd_vol
+                FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
+                WHERE v.sku = :sku AND TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql
+                GROUP BY c.cgc, c.regional, c.razaosocial
+            )
+            SELECT 
+                h.cgc, h.regional, h.razaosocial, 
+                COALESCE(h.media_vol, 0) as media_vol, 
+                COALESCE(m.mtd_vol, 0) as mtd_vol, 
+                COALESCE(f.freq_meses, 0) as freq_meses,
+                CASE 
+                    WHEN COALESCE(m.mtd_vol, 0) >= COALESCE(h.media_vol, 0) * 0.6 THEN 0 
+                    ELSE GREATEST(0, COALESCE(h.media_vol, 0) - COALESCE(m.mtd_vol, 0)) 
+                END as previsao_vol
+            FROM Hist_Clientes h
+            LEFT JOIN MTD_Clientes m ON h.cgc = m.cgc
+            LEFT JOIN Freq_Clientes f ON h.cgc = f.cgc
+            WHERE COALESCE(f.freq_meses, 0) >= 4 
+        """)
+        
+        df_pg = pd.read_sql(query, db.bind, params={"mes_sql": mes_sql, "ciclo_congelado": ciclo_congelado, "sku": sku})
+        
+        if df_pg.empty:
+            return []
+
+        # 2. BASE FRIA (AWS S3): Instanciando o sistema de arquivos para ler os Data Lakes
+        fs = s3fs.S3FileSystem(key=AWS_STORAGE_OPTIONS["key"], secret=AWS_STORAGE_OPTIONS["secret"])
+
+        # a) Buscar o último arquivo de Estoque da MTRIX
+        df_mtrix = pd.DataFrame(columns=["cgc", "estoque_mtrix"])
+        try:
+            arquivos_mtrix = fs.glob(f"s3://{S3_BUCKET}/mtrix/*estoque*.parquet")
+            if arquivos_mtrix:
+                ultimo_mtrix = sorted(arquivos_mtrix)[-1]
+                df_temp = pd.read_parquet(f"s3://{ultimo_mtrix}", storage_options=AWS_STORAGE_OPTIONS)
+                df_temp = df_temp[df_temp['sku'] == sku]
+                if not df_temp.empty:
+                    df_mtrix = df_temp.groupby('cgc')['estoque'].sum().reset_index()
+                    df_mtrix.rename(columns={'estoque': 'estoque_mtrix'}, inplace=True)
+        except Exception as e:
+            print(f"[Aviso] S3 MTRIX Inacessível ou Vazio: {e}")
+
+        # b) Buscar o arquivo GOLD Financeiro de PMR
+        df_pmr = pd.DataFrame(columns=["cgc", "pmr"])
+        try:
+            # Aponta cirurgicamente para a Camada Gold gerada pelo financeiro_worker.py
+            caminho_gold = f"s3://{S3_BUCKET}/financeiro/pmr/pmr_clientes_gold.parquet"
+            df_temp_pmr = pd.read_parquet(caminho_gold, storage_options=AWS_STORAGE_OPTIONS)
+            if not df_temp_pmr.empty:
+                df_pmr = df_temp_pmr[['cgc', 'pmr_dias']].rename(columns={'pmr_dias': 'pmr'})
+        except Exception as e:
+            print(f"[Aviso] S3 PMR Financeiro Inacessível: {e}")
+
+        # 3. O MERGE (Cruzamento Relacional em Memória via CGC)
+        df_merged = df_pg.merge(df_mtrix, on='cgc', how='left').merge(df_pmr, on='cgc', how='left')
+
+        # 4. AGRUPAMENTO PARA A TELA (Por Razão Social)
+        df_final = df_merged.groupby(['regional', 'razaosocial']).agg({
+            'media_vol': 'sum',
+            'mtd_vol': 'sum',
+            'freq_meses': 'max',
+            'previsao_vol': 'sum',
+            'estoque_mtrix': 'sum',
+            'pmr': 'mean'
+        }).reset_index()
+
+        # 5. TRATAMENTO VISUAL (Nulos e Strings Especiais)
+        registros_processados = []
+        for _, row in df_final.iterrows():
+            linha = row.to_dict()
+            linha['pmr'] = round(linha['pmr'], 1) if pd.notnull(linha['pmr']) else 0
+            
+            val_estoque = linha['estoque_mtrix']
+            if pd.isnull(val_estoque) or val_estoque == 0:
+                linha['estoque_mtrix'] = "sem mtrix"
+            else:
+                linha['estoque_mtrix'] = int(val_estoque)
+                
+            registros_processados.append(linha)
+
+        return sorted(registros_processados, key=lambda x: (x['previsao_vol'], x['mtd_vol']), reverse=True)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha no Drilldown Híbrido: {str(e)}")
