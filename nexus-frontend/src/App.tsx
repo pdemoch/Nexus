@@ -14,7 +14,8 @@ import GerenciamentoArena from './pages/GerenciamentoArena';
 import SoeDashboard from './pages/SoeDashboard';
 import InboundArena from './pages/InboundArena';
 import AuditoriaArena from './pages/AuditoriaArena';
-import DataLakeArena from './pages/DataLakeArena'; // <-- NOVA IMPORTAÇÃO AQUI
+import DataLakeArena from './pages/DataLakeArena';
+import CockpitCCC from './pages/CockpitCCC'; // 1. IMPORTAÇÃO INJETADA AQUI
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
@@ -44,7 +45,11 @@ export default function App() {
         }
       } catch (error) { console.error("Falha ao verificar status do sistema."); }
     };
+    
     checkSystemStatus();
+    // 2. CORREÇÃO: O Loop que mantém o radar a varrer de 3 em 3 segundos
+    const intervalId = setInterval(checkSystemStatus, 3000); 
+    return () => clearInterval(intervalId);
   }, [user]);
 
   // GESTÃO DE SESSÃO
@@ -88,10 +93,13 @@ export default function App() {
       // ROTAS DO NOVO MÓDULO S&OE E DATA LAKE
       case 'soe-radar': return <SoeDashboard />;
       case 'inbound': return <InboundArena />;
-      case 'datalake': return <DataLakeArena />; // <-- NOVA ROTA INJETADA AQUI
+      case 'datalake': return <DataLakeArena />; 
 
       // ROTA DO NOSSO NOVO MÓDULO DE AUDITORIA DE IA
       case 'auditoria': return <AuditoriaArena />;
+      
+      // 3. ROTA DO COCKPIT CCC INJETADA AQUI
+      case 'ccc': return <CockpitCCC user={user} />;
 
       default: return <AdminPanel />;
     }
@@ -133,18 +141,16 @@ export default function App() {
         </div>
       )}
 
-      {/* RENDERIZAÇÃO BLINDADA DA SIDEBAR (Shrink-0) */}
-      <div className="w-64 shrink-0 h-full shadow-xl z-20">
-        <Sidebar
-          currentRoute={currentRoute}
-          setCurrentRoute={setCurrentRoute}
-          user={user}
-          onLogout={handleLogout}
-        />
-      </div>
+      {/* 4. CORREÇÃO DA SIDEBAR: A "div w-64" fixa que impedia a expansão/contração foi removida */}
+      <Sidebar
+        currentRoute={currentRoute}
+        setCurrentRoute={setCurrentRoute}
+        user={user}
+        onLogout={handleLogout}
+      />
 
-      {/* CONTEÚDO PRINCIPAL */}
-      <main className="flex-1 h-full overflow-y-auto relative z-10 bg-[#f8fafc]">
+      {/* CONTEÚDO PRINCIPAL (Adicionado min-w-0 para as tabelas não vazarem em telas flex) */}
+      <main className="flex-1 min-w-0 h-full overflow-y-auto relative z-10 bg-[#f8fafc]">
         {renderContent()}
       </main>
 

@@ -101,7 +101,7 @@ const TipoPMPRow = ({ tipo, info }: any) => {
   );
 };
 
-export default function CockpitCCC() {
+export default function CockpitCCC(user: any) {
   const [lente, setLente] = useState<'pmr' | 'pmp'>('pmr');
   
   // Datas Default (Últimos 6 meses)
