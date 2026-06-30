@@ -27,18 +27,14 @@ AWS_STORAGE_OPTIONS = {
 }
 
 S3_BUCKET = "nexus-datalake-linea-prd"
-
-# [ALTERADO] Caminhos da Camada Prata (Silver) limpos, sem a pasta /historico
 S3_PREFIX_PMR_SILVER = f"s3://{S3_BUCKET}/financeiro/pmr"
 S3_PREFIX_PMP_SILVER = f"s3://{S3_BUCKET}/financeiro/pmp"
-
-# Caminho da Camada Gold para o Router KPIs ler em milissegundos
 S3_PREFIX_PMR_GOLD = f"s3://{S3_BUCKET}/financeiro/pmr/pmr_clientes_gold.parquet"
 
 API_GOBI_BASE = "https://gobi-api.lineaalimentos.com.br/v1/reports"
 
-# Tenta usar o Token do .env, senão cai para o Token fixo extraído do PowerBI
-TOKEN_GOBI = settings.GOBI_TOKEN if hasattr(settings, 'GOBI_TOKEN') and settings.GOBI_TOKEN else "TQWZ7G4UeRzu6zvmyt4b"
+_raw_token = settings.GOBI_TOKEN if hasattr(settings, 'GOBI_TOKEN') and settings.GOBI_TOKEN else "TQWZ7G4UeRzu6zvmyt4b"
+TOKEN_GOBI = _raw_token if _raw_token.startswith("Bearer") else f"Bearer {_raw_token}"
 
 # ==========================================
 # HELPERS DE EXTRAÇÃO ASSÍNCRONA
@@ -47,7 +43,7 @@ async def _fetch_json_with_retry(session: aiohttp.ClientSession, url: str, param
     headers = {"Authorization": TOKEN_GOBI}
     for tentativa in range(retries):
         try:
-            async with session.get(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=120)) as response:
+            async with session.get(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=60)) as response:
                 if response.status == 200:
                     data = await response.json(content_type=None)
                     return data if isinstance(data, list) else []
@@ -55,31 +51,41 @@ async def _fetch_json_with_retry(session: aiohttp.ClientSession, url: str, param
                     print(f"      [!] Rate Limit (429). Aguardando {3 ** tentativa}s...")
                     await asyncio.sleep(3 ** tentativa)
                 elif response.status == 401:
-                    headers["Authorization"] = f"Bearer {TOKEN_GOBI}"
+                    headers["Authorization"] = _raw_token
                 else:
                     text_erro = await response.text()
                     print(f"      ❌ Erro da Gobi {response.status} em {url}: {text_erro[:100]}")
                     return None
         except Exception as e:
-            print(f"      [!] Timeout/Falha na tentativa {tentativa+1} ({url}): {e}")
             if tentativa < retries - 1: await asyncio.sleep(2 ** tentativa)
     return None
 
 async def extrair_cadastro_clientes_188(session: aiohttp.ClientSession) -> pd.DataFrame:
-    """A 'Pedra de Roseta': Transforma o código do Protheus num CNPJ real."""
     print("   -> 📥 Puxando API 188 (Tradutor Cliente/Loja para CGC)...")
-    limit, offset, clientes = 2500, 0, []
+    limit, offset, clientes = 5000, 0, []
+    lote_anterior = [] # Trava Anti-Loop 1
     
     while True:
-        print(f"      - Baixando lote de clientes a partir da linha {offset}...")
+        print(f"      - Solicitando clientes a partir da linha {offset}...")
         dados = await _fetch_json_with_retry(session, f"{API_GOBI_BASE}/188/data", {"streaming": "true", "format": "json", "limit": limit, "offset": offset})
         
         if not dados or len(dados) == 0: break
-        clientes.extend(dados)
-        offset += len(dados)
-        if len(dados) < limit: break
+        
+        # Trava Anti-Loop 1: Se a Gobi repetiu a mesma linha inicial, ignorou o offset
+        if lote_anterior and dados[0] == lote_anterior[0]: 
+            break
             
-    print(f"   -> ✅ API 188 concluída! {len(clientes)} clientes carregados.")
+        clientes.extend(dados)
+        print(f"      ✅ Recebidos {len(dados)} registros!")
+        
+        lote_anterior = dados
+        offset += len(dados)
+        
+        # Trava Anti-Loop 2: Se a API mandou mais ou menos do que pedimos, ela ignorou a paginação
+        if len(dados) != limit: 
+            break
+            
+    print(f"   -> ✅ API 188 concluída! {len(clientes)} clientes carregados únicos.")
         
     df = pd.DataFrame(clientes)
     if not df.empty:
@@ -98,13 +104,20 @@ async def extrair_cadastro_clientes_188(session: aiohttp.ClientSession) -> pd.Da
 async def _fetch_dados_dia(session: aiohttp.ClientSession, relatorio_id: int, dia: datetime.date) -> list:
     limit, offset, registros_dia = 5000, 0, []
     dia_str = dia.strftime("%Y-%m-%d")
+    lote_anterior = []
+    
     while True:
         params = {"start_date": dia_str, "end_date": dia_str, "streaming": "true", "format": "json", "limit": limit, "offset": offset}
         dados = await _fetch_json_with_retry(session, f"{API_GOBI_BASE}/{relatorio_id}/data", params)
         if not dados or len(dados) == 0: break
+        if lote_anterior and dados[0] == lote_anterior[0]: break
+        
         registros_dia.extend(dados)
+        lote_anterior = dados
         offset += len(dados)
-        if len(dados) < limit: break
+        
+        if len(dados) != limit: break
+            
     return registros_dia
 
 async def extrair_dados_financeiros(session: aiohttp.ClientSession, relatorio_id: int, nome_relatorio: str) -> pd.DataFrame:
@@ -121,7 +134,7 @@ async def extrair_dados_financeiros(session: aiohttp.ClientSession, relatorio_id
         resultados = await asyncio.gather(*tasks)
         for lote in resultados:
             if lote: registros_totais.extend(lote)
-        print(f"      Progresso: {min(i + chunk_size, len(lista_dias))}/{len(lista_dias)} dias. Títulos: {len(registros_totais)}")
+        print(f"      Progresso: {min(i + chunk_size, len(lista_dias))}/{len(lista_dias)} dias. Títulos acumulados: {len(registros_totais)}")
         await asyncio.sleep(0.3) 
     return pd.DataFrame(registros_totais)
 
@@ -139,7 +152,6 @@ async def processar_pmp(session: aiohttp.ClientSession):
     if df_sf1.empty: return
     df_sf1.columns = [c.lower().strip() for c in df_sf1.columns]
     
-    # Filtro Fiscal MP/SI/EM
     if 'd1_tp' in df_sf1.columns:
         df_sf1 = df_sf1[df_sf1['d1_tp'].isin(['MP', 'SI', 'EM'])]
     
@@ -148,7 +160,6 @@ async def processar_pmp(session: aiohttp.ClientSession):
     
     df_se2['chave_nf'] = df_se2.get('e2_fornece', '').astype(str).str.strip() + "-" + df_se2.get('e2_loja', '').astype(str).str.strip() + "-" + df_se2.get('e2_num', '').astype(str).str.strip()
     
-    # Cruzamento Fiscal x Financeiro
     df_pmp = pd.merge(df_se2, df_sf1[['chave_nf', 'd1_tp']], on='chave_nf', how='inner')
     
     for col in ['e2_emissao', 'e2_vencto', 'e2_vencrea']:
@@ -179,45 +190,36 @@ async def processar_pmp(session: aiohttp.ClientSession):
 async def processar_pmr(session: aiohttp.ClientSession, engine):
     print("\n🔄 Processando PMR (Contas a Receber)...")
     
-    # 1. Tabela 188 (A Ponte: Cliente/Loja -> CGC)
     df_188 = await extrair_cadastro_clientes_188(session)
     
-    # 2. Master Data (A Verdade Absoluta: CGC -> Regional/Segmento)
     print("   -> 📥 Lendo Base Quente (PostgreSQL) para amarrações oficiais...")
     with engine.connect() as conn:
         df_dim = pd.read_sql("SELECT cgc, razaosocial, regional, segmento FROM dim_clientes", conn)
     
-    # 3. SF2 (Notas de Saída)
     df_sf2 = await extrair_dados_financeiros(session, 595, "SF2 Notas de Saída")
     if df_sf2.empty: return
     df_sf2.columns = [c.lower().strip() for c in df_sf2.columns]
     
-    # Filtros Fiscais PowerBI
     if 'f2_filial' in df_sf2.columns: df_sf2 = df_sf2[df_sf2['f2_filial'].astype(str).str.strip() != '0107']
     df_sf2['chave_cl'] = df_sf2.get('f2_cliente', '').astype(str).str.strip() + "-" + df_sf2.get('f2_loja', '').astype(str).str.strip()
     
-    # Enriquecimento com 188 e Postgres ANTES do JOIN Financeiro
-    df_sf2 = pd.merge(df_sf2, df_188, on='chave_cl', how='left') # Ganha o CGC
-    df_sf2 = pd.merge(df_sf2, df_dim, on='cgc', how='left') # Ganha Regional/Segmento
+    df_sf2 = pd.merge(df_sf2, df_188, on='chave_cl', how='left') 
+    df_sf2 = pd.merge(df_sf2, df_dim, on='cgc', how='left')
     
-    # Filtros de Segmento/Regional (Idêntico ao PowerBI)
     df_sf2 = df_sf2[~df_sf2['segmento'].astype(str).str.contains('AGENCIAS E FORNECEDORES', na=False, case=False)]
     df_sf2 = df_sf2[~df_sf2['regional'].astype(str).str.contains('EIC', na=False, case=False)]
     
     df_sf2['chave_nf'] = df_sf2.get('f2_cliente','').astype(str).str.strip() + "-" + df_sf2.get('f2_loja','').astype(str).str.strip() + "-" + df_sf2.get('f2_doc','').astype(str).str.strip() + "-" + df_sf2.get('f2_serie','').astype(str).str.strip()
     df_sf2 = df_sf2.drop_duplicates(subset=['chave_nf'])
     
-    # 4. SE1 (Títulos a Receber)
     df_se1 = await extrair_dados_financeiros(session, 596, "SE1 Títulos a Receber")
     if df_se1.empty: return
     df_se1.columns = [c.lower().strip() for c in df_se1.columns]
     
     df_se1['chave_nf'] = df_se1.get('e1_cliente','').astype(str).str.strip() + "-" + df_se1.get('e1_loja','').astype(str).str.strip() + "-" + df_se1.get('e1_num','').astype(str).str.strip() + "-" + df_se1.get('e1_prefixo','').astype(str).str.strip()
     
-    # 5. Inner Join Fisco-Financeiro
     df_pmr = pd.merge(df_se1, df_sf2[['chave_nf', 'regional', 'cgc', 'razaosocial', 'segmento']], on='chave_nf', how='inner')
     
-    # 6. Matemática
     for col in ['e1_emissao', 'e1_vencto', 'e1_vencrea']:
         if col in df_pmr.columns: df_pmr[col] = pd.to_datetime(df_pmr[col], errors='coerce')
         
@@ -233,15 +235,13 @@ async def processar_pmr(session: aiohttp.ClientSession, engine):
     
     df_pmr['mes_competencia'] = df_pmr['e1_emissao'].dt.strftime('%Y-%m')
     
-    # A. Salvar Silver
     cols_silver = ['e1_filial', 'e1_num', 'e1_prefixo', 'e1_cliente', 'e1_loja', 'cgc', 'razaosocial', 'regional', 'segmento', 'e1_emissao', 'e1_vencto', 'e1_vencrea', 'e1_valor', 'base_dias', 'real_dias', 'peso_base', 'peso_real', 'mes_competencia']
     df_silver = df_pmr[[c for c in cols_silver if c in df_pmr.columns]]
     
-    print(f"🚀 Enviando PMR (Silver) para S3 ({len(df_silver)} Registros)...")
+    print(f"🚀 Enviando PMR (Silver) para S3 ({len(df_silver)} Registros Válidos)...")
     if not df_silver.empty:
         df_silver.to_parquet(S3_PREFIX_PMR_SILVER, engine='pyarrow', partition_cols=['mes_competencia'], existing_data_behavior='delete_matching', storage_options=AWS_STORAGE_OPTIONS)
     
-    # B. Salvar Gold (Risco Estoque)
     print("🥇 Calculando Camada Gold PMR (Hierarquia para Risco de Estoque)...")
     df_gold = df_pmr.groupby(['cgc', 'regional']).agg({'e1_valor': 'sum', 'peso_real': 'sum'}).reset_index()
     df_gold['pmr_dias'] = np.where(df_gold['e1_valor'] > 0, df_gold['peso_real'] / df_gold['e1_valor'], 0).round(1)
