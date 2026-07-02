@@ -23,8 +23,8 @@ from app.core.state import AppState
 # CONFIGURAÇÕES AWS S3 (CREDENCIAIS)
 # ==========================================
 AWS_STORAGE_OPTIONS = {
-    "key": "AKIA4VPN43D6FP2LR2MT",
-    "secret": "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",
+    "key": os.getenv("AWS_ACCESS_KEY_ID"),
+    "secret": os.getenv("AWS_SECRET_ACCESS_KEY"),
     "client_kwargs": {"region_name": "us-east-1"}
 }
 

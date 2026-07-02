@@ -15,6 +15,8 @@ from app.core.state import AppState
 from app.api.routers.router_auth import get_current_user
 from app.core.config import settings
 from app.models.domain_models import FatoEstoqueD0
+import os
+
 
 router = APIRouter(prefix="/api/v1/kpis", tags=["Auditoria, KPIs e Riscos de Estoque"])
 
@@ -22,8 +24,8 @@ router = APIRouter(prefix="/api/v1/kpis", tags=["Auditoria, KPIs e Riscos de Est
 # CONFIGURAÇÕES AWS S3 (CREDENCIAIS)
 # ==========================================
 AWS_STORAGE_OPTIONS = {
-    "key": "AKIA4VPN43D6FP2LR2MT",
-    "secret": "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",
+    "key": os.getenv("AWS_ACCESS_KEY_ID"),
+    "secret": os.getenv("AWS_SECRET_ACCESS_KEY"),
     "client_kwargs": {"region_name": "us-east-1"}
 }
 S3_BUCKET = "nexus-datalake-linea-prd"
