@@ -1,250 +1,175 @@
 import numpy as np
 import pandas as pd
 import warnings
-import traceback
 
 warnings.filterwarnings("ignore")
 
-# Tenta importar os motores avançados, se não houver, ignora silenciosamente.
-try:
-    import xgboost as xgb
-except ImportError:
-    pass
+# =========================================================================
+# IMPORTAÇÕES GRACIOSAS (Só falha no modelo específico se faltar a biblioteca)
+# =========================================================================
+try: import xgboost as xgb
+except ImportError: xgb = None
 
-try:
-    import lightgbm as lgb
-except ImportError:
-    pass
+try: import lightgbm as lgb
+except ImportError: lgb = None
 
-try:
-    from sklearn.ensemble import RandomForestRegressor
-except ImportError:
-    pass
+try: from sklearn.ensemble import RandomForestRegressor
+except ImportError: RandomForestRegressor = None
 
-try:
-    from statsmodels.tsa.holtwinters import ExponentialSmoothing
-except ImportError:
-    pass
+try: from statsmodels.tsa.holtwinters import ExponentialSmoothing
+except ImportError: ExponentialSmoothing = None
 
-try:
-    from statsmodels.tsa.forecasting.theta import ThetaModel
-except ImportError:
-    pass
+try: from statsmodels.tsa.forecasting.theta import ThetaModel
+except ImportError: ThetaModel = None
 
-try:
-    from prophet import Prophet
-except ImportError:
-    pass
+try: from prophet import Prophet
+except ImportError: Prophet = None
 
-try:
-    import pmdarima as pm
-except ImportError:
-    pass
+try: import pmdarima as pm
+except ImportError: pm = None
 
 # =========================================================================
 # FUNÇÕES CORE DE AVALIAÇÃO E PREPARAÇÃO
 # =========================================================================
 
-def calcular_acuracia(y_true, y_pred, pesos=None):
-    """Calcula a Acurácia baseada no WMAPE ponderado taticamente."""
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred)
-    
-    if pesos is None:
-        pesos = np.ones(len(y_true))
-    else:
-        pesos = np.array(pesos)[:len(y_true)]
+def limpar_falsos_zeros(df, coluna_data='mes_data', coluna_volume='volume'):
+    """Expurga meses antigos antes do lançamento oficial do SKU."""
+    if df.empty: return df
+    primeira_venda_idx = df[df[coluna_volume] > 0].index.min()
+    if pd.isna(primeira_venda_idx): return df
+    return df.loc[primeira_venda_idx:].copy().reset_index(drop=True)
 
-    soma_real = np.sum(y_true * pesos)
-    if soma_real == 0:
-        return 0.0 if np.sum(y_pred * pesos) > 0 else 100.0
-        
-    erro_abs = np.abs(y_true - y_pred) * pesos
-    wmape = np.sum(erro_abs) / soma_real
-    acuracia = max(0.0, 100.0 - (wmape * 100))
-    return acuracia
-
-def limpar_falsos_zeros(df_treino: pd.DataFrame, col_data: str, col_volume: str) -> pd.DataFrame:
+def calcular_score_torneio(y_true, y_pred):
     """
-    CURA MATEMÁTICA 1: Corte de Ciclo de Vida.
-    Encontra a primeira vez que o produto vendeu. Todos os zeros (e NaNs) ANTES dessa data são 
-    apagados para não enviesar a IA de que o produto fracassou durante 1 ano antes do lançamento.
+    Penaliza WMAPE Alto + Penaliza BIAS (Viés Sistemático de Erro).
+    Quanto menor o score, melhor o modelo (Score 0 é a perfeição).
     """
-    df = df_treino.copy().sort_values(by=col_data).reset_index(drop=True)
+    y_true, y_pred = np.array(y_true), np.array(y_pred)
+    y_pred = np.maximum(y_pred, 0) # Corta projeções negativas surreais
     
-    # Preenche NaNs com 0 para segurança
-    df[col_volume] = df[col_volume].fillna(0)
-    
-    # Encontra o índice da primeira venda > 0
-    primeira_venda_idx = df[df[col_volume] > 0].index.min()
-    
-    if pd.isna(primeira_venda_idx):
-        # Se NUNCA vendeu na vida, devolve o dataframe vazio ou só zeros
-        return df
+    soma_real = np.sum(y_true)
+    if soma_real == 0: soma_real = 1e-5 # Evita divisão por zero
         
-    return df.iloc[primeira_venda_idx:].copy().reset_index(drop=True)
-
+    erro_absoluto = np.sum(np.abs(y_true - y_pred))
+    erro_vies = np.sum(y_pred - y_true) # >0 indica excesso, <0 indica falta
+    
+    wmape = (erro_absoluto / soma_real) * 100
+    bias_pct = (erro_vies / soma_real) * 100
+    
+    # Score = WMAPE + 50% da gravidade do Viés
+    score = wmape + (0.5 * abs(bias_pct))
+    return score
 
 # =========================================================================
-# MOTORES ESTATÍSTICOS CLÁSSICOS (UNIVARIADOS)
-# Excelentes para o Motor Alpha (Padrões Suaves e Sazonais)
+# ARSENAL DE MODELOS (PADRÃO WRAPPER UNIVERSAL)
 # =========================================================================
 
 class AutoArimaModel:
-    def __init__(self):
-        self.model = None
-
-    def predict(self, serie: pd.Series, horizon=5, exogenous=None):
-        if len(serie) < 12: return np.full(horizon, serie.mean())
-        if serie.sum() == 0: return np.zeros(horizon)
-        
-        try:
-            self.model = pm.auto_arima(
-                serie, seasonal=True, m=12, suppress_warnings=True, 
-                error_action="ignore", stepwise=True
-            )
-            # O AutoARIMA suporta exógenas! Se o Motor Beta enviar o estoque, ele usa.
-            if exogenous is not None and not exogenous.empty:
-                # Nota: Na predição, precisaríamos conhecer as exógenas futuras.
-                # Como a estratégia é Direct, esta versão clássica pode não usar o exógeno no futuro de forma simples.
-                # Vamos forçar regressão pura sem exógenas para este modelo clássico por segurança.
-                pass
-            return np.maximum(0, self.model.predict(n_periods=horizon))
-        except:
-            return np.full(horizon, serie.mean())
+    def fit(self, df):
+        if pm is None: raise ImportError("pmdarima não instalado")
+        self.model = pm.auto_arima(df['volume'].values, seasonal=False, suppress_warnings=True, error_action="ignore")
+    def predict(self, df, horizon):
+        return self.model.predict(n_periods=horizon).values if hasattr(self.model.predict(n_periods=horizon), 'values') else self.model.predict(n_periods=horizon)
 
 class HoltWintersModel:
-    def __init__(self):
-        pass
+    def fit(self, df):
+        if ExponentialSmoothing is None: raise ImportError("statsmodels não instalado")
+        y = df['volume'].values
+        seasonal = 'add' if len(y) >= 24 else None # Só aciona sazonalidade com 2 anos
+        sp = 12 if seasonal else None
+        self.model = ExponentialSmoothing(y, trend='add', seasonal=seasonal, seasonal_periods=sp, initialization_method="estimated").fit()
+    def predict(self, df, horizon):
+        return self.model.forecast(horizon).values if hasattr(self.model.forecast(horizon), 'values') else self.model.forecast(horizon)
 
-    def predict(self, serie: pd.Series, horizon=5, exogenous=None):
-        if len(serie) < 24: return np.full(horizon, serie.mean())
-        if serie.sum() == 0: return np.zeros(horizon)
-        try:
-            model = ExponentialSmoothing(serie, trend='add', seasonal='add', seasonal_periods=12).fit()
-            return np.maximum(0, model.forecast(horizon))
-        except:
-            return np.full(horizon, serie.mean())
+class ThetaModelWrapper:
+    def fit(self, df):
+        if ThetaModel is None: raise ImportError("statsmodels não instalado")
+        self.model = ThetaModel(df['volume'].values).fit()
+    def predict(self, df, horizon):
+        return self.model.forecast(horizon).values if hasattr(self.model.forecast(horizon), 'values') else self.model.forecast(horizon)
 
-
-# =========================================================================
-# O ESPECIALISTA EM INTERMITÊNCIA (O "Deserto")
-# Fundamental para o Motor Beta (SKUs com muitas rupturas e zeros)
-# =========================================================================
+class ProphetModel:
+    def fit(self, df):
+        if Prophet is None: raise ImportError("prophet não instalado")
+        self.model = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
+        df_p = pd.DataFrame({'ds': df['mes_data'], 'y': df['volume']})
+        self.model.fit(df_p)
+    def predict(self, df, horizon):
+        future = self.model.make_future_dataframe(periods=horizon, freq='MS')
+        forecast = self.model.predict(future)
+        return forecast['yhat'].iloc[-horizon:].values
 
 class CrostonModel:
-    def __init__(self):
-        pass
+    def fit(self, df): pass
+    def predict(self, df, horizon):
+        y = df['volume'].values
+        non_zero = y[y > 0]
+        if len(non_zero) == 0: return np.zeros(horizon)
         
-    def predict(self, serie: pd.Series, horizon=5, exogenous=None):
-        """
-        Calcula a demanda intermitente separando a probabilidade de venda do tamanho da venda.
-        """
-        arr = serie.values
-        if np.sum(arr) == 0: return np.zeros(horizon)
+        intervals = np.diff(np.where(y > 0)[0], prepend=-1)
+        mean_demand = np.mean(non_zero)
+        mean_interval = np.mean(intervals)
         
-        # Encontra os índices onde houve venda
-        vendas_idxs = np.where(arr > 0)[0]
-        if len(vendas_idxs) < 2: return np.full(horizon, arr.mean())
-        
-        # Calcula intervalos entre vendas
-        intervalos = np.diff(vendas_idxs)
-        media_intervalo = np.mean(intervalos)
-        
-        # Calcula a média do volume QUANDO VENDE
-        vendas = arr[vendas_idxs]
-        media_venda = np.mean(vendas)
-        
-        # A previsão é o Volume / Intervalo
-        previsao_plana = media_venda / media_intervalo if media_intervalo > 0 else media_venda
-        return np.full(horizon, previsao_plana)
-
-
-# =========================================================================
-# MOTORES MACHINE LEARNING COM SUPORTE MULTIVARIADO E DIRECT MULTI-STEP
-# Estes serão os "Cérebros" reais de ambos os Motores (Alpha e Beta)
-# =========================================================================
+        forecast = mean_demand / mean_interval if mean_interval > 0 else 0
+        return np.full(horizon, forecast)
 
 class LocalMLAutoregressive:
-    def __init__(self, model_type='xgb'):
+    def __init__(self, model_type='lgb'):
         self.model_type = model_type
-        # Guardaremos um modelo DIFERENTE para cada mês do horizonte (Direct Multi-step)
-        self.models_per_step = {} 
-
-    def _create_features(self, df_input: pd.DataFrame, step: int, tem_estoque: bool) -> pd.DataFrame:
-        """
-        Cria as variáveis explicativas (Features).
-        CURA MATEMÁTICA 4: O "step" garante que para prever M+2, usamos o Estoque de Hoje (M-1), e não o Estoque de M+1 (que não existe).
-        """
-        df = df_input.copy()
         
-        # O index deve ser datetime
-        df['mes'] = df.index.month
-        df['trimestre'] = df.index.quarter
+    def _create_features(self, df):
+        """Cria memória de curto prazo (Lags) e injeta PMV Financeiro."""
+        df_feat = df.copy()
+        df_feat['mes'] = df_feat['mes_data'].dt.month
+        df_feat['lag_1'] = df_feat['volume'].shift(1)
+        df_feat['lag_2'] = df_feat['volume'].shift(2)
+        df_feat['lag_3'] = df_feat['volume'].shift(3)
+        df_feat['media_movel_3'] = df_feat['volume'].rolling(3).mean()
         
-        # Lags da Variável Alvo (Vendas)
-        df[f'venda_lag_{step}'] = df['volume'].shift(step)
-        df[f'venda_lag_{step+1}'] = df['volume'].shift(step + 1)
-        df[f'venda_lag_{step+2}'] = df['volume'].shift(step + 2)
+        if 'pmv' in df_feat.columns:
+            df_feat['pmv_lag_1'] = df_feat['pmv'].shift(1)
+            
+        return df_feat.dropna()
+
+    def fit(self, df):
+        df_feat = self._create_features(df)
+        X = df_feat.drop(columns=['sku', 'mes_data', 'volume'], errors='ignore')
+        y = df_feat['volume']
         
-        # Lags Exógenos (Se o Motor for o Beta)
-        if tem_estoque and 'estoque' in df.columns:
-            # O Estoque de hoje impacta o mês do horizonte
-            df[f'estoque_lag_{step}'] = df['estoque'].shift(step)
+        if self.model_type == 'xgb' and xgb:
+            self.model = xgb.XGBRegressor(n_estimators=100, max_depth=3, random_state=42)
+        elif self.model_type == 'lgb' and lgb:
+            self.model = lgb.LGBMRegressor(n_estimators=100, max_depth=3, random_state=42, verbose=-1)
+        elif self.model_type == 'rf' and RandomForestRegressor:
+            self.model = RandomForestRegressor(n_estimators=100, max_depth=3, random_state=42)
+        else:
+            self.model = None
+            return
             
-            # Feature de engenharia: A Relação Venda/Estoque do passado (Giro)
-            df[f'giro_lag_{step}'] = np.where(df[f'venda_lag_{step}'] > 0, df[f'estoque_lag_{step}'] / df[f'venda_lag_{step}'], 0)
+        if len(X) > 0: self.model.fit(X, y)
+        else: self.model = None
+
+    def predict(self, df, horizon):
+        if getattr(self, 'model', None) is None:
+            return np.full(horizon, df['volume'].mean() if len(df) else 0)
+            
+        current_history = df.copy()
+        future_preds = []
         
-        return df.dropna()
-
-    def predict(self, df_completo: pd.DataFrame, horizon=5) -> np.ndarray:
-        """
-        df_completo: DataFrame do Pandas indexado por Data.
-        Deve ter a coluna 'volume'. Pode ou não ter a coluna 'estoque' (Motor Beta vs Alpha).
-        """
-        if len(df_completo) < horizon + 3:
-            return np.full(horizon, df_completo['volume'].mean())
-        if df_completo['volume'].sum() == 0:
-            return np.zeros(horizon)
-
-        tem_estoque = 'estoque' in df_completo.columns
-        predicoes = []
-
-        # CURA MATEMÁTICA 2: Direct Multi-Step Forecasting
-        # Treinamos 1 modelo isolado para CADA mês que queremos prever.
-        for h in range(1, horizon + 1): # h=1 é o próximo mês (M0), h=2 é M1, etc.
+        for _ in range(horizon):
+            next_date = current_history['mes_data'].max() + pd.offsets.MonthBegin(1)
+            new_row = pd.DataFrame({'mes_data': [next_date], 'volume': [np.nan]})
             
-            # Cria a matriz de treino específica para este salto (step)
-            df_train = self._create_features(df_completo, step=h, tem_estoque=tem_estoque)
+            if 'sku' in current_history.columns: new_row['sku'] = current_history['sku'].iloc[0]
+            if 'pmv' in current_history.columns: new_row['pmv'] = current_history['pmv'].iloc[-1]
             
-            if len(df_train) < 5: # Poucos dados após o dropna, falha segura
-                predicoes.append(df_completo['volume'].mean())
-                continue
-                
-            y = df_train['volume'].values
-            X = df_train.drop(columns=['volume', 'estoque'] if tem_estoque else ['volume']).values
-
-            # Escolhe a arma
-            if self.model_type == 'xgb' and 'xgb' in globals():
-                model = xgb.XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42, objective='reg:tweedie')
-            elif self.model_type == 'lgb' and 'lgb' in globals():
-                model = lgb.LGBMRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42, verbose=-1)
-            else:
-                model = RandomForestRegressor(n_estimators=100, max_depth=3, random_state=42)
-                
-            model.fit(X, y)
+            current_history = pd.concat([current_history, new_row], ignore_index=True)
+            df_feat = self._create_features(current_history)
             
-            # O cenário futuro: pegamos a ÚLTIMA linha do dataframe original
-            # e calculamos os lags dela com o nosso `step` para prever exatamente aquele horizonte
+            X_future = df_feat.drop(columns=['sku', 'mes_data', 'volume'], errors='ignore').iloc[-1:]
+            pred = max(0, self.model.predict(X_future)[0])
             
-            # Truque: Criamos um dataframe "esticado" até hoje para o _create_features puxar o shift correto
-            df_future_base = df_completo.copy()
-            df_futuro_features = self._create_features(df_future_base, step=h, tem_estoque=tem_estoque)
+            current_history.loc[current_history.index[-1], 'volume'] = pred
+            future_preds.append(pred)
             
-            # A última linha dessas features calculadas é a que nos dará a previsão do Mês H
-            X_future = df_futuro_features.drop(columns=['volume', 'estoque'] if tem_estoque else ['volume']).iloc[-1].values.reshape(1, -1)
-            
-            pred = max(0, model.predict(X_future)[0])
-            predicoes.append(pred)
-
-        return np.array(predicoes)
+        return np.array(future_preds)

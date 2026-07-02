@@ -5,35 +5,34 @@ import os
 from datetime import date
 from dateutil.relativedelta import relativedelta
 from sqlalchemy import text
-import time
 
 from app.core.database import SessionLocal 
 from app.ml.models_library import (
-    AutoArimaModel, HoltWintersModel, CrostonModel, 
-    LocalMLAutoregressive, calcular_acuracia, limpar_falsos_zeros
+    AutoArimaModel, HoltWintersModel, CrostonModel, ThetaModelWrapper,
+    ProphetModel, LocalMLAutoregressive, calcular_score_torneio, limpar_falsos_zeros
 )
 
 class NexusForecaster:
     def __init__(self):
-        self.forecast_horizon = 5 # M0, M1, M2, M3, M4
-        self.validation_size = 3  # Meses escondidos para o teste cego
+        self.forecast_horizon = 5 # M0 a M4
+        self.validation_size = 5  # Janela Profunda de 5 Meses (Teste de Stress Real)
         
         # ---------------------------------------------------------
-        # ARSENAL DE MODELOS
+        # A ARENA DE MODELOS (Agora com TODOS os algoritmos!)
         # ---------------------------------------------------------
         self.modelos_disponiveis = {
-            'XGBoost_Multivariado': LocalMLAutoregressive('xgb'),
-            'LightGBM_Multivariado': LocalMLAutoregressive('lgb'),
-            'AutoARIMA_Sazonal': AutoArimaModel(),
-            'HoltWinters_Sazonal': HoltWintersModel(),
-            'Croston_Intermitente': CrostonModel() # Especialista em Zeros/Rupturas
+            'XGBoost_MachineLearning': LocalMLAutoregressive('xgb'),
+            'LightGBM_MachineLearning': LocalMLAutoregressive('lgb'),
+            'RandomForest_MachineLearning': LocalMLAutoregressive('rf'),
+            'Prophet_Sazonal_Avancado': ProphetModel(),
+            'AutoARIMA_Estatistico': AutoArimaModel(),
+            'HoltWinters_Exponencial': HoltWintersModel(),
+            'Theta_Estatistico': ThetaModelWrapper(),
+            'Croston_Intermitente': CrostonModel() # Especialista em Rupturas
         }
 
     def _obter_dados_alpha(self, db, data_corte: str) -> pd.DataFrame:
-        """
-        MOTOR ALPHA (SELL-IN): Lê o histórico de faturamento da Indústria.
-        Agora enriquecido com cálculo de PMV e Blindagem de Portfólio.
-        """
+        """Motor Alpha (Sell-in) com cálculo embutido do PMV e Filtragem de Portfólio"""
         query = f"""
             SELECT 
                 sku, 
@@ -47,15 +46,10 @@ class NexusForecaster:
         """
         df = pd.read_sql(query, db.bind)
 
-        # =========================================================================
-        # 🛡️ BLINDAGEM CONTRA DADOS FANTASMAS (Filtro Segmentos.xlsx)
-        # =========================================================================
         caminho_segmentos = os.path.join("app", "etl", "Segmentos.xlsx")
         if os.path.exists(caminho_segmentos):
             try:
                 df_seg = pl.read_excel(caminho_segmentos)
-                
-                # Identifica a coluna correta de produto (ignora case sensitive)
                 col_produto = [c for c in df_seg.columns if c.lower() == 'produto'][0]
                 
                 skus_validos = df_seg.with_columns([
@@ -69,22 +63,15 @@ class NexusForecaster:
                 tamanho_antes = len(df['sku'].unique())
                 df = df[df['sku'].isin(skus_validos)]
                 tamanho_depois = len(df['sku'].unique())
-                print(f"🛡️ [MOTOR ALPHA] Blindagem Ativa: {tamanho_antes - tamanho_depois} SKUs fantasmas eliminados da memória da IA.")
+                print(f"🛡️ [MOTOR ALPHA] Blindagem Ativa: {tamanho_antes - tamanho_depois} SKUs fantasmas mortos eliminados da IA.")
             except Exception as e:
-                print(f"⚠️ [MOTOR ALPHA] Aviso: Falha ao ler Segmentos.xlsx para blindagem. Erro: {e}")
-        else:
-            print("⚠️ [MOTOR ALPHA] Arquivo Segmentos.xlsx não encontrado no caminho padrão. IA treinando sem blindagem de portfólio.")
+                print(f"⚠️ [MOTOR ALPHA] Falha na blindagem Segmentos.xlsx: {e}")
 
         return df
 
     def _obter_dados_beta(self, db, data_corte: str) -> pd.DataFrame:
-        """MOTOR BETA (SELL-OUT): Lê o histórico MTRIX com Estoque do Canal."""
         query = f"""
-            SELECT 
-                sku, 
-                DATE_TRUNC('month', mes_referencia) AS mes_data, 
-                SUM(qty_conv2) AS volume,
-                SUM(estoque_qty_conv2) AS estoque
+            SELECT sku, DATE_TRUNC('month', mes_referencia) AS mes_data, SUM(qty_conv2) AS volume
             FROM fato_mtrix_historico_mensal
             WHERE mes_referencia < '{data_corte}'
             GROUP BY sku, DATE_TRUNC('month', mes_referencia)
@@ -93,63 +80,55 @@ class NexusForecaster:
         return pd.read_sql(query, db.bind)
 
     def _torneio_modelos(self, df_sku: pd.DataFrame, is_beta=False) -> tuple:
-        """A Arena de Batalha: Testa todos os modelos cegamente e escolhe o Campeão."""
+        """A Batalha dos Algoritmos avaliando WMAPE + BIAS."""
         df_limpo = limpar_falsos_zeros(df_sku, coluna_data='mes_data', coluna_volume='volume')
         
-        if len(df_limpo) < (self.validation_size + 2):
+        if len(df_limpo) < (self.validation_size + 3):
             media = df_limpo['volume'].mean() if len(df_limpo) > 0 else 0.0
-            return np.full(self.forecast_horizon, media), "Media_Simples", 50.0
+            return np.full(self.forecast_horizon, media), "Media_Simples_Fallback", 50.0
 
         df_treino = df_limpo.iloc[:-self.validation_size]
         df_validacao = df_limpo.iloc[-self.validation_size:]
         y_real = df_validacao['volume'].values
 
         melhor_modelo_nome = None
-        menor_erro_wmape = float('inf')
+        menor_score = float('inf')
 
-        # 1. Batalha (Treino Cego)
+        # 1. Batalha (Treino Cego) - Graças aos wrappers, o loop ficou puríssimo!
         for nome, modelo in self.modelos_disponiveis.items():
-            if is_beta and nome == 'Croston_Intermitente': continue
+            if is_beta and 'Croston' in nome: continue 
             try:
-                if hasattr(modelo, '_create_features'):
-                    modelo.fit(df_treino)
-                else:
-                    modelo.fit(df_treino['volume'])
+                modelo.fit(df_treino)
+                y_pred = modelo.predict(df_treino, horizon=self.validation_size)
                 
-                y_pred = modelo.predict(df_treino, horizon=self.validation_size) if hasattr(modelo, '_create_features') else modelo.predict(df_treino['volume'], horizon=self.validation_size)
-                
-                # Previne erros de conversão do Pandas em predições
+                # Garante vetorização limpa
                 if isinstance(y_pred, pd.Series): y_pred = y_pred.values
 
-                # 2. Avaliação de Erro (Acurácia)
-                wmape = calcular_acuracia(y_real, y_pred)
+                # Score Penalizador de Viés (Quanto menor, melhor)
+                score = calcular_score_torneio(y_real, y_pred)
                 
-                if wmape < menor_erro_wmape:
-                    menor_erro_wmape = wmape
+                if score < menor_score:
+                    menor_score = score
                     melhor_modelo_nome = nome
             except Exception as e:
                 continue
 
         if not melhor_modelo_nome:
-            melhor_modelo_nome = "Media_Simples"
-            menor_erro_wmape = 50.0
+            melhor_modelo_nome = "Media_Simples_Fallback"
+            menor_score = 100.0
             
-        # 3. A Previsão Oficial (Refit do Campeão com 100% dos dados)
+        # 3. A Previsão Oficial (Refit do Campeão com 100% da base)
         motor_campeao = self.modelos_disponiveis.get(melhor_modelo_nome)
         
         try:
-            if hasattr(motor_campeao, '_create_features'):
-                futuro = motor_campeao.predict(df_limpo, horizon=self.forecast_horizon)
-            else:
-                futuro = motor_campeao.predict(df_limpo['volume'], horizon=self.forecast_horizon)
-                
-            # [CORREÇÃO] Garante que a previsão seja um array limpo do numpy (Evita KeyError: 0)
-            if isinstance(futuro, pd.Series):
-                futuro = futuro.values
+            motor_campeao.fit(df_limpo)
+            futuro = motor_campeao.predict(df_limpo, horizon=self.forecast_horizon)
+            if isinstance(futuro, pd.Series): futuro = futuro.values
         except:
             futuro = np.full(self.forecast_horizon, df_limpo['volume'].mean())
             
-        acuracia_final = max(0.0, 100.0 - menor_erro_wmape)
+        # Acurácia de apresentação (100% menos o score combinado)
+        acuracia_final = max(0.0, 100.0 - menor_score)
         return futuro, melhor_modelo_nome, acuracia_final
 
     def executar_arena(self, ciclo_alvo: str, log_callback=print):
@@ -161,45 +140,34 @@ class NexusForecaster:
         db = SessionLocal()
         
         try:
-            log_callback(f"   -> [ML] Lendo histórico Gobi ERP (Ancorado em {ciclo_alvo})...")
+            log_callback(f"   -> [ML] Lendo histórico PostgreSQL Enriquecido (Ancorado em {ciclo_alvo})...")
             df_alpha = self._obter_dados_alpha(db, data_corte_str)
             skus_alpha = df_alpha['sku'].unique()
             
-            if len(skus_alpha) == 0:
-                raise ValueError("Nenhum histórico Alpha encontrado no banco.")
+            if len(skus_alpha) == 0: raise ValueError("Nenhum histórico Alpha (Sell-in) encontrado.")
 
-            log_callback(f"   -> [ML] Iniciando Torneio de Algoritmos para {len(skus_alpha)} SKUs...")
+            log_callback(f"   -> [ML] Iniciando Torneio de Algoritmos em {len(skus_alpha)} SKUs (Teste de {self.validation_size} Meses)...")
             
             # --- MOTOR ALPHA (SELL-IN) ---
             for sku in skus_alpha:
                 df_sku = df_alpha[df_alpha['sku'] == sku].copy()
-                
-                # IA prevê o futuro bruto
                 previsao, melhor_modelo_nome, acuracia_final = self._torneio_modelos(df_sku, is_beta=False)
                 
                 # =========================================================================
-                # 🛡️ TRAVA DE BOM SENSO (CLIPPING ESTATÍSTICO)
+                # 🛡️ TRAVA DE BOM SENSO (CLIPPING ESTATÍSTICO OUTLIERS)
                 # =========================================================================
                 historico_recente = df_sku[df_sku['volume'] > 0].tail(12)['volume']
-                
                 if len(historico_recente) >= 3:
                     piso = historico_recente.quantile(0.05)
                     teto = historico_recente.quantile(0.95)
-                    teto_ajustado = teto * 1.15 # Teto ganha 15% de margem para acomodar crescimento
-                    
-                    # Corta picos absurdos ou quedas irreais gerados pela matemática
-                    previsao = np.clip(previsao, piso, teto_ajustado)
+                    previsao = np.clip(previsao, piso, teto * 1.15) # Margem 15% acima do Teto
 
-                # Grava os 5 meses projetados
                 for i in range(self.forecast_horizon):
                     mes_proj = data_inicio_proj + relativedelta(months=i)
                     resultados_alpha.append({
-                        "ciclo_sop": ciclo_alvo,
-                        "mes_projetado": mes_proj,
-                        "sku": sku,
-                        "vol_ia_global": round(previsao[i], 2), # O bug do KeyError: 0 morre aqui!
-                        "modelo_vencedor": melhor_modelo_nome,
-                        "acuracia_ia": round(acuracia_final, 2)
+                        "ciclo_sop": ciclo_alvo, "mes_projetado": mes_proj, "sku": sku,
+                        "vol_ia_global": round(previsao[i], 2),
+                        "modelo_vencedor": melhor_modelo_nome, "acuracia_ia": round(acuracia_final, 2)
                     })
 
             log_callback(f"   -> [ML] Motor Alpha concluído. Preparando Motor Beta (Sell-out)...")
@@ -209,23 +177,17 @@ class NexusForecaster:
             skus_beta = df_beta['sku'].unique()
             
             if len(skus_beta) > 0:
-                log_callback(f"      🔬 [MOTOR BETA] Iniciando Torneio de Sell-out para {len(skus_beta)} SKUs...")
-                
+                log_callback(f"      🔬 [MOTOR BETA] Torneio para {len(skus_beta)} SKUs Distribuidores...")
                 for sku in skus_beta:
                     df_sku_b = df_beta[df_beta['sku'] == sku].copy()
                     previsao_b, campeao_b, acuracia_b = self._torneio_modelos(df_sku_b, is_beta=True)
                     
                     db.execute(text("""
-                        UPDATE fato_mtrix_snapshot 
-                        SET previsao_sellout_m0 = :prev 
+                        UPDATE fato_mtrix_snapshot SET previsao_sellout_m0 = :prev 
                         WHERE sku = :sku AND ciclo_sop = :ciclo
                     """), {"prev": round(previsao_b[0], 2), "sku": sku, "ciclo": ciclo_alvo})
-                
                 db.commit()
-                log_callback("      ✅ [MOTOR BETA] Previsões de esgotamento de prateleira salvas no Dossiê.")
-            else:
-                log_callback("      ⚠️ [MOTOR BETA] Sem dados de Canal Indireto para treinar. Ignorado.")
-
+            
             return pl.DataFrame(resultados_alpha)
 
         except Exception as e:
