@@ -1,12 +1,12 @@
 import asyncio
-from app.etl.extractor import NexusExtractor
+from app.etl.extractor import GobiExtractor
 from app.etl.transformer import NexusTransformer
 from app.etl.loader import NexusLoader
 from app.ml.forecaster import NexusForecaster
 from app.ml.distributor import TopDownDistributor
 
 async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print):
-    extrator = NexusExtractor()
+    extrator = GobiExtractor()
     transformer = NexusTransformer()
     loader = NexusLoader()
     forecaster = NexusForecaster()
