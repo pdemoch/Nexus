@@ -1,204 +1,36 @@
-import traceback
-import time
-import os
-import glob
-import polars as pl
 import asyncio
-from datetime import date
-from dateutil.relativedelta import relativedelta
-from sqlalchemy import func, text
-from app.core.state import AppState
-from app.core.database import SessionLocal
-from app.models.domain_models import FatoIbpGranular
-from app.etl.extractor import GobiExtractor
+from app.etl.extractor import NexusExtractor
 from app.etl.transformer import NexusTransformer
 from app.etl.loader import NexusLoader
 from app.ml.forecaster import NexusForecaster
+from app.ml.distributor import TopDownDistributor
 
-def log(mensagem: str):
-    from datetime import datetime
-    hora = datetime.now().strftime('%H:%M:%S')
-    linha_log = f"[{hora}] {mensagem}"
-    AppState.logs.append(linha_log)
-    print(linha_log)
-
-def aplicar_pmv_historico_pipeline(engine, ciclo_atual: str):
-    """
-    Substitui o PMV genérico da fato_ibp_granular pelo PMV exato 
-    praticado por cada cliente (CGC) nos últimos 4 meses.
-    """
-    log(f"💰 [FINANÇAS] Calculando PMV Histórico Dinâmico (Cliente x SKU) para o ciclo {ciclo_atual}...")
+async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print):
+    extrator = NexusExtractor()
+    transformer = NexusTransformer()
+    loader = NexusLoader()
+    forecaster = NexusForecaster()
+    distributor = TopDownDistributor()
     
-    sql_update_pmv = text("""
-        -- 1. Calcula o PMV exato por Cliente + SKU nos últimos 4 meses
-        WITH pmv_cliente_sku AS (
-            SELECT 
-                cgc, 
-                sku, 
-                SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv_real
-            FROM fato_vendas
-            WHERE data_pedido >= CURRENT_DATE - INTERVAL '4 months'
-            GROUP BY cgc, sku
-        ),
-        -- 2. Fallback: Calcula o PMV médio nacional do SKU (caso o cliente não tenha comprado nos últimos 4 meses)
-        pmv_nacional_sku AS (
-            SELECT 
-                sku, 
-                SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv_nacional
-            FROM fato_vendas
-            WHERE data_pedido >= CURRENT_DATE - INTERVAL '4 months'
-            GROUP BY sku
-        )
-        
-        -- 3. Aplica a atualização na fato_ibp_granular
-        UPDATE fato_ibp_granular AS f
-        SET pmv_aplicado = COALESCE(
-            c.pmv_real,           -- Prioridade 1: Preço exato do Cliente
-            n.pmv_nacional,       -- Prioridade 2: Preço médio Nacional
-            f.pmv_aplicado,       -- Prioridade 3: Mantém o valor base que a IA inseriu
-            0
-        )
-        FROM fato_ibp_granular f_target
-        LEFT JOIN pmv_cliente_sku c ON f_target.cgc = c.cgc AND f_target.sku = c.sku
-        LEFT JOIN pmv_nacional_sku n ON f_target.sku = n.sku
-        WHERE f.id = f_target.id
-          AND f.ciclo_sop = :ciclo;
-    """)
-
     try:
-        with engine.begin() as conn:
-            resultado = conn.execute(sql_update_pmv, {"ciclo": ciclo_atual})
-            linhas_afetadas = resultado.rowcount
-            log(f"✅ [FINANÇAS] Sucesso! {linhas_afetadas} SKUs atualizados com precificação histórica de precisão.")
+        log_callback(f"🚀 Iniciando Pipeline Nexus (Ciclo: {ciclo_alvo})")
+        
+        # 1. ETL Clássico (Os 3 meses recentes)
+        log_callback("⏳ [EXTRACT/TRANSFORM] Sincronizando ERP...")
+        arquivos_csv = await extrator.executar_extracao(log_callback=log_callback)
+        df_historico_limpo = transformer.processar_faturamento(arquivos_csv, log_callback=log_callback)
+        loader.executar_carga_historico(df_historico_limpo, log_callback=log_callback)
+
+        # 2. PREVISÃO DA IA (Apenas SKU)
+        log_callback("\n🧠 [FORECASTER] Iniciando Arena de Modelos (Base de 3 Anos)...")
+        df_forecast = await asyncio.to_thread(forecaster.executar_arena, ciclo_alvo, log_callback=log_callback)
+        
+        # 3. RATEIO, PMV E CARGA (Tudo num único passo atômico)
+        log_callback("\n🔀 [DISTRIBUTOR] Fatiando Share (6m), calculando PMV (3m) e Injetando no Banco...")
+        await asyncio.to_thread(distributor.executar_rateio_e_carga, df_forecast, ciclo_alvo)
+        
+        log_callback("\n✅ Pipeline Executado com Sucesso Absoluto!")
+
     except Exception as e:
-        log(f"❌ [ERRO CRÍTICO] Falha ao atualizar PMV no pipeline: {str(e)}")
+        log_callback(f"❌ [ERRO CRÍTICO] Falha no pipeline: {e}")
         raise e
-
-async def executar_pipeline_nexus():
-    tempo_inicio_total = time.time()
-    try:
-        os.makedirs("data", exist_ok=True)
-        
-        # =========================================================================
-        # ⚙️ CÁLCULO DA JANELA DESLIZANTE (3 Meses)
-        # =========================================================================
-        hoje = date.today()
-        data_fim = hoje
-        data_inicio_janela = (data_fim - relativedelta(months=3)).replace(day=1)
-        
-        log("🚀 [SYSTEM] Iniciando Nexus Engine 4.0 (Arquitetura CPFR com AWS Data Lake)...")
-
-        # =========================================================================
-        # 1. OBTER CICLO ATIVO (GOVERNANÇA DE S&OP)
-        # =========================================================================
-        with SessionLocal() as db:
-            ciclo_alvo = getattr(AppState, 'ciclo_ativo', None)
-            if not ciclo_alvo:
-                ciclo_alvo = hoje.strftime("%m/%Y")
-            
-            log(f"🧭 [S&OP] Ciclo âncora travado na competência: {ciclo_alvo}")
-            
-            trava = db.query(func.count(FatoIbpGranular.id)).filter(FatoIbpGranular.ciclo_sop == ciclo_alvo).scalar()
-            ciclo_existe = (trava > 0)
-
-        # =========================================================================
-        # 🧹 LIMPEZA CIRÚRGICA DOS PARQUETS DA JANELA (Evita Ressurreição de Zumbis)
-        # =========================================================================
-        log(f"🧹 [SYSTEM] Limpando Parquets locais da janela ({data_inicio_janela.strftime('%m/%Y')} a {data_fim.strftime('%m/%Y')}) para recarga...")
-        curr_date = data_inicio_janela
-        while curr_date <= data_fim:
-            mes_str = curr_date.strftime("%Y-%m")
-            for f in glob.glob(f"data/150_{mes_str}*.parquet"):
-                try:
-                    os.remove(f)
-                except Exception:
-                    pass
-            curr_date += relativedelta(months=1)
-
-        # =========================================================================
-        # 2. FASE DE EXTRAÇÃO DO ERP INTERNO (SELL-IN / GOBI ERP)
-        # =========================================================================
-        extractor = GobiExtractor()
-        
-        # A extração agora é focada exclusivamente na Janela Deslizante
-        log(f"📥 [EXTRACT] Extraindo dados da Fábrica (Gobi ERP: {data_inicio_janela} a {data_fim})...")
-        lf_150, lf_188, df_seg, df_orc = await extractor.extrair_tudo(data_inicio_janela, data_fim)
-        
-        if len(lf_150.columns) == 0 or len(lf_188.columns) == 0:
-            log("⚠️ [SYSTEM] Arquivos de Vendas vazios. O pipeline será encerrado por segurança.")
-            AppState.pipeline_rodando = False
-            return
-
-        # =========================================================================
-        # 3. FASE DE TRANSFORMAÇÃO (SILVER LAYER - FÁBRICA)
-        # =========================================================================
-        transformer = NexusTransformer()
-        lf_silver, lf_clientes, df_orc_final = transformer.processar_camada_silver(lf_150, lf_188, df_seg, df_orc)
-
-        if lf_silver is None or lf_clientes is None:
-            log("⚠️ [SYSTEM] Arquivo Segmentos.xlsx ausente. Abortando pipeline.")
-            AppState.pipeline_rodando = False
-            return
-
-        # =========================================================================
-        # 4. FASE DE INJEÇÃO (POSTGRESQL RELACIONAL)
-        # =========================================================================
-        loader = NexusLoader()
-        
-        log("   -> Executando processamento Polars em memória...")
-        df_silver_coletado = await asyncio.to_thread(lf_silver.collect)
-        log(f"📊 [AUDITORIA] ETL Gobi Concluído: {len(df_silver_coletado)} linhas na Janela prontas para injeção.")
-
-        log("   -> Iniciando injeção no Banco de Dados (Delete Janela + Bulk Insert)...")
-        # ATENÇÃO: Passamos a data_inicio_janela para o loader saber a partir de quando fazer o expurgo (DELETE)
-        await asyncio.to_thread(loader.executar_carga_silver, df_silver_coletado, data_inicio_janela, log_callback=log)
-        await asyncio.to_thread(loader.atualizar_hierarquia_historica, lf_clientes, log_callback=log)
-
-        if df_orc_final is not None and not df_orc_final.is_empty():
-            df_orc_coletado = await asyncio.to_thread(df_orc_final.collect) if isinstance(df_orc_final, pl.LazyFrame) else df_orc_final
-            await asyncio.to_thread(loader.executar_carga_orcamento, df_orc_coletado, log_callback=log)
-
-        # =========================================================================
-        # 5. FASE DE CONSUMO DO DATA LAKE (SELL-OUT / MTRIX)
-        # =========================================================================
-        log(f"📥 [LAKE] Consumindo Data Lake de Canal Indireto na AWS...")
-        await asyncio.to_thread(loader.executar_carga_mtrix, ciclo_alvo, log_callback=log)
-        
-        log(f"   ⏳ Tempo Total FASE ETL + Lake: {time.time() - tempo_inicio_total:.2f}s.")
-
-        # =========================================================================
-        # 6. FASE PREDITIVA (ML MACHINE LEARNING ARENA & RATEIO)
-        # =========================================================================
-        if ciclo_existe:
-            log(f"⏸️ [S&OP] O ciclo {ciclo_alvo} já está trancado no banco de dados.")
-            log("   -> As Redes Neurais e o Rateio foram ignorados para manter a auditoria dos Gestores intacta.")
-        else:
-            forecaster = NexusForecaster()
-            t0 = time.time()
-            log("🧠 [ML] Acordando os Motores Duplos de Inteligência Artificial (Alpha e Beta)...")
-            
-            df_forecast = await asyncio.to_thread(forecaster.executar_arena, ciclo_alvo, log_callback=log)
-            log(f"✅ [ML] Previsões Concluídas em {time.time() - t0:.2f}s.")
-
-            t0 = time.time()
-            log("⏳ [LOAD] Rateando e injetando as Metas e Previsões S&OP no Banco...")
-            await asyncio.to_thread(loader.executar_carga_forecast, df_forecast, ciclo_alvo, log_callback=log) 
-            log(f"✅ [LOAD] Metas atomizadas com sucesso em {time.time() - t0:.2f}s.")
-
-            # =====================================================================
-            # 🔥 7. APLICAÇÃO DA REGRA DE NEGÓCIO FINANCEIRA (PMV DINÂMICO)
-            # =====================================================================
-            with SessionLocal() as db_session:
-                engine_db = db_session.get_bind()
-                await asyncio.to_thread(aplicar_pmv_historico_pipeline, engine_db, ciclo_alvo)
-
-        tempo_total = time.time() - tempo_inicio_total
-        minutos, segundos = divmod(tempo_total, 60)
-        AppState.pipeline_rodando = False
-        log(f"🏁 [SYSTEM] Pipeline Nexus concluído com sucesso em {int(minutos)}m {int(segundos)}s.")
-
-    except Exception as e:
-        AppState.pipeline_rodando = False
-        erro_formatado = traceback.format_exc()
-        log(f"❌ [ERRO CRÍTICO] Falha no pipeline: {str(e)}")
-        log(f"🔍 Detalhes: {erro_formatado}")
