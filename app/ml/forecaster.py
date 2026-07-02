@@ -80,44 +80,80 @@ class NexusForecaster:
         return pd.read_sql(query, db.bind)
 
     def _torneio_modelos(self, df_sku: pd.DataFrame, is_beta=False) -> tuple:
-        """A Batalha dos Algoritmos avaliando WMAPE + BIAS."""
+        """A Batalha dos Algoritmos com Máquina do Tempo (Walk-Forward Validation)."""
         df_limpo = limpar_falsos_zeros(df_sku, coluna_data='mes_data', coluna_volume='volume')
         
-        if len(df_limpo) < (self.validation_size + 3):
+        # Configuração da Máquina do Tempo
+        num_folds = 3  # Quantidade de testes (viagens) no passado
+        horizonte = self.validation_size # 5 meses de projeção por viagem
+        
+        # Se o produto for um recém-lançado com histórico curtíssimo, foge para a média
+        if len(df_limpo) < (horizonte + 3):
             media = df_limpo['volume'].mean() if len(df_limpo) > 0 else 0.0
             return np.full(self.forecast_horizon, media), "Media_Simples_Fallback", 50.0
+        
+        # Ajusta dinamicamente a quantidade de viagens no tempo se faltar histórico
+        while len(df_limpo) < ((num_folds * horizonte) + 3) and num_folds > 1:
+            num_folds -= 1
 
-        df_treino = df_limpo.iloc[:-self.validation_size]
-        df_validacao = df_limpo.iloc[-self.validation_size:]
-        y_real = df_validacao['volume'].values
+        # Dicionário para guardar as notas de cada modelo nas várias viagens
+        scores_modelos = {nome: [] for nome in self.modelos_disponiveis.keys()}
 
+        # =========================================================================
+        # 1. A MÁQUINA DO TEMPO (Treino e Teste em Múltiplas Épocas)
+        # =========================================================================
+        for fold in range(num_folds):
+            # Calcula os cortes de trás para a frente. 
+            # Ex: Fold 0 corta os meses 5 a 0. Fold 1 corta os meses 10 a 5.
+            corte_fim = len(df_limpo) - (fold * horizonte)
+            corte_inicio = corte_fim - horizonte
+            
+            df_treino = df_limpo.iloc[:corte_inicio]
+            df_validacao = df_limpo.iloc[corte_inicio:corte_fim]
+            y_real = df_validacao['volume'].values
+
+            # Batalha neste recorte específico de tempo
+            for nome, modelo in self.modelos_disponiveis.items():
+                if is_beta and 'Croston' in nome: continue 
+                
+                try:
+                    modelo.fit(df_treino)
+                    y_pred = modelo.predict(df_treino, horizon=horizonte)
+                    
+                    if isinstance(y_pred, pd.Series): y_pred = y_pred.values
+
+                    # Avaliação cruel: WMAPE + BIAS
+                    score = calcular_score_torneio(y_real, y_pred)
+                    scores_modelos[nome].append(score)
+                except Exception:
+                    scores_modelos[nome].append(float('inf')) # Penaliza falha catastrófica
+
+        # =========================================================================
+        # 2. A COROAÇÃO (Quem teve a melhor média na linha do tempo?)
+        # =========================================================================
         melhor_modelo_nome = None
-        menor_score = float('inf')
+        menor_score_medio = float('inf')
 
-        # 1. Batalha (Treino Cego) - Graças aos wrappers, o loop ficou puríssimo!
-        for nome, modelo in self.modelos_disponiveis.items():
-            if is_beta and 'Croston' in nome: continue 
-            try:
-                modelo.fit(df_treino)
-                y_pred = modelo.predict(df_treino, horizon=self.validation_size)
+        for nome, scores in scores_modelos.items():
+            if not scores: continue
+            
+            # Analisa apenas os modelos que sobreviveram a todas as viagens sem quebrar
+            scores_validos = [s for s in scores if s != float('inf')]
+            
+            if len(scores_validos) == num_folds:
+                score_medio = sum(scores_validos) / len(scores_validos)
                 
-                # Garante vetorização limpa
-                if isinstance(y_pred, pd.Series): y_pred = y_pred.values
-
-                # Score Penalizador de Viés (Quanto menor, melhor)
-                score = calcular_score_torneio(y_real, y_pred)
-                
-                if score < menor_score:
-                    menor_score = score
+                if score_medio < menor_score_medio:
+                    menor_score_medio = score_medio
                     melhor_modelo_nome = nome
-            except Exception as e:
-                continue
 
         if not melhor_modelo_nome:
             melhor_modelo_nome = "Media_Simples_Fallback"
-            menor_score = 100.0
-            
-        # 3. A Previsão Oficial (Refit do Campeão com 100% da base)
+            menor_score_medio = 100.0
+
+        # =========================================================================
+        # 3. O GRANDE REFIT (Treinar com 100% para projetar o Futuro Real)
+        # =========================================================================
         motor_campeao = self.modelos_disponiveis.get(melhor_modelo_nome)
         
         try:
@@ -127,8 +163,7 @@ class NexusForecaster:
         except:
             futuro = np.full(self.forecast_horizon, df_limpo['volume'].mean())
             
-        # Acurácia de apresentação (100% menos o score combinado)
-        acuracia_final = max(0.0, 100.0 - menor_score)
+        acuracia_final = max(0.0, 100.0 - menor_score_medio)
         return futuro, melhor_modelo_nome, acuracia_final
 
     def executar_arena(self, ciclo_alvo: str, log_callback=print):
