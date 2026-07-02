@@ -181,7 +181,7 @@ class NexusLoader:
             df_share = pl.DataFrame([dict(r._mapping) for r in res_share]) if res_share else pl.DataFrame()
 
             log_callback("      • Aplicando Rateio Atômico com Método do Maior Resto (Vetorizado)...")
-            df_forecast = df_forecast.rename({"produto": "sku"})
+            #df_forecast = df_forecast.rename({"produto": "sku"})
             
             if df_share.is_empty():
                 log_callback("⚠️ [LOAD] Nenhum share encontrado. Abortando injeção.")
