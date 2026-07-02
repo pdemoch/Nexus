@@ -124,6 +124,10 @@ class NexusForecaster:
                 futuro = motor_campeao.predict(df_limpo, horizon=self.forecast_horizon)
             else:
                 futuro = motor_campeao.predict(df_limpo['volume'], horizon=self.forecast_horizon)
+                
+            # [CORREÇÃO] Garante que a previsão seja um array limpo, evitando KeyError: 0
+            if isinstance(futuro, pd.Series):
+                futuro = futuro.values
         except:
             futuro = np.full(self.forecast_horizon, df_limpo['volume'].mean())
             

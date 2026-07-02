@@ -22,8 +22,8 @@ router = APIRouter(prefix="/api/v1/kpis", tags=["Auditoria, KPIs e Riscos de Est
 # CONFIGURAÇÕES AWS S3 (CREDENCIAIS)
 # ==========================================
 AWS_STORAGE_OPTIONS = {
-    "key": "AKIA4VPN43D6KCHKRYM5",
-    "secret": "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",
+    "key": "AKIA4VPN43D6FP2LR2MT",
+    "secret": "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",
     "client_kwargs": {"region_name": "us-east-1"}
 }
 S3_BUCKET = "nexus-datalake-linea-prd"

@@ -25,8 +25,8 @@ class NexusBypassWindows:
         self.bucket_name = "nexus-datalake-linea-prd"
         self.s3_prefix = "mtrix/"
         
-        self.aws_access_key = "AKIA4VPN43D6KCHKRYM5"
-        self.aws_secret_key = "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"
+        self.aws_access_key = "AKIA4VPN43D6FP2LR2MT"
+        self.aws_secret_key = "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"
         self.aws_region = "us-east-1"
         
         self.s3_client = boto3.client(
