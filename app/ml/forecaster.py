@@ -5,7 +5,6 @@ import os
 from datetime import date
 from dateutil.relativedelta import relativedelta
 from sqlalchemy import text
-
 from app.core.database import SessionLocal 
 from app.ml.models_library import (
     AutoArimaModel, HoltWintersModel, CrostonModel, ThetaModelWrapper,
@@ -70,11 +69,24 @@ class NexusForecaster:
         return df
 
     def _obter_dados_beta(self, db, data_corte: str) -> pd.DataFrame:
+        """Motor Beta (Sell-out): Consome a MTRIX convertendo o varchar mes_ano para Date."""
         query = f"""
-            SELECT sku, DATE_TRUNC('month', mes_referencia) AS mes_data, SUM(qty_conv2) AS volume
-            FROM fato_mtrix_historico_mensal
-            WHERE mes_referencia < '{data_corte}'
-            GROUP BY sku, DATE_TRUNC('month', mes_referencia)
+            WITH dados_formatados AS (
+                SELECT 
+                    sku, 
+                    -- Converte 'YYYY-MM' para uma Data real (1º dia do mês)
+                    TO_DATE(mes_ano || '-01', 'YYYY-MM-DD') AS mes_data, 
+                    volume_sellout AS volume
+                FROM fato_mtrix_historico_mensal
+                WHERE mes_ano IS NOT NULL
+            )
+            SELECT 
+                sku, 
+                mes_data, 
+                SUM(volume) AS volume
+            FROM dados_formatados
+            WHERE mes_data < '{data_corte}'
+            GROUP BY sku, mes_data
             ORDER BY sku, mes_data;
         """
         return pd.read_sql(query, db.bind)
