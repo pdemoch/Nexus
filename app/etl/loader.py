@@ -139,11 +139,25 @@ class NexusLoader:
             ciclo_atual = ciclo_alvo 
             log_callback(f"   -> [LOAD] Iniciando construção da matriz FatoIBP para o ciclo {ciclo_atual}...")
             
-            log_callback("      • Registrando performance e vencedores do Ensemble no Banco...")
-            df_modelos = df_forecast.group_by("produto").agg([pl.col("modelo_vencedor").first(), pl.col("acuracia").first()]).to_dicts()
+            log_callback("   • Registrando performance e vencedores do Ensemble no Banco...")
             
-            for row in df_modelos:
-                db.execute(text("UPDATE dim_produtos SET modelo_vencedor = :mod, acuracia_ia = :acc WHERE sku = :sku"), {"mod": row["modelo_vencedor"], "acc": row["acuracia"], "sku": row["produto"]})
+            # Correção: usando 'sku' e 'acuracia_ia'
+            df_modelos = df_forecast.group_by("sku").agg([
+                pl.col("modelo_vencedor").first(), 
+                pl.col("acuracia_ia").first()
+            ]).to_dicts()
+            
+            for d in df_modelos:
+                db.execute(text("""
+                    UPDATE fato_ibp_granular 
+                    SET modelo_vencedor = :mod, acuracia_ia = :acu 
+                    WHERE sku = :sku AND ciclo_sop = :ciclo
+                """), {
+                    "mod": d['modelo_vencedor'], 
+                    "acu": d['acuracia_ia'], 
+                    "sku": d['sku'], 
+                    "ciclo": ciclo_alvo
+                })
 
             query_share = text("""
                 WITH cte_base AS (
