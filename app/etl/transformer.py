@@ -183,7 +183,7 @@ class NexusTransformer:
         lf_final = lf_final.rename({"produto": "sku"})
         
         lf_final = lf_final.with_columns(
-            pl.col("data_pedido").str.to_date(strict=False)
+            pl.col("data_pedido").str.to_date("%Y%m%d", strict=False)
         ).filter(pl.col("data_pedido").is_not_null())
 
         return lf_final, lf_clientes, df_orc_final
