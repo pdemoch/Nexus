@@ -14,11 +14,15 @@ class NexusLoader:
     def __init__(self):
         pass
 
+    # No arquivo app/etl/loader.py, altere as primeiras linhas de executar_carga_silver:
     def executar_carga_silver(self, df_silver: pl.DataFrame, data_inicio: date, log_callback=print):
         log_callback(f"⏳ [LOAD] Apagando vendas a partir de {data_inicio} e substituindo pelos dados extraídos...")
         try:
-            df_vendas = df_silver.to_dicts()
+            # 🔥 FILTRO DE INTEGRALIDADE: Garante apenas os campos existentes na fato_vendas
+            colunas_vendas = ["pedido", "data_pedido", "sku", "cgc", "vendedor_nome", "qt_pedido", "vl_pedido", "qtfatura", "qtcorte", "vlfatura", "vlcorte"]
+            df_vendas = df_silver.select(colunas_vendas).to_dicts()
             if not df_vendas:
+                log_callback("⚠️ [LOAD] Nenhum dado encontrado para carga.")
                 return
 
             with SessionLocal() as db:
@@ -187,6 +191,13 @@ class NexusLoader:
             # Preenche regional caso não venha do ERP
             if 'regional' not in df_pd.columns:
                 df_pd['regional'] = "N/A"
+
+            # 🔥 A BLINDAGEM: Definir as colunas exatas da DimCliente e filtrar o DataFrame
+            colunas_permitidas = ['cgc', 'cod_cliente', 'loja', 'razaosocial', 'regional', 'bloqueado', 'vendedor_nome', 'gerente_nome', 'supervisor_nome']
+            
+            # Descarta cod_loja e qualquer outra coluna temporária que tenha vazado
+            colunas_presentes = [c for c in colunas_permitidas if c in df_pd.columns]
+            df_pd = df_pd[colunas_presentes]
 
             registros = df_pd.to_dict(orient='records')
             

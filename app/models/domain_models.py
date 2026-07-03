@@ -128,6 +128,10 @@ class FatoIbpGranular(Base):
     
     pmv_aplicado = Column(Float, default=0.0)
     
+    # 🔥 MAPEAMENTO CORRIGIDO: Espelhando a estrutura física da AWS
+    modelo_vencedor = Column(String(100), nullable=True)
+    acuracia_ia = Column(Float, nullable=True)
+    
     __table_args__ = (
         UniqueConstraint('ciclo_sop', 'mes_projetado', 'sku', 'cgc', name='uix_forecast_atomico'),
     )
