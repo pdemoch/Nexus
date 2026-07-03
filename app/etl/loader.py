@@ -174,23 +174,24 @@ class NexusLoader:
             log_callback(traceback.format_exc())
             raise e
     
-    def executar_carga_clientes(self, df_clientes: pl.DataFrame, log_callback=print):
-        """Atualiza a Dimensão de Clientes (Base 188) com a hierarquia comercial mais recente."""
-        log_callback("⏳ [LOAD] Atualizando Cadastro e Hierarquia de Clientes (Dimensão)...")
+    def executar_carga_clientes(self, df_clientes: pl.DataFrame, log_callback=print,
+                                limiar_seguranca: float = 0.5):
+        """
+        Sincroniza a Dimensão de Clientes via DELETE + RELOAD (full refresh).
+        Substitui o UPSERT: clientes que saíram da base 188 são expurgados,
+        em vez de persistirem como linhas mortas na dimensão.
+        """
+        log_callback("⏳ [LOAD] Recarregando Dimensão de Clientes (DELETE + RELOAD)...")
         try:
             if df_clientes is None or df_clientes.is_empty():
+                log_callback("⚠️ [LOAD] Extração de clientes vazia — dimensão preservada, nada alterado.")
                 return
 
             df_pd = df_clientes.to_pandas()
-            df_pd = df_pd.rename(columns={
-                'cod': 'cod_cliente',
-                'cliente_razaosocial': 'razaosocial'
-            })
-
+            df_pd = df_pd.rename(columns={'cod': 'cod_cliente', 'cliente_razaosocial': 'razaosocial'})
             if 'regional' not in df_pd.columns:
                 df_pd['regional'] = "N/A"
 
-            # 🔥 BLINDAGEM: só as colunas reais da DimCliente
             colunas_permitidas = ['cgc', 'cod_cliente', 'loja', 'razaosocial', 'regional',
                                   'bloqueado', 'vendedor_nome', 'gerente_nome', 'supervisor_nome']
             colunas_presentes = [c for c in colunas_permitidas if c in df_pd.columns]
@@ -198,43 +199,48 @@ class NexusLoader:
 
             registros = df_pd.to_dict(orient='records')
 
-            # 🔥 DEDUP GLOBAL POR CGC, PRIORIZANDO ATIVO
-            # A origem (188) traz o mesmo CNPJ/CPF sob mais de um código de cliente.
-            # Como a dimensão tem conflito em 'cgc', sem colapsar aqui o
-            # ON CONFLICT (cgc) tenta afetar a mesma linha 2x -> CardinalityViolation.
-            #
-            # Ordenação estável: INATIVO primeiro, ATIVO por último. No dict
-            # "último vence", então o cadastro ATIVO sobrevive quando há empate de CGC.
+            # DEDUP GLOBAL POR CGC, PRIORIZANDO ATIVO.
+            # Continua OBRIGATÓRIO mesmo com DELETE: 'cgc' é único e a 188 traz o
+            # mesmo CNPJ/CPF sob vários cod_cliente. Sem colapsar, o INSERT quebra
+            # na unique constraint (o antigo CardinalityViolation vira IntegrityError).
             def _peso_ativo(r):
                 return 1 if str(r.get("bloqueado") or "").strip().upper() == "ATIVO" else 0
-
-            registros.sort(key=_peso_ativo)  # sort estável preserva a ordem dentro do mesmo status
+            registros.sort(key=_peso_ativo)  # sort estável: ATIVO por último -> vence no dict
 
             deduplicados = {}
             for r in registros:
                 cgc = str(r.get("cgc") or "").strip()
                 if not cgc or cgc.upper() in ("SEM_CGC", "NULL", "NAN", "NONE"):
-                    continue  # sem CNPJ válido não entra na dimensão
+                    continue  # sem CNPJ/CPF válido não entra na dimensão
                 r["cgc"] = cgc
-                deduplicados[cgc] = r  # ATIVO vence por vir depois no sort
+                deduplicados[cgc] = r
             registros = list(deduplicados.values())
 
             if not registros:
-                log_callback("⚠️ [LOAD] Nenhum cliente com CGC válido para sincronizar.")
+                log_callback("⚠️ [LOAD] Nenhum cliente com CGC válido — dimensão preservada, nada alterado.")
                 return
 
             with SessionLocal() as db:
+                # 🛡️ TRAVA ANTI-WIPE: impede que uma extração quebrada da 188
+                # (ERP fora do ar, arquivo truncado) zere a dimensão inteira.
+                existentes = db.execute(text("SELECT COUNT(*) FROM dim_clientes")).scalar() or 0
+                novos = len(registros)
+                if existentes > 0 and novos < existentes * limiar_seguranca:
+                    log_callback(
+                        f"🛑 [LOAD] Carga ABORTADA por segurança: extração trouxe {novos} clientes "
+                        f"contra {existentes} já cadastrados (< {int(limiar_seguranca*100)}%). "
+                        f"Dimensão preservada — verifique a extração da 188."
+                    )
+                    return
+
+                # DELETE + RELOAD num único commit -> troca atômica.
+                db.execute(text("DELETE FROM dim_clientes"))
                 lote_size = 1000
                 for i in range(0, len(registros), lote_size):
-                    lote = registros[i:i+lote_size]
-                    stmt = pg_insert(DimCliente).values(lote)
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=['cgc'],
-                        set_={col: getattr(stmt.excluded, col) for col in lote[0].keys() if col != 'cgc'}
-                    )
-                    db.execute(stmt)
+                    db.bulk_insert_mappings(DimCliente, registros[i:i+lote_size])
                 db.commit()
-            log_callback("✅ [LOAD] Cadastro de Clientes (Base 188) sincronizado com sucesso.")
+
+            log_callback(f"✅ [LOAD] Dimensão recarregada: {novos} clientes na base.")
         except Exception as e:
             log_callback(f"❌ [LOAD] Erro na carga de clientes: {e}")
             raise e
