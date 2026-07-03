@@ -22,25 +22,31 @@ def get_topdown_dados(db: Session = Depends(get_db)):
     ciclo_atual = get_current_cycle(db)
     ciclo_anterior = obter_ciclo_anterior(ciclo_atual)
     
+    # Captura a janela tática correta (M2, M3, M4)
     meses_proj = get_projection_window(db, ciclo_atual)
-    if len(meses_proj) < 3:
-        raise HTTPException(status_code=500, detail="Janela de projeção incompleta.")
     m2, m3, m4 = meses_proj[0], meses_proj[1], meses_proj[2]
+    
+    # Parâmetros de início do histórico (24 meses atrás) e fim da projeção para a linha do tempo do gráfico
+    dt_ciclo_base = datetime.strptime(ciclo_atual, "%m/%Y")
+    dt_inicio_grafico = (dt_ciclo_base - relativedelta(months=24)).strftime("%Y-%m-%01")
+    dt_fim_grafico = m4
     
     status_etapa = db.execute(text("""
         SELECT status FROM controle_ciclos 
         WHERE ciclo_sop = :ciclo AND origem = 'TopDown'
     """), {"ciclo": ciclo_atual}).scalar() or "ABERTO"
     
-    # ===============================================================================
-    # SQL TOTALMENTE ALINHADO COM O SCHEMA DO NEXUS (pmv_aplicado, fato_orcamento, etc)
-    # ===============================================================================
     query = text("""
         WITH base_skus AS (
             SELECT DISTINCT f.sku, p.descricao 
             FROM fato_ibp_granular f
             JOIN dim_produtos p ON f.sku = p.sku
             WHERE f.ciclo_sop = :ciclo_atual
+        ),
+        -- Eixo temporal completo para evitar cortes nos gráficos das pontas
+        eixo_tempo AS (
+            SELECT DISTINCT DATE_TRUNC('month', d)::DATE as mes
+            FROM generate_series(:inicio_grafico::date, :fim_grafico::date, '1 month'::interval) d
         ),
         dados_grid AS (
             SELECT 
@@ -58,7 +64,7 @@ def get_topdown_dados(db: Session = Depends(get_db)):
         historico AS (
             SELECT sku, DATE_TRUNC('month', data_pedido)::DATE as mes, SUM(qt_pedido) as vol_real
             FROM fato_vendas
-            WHERE data_pedido >= '2024-01-01'
+            WHERE data_pedido >= :inicio_grafico::date
             GROUP BY sku, DATE_TRUNC('month', data_pedido)::DATE
         ),
         lag1 AS (
@@ -86,30 +92,32 @@ def get_topdown_dados(db: Session = Depends(get_db)):
         SELECT 
             b.sku, 
             b.descricao,
-            COALESCE(g.mes_projetado, h.mes, l.mes, ia.mes, t.mes) as mes,
+            t.mes,
             g.vol_topdown,
             g.pmv,
             g.rec_orcada,
             h.vol_real,
             l.vol_lag1,
             ia.vol_ia,
-            t.vol_td_hist
+            tc.vol_td_hist
         FROM base_skus b
-        FULL OUTER JOIN dados_grid g ON b.sku = g.sku
-        FULL OUTER JOIN historico h ON b.sku = h.sku AND COALESCE(g.mes_projetado, h.mes) = h.mes
-        FULL OUTER JOIN lag1 l ON b.sku = l.sku AND COALESCE(g.mes_projetado, h.mes, l.mes) = l.mes
-        FULL OUTER JOIN ia_hist ia ON b.sku = ia.sku AND COALESCE(g.mes_projetado, h.mes, l.mes, ia.mes) = ia.mes
-        FULL OUTER JOIN topdown_curva t ON b.sku = t.sku AND COALESCE(g.mes_projetado, h.mes, l.mes, ia.mes, t.mes) = t.mes
+        CROSS JOIN eixo_tempo t
+        LEFT JOIN dados_grid g ON b.sku = g.sku AND t.mes = g.mes_projetado
+        LEFT JOIN historico h ON b.sku = h.sku AND t.mes = h.mes
+        LEFT JOIN lag1 l ON b.sku = l.sku AND t.mes = l.mes
+        LEFT JOIN ia_hist ia ON b.sku = ia.sku AND t.mes = ia.mes
+        LEFT JOIN topdown_curva tc ON b.sku = tc.sku AND t.mes = tc.mes
+        ORDER BY b.sku, t.mes
     """)
     
     result = db.execute(query, {
         "ciclo_atual": ciclo_atual, "ciclo_anterior": ciclo_anterior,
-        "m2": m2, "m3": m3, "m4": m4
+        "m2": m2, "m3": m3, "m4": m4,
+        "inicio_grafico": dt_inicio_grafico, "fim_grafico": dt_fim_grafico
     }).fetchall()
     
     df = pd.DataFrame(result, columns=["sku", "descricao", "mes", "vol_topdown", "pmv", "rec_orcada", "vol_real", "vol_lag1", "vol_ia", "vol_td_hist"])
     df['mes'] = pd.to_datetime(df['mes'])
-    df = df.dropna(subset=['mes'])
     
     output = []
     for (sku, desc), group in df.groupby(['sku', 'descricao']):

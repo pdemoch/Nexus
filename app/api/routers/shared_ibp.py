@@ -117,16 +117,18 @@ def registrar_log_auditoria(db: Session, ciclo: str, origem: str, usuario: str, 
 
 def get_projection_window(db: Session, ciclo_atual: str) -> list:
     """
-    Retorna os próximos 3 meses táticos (M2, M3, M4) a partir do ciclo atual.
-    Se o ciclo é 07/2026, devolve [08/2026, 09/2026, 10/2026].
+    Retorna a janela tática correta de planejamento S&OP: M2, M3 e M4.
+    Se o ciclo é 07/2026 (Julho), pula o mês corrente e M1, retornando:
+    ['2026-09-01', '2026-10-01', '2026-11-01'] (Set, Out, Nov).
     """
     try:
         mes, ano = map(int, ciclo_atual.split('/'))
         data_base = datetime.date(ano, mes, 1)
         
         meses = []
+        # i=0 vira M2 (+2 meses), i=1 vira M3 (+3 meses), i=2 vira M4 (+4 meses)
         for i in range(3): 
-            data_proj = data_base + relativedelta(months=i)
+            data_proj = data_base + relativedelta(months=(i + 2))
             meses.append(data_proj.strftime('%Y-%m-%d'))
             
         return meses
