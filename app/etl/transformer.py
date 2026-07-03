@@ -189,15 +189,24 @@ class NexusTransformer:
         return lf_final, lf_clientes, df_orc_final
     
     def processar_estoque_d0(self, lf_90: pl.LazyFrame) -> pl.LazyFrame:
-        """Limpa e padroniza os dados de estoque da API 90"""
+        """Limpa e padroniza os dados de estoque da API 90 (armazém 05)."""
         if lf_90 is None:
             return None
-            
-        # 🔴 CORREÇÃO 3: Usar 'produto' e 'qtd_dispo' conforme o payload da API 90
-        lf_limpo = lf_90.select([
-            # Tratamos a string para garantir que junta perfeitamente com a tabela de vendas
-            pl.col("produto").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars().alias("sku"),
-            pl.col("qtd_dispo").cast(pl.Float64)
-        ])
-        
+
+        # A API 90 devolve nomes de coluna com espaço no fim ("produto ",
+        # "qtd_dispo ") e caixa variável. Sem normalizar, o select não acha
+        # as colunas e o LazyFrame sai vazio.
+        lf_90 = lf_90.rename({c: c.strip().lower() for c in lf_90.columns})
+
+        lf_limpo = (
+            lf_90
+            .with_columns([
+                pl.col("produto").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars().alias("sku"),
+                pl.col("qtd_dispo").cast(pl.Utf8).str.strip_chars().cast(pl.Float64, strict=False).alias("qtd_dispo"),
+                pl.col("arm").cast(pl.Utf8).str.strip_chars().alias("arm"),
+            ])
+            .filter(pl.col("arm") == "05")            # só armazém 05
+            .group_by("sku")                          # payload vem por LOTE
+            .agg(pl.col("qtd_dispo").sum().alias("qtd_dispo"))
+        )
         return lf_limpo

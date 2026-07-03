@@ -177,14 +177,15 @@ class NexusLoader:
     def executar_carga_clientes(self, df_clientes: pl.DataFrame, log_callback=print,
                                 limiar_seguranca: float = 0.5):
         """
-        Sincroniza a Dimensão de Clientes via DELETE + RELOAD (full refresh).
-        Substitui o UPSERT: clientes que saíram da base 188 são expurgados,
-        em vez de persistirem como linhas mortas na dimensão.
+        Sincroniza a Dimensão de Clientes via UPSERT (sem purga, sem DELETE).
+        A FK cgc é NO ACTION: qualquer DELETE que remova um cgc referenciado em
+        fato_vendas/fato_ibp_granular quebra o pipeline. O UPSERT nunca desafia
+        a FK. Cliente que sai do ERP apenas deixa de ser atualizado.
         """
-        log_callback("⏳ [LOAD] Recarregando Dimensão de Clientes (DELETE + RELOAD)...")
+        log_callback("⏳ [LOAD] Sincronizando Dimensão de Clientes (UPSERT)...")
         try:
             if df_clientes is None or df_clientes.is_empty():
-                log_callback("⚠️ [LOAD] Extração de clientes vazia — dimensão preservada, nada alterado.")
+                log_callback("⚠️ [LOAD] Extração de clientes vazia — dimensão preservada.")
                 return
 
             df_pd = df_clientes.to_pandas()
@@ -194,15 +195,10 @@ class NexusLoader:
 
             colunas_permitidas = ['cgc', 'cod_cliente', 'loja', 'razaosocial', 'regional',
                                   'bloqueado', 'vendedor_nome', 'gerente_nome', 'supervisor_nome']
-            colunas_presentes = [c for c in colunas_permitidas if c in df_pd.columns]
-            df_pd = df_pd[colunas_presentes]
-
+            df_pd = df_pd[[c for c in colunas_permitidas if c in df_pd.columns]]
             registros = df_pd.to_dict(orient='records')
 
-            # DEDUP GLOBAL POR CGC, PRIORIZANDO ATIVO.
-            # Continua OBRIGATÓRIO mesmo com DELETE: 'cgc' é único e a 188 traz o
-            # mesmo CNPJ/CPF sob vários cod_cliente. Sem colapsar, o INSERT quebra
-            # na unique constraint (o antigo CardinalityViolation vira IntegrityError).
+            # DEDUP GLOBAL POR CGC, PRIORIZANDO ATIVO (cgc é PK; a 188 repete CNPJ/CPF).
             def _peso_ativo(r):
                 return 1 if str(r.get("bloqueado") or "").strip().upper() == "ATIVO" else 0
             registros.sort(key=_peso_ativo)  # sort estável: ATIVO por último -> vence no dict
@@ -211,36 +207,38 @@ class NexusLoader:
             for r in registros:
                 cgc = str(r.get("cgc") or "").strip()
                 if not cgc or cgc.upper() in ("SEM_CGC", "NULL", "NAN", "NONE"):
-                    continue  # sem CNPJ/CPF válido não entra na dimensão
+                    continue
                 r["cgc"] = cgc
                 deduplicados[cgc] = r
             registros = list(deduplicados.values())
 
             if not registros:
-                log_callback("⚠️ [LOAD] Nenhum cliente com CGC válido — dimensão preservada, nada alterado.")
+                log_callback("⚠️ [LOAD] Nenhum cliente com CGC válido — dimensão preservada.")
                 return
 
             with SessionLocal() as db:
-                # 🛡️ TRAVA ANTI-WIPE: impede que uma extração quebrada da 188
-                # (ERP fora do ar, arquivo truncado) zere a dimensão inteira.
+                # 🛡️ TRAVA ANTI-WIPE: barra 188 truncada de encolher a base.
                 existentes = db.execute(text("SELECT COUNT(*) FROM dim_clientes")).scalar() or 0
-                novos = len(registros)
-                if existentes > 0 and novos < existentes * limiar_seguranca:
+                if existentes > 0 and len(registros) < existentes * limiar_seguranca:
                     log_callback(
-                        f"🛑 [LOAD] Carga ABORTADA por segurança: extração trouxe {novos} clientes "
-                        f"contra {existentes} já cadastrados (< {int(limiar_seguranca*100)}%). "
-                        f"Dimensão preservada — verifique a extração da 188."
+                        f"🛑 [LOAD] Carga ABORTADA por segurança: {len(registros)} clientes "
+                        f"contra {existentes} cadastrados (< {int(limiar_seguranca*100)}%). "
+                        f"Verifique a extração da 188."
                     )
                     return
 
-                # DELETE + RELOAD num único commit -> troca atômica.
-                db.execute(text("DELETE FROM dim_clientes"))
-                lote_size = 1000
-                for i in range(0, len(registros), lote_size):
-                    db.bulk_insert_mappings(DimCliente, registros[i:i+lote_size])
+                lote = 1000
+                for i in range(0, len(registros), lote):
+                    bloco = registros[i:i+lote]
+                    stmt = pg_insert(DimCliente).values(bloco)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=['cgc'],
+                        set_={c: getattr(stmt.excluded, c) for c in bloco[0].keys() if c != 'cgc'}
+                    )
+                    db.execute(stmt)
                 db.commit()
 
-            log_callback(f"✅ [LOAD] Dimensão recarregada: {novos} clientes na base.")
+            log_callback(f"✅ [LOAD] Dimensão sincronizada: {len(registros)} clientes (UPSERT).")
         except Exception as e:
             log_callback(f"❌ [LOAD] Erro na carga de clientes: {e}")
             raise e
