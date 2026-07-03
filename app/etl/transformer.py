@@ -122,9 +122,12 @@ class NexusTransformer:
             pl.col("vlpedido").sum().alias("vlpedido"),
             pl.col("qtfatura").sum().alias("qtfatura"),
             pl.col("qtcorte").sum().alias("qtcorte"),
-            pl.col("vlfatura").sum().alias("vlfatura"), # -> Nova Coluna Passando
-            pl.col("vlcorte").sum().alias("vlcorte"),   # -> Nova Coluna Passando
-            pl.col("dtapedido").first().alias("dtapedido"),
+            pl.col("vlfatura").sum().alias("vlfatura"), 
+            pl.col("vlcorte").sum().alias("vlcorte"),   
+            
+            # 🔴 CORREÇÃO 1: Renomear dtapedido para data_pedido
+            pl.col("dtapedido").first().alias("data_pedido"),
+            
             pl.col("cod_cliente").first().alias("cod_cliente"),
             pl.col("loja").first().alias("loja"),
             pl.col("cliente_razaosocial").first().alias("cliente_razaosocial"),
@@ -175,6 +178,26 @@ class NexusTransformer:
                 df_orc_final = df_orc_final.group_by(["sku", "mes_projetado"]).agg([
                     pl.col("receita_orcamento").sum().alias("receita_orcamento")
                 ]).select(["sku", "mes_projetado", "receita_orcamento"])
-                
+
+        # 🔴 CORREÇÃO 2: Renomear produto para sku, converter data_pedido e barrar Nulos
         lf_final = lf_final.rename({"produto": "sku"})
+        
+        lf_final = lf_final.with_columns(
+            pl.col("data_pedido").str.to_date(strict=False)
+        ).filter(pl.col("data_pedido").is_not_null())
+
         return lf_final, lf_clientes, df_orc_final
+    
+    def processar_estoque_d0(self, lf_90: pl.LazyFrame) -> pl.LazyFrame:
+        """Limpa e padroniza os dados de estoque da API 90"""
+        if lf_90 is None:
+            return None
+            
+        # 🔴 CORREÇÃO 3: Usar 'produto' e 'qtd_dispo' conforme o payload da API 90
+        lf_limpo = lf_90.select([
+            # Tratamos a string para garantir que junta perfeitamente com a tabela de vendas
+            pl.col("produto").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars().alias("sku"),
+            pl.col("qtd_dispo").cast(pl.Float64)
+        ])
+        
+        return lf_limpo

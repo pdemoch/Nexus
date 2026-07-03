@@ -24,25 +24,39 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print):
         # ====================================================================
         log_callback("⏳ [EXTRACT/TRANSFORM] Sincronizando ERP...")
         
+        # Janela deslizante de 3 meses
         data_fim = date.today()
         data_inicio = (data_fim - relativedelta(months=3)).replace(day=1)
         
+        # A. Extração Original
         lf_150, lf_188, df_seg, df_orc = await extrator.extrair_tudo(data_inicio, data_fim)
-        lf_silver, lf_clientes, df_orc_final = transformer.processar_camada_silver(lf_150, lf_188, df_seg, df_orc)
         
+        # B. NOVA Extração de Estoque D0 (API 90)
+        lf_90 = await extrator.extrair_estoque_90()
+        
+        # C. Transformações (Camada Silver e Estoque)
+        lf_silver, lf_clientes, df_orc_final = transformer.processar_camada_silver(lf_150, lf_188, df_seg, df_orc)
+        lf_estoque_d0 = transformer.processar_estoque_d0(lf_90)
+        
+        # D. Cargas no Banco (Se houver dados retornados do cruzamento)
         if lf_silver is not None:
+            # Coleta as queries 'preguiçosas' (LazyFrames) do Polars para a RAM
             df_silver_coletado = lf_silver.collect()
-            loader.executar_carga_silver(df_silver_coletado, data_inicio, log_callback=log_callback)
-            
             df_clientes_coletado = lf_clientes.collect()
-            loader.executar_carga_clientes(df_clientes_coletado, log_callback=log_callback)
             
+            # Carga Drop & Replace de Vendas e Orçamento + UPSERT de Clientes
+            loader.executar_carga_silver(df_silver_coletado, data_inicio, log_callback=log_callback)
+            loader.executar_carga_clientes(df_clientes_coletado, log_callback=log_callback)
             loader.executar_carga_orcamento(df_orc_final, log_callback=log_callback)
+            
+            # E. NOVA Carga de Estoque
+            if lf_estoque_d0 is not None:
+                loader.executar_carga_estoque(lf_estoque_d0.collect(), log_callback=log_callback)
         else:
             log_callback("⚠️ [AVISO] O cruzamento com o portfólio não retornou dados nesta rodada.")
 
         # ====================================================================
-        # 2. VERIFICAÇÃO DE SEGURANÇA DO CICLO (A SUA REGRA)
+        # 2. VERIFICAÇÃO DE SEGURANÇA DO CICLO (A TRAVA S&OP)
         # ====================================================================
         with SessionLocal() as db:
             ciclo_existe = db.query(FatoIbpGranular.id).filter(FatoIbpGranular.ciclo_sop == ciclo_alvo).first()
