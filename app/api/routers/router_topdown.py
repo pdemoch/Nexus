@@ -7,7 +7,7 @@ from app.api.routers.shared_ibp import get_current_cycle, get_projection_window
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-router = APIRouter(prefix="/topdown", tags=["TopDown"])
+router = APIRouter(tags=["TopDown"])
 
 def obter_ciclo_anterior(ciclo: str) -> str:
     try:
