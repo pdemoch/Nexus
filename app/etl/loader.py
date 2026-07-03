@@ -15,29 +15,24 @@ class NexusLoader:
         pass
 
     def executar_carga_silver(self, df_silver: pl.DataFrame, data_inicio: date, log_callback=print):
-        """
-        Responsável por sincronizar o histórico bruto extraído (Gobi) para a Camada Silver (PostgreSQL).
-        Caso você possua uma lógica específica para os clientes inativos, ela é preservada aqui.
-        """
-        log_callback("⏳ [LOAD] Sincronizando dados históricos extraídos com o Banco de Dados...")
+        log_callback(f"⏳ [LOAD] Apagando vendas a partir de {data_inicio} e substituindo pelos dados extraídos...")
         try:
             df_vendas = df_silver.to_dicts()
             if not df_vendas:
                 return
 
             with SessionLocal() as db:
+                # 1. Deleção massiva do período exato que foi extraído
+                db.execute(text("DELETE FROM fato_vendas WHERE data_pedido >= :dt"), {"dt": data_inicio})
+                
+                # 2. Inserção direta e bruta (bulk insert) muito mais rápida que o UPSERT
                 lote_size = 5000
                 for i in range(0, len(df_vendas), lote_size):
                     lote = df_vendas[i:i+lote_size]
-                    stmt = pg_insert(FatoVendas).values(lote)
-                    # Atualiza em caso de conflito (Garante que pedidos cancelados/alterados sejam corrigidos)
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=['pedido', 'sku', 'cgc'],
-                        set_={col: getattr(stmt.excluded, col) for col in lote[0].keys() if col not in ['pedido', 'sku', 'cgc']}
-                    )
-                    db.execute(stmt)
+                    db.bulk_insert_mappings(FatoVendas, lote)
+                
                 db.commit()
-            log_callback("✅ [LOAD] Histórico recente integrado com sucesso.")
+            log_callback("✅ [LOAD] Histórico recente recarregado (Drop & Replace) com sucesso.")
         except Exception as e:
             log_callback(f"❌ [LOAD] Erro na carga de histórico: {e}")
             raise e
@@ -214,8 +209,7 @@ class NexusLoader:
             raise e
 
     def executar_carga_orcamento(self, df_orc: pl.DataFrame, log_callback=print):
-        """Injeta as metas do Orçamento Financeiro para balizar a tela de Gerenciamento."""
-        log_callback("⏳ [LOAD] Atualizando Metas do Orçamento Financeiro...")
+        log_callback("⏳ [LOAD] Substituindo Metas do Orçamento Financeiro...")
         try:
             if df_orc is None or df_orc.is_empty():
                 log_callback("⚠️ [LOAD] Nenhum dado de orçamento recebido.")
@@ -224,19 +218,17 @@ class NexusLoader:
             registros = df_orc.to_dicts()
             
             with SessionLocal() as db:
+                # 1. Apaga totalmente a tabela de Orçamento
+                db.execute(text("DELETE FROM fato_orcamento"))
+                
+                # 2. Insere a planilha nova por cima
                 lote_size = 5000
                 for i in range(0, len(registros), lote_size):
                     lote = registros[i:i+lote_size]
-                    stmt = pg_insert(FatoOrcamento).values(lote)
-                    
-                    # Atualiza a receita do Orçamento para aquela combinação de SKU + Mês
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=['sku', 'mes_projetado'],
-                        set_={'receita_orcamento': stmt.excluded.receita_orcamento}
-                    )
-                    db.execute(stmt)
+                    db.bulk_insert_mappings(FatoOrcamento, lote)
+                
                 db.commit()
-            log_callback("✅ [LOAD] Tabela de Orçamento Financeiro carregada com sucesso.")
+            log_callback("✅ [LOAD] Tabela de Orçamento substituída (Drop & Replace) com sucesso.")
         except Exception as e:
             log_callback(f"❌ [LOAD] Erro na carga de orçamento: {e}")
             raise e
