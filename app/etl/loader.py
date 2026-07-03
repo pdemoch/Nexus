@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.database import SessionLocal, engine
-from app.models.domain_models import FatoIbpGranular, FatoVenda, DimCliente
+from app.models.domain_models import FatoIbpGranular, FatoVendas, DimCliente
 
 class NexusLoader:
     def __init__(self):
@@ -29,7 +29,7 @@ class NexusLoader:
                 lote_size = 5000
                 for i in range(0, len(df_vendas), lote_size):
                     lote = df_vendas[i:i+lote_size]
-                    stmt = pg_insert(FatoVenda).values(lote)
+                    stmt = pg_insert(FatoVendas).values(lote)
                     # Atualiza em caso de conflito (Garante que pedidos cancelados/alterados sejam corrigidos)
                     stmt = stmt.on_conflict_do_update(
                         index_elements=['pedido', 'sku', 'cgc'],
