@@ -22,13 +22,14 @@ def get_topdown_dados(db: Session = Depends(get_db)):
     ciclo_atual = get_current_cycle(db)
     ciclo_anterior = obter_ciclo_anterior(ciclo_atual)
     
-    # Captura a janela tática correta (M2, M3, M4)
     meses_proj = get_projection_window(db, ciclo_atual)
+    if len(meses_proj) < 3:
+        raise HTTPException(status_code=500, detail="Janela de projeção incompleta.")
     m2, m3, m4 = meses_proj[0], meses_proj[1], meses_proj[2]
     
-    # Parâmetros de início do histórico (24 meses atrás) e fim da projeção para a linha do tempo do gráfico
     dt_ciclo_base = datetime.strptime(ciclo_atual, "%m/%Y")
-    dt_inicio_grafico = (dt_ciclo_base - relativedelta(months=24)).strftime("%Y-%m-%01")
+    # CORREÇÃO 1: Formatado corretamente para YYYY-MM-01
+    dt_inicio_grafico = (dt_ciclo_base - relativedelta(months=24)).strftime("%Y-%m-01")
     dt_fim_grafico = m4
     
     status_etapa = db.execute(text("""
@@ -36,6 +37,7 @@ def get_topdown_dados(db: Session = Depends(get_db)):
         WHERE ciclo_sop = :ciclo AND origem = 'TopDown'
     """), {"ciclo": ciclo_atual}).scalar() or "ABERTO"
     
+    # CORREÇÃO 2: SQL com CAST AS DATE explícito para evitar conflito de bind parameters
     query = text("""
         WITH base_skus AS (
             SELECT DISTINCT f.sku, p.descricao 
@@ -43,7 +45,6 @@ def get_topdown_dados(db: Session = Depends(get_db)):
             JOIN dim_produtos p ON f.sku = p.sku
             WHERE f.ciclo_sop = :ciclo_atual
         ),
-        -- Eixo temporal completo para evitar cortes nos gráficos das pontas
         eixo_tempo AS (
             SELECT DISTINCT DATE_TRUNC('month', d)::DATE as mes
             FROM generate_series(CAST(:inicio_grafico AS DATE), CAST(:fim_grafico AS DATE), '1 month'::interval) d
@@ -56,7 +57,7 @@ def get_topdown_dados(db: Session = Depends(get_db)):
                 COALESCE(SUM(f.vol_ia * f.pmv_aplicado) / NULLIF(SUM(f.vol_ia), 0), AVG(f.pmv_aplicado)) as pmv,
                 SUM(COALESCE(o.receita_orcamento, 0)) as rec_orcada
             FROM fato_ibp_granular f
-            LEFT JOIN fato_orcamento o ON f.sku = o.sku AND f.mes_projetado = o.mes_projetado
+            LEFT JOIN fato_orcamento o ON f.sku = o.sku AND DATE_TRUNC('month', f.mes_projetado) = DATE_TRUNC('month', o.mes_projetado)
             WHERE f.ciclo_sop = :ciclo_atual 
               AND f.mes_projetado IN (:m2, :m3, :m4)
             GROUP BY f.sku, f.mes_projetado
@@ -90,16 +91,8 @@ def get_topdown_dados(db: Session = Depends(get_db)):
             GROUP BY sku, mes_projetado
         )
         SELECT 
-            b.sku, 
-            b.descricao,
-            t.mes,
-            g.vol_topdown,
-            g.pmv,
-            g.rec_orcada,
-            h.vol_real,
-            l.vol_lag1,
-            ia.vol_ia,
-            tc.vol_td_hist
+            b.sku, b.descricao, t.mes, g.vol_topdown, g.pmv, g.rec_orcada,
+            h.vol_real, l.vol_lag1, ia.vol_ia, tc.vol_td_hist
         FROM base_skus b
         CROSS JOIN eixo_tempo t
         LEFT JOIN dados_grid g ON b.sku = g.sku AND t.mes = g.mes_projetado
@@ -184,24 +177,14 @@ def topdown_salvar(payload: dict, db: Session = Depends(get_db)):
             WHERE ciclo_sop = :ciclo AND sku = :sku AND mes_projetado = :mes
         """), {"ciclo": ciclo_atual, "sku": sku, "mes": mes_banco}).fetchall()
         
-        if not linhas:
-            continue
+        if not linhas: continue
             
         vol_total_atual = sum(float(l.vol_topdown or 0) for l in linhas)
         vol_ia_total = sum(float(l.vol_ia or 0) for l in linhas)
         
         for l in linhas:
-            if vol_total_atual > 0:
-                peso = float(l.vol_topdown or 0) / vol_total_atual
-            elif vol_ia_total > 0:
-                peso = float(l.vol_ia or 0) / vol_ia_total
-            else:
-                peso = 1.0 / len(linhas)
-                
-            fatia = novo_vol * peso
-            db.execute(text("""
-                UPDATE fato_ibp_granular SET vol_topdown = :val WHERE id = :id_linha
-            """), {"val": fatia, "id_linha": l.id})
+            peso = (float(l.vol_topdown or 0) / vol_total_atual) if vol_total_atual > 0 else (float(l.vol_ia or 0) / vol_ia_total if vol_ia_total > 0 else 1.0 / len(linhas))
+            db.execute(text("UPDATE fato_ibp_granular SET vol_topdown = :val WHERE id = :id_linha"), {"val": novo_vol * peso, "id_linha": l.id})
             
     db.commit()
     return {"status": "sucesso", "mensagem": "Rascunho do Top-Down salvo com sucesso."}
@@ -220,20 +203,14 @@ def topdown_congelar(db: Session = Depends(get_db)):
         WHERE ciclo_sop = :ciclo
     """), {"ciclo": ciclo_atual})
     
-    # Busca usando a tabela correta 'controle_ciclos' e coluna 'origem'
     id_controle = db.execute(text("""
         SELECT id FROM controle_ciclos WHERE ciclo_sop = :ciclo AND origem = 'TopDown'
     """), {"ciclo": ciclo_atual}).scalar()
     
     if id_controle:
-        db.execute(text("""
-            UPDATE controle_ciclos SET status = 'CONGELADO' WHERE id = :id_ctrl
-        """), {"id_ctrl": id_controle})
+        db.execute(text("UPDATE controle_ciclos SET status = 'CONGELADO' WHERE id = :id_ctrl"), {"id_ctrl": id_controle})
     else:
-        db.execute(text("""
-            INSERT INTO controle_ciclos (ciclo_sop, origem, status) 
-            VALUES (:ciclo, 'TopDown', 'CONGELADO')
-        """), {"ciclo": ciclo_atual})
+        db.execute(text("INSERT INTO controle_ciclos (ciclo_sop, origem, status) VALUES (:ciclo, 'TopDown', 'CONGELADO')"), {"ciclo": ciclo_atual})
         
     db.commit()
     return {"status": "sucesso", "mensagem": "Etapa Top-Down CONGELADA."}
