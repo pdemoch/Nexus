@@ -33,13 +33,22 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print):
         # 1.2 Transformação (Limpeza, Filtros e Cruzamentos)
         lf_silver, lf_clientes, df_orc_final = transformer.processar_camada_silver(lf_150, lf_188, df_seg, df_orc)
         
-        # 1.3 Carga no PostgreSQL (Apenas se a transformação retornou dados)
+        # 1.3 Carga no PostgreSQL
         if lf_silver is not None:
-            df_silver_coletado = lf_silver.collect() # Transforma de LazyFrame para DataFrame
+            # A. Gravar Histórico de Vendas
+            df_silver_coletado = lf_silver.collect() 
             loader.executar_carga_silver(df_silver_coletado, data_inicio, log_callback=log_callback)
+            
+            # B. Gravar Cadastro Atualizado de Clientes
+            df_clientes_coletado = lf_clientes.collect()
+            loader.executar_carga_clientes(df_clientes_coletado, log_callback=log_callback)
+            
+            # C. Gravar Metas Financeiras (Orçamento)
+            # Nota: O df_orc_final já é um DataFrame comum (não Lazy), não precisa de .collect()
+            loader.executar_carga_orcamento(df_orc_final, log_callback=log_callback)
         else:
             log_callback("⚠️ [AVISO] O cruzamento com o portfólio não retornou dados nesta rodada.")
-
+            
         # ====================================================================
         # 2. PREVISÃO DA IA (Apenas SKU)
         # ====================================================================
@@ -50,7 +59,7 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print):
         # 3. RATEIO, PMV E CARGA IBp GRANULAR
         # ====================================================================
         log_callback("\n🔀 [DISTRIBUTOR] Fatiando Share (6m), calculando PMV (3m) e Injetando no Banco...")
-        await asyncio.to_thread(distributor.executar_rateio_e_carga, df_forecast, ciclo_alvo)
+        await asyncio.to_thread(loader.executar_carga_forecast, df_forecast, ciclo_alvo, log_callback)
         
         log_callback("\n✅ Pipeline Executado com Sucesso Absoluto!")
 

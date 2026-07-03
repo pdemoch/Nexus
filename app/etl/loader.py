@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.database import SessionLocal, engine
-from app.models.domain_models import FatoIbpGranular, FatoVendas, DimCliente
+from app.models.domain_models import FatoIbpGranular, FatoVendas, DimCliente, FatoOrcamento
 
 class NexusLoader:
     def __init__(self):
@@ -173,4 +173,70 @@ class NexusLoader:
         except Exception as e:
             log_callback(f"❌ [LOAD] Erro Crítico no Loader: {str(e)}")
             log_callback(traceback.format_exc())
+            raise e
+    
+    def executar_carga_clientes(self, df_clientes: pl.DataFrame, log_callback=print):
+        """Atualiza a Dimensão de Clientes (Base 188) com a hierarquia comercial mais recente."""
+        log_callback("⏳ [LOAD] Atualizando Cadastro e Hierarquia de Clientes (Dimensão)...")
+        try:
+            if df_clientes is None or df_clientes.is_empty():
+                return
+            
+            # Converte para Pandas para facilitar o mapeamento de nomes de colunas
+            df_pd = df_clientes.to_pandas()
+            df_pd = df_pd.rename(columns={
+                'cod': 'cod_cliente', 
+                'cliente_razaosocial': 'razaosocial'
+            })
+            
+            # Preenche regional caso não venha do ERP
+            if 'regional' not in df_pd.columns:
+                df_pd['regional'] = "N/A"
+
+            registros = df_pd.to_dict(orient='records')
+            
+            with SessionLocal() as db:
+                lote_size = 5000
+                for i in range(0, len(registros), lote_size):
+                    lote = registros[i:i+lote_size]
+                    stmt = pg_insert(DimCliente).values(lote)
+                    
+                    # Se o CNPJ (CGC) já existir, atualiza toda a hierarquia e bloqueios
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=['cgc'],
+                        set_={col: getattr(stmt.excluded, col) for col in lote[0].keys() if col != 'cgc'}
+                    )
+                    db.execute(stmt)
+                db.commit()
+            log_callback("✅ [LOAD] Cadastro de Clientes (Base 188) sincronizado com sucesso.")
+        except Exception as e:
+            log_callback(f"❌ [LOAD] Erro na carga de clientes: {e}")
+            raise e
+
+    def executar_carga_orcamento(self, df_orc: pl.DataFrame, log_callback=print):
+        """Injeta as metas do Orçamento Financeiro para balizar a tela de Gerenciamento."""
+        log_callback("⏳ [LOAD] Atualizando Metas do Orçamento Financeiro...")
+        try:
+            if df_orc is None or df_orc.is_empty():
+                log_callback("⚠️ [LOAD] Nenhum dado de orçamento recebido.")
+                return
+
+            registros = df_orc.to_dicts()
+            
+            with SessionLocal() as db:
+                lote_size = 5000
+                for i in range(0, len(registros), lote_size):
+                    lote = registros[i:i+lote_size]
+                    stmt = pg_insert(FatoOrcamento).values(lote)
+                    
+                    # Atualiza a receita do Orçamento para aquela combinação de SKU + Mês
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=['sku', 'mes_projetado'],
+                        set_={'receita_orcamento': stmt.excluded.receita_orcamento}
+                    )
+                    db.execute(stmt)
+                db.commit()
+            log_callback("✅ [LOAD] Tabela de Orçamento Financeiro carregada com sucesso.")
+        except Exception as e:
+            log_callback(f"❌ [LOAD] Erro na carga de orçamento: {e}")
             raise e

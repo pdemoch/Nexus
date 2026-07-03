@@ -175,5 +175,6 @@ class NexusTransformer:
                 df_orc_final = df_orc_final.group_by(["sku", "mes_projetado"]).agg([
                     pl.col("receita_orcamento").sum().alias("receita_orcamento")
                 ]).select(["sku", "mes_projetado", "receita_orcamento"])
-        
+                
+        lf_final = lf_final.rename({"produto": "sku"})
         return lf_final, lf_clientes, df_orc_final
