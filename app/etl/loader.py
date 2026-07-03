@@ -146,7 +146,7 @@ class NexusLoader:
                 db.execute(text("DELETE FROM fato_ibp_granular WHERE ciclo_sop = :c"), {"c": ciclo_alvo})
                 
                 # 2. Injeta as linhas em velocidade Bulk
-                lote_size = 5000
+                lote_size = 1000
                 for i in range(0, len(dados_granulares), lote_size):
                     stmt = pg_insert(FatoIbpGranular).values(dados_granulares[i:i+lote_size])
                     
@@ -202,7 +202,7 @@ class NexusLoader:
             registros = df_pd.to_dict(orient='records')
             
             with SessionLocal() as db:
-                lote_size = 5000
+                lote_size = 1000
                 for i in range(0, len(registros), lote_size):
                     lote = registros[i:i+lote_size]
                     stmt = pg_insert(DimCliente).values(lote)
