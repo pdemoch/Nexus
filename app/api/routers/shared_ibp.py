@@ -114,3 +114,21 @@ def registrar_log_auditoria(db: Session, ciclo: str, origem: str, usuario: str, 
         vol_novo=v_novo
     )
     db.add(novo_log)
+
+def get_projection_window(db: Session, ciclo_atual: str) -> list:
+    """
+    Retorna os próximos 3 meses táticos (M2, M3, M4) a partir do ciclo atual.
+    Se o ciclo é 07/2026, devolve [08/2026, 09/2026, 10/2026].
+    """
+    try:
+        mes, ano = map(int, ciclo_atual.split('/'))
+        data_base = datetime.date(ano, mes, 1)
+        
+        meses = []
+        for i in range(3): 
+            data_proj = data_base + relativedelta(months=i)
+            meses.append(data_proj.strftime('%Y-%m-%d'))
+            
+        return meses
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao calcular janela de projeção: {str(e)}")

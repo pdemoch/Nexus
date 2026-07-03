@@ -7,7 +7,8 @@ from app.api.routers.shared_ibp import get_current_cycle, get_projection_window
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-router = APIRouter(tags=["TopDown"])
+# AQUI ESTÁ A CORREÇÃO DO 404: O prefixo da API foi restaurado no roteador!
+router = APIRouter(prefix="/api/v1/topdown", tags=["TopDown"])
 
 def obter_ciclo_anterior(ciclo: str) -> str:
     try:
@@ -45,7 +46,6 @@ def get_topdown_dados(db: Session = Depends(get_db)):
                 f.sku,
                 f.mes_projetado,
                 SUM(f.vol_topdown) as vol_topdown,
-                -- Média Ponderada do PMV para evitar distorções de Share
                 COALESCE(SUM(f.vol_ia * f.pmv) / NULLIF(SUM(f.vol_ia), 0), AVG(f.pmv)) as pmv,
                 SUM(COALESCE(o.receita, 0)) as rec_orcada
             FROM fato_ibp_granular f
