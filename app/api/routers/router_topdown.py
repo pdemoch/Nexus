@@ -46,7 +46,7 @@ def get_topdown_dados(db: Session = Depends(get_db)):
         -- Eixo temporal completo para evitar cortes nos gráficos das pontas
         eixo_tempo AS (
             SELECT DISTINCT DATE_TRUNC('month', d)::DATE as mes
-            FROM generate_series(:inicio_grafico::date, :fim_grafico::date, '1 month'::interval) d
+            FROM generate_series(CAST(:inicio_grafico AS DATE), CAST(:fim_grafico AS DATE), '1 month'::interval) d
         ),
         dados_grid AS (
             SELECT 
@@ -64,7 +64,7 @@ def get_topdown_dados(db: Session = Depends(get_db)):
         historico AS (
             SELECT sku, DATE_TRUNC('month', data_pedido)::DATE as mes, SUM(qt_pedido) as vol_real
             FROM fato_vendas
-            WHERE data_pedido >= :inicio_grafico::date
+            WHERE data_pedido >= CAST(:inicio_grafico AS DATE)
             GROUP BY sku, DATE_TRUNC('month', data_pedido)::DATE
         ),
         lag1 AS (
@@ -220,6 +220,7 @@ def topdown_congelar(db: Session = Depends(get_db)):
         WHERE ciclo_sop = :ciclo
     """), {"ciclo": ciclo_atual})
     
+    # Busca usando a tabela correta 'controle_ciclos' e coluna 'origem'
     id_controle = db.execute(text("""
         SELECT id FROM controle_ciclos WHERE ciclo_sop = :ciclo AND origem = 'TopDown'
     """), {"ciclo": ciclo_atual}).scalar()
