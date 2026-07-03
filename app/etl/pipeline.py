@@ -45,8 +45,8 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print):
             df_clientes_coletado = lf_clientes.collect()
             
             # Carga Drop & Replace de Vendas e Orçamento + UPSERT de Clientes
-            loader.executar_carga_silver(df_silver_coletado, data_inicio, log_callback=log_callback)
             loader.executar_carga_clientes(df_clientes_coletado, log_callback=log_callback)
+            loader.executar_carga_silver(df_silver_coletado, data_inicio, log_callback=log_callback)            
             loader.executar_carga_orcamento(df_orc_final, log_callback=log_callback)
             
             # E. NOVA Carga de Estoque

@@ -118,8 +118,8 @@ class NexusTransformer:
         
         # --- A GRANDE CORREÇÃO (O FUNIL): Agora os Reais (R$) passam aqui! ---
         lf_final = lf_final.group_by(["pedido", "produto", "cgc"]).agg([
-            pl.col("qtpedido").sum().alias("qtpedido"),
-            pl.col("vlpedido").sum().alias("vlpedido"),
+            pl.col("qtpedido").sum().alias("qt_pedido"), # <-- Ajustado
+            pl.col("vlpedido").sum().alias("vl_pedido"), # <-- Ajustado
             pl.col("qtfatura").sum().alias("qtfatura"),
             pl.col("qtcorte").sum().alias("qtcorte"),
             pl.col("vlfatura").sum().alias("vlfatura"), 
