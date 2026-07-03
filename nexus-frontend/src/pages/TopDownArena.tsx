@@ -1,682 +1,298 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { 
-  ChevronRight, ChevronDown, Lock, Unlock, Search, X, 
-  Package, Boxes, LayoutGrid, Download, BarChart2, Activity, Shield,
-  Wand2, Target, AlertTriangle, TrendingUp, TrendingDown, Save,
-  ArrowUpDown, ArrowUp, ArrowDown
-} from 'lucide-react';
-import { 
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
+import {
+    LineChart,
+    Line,
+    XAxis,
+    YAxis,
+    CartesianGrid,
+    Tooltip,
+    Legend,
+    ResponsiveContainer
 } from 'recharts';
+import { BarChart2, Save, Lock, CheckCircle } from 'lucide-react'; 
 
-const formatVolume = (val: number) => {
-  const num = Number(val);
-  if (isNaN(num)) return '0';
-  return new Intl.NumberFormat('pt-BR').format(Math.round(num));
-};
+interface MesData {
+    mes_banco: string;
+    mes_str: string;
+    vol_topdown: number;
+    pmv: number;
+    rec_topdown: number;
+    rec_orcada: number;
+    variacao: number;
+}
 
-const formatMoeda = (val: number) => {
-  const num = Number(val);
-  if (isNaN(num)) return 'R$ 0,00';
-  return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(num);
-};
+interface SkuData {
+    sku: string;
+    descricao: string;
+    meses: MesData[];
+    grafico: {
+        labels: string[];
+        realizado: (number | null)[];
+        ia: (number | null)[];
+        lag1: (number | null)[];
+        topdown: (number | null)[];
+    };
+}
 
-const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (val: number) => void, disabled: boolean }) => {
-  const [localVal, setLocalVal] = useState((value !== undefined && value !== null) ? formatVolume(value) : '0');
-  const [isFocused, setIsFocused] = useState(false);
-
-  useEffect(() => {
-    if (!isFocused) {
-      setLocalVal((value !== undefined && value !== null) ? formatVolume(value) : '0');
-    }
-  }, [value, isFocused]);
-
-  const handleFocus = () => { setIsFocused(true); setLocalVal(localVal.replace(/\./g, '')); };
-  const handleBlur = () => { 
-      setIsFocused(false); 
-      const parsed = parseInt(localVal.replace(/\D/g, ''), 10);
-      const num = isNaN(parsed) ? 0 : parsed;
-      setLocalVal(formatVolume(num));
-      onChange(num);
-  };
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') e.currentTarget.blur(); };
-
-  return (
-    <input
-      type="text" value={localVal} disabled={disabled} onFocus={handleFocus} onBlur={handleBlur} onKeyDown={handleKeyDown} onChange={(e) => setLocalVal(e.target.value)}
-      className={`w-full bg-transparent border-none text-right focus:outline-none focus:ring-1 focus:ring-blue-500 rounded px-1
-        ${disabled ? 'text-slate-400 font-medium cursor-not-allowed' : 'text-blue-700 font-bold bg-blue-50/50'}`}
-    />
-  );
-};
-
-const AiInsightBox = ({ alvo, tipo, pmv, volume, receita }: { alvo: string, tipo: string, pmv: number, volume: number, receita: number }) => {
-  const [insight, setInsight] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const fetchInsight = async () => {
-    setLoading(true);
-    try {
-      const prompt = `Gere uma análise executiva de S&OP (máx 3 parágrafos) para o alvo ${alvo} do tipo ${tipo}. O volume top-down planeado é ${volume} CX, com PMV médio de R$ ${pmv.toFixed(2)} e Receita de R$ ${receita.toFixed(2)}. Fale sobre sazonalidade e riscos.`;
-      const res = await axios.post('/api/v1/ai-sql/perguntar', { pergunta: prompt });
-      setInsight(res.data.resposta);
-    } catch (e) { setInsight("Erro ao comunicar com a IA Nexus. Tente novamente."); } 
-    finally { setLoading(false); }
-  };
-
-  return (
-    <div className="bg-slate-800 rounded-xl p-5 border border-slate-700 flex flex-col h-full shadow-lg">
-      <div className="flex items-center justify-between mb-4">
-        <h4 className="font-bold text-slate-200 flex items-center gap-2">
-          <Wand2 className="w-4 h-4 text-blue-400" /> Nexus AI Insight 360°
-        </h4>
-        <button onClick={fetchInsight} disabled={loading} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-2">
-          {loading ? "Processando..." : "Gerar Diagnóstico"}
-        </button>
-      </div>
-      <div className="flex-1 text-sm text-slate-300 leading-relaxed overflow-y-auto pr-2">
-        {loading ? (
-          <div className="animate-pulse flex flex-col gap-2">
-            <div className="h-2 bg-slate-700 rounded w-full"></div>
-            <div className="h-2 bg-slate-700 rounded w-5/6"></div>
-            <div className="h-2 bg-slate-700 rounded w-4/6"></div>
-          </div>
-        ) : insight ? (
-          <div className="whitespace-pre-wrap">{insight}</div>
-        ) : (
-          <div className="flex flex-col items-center justify-center h-full text-slate-500 opacity-50">
-            <Shield className="w-12 h-12 mb-2" />
-            <span>Nenhuma análise gerada.</span>
-          </div>
-        )}
-      </div>
-    </div>
-  );
+const formatCurrency = (val: number) => {
+    return new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(val || 0);
 };
 
 export default function TopDownArena() {
-  const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
-  const [busca, setBusca] = useState("");
-  
-  const [isFechado, setIsFechado] = useState(true);
-  const [celulasEditadas, setCelulasEditadas] = useState<any>({});
-  const [isLoading, setIsLoading] = useState(false);
-  
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [chartExpanded, setChartExpanded] = useState<string | null>(null);
-  const [dadosGraficoCache, setDadosGraficoCache] = useState<any>({});
-  const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
+    const [dados, setDados] = useState<SkuData[]>([]);
+    const [ciclo, setCiclo] = useState<string>('');
+    const [statusEtapa, setStatusEtapa] = useState<string>('ABERTO');
+    const [expandedRows, setExpandedRows] = useState<{ [key: string]: boolean }>({});
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
+    const [pendingChanges, setPendingChanges] = useState<{ [key: string]: { sku: string, mes_banco: string, novo_vol: number } }>({});
 
-  const [ordenacao, setOrdenacao] = useState<{ coluna: string | null, direcao: 'asc' | 'desc' }>({ coluna: null, direcao: 'asc' });
+    useEffect(() => {
+        carregarDados();
+    }, []);
 
-  const fetchData = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      const params: any = { nocache: new Date().getTime() };
-      const [dadosRes, statusRes] = await Promise.all([
-        axios.get('/api/v1/consensus/macro', { params }),
-        axios.get('/api/v1/consensus/macro/status')
-      ]);
-      
-      setDadosBrutos(dadosRes.data.dados || []);
-      setIsFechado(statusRes.data.is_fechado); 
-      setCelulasEditadas({});
-    } catch (e) {
-      console.error(e);
-      setDadosBrutos([]);
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { fetchData(); }, [fetchData]);
-
-  const colunasData = useMemo(() => {
-    return dadosBrutos.length > 0 && dadosBrutos[0].meses ? dadosBrutos[0].meses : [];
-  }, [dadosBrutos]);
-
-  const chartDataFinal = useMemo(() => {
-    if (!chartExpanded || !dadosGraficoCache[chartExpanded]) return [];
-    const dadosOriginais = dadosGraficoCache[chartExpanded];
-
-    const mesesTaticos = colunasData?.map((m: any) => m.mes_banco) || [];
-
-    return dadosOriginais.map((ponto: any) => {
-      const edicao = celulasEditadas[chartExpanded]?.[ponto.data_iso];
-      let valorTopDown = ponto.TopDown;
-
-      if (!mesesTaticos.includes(ponto.data_iso)) {
-          valorTopDown = null;
-      } else if (edicao !== undefined) {
-          valorTopDown = Number(edicao.novo_volume);
-      }
-      return { ...ponto, TopDown: valorTopDown };
-    });
-  }, [chartExpanded, dadosGraficoCache, celulasEditadas, colunasData]);
-
-  const getStaticVol = (row: any, mesBanco: string): number => {
-    if (row.tipo === 'produto') {
-      const m = row.meses?.find((x: any) => x.mes_banco === mesBanco);
-      return (m?.vol_ajustado !== undefined && m?.vol_ajustado !== null) ? Number(m.vol_ajustado) : 0;
-    }
-    return (row.subRows || []).reduce((acc: number, child: any) => acc + getStaticVol(child, mesBanco), 0);
-  };
-
-  const dadosProcessados = useMemo(() => {
-    let processados = dadosBrutos;
-
-    if (busca) {
-        const lowerTerm = busca.toLowerCase();
-        const filtrarArvore = (nodes: any[]): any[] => {
-            return nodes.map(node => {
-                const matchSelf = (node.nome && String(node.nome).toLowerCase().includes(lowerTerm)) ||
-                                  (node.produto && String(node.produto).toLowerCase().includes(lowerTerm));
-                
-                let childMatches: any[] = []; 
-                if (node.subRows?.length > 0) {
-                    childMatches = filtrarArvore(node.subRows);
-                }
-
-                if (matchSelf || childMatches.length > 0) {
-                    return { ...node, subRows: matchSelf ? node.subRows : childMatches };
-                }
-                return null;
-            }).filter(Boolean);
-        };
-        processados = filtrarArvore(dadosBrutos);
-    }
-
-    if (ordenacao.coluna) {
-        const ordenarArvore = (nodes: any[]): any[] => {
-            const ordenados = [...nodes].sort((a, b) => {
-                let valA, valB;
-                if (ordenacao.coluna === 'nome') {
-                    valA = String(a.nome || '').toLowerCase();
-                    valB = String(b.nome || '').toLowerCase();
-                } else {
-                    valA = getStaticVol(a, ordenacao.coluna!);
-                    valB = getStaticVol(b, ordenacao.coluna!);
-                }
-
-                if (valA < valB) return ordenacao.direcao === 'asc' ? -1 : 1;
-                if (valA > valB) return ordenacao.direcao === 'asc' ? 1 : -1;
-                return 0;
-            });
-
-            return ordenados.map(n => ({
-                ...n,
-                subRows: n.subRows?.length > 0 ? ordenarArvore(n.subRows) : []
-            }));
-        };
-        processados = ordenarArvore(processados);
-    }
-
-    return processados;
-  }, [dadosBrutos, busca, ordenacao]);
-
-
-  const getDynamicVol = useCallback((row: any, mesBanco: string): number => {
-    if (row.tipo === 'produto') {
-      const edicao = celulasEditadas[row.chave_matriz]?.[mesBanco];
-      if (edicao !== undefined) {
-          const num = Number(edicao.novo_volume);
-          return isNaN(num) ? 0 : num;
-      }
-      const m = row.meses?.find((x: any) => x.mes_banco === mesBanco);
-      return (m?.vol_ajustado !== undefined && m?.vol_ajustado !== null) ? Number(m.vol_ajustado) : 0;
-    }
-    return (row.subRows || []).reduce((acc: number, child: any) => acc + getDynamicVol(child, mesBanco), 0);
-  }, [celulasEditadas]);
-
-  const getDynamicRec = useCallback((row: any, mesBanco: string): number => {
-    if (row.tipo === 'produto') {
-      const vol = getDynamicVol(row, mesBanco);
-      const m = row.meses?.find((x: any) => x.mes_banco === mesBanco);
-      return vol * (m?.pmv || 0);
-    }
-    return (row.subRows || []).reduce((acc: number, child: any) => acc + getDynamicRec(child, mesBanco), 0);
-  }, [getDynamicVol]);
-
-  const handleSort = (coluna: string) => {
-    setOrdenacao(prev => {
-        if (prev.coluna === coluna) {
-            if (prev.direcao === 'desc') return { coluna, direcao: 'asc' };
-            return { coluna: null, direcao: 'asc' };
+    const carregarDados = async () => {
+        try {
+            const response = await axios.get('/api/v1/topdown/dados');
+            setDados(response.data.dados || []);
+            setCiclo(response.data.ciclo_ativo || '');
+            setStatusEtapa(response.data.status_etapa || 'ABERTO');
+        } catch (err) {
+            console.error("Erro ao carregar dados:", err);
+        } finally {
+            setLoading(false);
         }
-        return { coluna, direcao: 'desc' };
-    });
-  };
-
-  const SortIcon = ({ coluna }: { coluna: string }) => {
-      if (ordenacao.coluna !== coluna) return <ArrowUpDown className="w-4 h-4 text-slate-500 opacity-30 group-hover:opacity-100 transition-opacity" />;
-      return ordenacao.direcao === 'asc' ? <ArrowUp className="w-4 h-4 text-blue-400" /> : <ArrowDown className="w-4 h-4 text-blue-400" />;
-  };
-
-  const handleSalvar = async () => {
-    if (Object.keys(celulasEditadas).length === 0) return alert("Nenhuma alteração para salvar.");
-    try {
-      const payload = {
-        ajustes: Object.entries(celulasEditadas).flatMap(([chave, meses]: any) => 
-          Object.entries(meses).map(([mes_projetado, val]: any) => ({
-            sku: chave.split('|').pop(),
-            mes_projetado,
-            novo_volume: Number(val.novo_volume)
-          }))
-        )
-      };
-      await axios.post(`/api/v1/consensus/macro/salvar`, payload);
-      alert("Alterações salvas no rascunho com sucesso!");
-      fetchData();
-    } catch (e: any) { alert("Erro ao salvar: " + (e.response?.data?.detail || e.message)); }
-  };
-
-  const handleCongelar = async () => {
-    if (!confirm("Aviso Diretoria: Esta ação irá ratear os volumes aos clientes baseado no histórico real de vendas e fechar a edição. Deseja prosseguir?")) return;
-    try {
-      const payload = {
-        ajustes: Object.entries(celulasEditadas).flatMap(([chave, meses]: any) => 
-          Object.entries(meses).map(([mes_projetado, val]: any) => ({
-            sku: chave.split('|').pop(),
-            mes_projetado,
-            novo_volume: Number(val.novo_volume)
-          }))
-        )
-      };
-      await axios.post(`/api/v1/consensus/macro/congelar`, payload);
-      alert("Top-Down Congelado e Rateado com Sucesso!");
-      fetchData();
-    } catch (e: any) { alert("Erro ao congelar: " + (e.response?.data?.detail || e.message)); }
-  };
-
-  const handleExportExcel = () => {
-    if (dadosBrutos.length === 0) return alert("Não há dados para exportar.");
-    let csv = "Categoria,Segmento,SKU,Descrição,Mês,Projeção IA,Proposta Top-Down,PMV Médio,Receita,Orcamento\n";
-    
-    dadosBrutos.forEach(cat => {
-      cat.subRows?.forEach((seg: any) => {
-        seg.subRows?.forEach((prod: any) => {
-          prod.meses?.forEach((m: any) => {
-             const edicao = celulasEditadas[prod.chave_matriz]?.[m.mes_banco];
-             const volFinal = edicao !== undefined ? Number(edicao.novo_volume) : (m.vol_ajustado || 0);
-             const rec = volFinal * (m.pmv || 0);
-             const orc = m.receita_orcamento || 0;
-             csv += `"${cat.nome}","${seg.nome}","${prod.produto}","${prod.nome}","${m.mes_str}",${m.vol_ia},${volFinal},${m.pmv},${rec},${orc}\n`;
-          });
-        });
-      });
-    });
-
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute("download", `Exportacao_TopDown_${new Date().getTime()}.csv`);
-    document.body.appendChild(link); link.click(); document.body.removeChild(link);
-  };
-
-  const handleEditCell = (chaveStr: string, mesBanco: string, novoValor: number) => {
-    if (isFechado) return;
-    setCelulasEditadas((prev: any) => ({
-      ...prev, [chaveStr]: { ...(prev[chaveStr] || {}), [mesBanco]: { novo_volume: novoValor } }
-    }));
-  };
-
-  const toggleChart = async (node: any) => {
-    const chave = node.chave_matriz;
-    if (chartExpanded === chave) { setChartExpanded(null); return; }
-    setChartExpanded(chave);
-    setLoadingGrafico(chave);
-    try {
-      const res = await axios.get('/api/v1/consensus/macro/grafico', { 
-         params: { chave_matriz: chave, nivel_hierarquia: node.tipo } 
-      });
-      setDadosGraficoCache((prev: any) => ({ ...prev, [chave]: res.data.dados }));
-    } catch (e) { console.error(e); } finally { setLoadingGrafico(null); }
-  };
-
-  const PainelSaudabilidade = ({ rowData }: { rowData: any }) => {
-    const chave = rowData.chave_matriz;
-    const chartData = chartDataFinal; 
-
-    const kpis = useMemo(() => {
-      let volTD = 0; let volIA = 0; let rec = 0;
-      (rowData?.meses || []).forEach((m: any) => {
-          const vFinal = getDynamicVol(rowData, m.mes_banco);
-          const rFinal = getDynamicRec(rowData, m.mes_banco);
-          volTD += vFinal;
-          volIA += (m.vol_ia || 0);
-          rec += rFinal;
-      });
-      const gap = volTD - volIA;
-      return { volTD, volIA, rec, gap, pmvMedio: volTD > 0 ? (rec / volTD) : 0 };
-    }, [rowData, celulasEditadas]);
-
-    const CustomTooltip = ({ active, payload, label }: any) => {
-      if (active && payload && payload.length) {
-        return (
-          <div className="bg-slate-900 border border-slate-700 p-4 rounded-xl shadow-2xl z-50">
-            <p className="text-white font-bold mb-3 pb-2 border-b border-slate-700">{label}</p>
-            {payload.map((entry: any, idx: number) => (
-              <div key={idx} className="flex items-center gap-3 py-1">
-                <div className="w-3 h-3 rounded-full" style={{ backgroundColor: entry.color }} />
-                <span className="text-slate-300 text-sm w-36">{entry.name}:</span>
-                <span className="text-white font-bold text-sm">{formatVolume(entry.value)} cx</span>
-              </div>
-            ))}
-          </div>
-        );
-      }
-      return null;
     };
 
+    const toggleGraph = (sku: string) => {
+        setExpandedRows(prev => ({ ...prev, [sku]: !prev[sku] }));
+    };
+
+    const handleInputChange = (sku: string, mes_banco: string, valorStr: string) => {
+        const novoVol = parseFloat(valorStr);
+        const volumeFinal = isNaN(novoVol) ? 0 : novoVol;
+
+        const uniqueKey = `${sku}-${mes_banco}`;
+        setPendingChanges(prev => ({
+            ...prev,
+            [uniqueKey]: { sku, mes_banco, novo_vol: volumeFinal }
+        }));
+
+        setDados(prevDados => prevDados.map(item => {
+            if (item.sku === sku) {
+                const mesesAtualizados = (item.meses || []).map(m => {
+                    if (m.mes_banco === mes_banco) {
+                        const novaRec = volumeFinal * m.pmv;
+                        const novaVar = m.rec_orcada > 0 ? (novaRec - m.rec_orcada) / m.rec_orcada : 0;
+                        return { ...m, vol_topdown: volumeFinal, rec_topdown: novaRec, variacao: novaVar };
+                    }
+                    return m;
+                });
+
+                const mesIndex = (item.meses || []).findIndex(m => m.mes_banco === mes_banco);
+                let novosPontosTopDown = [...(item.grafico?.topdown || [])];
+                
+                if (mesIndex !== -1 && item.grafico?.labels) {
+                    const labelAlvo = item.meses[mesIndex].mes_str;
+                    const labelGraphIndex = item.grafico.labels.findIndex(l => l?.toLowerCase() === labelAlvo?.toLowerCase());
+                    
+                    if (labelGraphIndex !== -1) {
+                        while (novosPontosTopDown.length <= labelGraphIndex) {
+                            novosPontosTopDown.push(null);
+                        }
+                        novosPontosTopDown[labelGraphIndex] = volumeFinal;
+                    }
+                }
+
+                return {
+                    ...item,
+                    meses: mesesAtualizados,
+                    grafico: {
+                        ...item.grafico,
+                        topdown: novosPontosTopDown
+                    }
+                };
+            }
+            return item;
+        }));
+    };
+
+    const handleSalvarRascunho = async () => {
+        const listaAlteracoes = Object.values(pendingChanges);
+        if (listaAlteracoes.length === 0) return alert("Nenhuma alteração pendente para salvar.");
+
+        setSaving(true);
+        try {
+            await axios.post('/api/v1/topdown/salvar', { alteracoes: listaAlteracoes });
+            setPendingChanges({}); 
+            alert("Rascunho salvo e distribuído proporcionalmente entre os CNPJs!");
+            carregarDados();
+        } catch (err) {
+            console.error(err);
+            alert("Erro ao salvar rascunho.");
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const handleCongelarEtapa = async () => {
+        if (!window.confirm("Atenção: O congelamento irá propagar os volumes Top-Down para toda a malha operacional. Confirmar fecho da etapa?")) return;
+        
+        setSaving(true);
+        try {
+            await axios.post('/api/v1/topdown/congelar');
+            setStatusEtapa('CONGELADO');
+            alert("Etapa Top-Down trancada com sucesso!");
+            carregarDados();
+        } catch (err) {
+            console.error(err);
+            alert("Erro ao congelar etapa.");
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const getRechartsData = (grafico: any) => {
+        if (!grafico || !grafico.labels) return [];
+        return grafico.labels.map((label: string, idx: number) => ({
+            name: label,
+            realizado: grafico.realizado?.[idx] ?? null,
+            ia: grafico.ia?.[idx] ?? null,
+            lag1: grafico.lag1?.[idx] ?? null,
+            topdown: grafico.topdown?.[idx] ?? null,
+        }));
+    };
+
+    if (loading) return <div className="text-white p-8">A Carregar Arena Top-Down...</div>;
+
+    const hasPendingChanges = Object.keys(pendingChanges).length > 0;
+
     return (
-      <div className="w-full bg-slate-900 shadow-inner px-8 py-8 border-y border-slate-800">
-        <div className="flex items-center gap-2 mb-6">
-          <Activity className="w-5 h-5 text-blue-400" />
-          <h3 className="font-bold text-lg text-white">
-            Dossiê Tático Executivo <span className="text-slate-500 font-normal">| {rowData.nome}</span>
-          </h3>
-        </div>
-
-        <div className="grid grid-cols-4 gap-4 mb-6">
-          <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
-            <div className="flex items-center gap-2 text-slate-400 mb-2">
-               <Target className="w-4 h-4 text-emerald-400" /> <span className="text-xs font-bold uppercase tracking-wider">Receita Projetada</span>
-            </div>
-            <div className="text-2xl font-black text-white">{formatMoeda(kpis.rec)}</div>
-          </div>
-          <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
-            <div className="flex items-center gap-2 text-slate-400 mb-2">
-               <Activity className="w-4 h-4 text-blue-400" /> <span className="text-xs font-bold uppercase tracking-wider">Volume S&OP</span>
-            </div>
-            <div className="text-2xl font-black text-white">{formatVolume(kpis.volTD)} <span className="text-sm font-normal text-slate-500">CX</span></div>
-          </div>
-          <div className="bg-slate-800 border border-slate-700 p-4 rounded-xl">
-            <div className="flex items-center gap-2 text-slate-400 mb-2">
-               <LayoutGrid className="w-4 h-4 text-purple-400" /> <span className="text-xs font-bold uppercase tracking-wider">PMV Médio</span>
-            </div>
-            <div className="text-2xl font-black text-white">{formatMoeda(kpis.pmvMedio)}</div>
-          </div>
-          <div className={`border p-4 rounded-xl ${kpis.gap < 0 ? 'bg-rose-900/20 border-rose-500/30' : 'bg-emerald-900/20 border-emerald-500/30'}`}>
-            <div className="flex items-center gap-2 text-slate-400 mb-2">
-               {kpis.gap < 0 ? <TrendingDown className="w-4 h-4 text-rose-400" /> : <TrendingUp className="w-4 h-4 text-emerald-400" />} 
-               <span className="text-xs font-bold uppercase tracking-wider">GAP Base IA</span>
-            </div>
-            <div className={`text-2xl font-black ${kpis.gap < 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
-              {kpis.gap > 0 ? '+' : ''}{formatVolume(kpis.gap)} <span className="text-sm font-normal opacity-70">CX</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-3 gap-6">
-          <div className="col-span-2 bg-slate-800 border border-slate-700 p-4 rounded-xl h-[340px]">
-            {loadingGrafico === chave ? (
-              <div className="h-full flex items-center justify-center text-slate-500">Extraindo inteligência temporal...</div>
-            ) : chartDataFinal ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartDataFinal} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
-                  <XAxis dataKey="name" tick={{fill: '#94a3b8', fontSize: 12}} tickMargin={10} axisLine={false} />
-                  <YAxis tickFormatter={(val) => formatVolume(val)} tick={{fill: '#94a3b8', fontSize: 12}} tickLine={false} axisLine={false} />
-                  <Tooltip content={<CustomTooltip />} />
-                  <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} />
-                  
-                  <Line type="monotone" dataKey="Realizado" name="Histórico Faturado" stroke="#f8fafc" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} connectNulls={false} />
-                  <Line type="monotone" dataKey="IA" name="Projeção IA" stroke="#64748b" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
-                  <Line type="monotone" dataKey="CicloAnterior" name="Meta S&OP Congelada" stroke="#a855f7" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} />
-                  <Line type="monotone" dataKey="TopDown" name="Proposta Atual" stroke="#3b82f6" strokeWidth={3} dot={{r: 5, fill: '#3b82f6', stroke: '#fff', strokeWidth: 2}} connectNulls={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            ) : null}
-          </div>
-
-          <div className="col-span-1 h-[340px]">
-             <AiInsightBox alvo={rowData.nome} tipo={rowData.tipo} pmv={kpis.pmvMedio} volume={kpis.volTD} receita={kpis.rec} />
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  const totaisGerais = useMemo(() => {
-    const totais: Record<string, { vol: number, fat: number, orc: number }> = {};
-    colunasData?.forEach((m: any) => {
-      let vol = 0; let fat = 0; let orc = 0;
-      dadosProcessados.forEach((cat: any) => {
-        vol += getDynamicVol(cat, m.mes_banco);
-        fat += getDynamicRec(cat, m.mes_banco);
-        const mData = cat.meses?.find((x: any) => x.mes_banco === m.mes_banco);
-        orc += (mData?.receita_orcamento || 0);
-      });
-      totais[m.mes_banco] = { vol, fat, orc };
-    });
-    return totais;
-  }, [dadosProcessados, getDynamicVol, getDynamicRec, colunasData]);
-
-  const renderRow = (row: any, depth = 0) => {
-    const isExpanded = expanded[row.chave_matriz];
-    const hasChildren = row.subRows && row.subRows.length > 0;
-    const isProduto = row.tipo === 'produto';
-
-    return (
-      <React.Fragment key={row.chave_matriz}>
-        <tr className={`border-b transition-colors hover:bg-slate-50 ${depth === 0 ? 'bg-white' : depth === 1 ? 'bg-slate-50/50' : 'bg-white'}`}>
-          <td className="p-0 align-middle">
-            <div style={{ paddingLeft: `${depth * 2 + 1}rem` }} className="flex items-center gap-3 py-3 min-w-[320px] h-full">
-              {hasChildren ? (
-                <button onClick={() => setExpanded(p => ({ ...p, [row.chave_matriz]: !p[row.chave_matriz] }))} className="p-1.5 hover:bg-slate-200 text-slate-500 rounded-lg transition-colors">
-                  {isExpanded ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
-                </button>
-              ) : !isProduto ? <div className="w-8 text-center text-slate-300">•</div> : <div className="w-8" />}
-              
-              <button onClick={() => toggleChart(row)} className={`p-1.5 rounded-lg border transition-colors ${chartExpanded === row.chave_matriz ? 'bg-blue-100 text-blue-600 border-blue-200' : 'hover:bg-slate-100 text-slate-400'}`}>
-                <BarChart2 className="w-4 h-4" />
-              </button>
-
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center border shrink-0 ${depth === 0 ? 'bg-slate-800 text-white' : depth === 1 ? 'bg-slate-100 text-slate-600' : 'bg-blue-50 text-blue-600'}`}>
-                {depth === 0 ? <LayoutGrid className="w-4 h-4" /> : depth === 1 ? <Boxes className="w-4 h-4" /> : <Package className="w-4 h-4" />}
-              </div>
-              
-              <span className={`text-sm pr-4 ${!isProduto ? 'font-black text-slate-800 uppercase tracking-tight' : 'font-semibold text-slate-600'}`}>
-                {row.nome || "INDEFINIDO"}
-              </span>
-            </div>
-          </td>
-
-          {colunasData?.map((m: any, idx: number) => {
-            const isEdited = isProduto && celulasEditadas[row.chave_matriz]?.[m.mes_banco] !== undefined;
-            const valorExibicao = getDynamicVol(row, m.mes_banco);
-            const receitaExibicao = getDynamicRec(row, m.mes_banco);
+        <div className="p-6 bg-slate-900 min-h-screen">
             
-            const mData = row.meses?.find((x: any) => x.mes_banco === m.mes_banco) || {};
-            const orcamento = mData.receita_orcamento || 0;
-            const atingimento = orcamento > 0 ? (receitaExibicao / orcamento) * 100 : (receitaExibicao > 0 ? 100 : 0);
-            const corAtingimento = atingimento >= 100 ? 'text-emerald-500' : (atingimento >= 95 ? 'text-amber-500' : 'text-rose-500');
-
-            return (
-              <td key={idx} className="p-0 border-l border-slate-100 align-top">
-                <div className={`flex flex-col h-full min-h-[90px] ${isFechado ? 'bg-slate-50' : isEdited ? 'bg-blue-50/40' : 'hover:bg-slate-50'}`}>
-                  
-                  <div className="px-2 py-1.5 border-b border-slate-100/50 flex justify-center gap-3 items-center bg-slate-50/80">
-                    <span className="text-[10px] font-bold text-slate-500 bg-slate-200/50 px-2 py-0.5 rounded whitespace-nowrap" title="Projeção IA Original">
-                      IA: {formatVolume(mData.vol_ia || 0)}
-                    </span>
-                    <span className="text-[10px] font-bold text-purple-600 bg-purple-100/50 border border-purple-200/50 px-2 py-0.5 rounded whitespace-nowrap" title="Aprovado no Ciclo Anterior">
-                      Lag 1: {formatVolume(mData.vol_anterior || 0)}
-                    </span>
-                  </div>
-                  
-                  <div className="px-4 py-2 flex flex-col items-end justify-center flex-1">
-                    <div className="w-24">
-                      {isProduto ? (
-                        <SmartInput value={valorExibicao} disabled={isFechado} onChange={(novoVol) => handleEditCell(row.chave_matriz, m.mes_banco, novoVol)} />
-                      ) : (
-                        <div className="w-full text-right font-bold text-slate-800 pr-1">{formatVolume(valorExibicao)}</div>
-                      )}
-                    </div>
-                    <span className="text-[10px] font-bold text-blue-600 tracking-tight pr-1 mt-0.5" title="Receita (R$) Prevista">
-                      {formatMoeda(receitaExibicao)}
-                    </span>
-
-                    {/* NOVO: Visão de Orçamento com % de Atingimento */}
-                    {orcamento > 0 && (
-                        <div className="flex flex-col items-end mt-1 w-full border-t border-slate-200/60 pt-1">
-                            <span className="text-[9px] font-bold text-slate-400 tracking-tight" title="Orçamento (R$)">
-                                Orç: {formatMoeda(orcamento)}
-                            </span>
-                            <span className={`text-[9px] font-black ${corAtingimento} tracking-widest bg-slate-100 px-1.5 py-0.5 rounded mt-0.5`} title="% Atingimento vs Orçamento">
-                                {atingimento.toFixed(1)}%
-                            </span>
-                        </div>
-                    )}
-                  </div>
-
+            <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 bg-slate-800 p-4 rounded-lg border border-slate-700 gap-4">
+                <div>
+                    <h1 className="text-2xl font-bold text-white tracking-tight">Arena Top-Down</h1>
+                    <p className="text-slate-400 text-xs mt-0.5">Ciclo Ativo S&OP: {ciclo} | Visão Direta por SKU</p>
                 </div>
-              </td>
-            );
-          })}
-        </tr>
-        
-        {chartExpanded === row.chave_matriz && (
-          <tr>
-            <td colSpan={(colunasData?.length || 0) + 1} className="p-0">
-              <PainelSaudabilidade rowData={row} />
-            </td>
-          </tr>
-        )}
-        {isExpanded && hasChildren && row.subRows.map((child: any) => renderRow(child, depth + 1))}
-      </React.Fragment>
-    );
-  };
+                
+                <div className="flex items-center gap-3">
+                    {statusEtapa === 'CONGELADO' ? (
+                        <div className="flex items-center bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold px-3 py-2 rounded-lg">
+                            <CheckCircle className="mr-2 w-4 h-4" /> ETAPA CONGELADA NA MALHA
+                        </div>
+                    ) : (
+                        <>
+                            <button
+                                onClick={handleSalvarRascunho}
+                                disabled={saving || !hasPendingChanges}
+                                className={`flex items-center text-sm font-semibold px-4 py-2 rounded-lg transition-colors border ${
+                                    hasPendingChanges 
+                                    ? "bg-slate-700 hover:bg-slate-600 border-slate-500 text-cyan-400" 
+                                    : "bg-slate-800 border-slate-700 text-slate-500 opacity-50 cursor-not-allowed"
+                                }`}
+                            >
+                                <Save className="mr-2 w-4 h-4" /> {saving ? "A Guardar..." : "Salvar Rascunho"}
+                            </button>
+                            <button
+                                onClick={handleCongelarEtapa}
+                                disabled={saving}
+                                className="flex items-center bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors shadow-lg shadow-cyan-600/20 disabled:opacity-50"
+                            >
+                                <Lock className="mr-2 w-4 h-4" /> Congelar Arena
+                            </button>
+                        </>
+                    )}
+                </div>
+            </div>
 
-  return (
-    <div className="min-h-screen bg-slate-50 p-8 pb-32">
-      <div className="max-w-[1600px] mx-auto mb-8 flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-black text-slate-800 tracking-tight flex items-center gap-3">
-            <Shield className="w-8 h-8 text-blue-600" /> Macrociclo <span className="text-blue-600">Diretoria</span>
-          </h1>
-          <p className="text-slate-500 mt-1 font-medium">Decisão Estratégica Top-Down (C-Level)</p>
-        </div>
+            <div className="space-y-4">
+                {dados.map(item => (
+                    <div key={item.sku} className="bg-slate-800 rounded-lg shadow border border-slate-700 overflow-hidden">
+                        
+                        <div className="flex flex-col xl:flex-row">
+                            
+                            <div className="w-full xl:w-80 p-4 border-b xl:border-b-0 xl:border-r border-slate-700 flex flex-col justify-center shrink-0">
+                                <h3 className="text-sm font-bold text-white tracking-tight leading-tight">{item.descricao}</h3>
+                                <span className="text-xs text-slate-400 mt-1 font-mono">SKU: {item.sku}</span>
+                                <button 
+                                    onClick={() => toggleGraph(item.sku)} 
+                                    className="mt-4 text-xs flex items-center w-max px-2 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-cyan-400 transition-colors border border-slate-600"
+                                >
+                                    <BarChart2 className="mr-2 w-4 h-4"/> {expandedRows[item.sku] ? "Ocultar Curva" : "Visualizar Gráfico"}
+                                </button>
+                            </div>
+                            
+                            <div className="flex flex-1 overflow-x-auto">
+                                {(item.meses || []).map(mes => (
+                                    <div key={mes.mes_banco} className="w-64 p-4 border-r border-slate-700 shrink-0 bg-slate-800/40">
+                                        
+                                        <div className="text-xs font-bold text-slate-400 tracking-wider uppercase mb-3 border-b border-slate-700/60 pb-1.5">
+                                            {mes.mes_str}
+                                        </div>
+                                        
+                                        <div className="flex items-center justify-between mb-4">
+                                            <span className="text-xs font-semibold text-cyan-400">Volume (Cx)</span>
+                                            <input 
+                                                type="number"
+                                                disabled={statusEtapa === 'CONGELADO'}
+                                                className="bg-slate-900 border border-slate-700 focus:border-cyan-500 rounded px-2.5 py-1 text-sm text-white w-28 text-right focus:outline-none focus:ring-1 focus:ring-cyan-500 font-mono disabled:opacity-50 disabled:cursor-not-allowed"
+                                                value={mes.vol_topdown.toString()} 
+                                                onFocus={(e) => e.target.select()} 
+                                                onChange={(e) => handleInputChange(item.sku, mes.mes_banco, e.target.value)}
+                                            />
+                                        </div>
+                                        
+                                        <div className="space-y-2 pt-1">
+                                            <div className="flex justify-between text-xs">
+                                                <span className="text-slate-400">Faturamento</span>
+                                                <span className="text-slate-100 font-medium font-mono">R$ {formatCurrency(mes.rec_topdown)}</span>
+                                            </div>
+                                            <div className="flex justify-between text-xs">
+                                                <span className="text-slate-500">Orçado (Sku)</span>
+                                                <span className="text-slate-400 font-mono">R$ {formatCurrency(mes.rec_orcada)}</span>
+                                            </div>
+                                            <div className="flex justify-between text-xs pt-2 border-t border-slate-700/60 mt-1">
+                                                <span className="text-slate-400 font-medium">Variação</span>
+                                                <span className={`font-mono font-bold ${mes.variacao >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                                                    {mes.variacao > 0 ? '+' : ''}{(mes.variacao * 100).toFixed(1)}%
+                                                </span>
+                                            </div>
+                                        </div>
 
-        <div className="flex items-center gap-4">
-          <button onClick={handleExportExcel} className="px-4 py-2 bg-white border shadow-sm text-slate-600 font-bold rounded-xl hover:bg-slate-50 flex items-center gap-2">
-             <Download className="w-4 h-4" /> CSV
-          </button>
-          <div className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold border shadow-sm ${isFechado ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
-            {isFechado ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
-            {isFechado ? 'ESTRATÉGIA FECHADA' : 'ESTRATÉGIA ABERTA'}
-          </div>
+                                    </div>
+                                ))}
+                            </div>
 
-          <button onClick={handleSalvar} disabled={isFechado} className="px-4 py-2.5 bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold border border-blue-200 rounded-xl transition-all disabled:opacity-50 flex items-center gap-2">
-            <Save className="w-4 h-4" /> Salvar Rascunho
-          </button>
+                        </div>
 
-          <button onClick={handleCongelar} disabled={isFechado} className="px-6 py-2.5 bg-slate-900 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg shadow-slate-900/20 transition-all disabled:opacity-50 flex items-center gap-2">
-            <Shield className="w-4 h-4" /> Ratificar Top-Down
-          </button>
-        </div>
-      </div>
-
-      <div className="max-w-[1600px] mx-auto bg-white rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-200 overflow-hidden">
-        
-        <div className="bg-slate-50 p-4 border-b border-slate-200 flex items-center justify-between">
-            <div className="flex items-center gap-3 w-full max-w-md px-4 py-2.5 bg-white border border-slate-300 rounded-xl shadow-sm transition-all focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-blue-500">
-                <Search className="w-5 h-5 text-slate-400" />
-                <input 
-                    type="text" 
-                    placeholder="Procurar SKU, Produto ou Categoria..." 
-                    value={busca} 
-                    onChange={(e) => setBusca(e.target.value)} 
-                    className="bg-transparent border-none focus:outline-none text-sm font-medium w-full text-slate-700 placeholder-slate-400" 
-                />
-                {busca && <button onClick={() => setBusca("")}><X className="w-4 h-4 text-slate-400 hover:text-slate-600" /></button>}
+                        {expandedRows[item.sku] && (
+                            <div className="p-6 bg-slate-950 border-t border-slate-700">
+                                <div className="h-64 w-full">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <LineChart data={getRechartsData(item.grafico)} margin={{ top: 5, right: 30, bottom: 5, left: 0 }}>
+                                            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                                            <XAxis dataKey="name" stroke="#64748b" tick={{ fill: '#64748b', fontSize: 12 }} tickLine={false} axisLine={false} />
+                                            <YAxis stroke="#64748b" tick={{ fill: '#64748b', fontSize: 12 }} tickLine={false} axisLine={false} tickFormatter={(val) => new Intl.NumberFormat('pt-BR', { notation: "compact" }).format(val)} />
+                                            <Tooltip 
+                                                contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '8px' }}
+                                                itemStyle={{ fontSize: '13px', fontWeight: '500' }}
+                                                labelStyle={{ color: '#94a3b8', marginBottom: '8px', fontSize: '12px', fontWeight: 'bold' }}
+                                            />
+                                            <Legend wrapperStyle={{ paddingTop: '20px', fontSize: '12px' }} iconType="circle" />
+                                            <Line type="monotone" dataKey="realizado" name="Realizado (Cx)" stroke="#94a3b8" strokeWidth={2} dot={{ r: 4, fill: '#94a3b8', strokeWidth: 0 }} connectNulls />
+                                            <Line type="monotone" dataKey="ia" name="Projeção IA" stroke="#a855f7" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls />
+                                            <Line type="monotone" dataKey="lag1" name="Lag 1 (ant.)" stroke="#f59e0b" strokeWidth={2} strokeDasharray="3 3" dot={false} connectNulls />
+                                            <Line type="monotone" dataKey="topdown" name="Top-Down Simulado" stroke="#22d3ee" strokeWidth={3} dot={{ r: 5, fill: '#22d3ee', strokeWidth: 0 }} activeDot={{ r: 7 }} connectNulls />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                ))}
             </div>
         </div>
-
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr>
-                <th className="bg-slate-900 p-0 border-b border-slate-800 w-[400px]">
-                  <div 
-                    onClick={() => handleSort('nome')}
-                    className="px-6 py-5 flex items-center justify-between cursor-pointer group hover:bg-slate-800 transition-colors"
-                  >
-                    <span className="text-white font-bold text-sm tracking-widest uppercase group-hover:text-blue-400 transition-colors">Hierarquia do Portfólio</span>
-                    <SortIcon coluna="nome" />
-                  </div>
-                </th>
-
-                {colunasData?.map((m: any, i: number) => (
-                  <th key={i} className="bg-slate-900 p-0 border-b border-slate-800 border-l border-slate-800/50 min-w-[160px]">
-                    <div 
-                        onClick={() => handleSort(m.mes_banco)}
-                        className="px-6 py-5 flex flex-col items-center justify-center relative cursor-pointer group hover:bg-slate-800 transition-colors"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="text-white font-bold text-sm tracking-widest group-hover:text-blue-400 transition-colors">{m.mes_str}</span>
-                        <SortIcon coluna={m.mes_banco} />
-                      </div>
-                      <span className="text-blue-400/80 text-[10px] font-black tracking-widest uppercase mt-0.5">S&OP Forecast</span>
-                    </div>
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {isLoading ? (
-                <tr><td colSpan={10} className="p-12 text-center text-slate-400 font-medium">Extraindo Dados de S&OP...</td></tr>
-              ) : dadosProcessados.length === 0 ? (
-                <tr><td colSpan={10} className="p-12 text-center text-slate-400 font-medium">Nenhum dado encontrado.</td></tr>
-              ) : (
-                dadosProcessados.map(row => renderRow(row))
-              )}
-            </tbody>
-            
-            {dadosProcessados.length > 0 && (
-              <tfoot className="bg-slate-900 sticky bottom-0 z-20 shadow-[0_-10px_40px_rgba(0,0,0,0.1)] border-t border-slate-800">
-                <tr>
-                  <td className="px-6 py-5">
-                    <div className="flex flex-col">
-                      <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Total Filtrado</span>
-                      <span className="font-bold text-sm text-white">SUMÁRIO GERENCIAL</span>
-                    </div>
-                  </td>
-                  {colunasData?.map((m: any, i: number) => {
-                    const t = totaisGerais[m.mes_banco];
-                    const perc = t.orc > 0 ? (t.fat / t.orc) * 100 : 0;
-                    const corPerc = perc >= 100 ? 'text-emerald-400' : 'text-rose-400';
-
-                    return (
-                      <td key={i} className="px-6 py-5 border-l border-slate-800/50 text-right">
-                        <div className="flex flex-col items-end">
-                          <span className="font-black text-white text-base">
-                            {formatVolume(t?.vol || 0)} <span className="text-[10px] text-slate-400 font-medium ml-1">CX</span>
-                          </span>
-                          <span className="font-bold text-blue-400 text-xs tracking-tight mt-1 bg-blue-400/10 px-2 py-0.5 rounded">
-                            {formatMoeda(t?.fat || 0)}
-                          </span>
-                          
-                          {/* SUMÁRIO GLOBAL DO ORÇAMENTO */}
-                          {t.orc > 0 && (
-                            <div className="flex flex-col items-end mt-2 pt-2 border-t border-slate-700/50 w-full">
-                               <span className="text-[9px] text-slate-400 font-bold uppercase tracking-widest">Orçamento</span>
-                               <span className="text-xs font-bold text-slate-300">{formatMoeda(t.orc)}</span>
-                               <span className={`text-[10px] font-black ${corPerc} mt-1 tracking-widest`}>{perc.toFixed(1)}%</span>
-                            </div>
-                          )}
-                        </div>
-                      </td>
-                    );
-                  })}
-                </tr>
-              </tfoot>
-            )}
-          </table>
-        </div>
-      </div>
-    </div>
-  );
+    );
 }
