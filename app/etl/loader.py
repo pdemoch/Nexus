@@ -180,34 +180,54 @@ class NexusLoader:
         try:
             if df_clientes is None or df_clientes.is_empty():
                 return
-            
-            # Converte para Pandas para facilitar o mapeamento de nomes de colunas
+
             df_pd = df_clientes.to_pandas()
             df_pd = df_pd.rename(columns={
-                'cod': 'cod_cliente', 
+                'cod': 'cod_cliente',
                 'cliente_razaosocial': 'razaosocial'
             })
-            
-            # Preenche regional caso não venha do ERP
+
             if 'regional' not in df_pd.columns:
                 df_pd['regional'] = "N/A"
 
-            # 🔥 A BLINDAGEM: Definir as colunas exatas da DimCliente e filtrar o DataFrame
-            colunas_permitidas = ['cgc', 'cod_cliente', 'loja', 'razaosocial', 'regional', 'bloqueado', 'vendedor_nome', 'gerente_nome', 'supervisor_nome']
-            
-            # Descarta cod_loja e qualquer outra coluna temporária que tenha vazado
+            # 🔥 BLINDAGEM: só as colunas reais da DimCliente
+            colunas_permitidas = ['cgc', 'cod_cliente', 'loja', 'razaosocial', 'regional',
+                                  'bloqueado', 'vendedor_nome', 'gerente_nome', 'supervisor_nome']
             colunas_presentes = [c for c in colunas_permitidas if c in df_pd.columns]
             df_pd = df_pd[colunas_presentes]
 
             registros = df_pd.to_dict(orient='records')
-            
+
+            # 🔥 DEDUP GLOBAL POR CGC, PRIORIZANDO ATIVO
+            # A origem (188) traz o mesmo CNPJ/CPF sob mais de um código de cliente.
+            # Como a dimensão tem conflito em 'cgc', sem colapsar aqui o
+            # ON CONFLICT (cgc) tenta afetar a mesma linha 2x -> CardinalityViolation.
+            #
+            # Ordenação estável: INATIVO primeiro, ATIVO por último. No dict
+            # "último vence", então o cadastro ATIVO sobrevive quando há empate de CGC.
+            def _peso_ativo(r):
+                return 1 if str(r.get("bloqueado") or "").strip().upper() == "ATIVO" else 0
+
+            registros.sort(key=_peso_ativo)  # sort estável preserva a ordem dentro do mesmo status
+
+            deduplicados = {}
+            for r in registros:
+                cgc = str(r.get("cgc") or "").strip()
+                if not cgc or cgc.upper() in ("SEM_CGC", "NULL", "NAN", "NONE"):
+                    continue  # sem CNPJ válido não entra na dimensão
+                r["cgc"] = cgc
+                deduplicados[cgc] = r  # ATIVO vence por vir depois no sort
+            registros = list(deduplicados.values())
+
+            if not registros:
+                log_callback("⚠️ [LOAD] Nenhum cliente com CGC válido para sincronizar.")
+                return
+
             with SessionLocal() as db:
                 lote_size = 1000
                 for i in range(0, len(registros), lote_size):
                     lote = registros[i:i+lote_size]
                     stmt = pg_insert(DimCliente).values(lote)
-                    
-                    # Se o CNPJ (cgc) já existir, atualiza toda a hierarquia e bloqueios
                     stmt = stmt.on_conflict_do_update(
                         index_elements=['cgc'],
                         set_={col: getattr(stmt.excluded, col) for col in lote[0].keys() if col != 'cgc'}
