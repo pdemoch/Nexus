@@ -7,7 +7,6 @@ from app.api.routers.shared_ibp import get_current_cycle, get_projection_window
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-# AQUI ESTÁ A CORREÇÃO DO 404: O prefixo da API foi restaurado no roteador!
 router = APIRouter(prefix="/api/v1/topdown", tags=["TopDown"])
 
 def obter_ciclo_anterior(ciclo: str) -> str:
@@ -28,10 +27,10 @@ def get_topdown_dados(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Janela de projeção incompleta.")
     m2, m3, m4 = meses_proj[0], meses_proj[1], meses_proj[2]
     
-    # Captura o status de congelamento da etapa
+    # === AQUI ESTAVA O ERRO DE TABELA (LINHA 32) ===
     status_etapa = db.execute(text("""
-        SELECT status FROM controle_ciclo 
-        WHERE ciclo_sop = :ciclo AND etapa = 'TopDown'
+        SELECT status FROM controle_ciclos 
+        WHERE ciclo_sop = :ciclo AND origem = 'TopDown'
     """), {"ciclo": ciclo_atual}).scalar() or "ABERTO"
     
     query = text("""
@@ -211,12 +210,20 @@ def topdown_congelar(db: Session = Depends(get_db)):
         WHERE ciclo_sop = :ciclo
     """), {"ciclo": ciclo_atual})
     
-    db.execute(text("""
-        INSERT INTO controle_ciclo (ciclo_sop, etapa, status, atualizado_em)
-        VALUES (:ciclo, 'TopDown', 'CONGELADO', NOW())
-        ON CONFLICT (ciclo_sop, etapa) 
-        DO UPDATE SET status = 'CONGELADO', atualizado_em = NOW()
-    """), {"ciclo": ciclo_atual})
+    # === AQUI ESTAVA O ERRO DE TABELA NO CONGELAMENTO ===
+    id_controle = db.execute(text("""
+        SELECT id FROM controle_ciclos WHERE ciclo_sop = :ciclo AND origem = 'TopDown'
+    """), {"ciclo": ciclo_atual}).scalar()
     
+    if id_controle:
+        db.execute(text("""
+            UPDATE controle_ciclos SET status = 'CONGELADO' WHERE id = :id_ctrl
+        """), {"id_ctrl": id_controle})
+    else:
+        db.execute(text("""
+            INSERT INTO controle_ciclos (ciclo_sop, origem, status) 
+            VALUES (:ciclo, 'TopDown', 'CONGELADO')
+        """), {"ciclo": ciclo_atual})
+        
     db.commit()
     return {"status": "sucesso", "mensagem": "Etapa Top-Down CONGELADA."}
