@@ -27,12 +27,14 @@ def get_topdown_dados(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Janela de projeção incompleta.")
     m2, m3, m4 = meses_proj[0], meses_proj[1], meses_proj[2]
     
-    # === AQUI ESTAVA O ERRO DE TABELA (LINHA 32) ===
     status_etapa = db.execute(text("""
         SELECT status FROM controle_ciclos 
         WHERE ciclo_sop = :ciclo AND origem = 'TopDown'
     """), {"ciclo": ciclo_atual}).scalar() or "ABERTO"
     
+    # ===============================================================================
+    # SQL TOTALMENTE ALINHADO COM O SCHEMA DO NEXUS (pmv_aplicado, fato_orcamento, etc)
+    # ===============================================================================
     query = text("""
         WITH base_skus AS (
             SELECT DISTINCT f.sku, p.descricao 
@@ -45,19 +47,19 @@ def get_topdown_dados(db: Session = Depends(get_db)):
                 f.sku,
                 f.mes_projetado,
                 SUM(f.vol_topdown) as vol_topdown,
-                COALESCE(SUM(f.vol_ia * f.pmv) / NULLIF(SUM(f.vol_ia), 0), AVG(f.pmv)) as pmv,
-                SUM(COALESCE(o.receita, 0)) as rec_orcada
+                COALESCE(SUM(f.vol_ia * f.pmv_aplicado) / NULLIF(SUM(f.vol_ia), 0), AVG(f.pmv_aplicado)) as pmv,
+                SUM(COALESCE(o.receita_orcamento, 0)) as rec_orcada
             FROM fato_ibp_granular f
-            LEFT JOIN dim_orcamento o ON f.sku = o.sku AND f.mes_projetado = o.mes
+            LEFT JOIN fato_orcamento o ON f.sku = o.sku AND f.mes_projetado = o.mes_projetado
             WHERE f.ciclo_sop = :ciclo_atual 
               AND f.mes_projetado IN (:m2, :m3, :m4)
             GROUP BY f.sku, f.mes_projetado
         ),
         historico AS (
-            SELECT sku, data as mes, SUM(volume) as vol_real
+            SELECT sku, DATE_TRUNC('month', data_pedido)::DATE as mes, SUM(qt_pedido) as vol_real
             FROM fato_vendas
-            WHERE data >= '2024-01-01'
-            GROUP BY sku, data
+            WHERE data_pedido >= '2024-01-01'
+            GROUP BY sku, DATE_TRUNC('month', data_pedido)::DATE
         ),
         lag1 AS (
             SELECT sku, mes_projetado as mes, SUM(vol_final) as vol_lag1
@@ -210,7 +212,6 @@ def topdown_congelar(db: Session = Depends(get_db)):
         WHERE ciclo_sop = :ciclo
     """), {"ciclo": ciclo_atual})
     
-    # === AQUI ESTAVA O ERRO DE TABELA NO CONGELAMENTO ===
     id_controle = db.execute(text("""
         SELECT id FROM controle_ciclos WHERE ciclo_sop = :ciclo AND origem = 'TopDown'
     """), {"ciclo": ciclo_atual}).scalar()

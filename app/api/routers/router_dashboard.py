@@ -39,7 +39,10 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
     try:
         ciclo_atual = get_current_cycle(db)
         ciclo_anterior = get_previous_cycle(db)
-        m2_str, m4_str = get_projection_window(db)
+        
+        # CORREÇÃO 1: Adaptação para a nova inteligência da janela de projeção
+        meses_proj = get_projection_window(db, ciclo_atual)
+        m2_str, m4_str = meses_proj[0], meses_proj[-1] 
         m2_date = parse_date_safe(m2_str)
         
         # 1. ORÇAMENTO FINANCEIRO
@@ -72,8 +75,7 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
         prev_map = {f"{p.sku}|{p.cgc}|{str(p.mes_projetado)}": float(p.vol_final or 0) for p in prev_query}
 
         # 4. CONSULTA ATUAL S&OP GLOBAL - AJUSTADA CIRURGICAMENTE
-        # Removemos joins complexos e queries pesadas. Lemos diretamente f.pmv_aplicado da fato
-        query = get_truth_query(db, ciclo_atual, m2_str, m4_str).with_entities(
+        query = get_truth_query(db, ciclo_atual, m2_date, parse_date_safe(m4_str)).with_entities(
             DimProduto.categoria, FatoIbpGranular.sku, DimProduto.descricao, DimCliente.razaosocial, DimCliente.cgc,
             FatoIbpGranular.mes_projetado, FatoIbpGranular.vol_ia, FatoIbpGranular.vol_topdown, 
             FatoIbpGranular.vol_bottomup, FatoIbpGranular.vol_supply, FatoIbpGranular.vol_final, 
@@ -103,11 +105,13 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
                 "var_pmv_pct": 0.0
             })
         
-        reg = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo_atual, ControleCiclo.origem == 'S&OP-Final').first()
-        is_locked = reg.status == 'Fechado' if reg else False
-        reg_sp = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo_atual, ControleCiclo.origem == 'Supply Review').first()
+        # CORREÇÃO 2: Bypass do ORM substituído por raw SQL para evitar erros de UndefinedTable
+        reg_status = db.execute(text("SELECT status FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'S&OP-Final'"), {"c": ciclo_atual}).scalar()
+        is_locked = (reg_status == 'Fechado')
         
-        if not is_locked and (not reg_sp or reg_sp.status != 'Fechado'):
+        reg_sp_status = db.execute(text("SELECT status FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'Supply Review'"), {"c": ciclo_atual}).scalar()
+        
+        if not is_locked and (reg_sp_status != 'Fechado'):
             return {"status": "success", "is_locked": True, "lock_message": "Aguardando encerramento do Supply Review (Fase 3)", "dados": dados_enriquecidos, "orcamento": orc_dict}
 
         return {"status": "success", "is_locked": is_locked, "lock_message": "Demanda Irrestrita Publicada" if is_locked else "Plano Aberto para Approvação Final", "dados": dados_enriquecidos, "orcamento": orc_dict}
@@ -127,11 +131,15 @@ async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria',
             categoria = partes[0]
             if len(partes) > 1: sku = partes[1]
 
-        m2_str, _ = get_projection_window(db)
+        ciclo_atual = get_current_cycle(db)
+        ciclo_ant = get_previous_cycle(db)
+        
+        meses_proj = get_projection_window(db, ciclo_atual)
+        m2_str = meses_proj[0]
         m2_date = parse_date_safe(m2_str)
+        
         hoje = datetime.date.today()
         mes_atual_inicio = hoje.replace(day=1)
-        ciclo_ant, ciclo_atual = get_previous_cycle(db), get_current_cycle(db)
 
         inicio_hist = hoje - relativedelta(years=2)
 
@@ -230,12 +238,14 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
                 l.vol_final = rateado
 
             nome_user = usuario.get('nome', usuario.get('email', 'Desconhecido'))
-            # CORREÇÃO: "origem" no lugar de "origen"
             registrar_log_auditoria(db=db, ciclo=ciclo, origem="S&OP Global (Dashboard Final)", usuario=nome_user, sku=sku, cliente="TODOS_OS_CLIENTES", mes=data_alvo, v_antigo=int(total_base_antigo), v_novo=volume_alvo)
 
-        registro = db.query(ControleCiclo).filter(ControleCiclo.ciclo_sop == ciclo, ControleCiclo.origem == 'S&OP-Final').first()
-        if not registro: db.add(ControleCiclo(ciclo_sop=ciclo, origem='S&OP-Final', status='Fechado'))
-        else: registro.status = 'Fechado'
+        # CORREÇÃO 3: Proteção ao atualizar tabela de controle de ciclos no banco (Aprovação)
+        id_controle = db.execute(text("SELECT id FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'S&OP-Final'"), {"c": ciclo}).scalar()
+        if id_controle:
+            db.execute(text("UPDATE controle_ciclos SET status = 'Fechado' WHERE id = :id"), {"id": id_controle})
+        else:
+            db.execute(text("INSERT INTO controle_ciclos (ciclo_sop, origem, status) VALUES (:c, 'S&OP-Final', 'Fechado')"), {"c": ciclo})
 
         db.commit()
         return {"status": "success", "message": "S&OP Consolidado e Metas travadas com sucesso!"}
@@ -247,7 +257,11 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
 async def exportar_oficial(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
         ciclo = get_current_cycle(db)
-        m2, m4 = get_projection_window(db)
+        
+        # CORREÇÃO 4: Aplicação da nova chamada da Janela para o Excel
+        meses_proj = get_projection_window(db, ciclo)
+        m2 = parse_date_safe(meses_proj[0])
+        m4 = parse_date_safe(meses_proj[-1])
         
         resultados = get_truth_query(db, ciclo, m2, m4).with_entities(
             DimProduto.categoria, FatoIbpGranular.sku, DimProduto.descricao, DimCliente.razaosocial, 
