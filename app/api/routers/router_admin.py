@@ -32,10 +32,16 @@ async def iniciar_pipeline(background_tasks: BackgroundTasks, db: Session = Depe
     if AppState.pipeline_rodando:
         raise HTTPException(status_code=400, detail="O pipeline já está em execução.")
 
+    # 1. Utilizamos a função do shared_ibp para ler o ciclo que o Admin definiu no painel
+    ciclo_atual = get_current_cycle(db)
+
     AppState.pipeline_rodando = True
     AppState.logs = [] 
-    background_tasks.add_task(executar_pipeline_nexus)
-    return {"status": "success", "message": "Pipeline de Engenharia de Dados iniciado em Background!"}
+    
+    # 2. Injetamos o ciclo_atual no motor de background para suprir o argumento "ciclo_alvo"
+    background_tasks.add_task(executar_pipeline_nexus, ciclo_atual)
+    
+    return {"status": "success", "message": f"Pipeline de Engenharia de Dados iniciado para o ciclo {ciclo_atual}!"}
 
 # =====================================================================
 # ROTAS DA MÁQUINA DO TEMPO
