@@ -151,7 +151,7 @@ def get_topdown_dados(db: Session = Depends(get_db)):
         rows = db.execute(text("""
             SELECT sku, mes_projetado::DATE AS mes, SUM(vol_ia) AS vol_ia
             FROM fato_ibp_granular
-            WHERE ciclo_sop = :cf AND mes_projetado = ANY(:meses)
+            WHERE ciclo_sop = :cf AND mes_projetado = ANY(CAST(:meses AS DATE[]))
             GROUP BY sku, mes_projetado
         """), {"cf": ciclo_fonte, "meses": meses_list}).fetchall()
         for r in rows:
