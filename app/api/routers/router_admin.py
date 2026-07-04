@@ -12,36 +12,44 @@ from app.core.state import AppState
 from app.models.domain_models import ControleCiclo, DimProduto, DimCliente, FatoIbpGranular, AuditoriaAjuste
 from app.etl.pipeline import executar_pipeline_nexus
 from app.api.routers.router_auth import get_current_user
-from app.api.routers.shared_ibp import get_current_cycle, get_truth_query, get_projection_window
+from app.api.routers.shared_ibp import (
+    get_current_cycle,
+    get_truth_query,
+    get_projection_window_dates,
+    normalizar_ciclo,
+)
 
 router = APIRouter(prefix="/api/v1/admin", tags=["Administração e Pipeline"])
+
 
 # SCHEMA PARA ALTERAÇÃO DE CICLO
 class PayloadCiclo(BaseModel):
     novo_ciclo: str  # Formato "MM/YYYY"
 
+
 @router.get("/pipeline/status")
 async def obter_status_pipeline(usuario_logado: dict = Depends(get_current_user)):
     return {"is_running": AppState.pipeline_rodando, "logs": AppState.logs}
+
 
 @router.post("/pipeline/start")
 async def iniciar_pipeline(background_tasks: BackgroundTasks, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
     if usuario_logado.get('funcao') != 'Administrador':
         raise HTTPException(status_code=403, detail="Acesso negado. Apenas Administradores podem rodar o pipeline.")
-        
+
     if AppState.pipeline_rodando:
         raise HTTPException(status_code=400, detail="O pipeline já está em execução.")
 
-    # 1. Utilizamos a função do shared_ibp para ler o ciclo que o Admin definiu no painel
+    # Lê o ciclo ativo (já normalizado pela fundação) para suprir o "ciclo_alvo".
     ciclo_atual = get_current_cycle(db)
 
     AppState.pipeline_rodando = True
-    AppState.logs = [] 
-    
-    # 2. Injetamos o ciclo_atual no motor de background para suprir o argumento "ciclo_alvo"
+    AppState.logs = []
+
     background_tasks.add_task(executar_pipeline_nexus, ciclo_atual)
-    
+
     return {"status": "success", "message": f"Pipeline de Engenharia de Dados iniciado para o ciclo {ciclo_atual}!"}
+
 
 # =====================================================================
 # ROTAS DA MÁQUINA DO TEMPO
@@ -49,35 +57,36 @@ async def iniciar_pipeline(background_tasks: BackgroundTasks, db: Session = Depe
 
 @router.get("/ciclo-ativo")
 async def obter_ciclo_ativo(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
-    """Retorna o ciclo que está atualmente a comandar o sistema"""
+    """Retorna o ciclo que está atualmente a comandar o sistema (formato canônico)."""
     try:
-        resultado = db.execute(text("SELECT ciclo_ativo_global FROM configuracao_sistema ORDER BY id DESC LIMIT 1")).fetchone()
-        ciclo = resultado[0] if resultado else datetime.date.today().strftime("%m/%Y")
-        return {"ciclo_ativo": ciclo}
+        # get_current_cycle já lê configuracao_sistema e normaliza para MM/YYYY.
+        return {"ciclo_ativo": get_current_cycle(db)}
     except Exception as e:
         return {"ciclo_ativo": datetime.date.today().strftime("%m/%Y"), "error": str(e)}
 
+
 @router.post("/ciclo-ativo")
 async def atualizar_ciclo_ativo(payload: PayloadCiclo, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
-    """Altera o relógio global do sistema S&OP"""
+    """Altera o relógio global do sistema S&OP."""
     if usuario.get('funcao') != 'Administrador':
         raise HTTPException(status_code=403, detail="Apenas administradores podem viajar no tempo.")
-    
-    try:
-        # Validação simples de formato
-        partes = payload.novo_ciclo.split('/')
-        if len(partes) != 2 or len(partes[0]) != 2 or len(partes[1]) != 4:
-            raise HTTPException(status_code=400, detail="Formato inválido. Use MM/YYYY (ex: 05/2026)")
 
+    # normalizar_ciclo valida faixa e formato; levanta HTTP 400 se inválido.
+    # Isto fecha o vetor do input de texto livre do AdminPanel: o banco só
+    # recebe ciclo em formato canônico MM/YYYY, nunca '7/2026' ou lixo.
+    ciclo_canonico = normalizar_ciclo(payload.novo_ciclo)
+
+    try:
         db.execute(
             text("INSERT INTO configuracao_sistema (ciclo_ativo_global) VALUES (:ciclo)"),
-            {"ciclo": payload.novo_ciclo}
+            {"ciclo": ciclo_canonico}
         )
         db.commit()
-        return {"status": "success", "message": f"Sistema Nexus agora focado no ciclo {payload.novo_ciclo}"}
+        return {"status": "success", "message": f"Sistema Nexus agora focado no ciclo {ciclo_canonico}"}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # =====================================================================
 # GESTÃO DE CADEADOS E EXPORTAÇÃO
@@ -87,7 +96,7 @@ async def atualizar_ciclo_ativo(payload: PayloadCiclo, db: Session = Depends(get
 async def reabrir_ciclo(origem: str, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
     if usuario_logado.get('funcao') != 'Administrador':
         raise HTTPException(status_code=403, detail="Acesso negado.")
-        
+
     ciclo_atual = get_current_cycle(db)
     try:
         # 1. Lógica especial para o Gerenciamento (Destranca todos os vendedores)
@@ -98,43 +107,44 @@ async def reabrir_ciclo(origem: str, db: Session = Depends(get_db), usuario_loga
                     'TOP-DOWN ARENA', 'SUPPLY REVIEW', 'S&OP-FINAL'
                 ])
             ).delete(synchronize_session=False)
-            
+
             db.commit()
-            
+
             if deletados > 0:
                 return {"status": "success", "message": f"Todos os {deletados} bloqueios de Vendedores foram removidos!"}
             return {"status": "success", "message": "A tela de Gerenciamento já se encontra aberta."}
 
         # 2. Lógica padrão para as etapas globais
         cadeado = db.query(ControleCiclo).filter(
-            ControleCiclo.ciclo_sop == ciclo_atual, 
+            ControleCiclo.ciclo_sop == ciclo_atual,
             func.upper(func.trim(ControleCiclo.origem)) == origem.strip().upper()
         ).first()
-        
+
         if cadeado:
             db.delete(cadeado)
             db.commit()
             return {"status": "success", "message": f"O cadeado de '{origem}' foi removido com sucesso!"}
-            
+
         return {"status": "success", "message": f"A tela de '{origem}' já se encontra aberta."}
-        
+
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
-    
+
+
 @router.get("/exportar-base")
 async def exportar_base_granular(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
     if usuario_logado.get('funcao') != 'Administrador':
         raise HTTPException(status_code=403, detail="Acesso negado.")
-        
+
     try:
         engine = db.get_bind()
         ciclo = get_current_cycle(db)
-        m2, m4 = get_projection_window(db)
-        
-        # 🔥 CÓDIGO CIRÚRGICO: A query agora é super leve.
-        # Removemos WITH pmv_historico_4m e o LEFT JOIN. 
-        # Lemos diretamente f.pmv_aplicado que foi cravado no Pipeline.
+        # CONSERTO: a fundação nova devolve LISTA de 3 em get_projection_window.
+        # Para o par (M2, M4) usa-se get_projection_window_dates, que devolve tupla.
+        m2, m4 = get_projection_window_dates(db)
+
+        # Lê f.pmv_aplicado direto (base de precificação global cravada no pipeline).
         sql = """
             SELECT 
                 f.ciclo_sop AS "Ciclo S&OP",
@@ -162,7 +172,7 @@ async def exportar_base_granular(db: Session = Depends(get_db), usuario_logado: 
               AND f.mes_projetado <= :m4
             ORDER BY c.gerente_nome, c.supervisor_nome, f.vendedor_nome, c.razaosocial, f.sku
         """
-        
+
         df = pd.read_sql(text(sql), engine, params={"ciclo": ciclo, "m2": m2, "m4": m4})
 
         if df.empty:
@@ -171,25 +181,27 @@ async def exportar_base_granular(db: Session = Depends(get_db), usuario_logado: 
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Base_SOP_Granular')
-        
+
         buffer.seek(0)
         return StreamingResponse(
-            buffer, 
+            buffer,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f"attachment; filename=Nexus_Base_Granular_{ciclo.replace('/','_')}.xlsx"}
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, repr(e))
+
 
 @router.get("/auditoria/logs")
 async def listar_logs_auditoria(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
     if usuario_logado.get('funcao') != 'Administrador':
         raise HTTPException(status_code=403, detail="Acesso negado.")
-        
+
     try:
-        # Busca os últimos 500 registos de alteração
         logs = db.query(AuditoriaAjuste).order_by(AuditoriaAjuste.data_ajuste.desc()).limit(500).all()
-        
+
         dados = []
         for l in logs:
             dados.append({
@@ -207,6 +219,7 @@ async def listar_logs_auditoria(db: Session = Depends(get_db), usuario_logado: d
     except Exception as e:
         raise HTTPException(500, f"Erro ao carregar auditoria: {str(e)}")
 
+
 # =====================================================================
 # GESTÃO DE USUÁRIOS E SEGURANÇA (SQL PURO)
 # =====================================================================
@@ -215,23 +228,23 @@ async def listar_logs_auditoria(db: Session = Depends(get_db), usuario_logado: d
 async def excluir_usuario_sistema(user_id: int, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
     if usuario_logado.get('funcao') != 'Administrador':
         raise HTTPException(status_code=403, detail="Acesso negado. Apenas administradores podem excluir usuários.")
-    
+
     if user_id == usuario_logado.get('id'):
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail="Operação negada: Você não pode excluir a sua própria conta de administrador."
         )
 
     try:
         db.execute(text("DELETE FROM usuarios WHERE id = :id"), {"id": user_id})
         db.commit()
-        return {"status": "success", "message": f"Utilizador removido com sucesso do Nexus."}
+        return {"status": "success", "message": "Utilizador removido com sucesso do Nexus."}
     except Exception as e:
         db.rollback()
         try:
             db.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_id})
             db.commit()
-            return {"status": "success", "message": f"Utilizador removido com sucesso do Nexus."}
+            return {"status": "success", "message": "Utilizador removido com sucesso do Nexus."}
         except Exception as e2:
             db.rollback()
-            raise HTTPException(status_code=500, detail=f"Erro interno ao excluir utilizador. Contacte o suporte.")
+            raise HTTPException(status_code=500, detail="Erro interno ao excluir utilizador. Contacte o suporte.")

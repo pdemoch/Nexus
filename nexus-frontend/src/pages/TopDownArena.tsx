@@ -1,298 +1,697 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import {
+  useReactTable, getCoreRowModel, flexRender, getExpandedRowModel,
+  getSortedRowModel, SortingState, ColumnDef
+} from '@tanstack/react-table';
+import {
+  Loader2, ChevronDown, ChevronRight, Layers, Lock, Package, Search,
+  BarChart3, TrendingUp, TrendingDown, Bot, Target, Wand2, Check, ShieldCheck,
+  Save
+} from 'lucide-react';
 import axios from 'axios';
 import {
-    LineChart,
-    Line,
-    XAxis,
-    YAxis,
-    CartesianGrid,
-    Tooltip,
-    Legend,
-    ResponsiveContainer
+  BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  Legend, ResponsiveContainer
 } from 'recharts';
-import { BarChart2, Save, Lock, CheckCircle } from 'lucide-react'; 
 
-interface MesData {
-    mes_banco: string;
-    mes_str: string;
-    vol_topdown: number;
-    pmv: number;
-    rec_topdown: number;
-    rec_orcada: number;
-    variacao: number;
-}
-
-interface SkuData {
-    sku: string;
-    descricao: string;
-    meses: MesData[];
-    grafico: {
-        labels: string[];
-        realizado: (number | null)[];
-        ia: (number | null)[];
-        lag1: (number | null)[];
-        topdown: (number | null)[];
-    };
-}
-
-const formatCurrency = (val: number) => {
-    return new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(val || 0);
+// =====================================================================
+// HELPERS DE FORMATAÇÃO (padrão GlobalDashboard)
+// =====================================================================
+const formatMoeda = (valor: any) => {
+  const num = Number(valor);
+  if (isNaN(num)) return 'R$ 0';
+  return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(num));
 };
 
+const formatVolume = (val: any) => {
+  const num = Number(val);
+  if (isNaN(num)) return '0';
+  return Math.round(num).toLocaleString('pt-BR');
+};
+
+const calcVar = (atual: number, orcado: number) => orcado > 0 ? ((atual - orcado) / orcado) * 100 : 0;
+
+// Badge de variação % — o KPI-âncora da fase (TopDown vs Orçamento).
+const VarBadge = ({ atual = 0, orcado = 0 }: { atual?: number, orcado?: number }) => {
+  const v = calcVar(atual, orcado);
+  if (orcado === 0) return null;
+  const isPos = v >= 0;
+  return (
+    <span className={`text-[9px] font-black flex items-center gap-0.5 px-1 py-0.5 rounded ${isPos ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+      {isPos ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />} {Math.abs(v).toFixed(1)}%
+    </span>
+  );
+};
+
+// =====================================================================
+// INPUT DE VOLUME EM CAIXAS (máscara pt-BR, foco limpa, blur reaplica)
+// Idêntico em comportamento ao SmartInput do GlobalDashboard.
+// =====================================================================
+const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (val: number) => void, disabled: boolean }) => {
+  const [localVal, setLocalVal] = useState((value !== undefined && value !== null) ? formatVolume(value) : '0');
+  const [isFocused, setIsFocused] = useState(false);
+
+  useEffect(() => {
+    if (!isFocused) setLocalVal((value !== undefined && value !== null) ? formatVolume(value) : '0');
+  }, [value, isFocused]);
+
+  const handleFocus = () => { setIsFocused(true); setLocalVal(localVal.replace(/\./g, '')); };
+  const handleBlur = () => {
+    setIsFocused(false);
+    const num = parseInt(localVal.replace(/\D/g, ''), 10) || 0;
+    setLocalVal(formatVolume(num));
+    onChange(num);
+  };
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') e.currentTarget.blur(); };
+
+  return (
+    <input
+      type="text" value={localVal} disabled={disabled} onFocus={handleFocus} onBlur={handleBlur} onKeyDown={handleKeyDown} onChange={(e) => setLocalVal(e.target.value)}
+      className={`w-full bg-transparent border-none text-center focus:outline-none focus:ring-2 focus:ring-indigo-500 rounded-lg py-1
+        ${disabled ? 'text-slate-900 font-black cursor-not-allowed' : 'text-indigo-700 font-black bg-indigo-50 shadow-inner'}`}
+    />
+  );
+};
+
+// =====================================================================
+// TIPAGEM DO CONTRATO DO ROUTER
+// =====================================================================
+interface MesData {
+  mes_banco: string;
+  mes_str: string;
+  vol_topdown: number;
+  fat_topdown: number;
+  vol_ia: number;
+  fat_ia: number;
+  rec_orcada: number;
+  pmv: number;
+  variacao_orcamento: number;
+}
+interface SkuData {
+  sku: string;
+  descricao: string;
+  categoria?: string;
+  meses: MesData[];
+  grafico: {
+    labels: string[];
+    realizado: (number | null)[];
+    ia: (number | null)[];
+    lag1: (number | null)[];
+    topdown: (number | null)[];
+  };
+}
+interface TotalMes {
+  mes_banco: string; mes_str: string;
+  fat_topdown: number; fat_ia: number; rec_orcada: number;
+  vol_topdown: number; vol_ia: number; variacao_orcamento: number;
+}
+
+// =====================================================================
+// COMPONENTE PRINCIPAL
+// =====================================================================
 export default function TopDownArena() {
-    const [dados, setDados] = useState<SkuData[]>([]);
-    const [ciclo, setCiclo] = useState<string>('');
-    const [statusEtapa, setStatusEtapa] = useState<string>('ABERTO');
-    const [expandedRows, setExpandedRows] = useState<{ [key: string]: boolean }>({});
-    const [loading, setLoading] = useState(true);
-    const [saving, setSaving] = useState(false);
-    const [pendingChanges, setPendingChanges] = useState<{ [key: string]: { sku: string, mes_banco: string, novo_vol: number } }>({});
+  const [dados, setDados] = useState<SkuData[]>([]);
+  const [totais, setTotais] = useState<{ por_mes: TotalMes[]; consolidado: TotalMes | null }>({ por_mes: [], consolidado: null });
+  const [contador, setContador] = useState<{ total_skus: number; skus_ajustados: number; skus_intocados: number }>({ total_skus: 0, skus_ajustados: 0, skus_intocados: 0 });
+  const [ciclo, setCiclo] = useState('');
+  const [statusEtapa, setStatusEtapa] = useState('ABERTO');
 
-    useEffect(() => {
-        carregarDados();
-    }, []);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [busca, setBusca] = useState('');
+  const [expanded, setExpanded] = useState({});
+  const [sorting, setSorting] = useState<SortingState>([]);
+  const [chartExpanded, setChartExpanded] = useState<string | null>(null);
 
-    const carregarDados = async () => {
-        try {
-            const response = await axios.get('/api/v1/topdown/dados');
-            setDados(response.data.dados || []);
-            setCiclo(response.data.ciclo_ativo || '');
-            setStatusEtapa(response.data.status_etapa || 'ABERTO');
-        } catch (err) {
-            console.error("Erro ao carregar dados:", err);
-        } finally {
-            setLoading(false);
-        }
-    };
+  // Edições pendentes: { [sku]: { [mes_banco]: novo_vol } }
+  const [celulasEditadas, setCelulasEditadas] = useState<{ [sku: string]: { [mes: string]: number } }>({});
 
-    const toggleGraph = (sku: string) => {
-        setExpandedRows(prev => ({ ...prev, [sku]: !prev[sku] }));
-    };
+  const isLocked = statusEtapa === 'CONGELADO';
 
-    const handleInputChange = (sku: string, mes_banco: string, valorStr: string) => {
-        const novoVol = parseFloat(valorStr);
-        const volumeFinal = isNaN(novoVol) ? 0 : novoVol;
+  const carregarDados = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await axios.get('/api/v1/topdown/dados');
+      setDados(res.data.dados || []);
+      setTotais(res.data.totais || { por_mes: [], consolidado: null });
+      setContador(res.data.contador || { total_skus: 0, skus_ajustados: 0, skus_intocados: 0 });
+      setCiclo(res.data.ciclo_ativo || '');
+      setStatusEtapa(res.data.status_etapa || 'ABERTO');
+      setCelulasEditadas({});
+      setExpanded({});
+      setChartExpanded(null);
+    } catch (e) {
+      console.error('Erro ao carregar Top-Down:', e);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-        const uniqueKey = `${sku}-${mes_banco}`;
-        setPendingChanges(prev => ({
-            ...prev,
-            [uniqueKey]: { sku, mes_banco, novo_vol: volumeFinal }
-        }));
+  useEffect(() => { carregarDados(); }, [carregarDados]);
 
-        setDados(prevDados => prevDados.map(item => {
-            if (item.sku === sku) {
-                const mesesAtualizados = (item.meses || []).map(m => {
-                    if (m.mes_banco === mes_banco) {
-                        const novaRec = volumeFinal * m.pmv;
-                        const novaVar = m.rec_orcada > 0 ? (novaRec - m.rec_orcada) / m.rec_orcada : 0;
-                        return { ...m, vol_topdown: volumeFinal, rec_topdown: novaRec, variacao: novaVar };
-                    }
-                    return m;
-                });
+  // Meses disponíveis (M2, M3, M4) a partir do primeiro SKU.
+  const mesesDisponiveis = useMemo(() => {
+    if (!dados.length) return [] as { mes_banco: string; mes_str: string }[];
+    return dados[0].meses.map(m => ({ mes_banco: m.mes_banco, mes_str: m.mes_str }));
+  }, [dados]);
 
-                const mesIndex = (item.meses || []).findIndex(m => m.mes_banco === mes_banco);
-                let novosPontosTopDown = [...(item.grafico?.topdown || [])];
-                
-                if (mesIndex !== -1 && item.grafico?.labels) {
-                    const labelAlvo = item.meses[mesIndex].mes_str;
-                    const labelGraphIndex = item.grafico.labels.findIndex(l => l?.toLowerCase() === labelAlvo?.toLowerCase());
-                    
-                    if (labelGraphIndex !== -1) {
-                        while (novosPontosTopDown.length <= labelGraphIndex) {
-                            novosPontosTopDown.push(null);
-                        }
-                        novosPontosTopDown[labelGraphIndex] = volumeFinal;
-                    }
-                }
+  // Volume "vivo" de um SKU num mês: edição pendente ou valor do banco.
+  const getVolVivo = useCallback((sku: string, mesBanco: string): number => {
+    const editado = celulasEditadas[sku]?.[mesBanco];
+    if (editado !== undefined) return Number(editado);
+    const skuData = dados.find(d => d.sku === sku);
+    const mes = skuData?.meses.find(m => m.mes_banco === mesBanco);
+    return mes?.vol_topdown || 0;
+  }, [celulasEditadas, dados]);
 
-                return {
-                    ...item,
-                    meses: mesesAtualizados,
-                    grafico: {
-                        ...item.grafico,
-                        topdown: novosPontosTopDown
-                    }
-                };
-            }
-            return item;
-        }));
-    };
+  // PMV médio de exibição de um SKU/mês (derivado; base é fat_topdown micro do banco).
+  const getPmvExib = useCallback((sku: string, mesBanco: string): number => {
+    const skuData = dados.find(d => d.sku === sku);
+    const mes = skuData?.meses.find(m => m.mes_banco === mesBanco);
+    if (!mes) return 0;
+    if (mes.vol_topdown > 0) return mes.fat_topdown / mes.vol_topdown;
+    if (mes.vol_ia > 0) return mes.fat_ia / mes.vol_ia;
+    return mes.pmv || 0;
+  }, [dados]);
 
-    const handleSalvarRascunho = async () => {
-        const listaAlteracoes = Object.values(pendingChanges);
-        if (listaAlteracoes.length === 0) return alert("Nenhuma alteração pendente para salvar.");
+  // Faturamento estimado (otimista) de um SKU/mês: vol vivo × PMV médio.
+  // SINALIZADO como estimativa até salvar; o valor exato (micro) vem do backend.
+  const getFatEstimado = useCallback((sku: string, mesBanco: string): number => {
+    return getVolVivo(sku, mesBanco) * getPmvExib(sku, mesBanco);
+  }, [getVolVivo, getPmvExib]);
 
-        setSaving(true);
-        try {
-            await axios.post('/api/v1/topdown/salvar', { alteracoes: listaAlteracoes });
-            setPendingChanges({}); 
-            alert("Rascunho salvo e distribuído proporcionalmente entre os CNPJs!");
-            carregarDados();
-        } catch (err) {
-            console.error(err);
-            alert("Erro ao salvar rascunho.");
-        } finally {
-            setSaving(false);
-        }
-    };
+  const handleEditCell = (sku: string, mesBanco: string, novoVol: number) => {
+    setCelulasEditadas(prev => ({ ...prev, [sku]: { ...(prev[sku] || {}), [mesBanco]: novoVol } }));
+  };
 
-    const handleCongelarEtapa = async () => {
-        if (!window.confirm("Atenção: O congelamento irá propagar os volumes Top-Down para toda a malha operacional. Confirmar fecho da etapa?")) return;
-        
-        setSaving(true);
-        try {
-            await axios.post('/api/v1/topdown/congelar');
-            setStatusEtapa('CONGELADO');
-            alert("Etapa Top-Down trancada com sucesso!");
-            carregarDados();
-        } catch (err) {
-            console.error(err);
-            alert("Erro ao congelar etapa.");
-        } finally {
-            setSaving(false);
-        }
-    };
+  const temPendencia = (sku: string, mesBanco: string) => celulasEditadas[sku]?.[mesBanco] !== undefined;
+  const hasPendingChanges = Object.keys(celulasEditadas).length > 0;
 
-    const getRechartsData = (grafico: any) => {
-        if (!grafico || !grafico.labels) return [];
-        return grafico.labels.map((label: string, idx: number) => ({
-            name: label,
-            realizado: grafico.realizado?.[idx] ?? null,
-            ia: grafico.ia?.[idx] ?? null,
-            lag1: grafico.lag1?.[idx] ?? null,
-            topdown: grafico.topdown?.[idx] ?? null,
-        }));
-    };
-
-    if (loading) return <div className="text-white p-8">A Carregar Arena Top-Down...</div>;
-
-    const hasPendingChanges = Object.keys(pendingChanges).length > 0;
-
-    return (
-        <div className="p-6 bg-slate-900 min-h-screen">
-            
-            <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 bg-slate-800 p-4 rounded-lg border border-slate-700 gap-4">
-                <div>
-                    <h1 className="text-2xl font-bold text-white tracking-tight">Arena Top-Down</h1>
-                    <p className="text-slate-400 text-xs mt-0.5">Ciclo Ativo S&OP: {ciclo} | Visão Direta por SKU</p>
-                </div>
-                
-                <div className="flex items-center gap-3">
-                    {statusEtapa === 'CONGELADO' ? (
-                        <div className="flex items-center bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold px-3 py-2 rounded-lg">
-                            <CheckCircle className="mr-2 w-4 h-4" /> ETAPA CONGELADA NA MALHA
-                        </div>
-                    ) : (
-                        <>
-                            <button
-                                onClick={handleSalvarRascunho}
-                                disabled={saving || !hasPendingChanges}
-                                className={`flex items-center text-sm font-semibold px-4 py-2 rounded-lg transition-colors border ${
-                                    hasPendingChanges 
-                                    ? "bg-slate-700 hover:bg-slate-600 border-slate-500 text-cyan-400" 
-                                    : "bg-slate-800 border-slate-700 text-slate-500 opacity-50 cursor-not-allowed"
-                                }`}
-                            >
-                                <Save className="mr-2 w-4 h-4" /> {saving ? "A Guardar..." : "Salvar Rascunho"}
-                            </button>
-                            <button
-                                onClick={handleCongelarEtapa}
-                                disabled={saving}
-                                className="flex items-center bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors shadow-lg shadow-cyan-600/20 disabled:opacity-50"
-                            >
-                                <Lock className="mr-2 w-4 h-4" /> Congelar Arena
-                            </button>
-                        </>
-                    )}
-                </div>
-            </div>
-
-            <div className="space-y-4">
-                {dados.map(item => (
-                    <div key={item.sku} className="bg-slate-800 rounded-lg shadow border border-slate-700 overflow-hidden">
-                        
-                        <div className="flex flex-col xl:flex-row">
-                            
-                            <div className="w-full xl:w-80 p-4 border-b xl:border-b-0 xl:border-r border-slate-700 flex flex-col justify-center shrink-0">
-                                <h3 className="text-sm font-bold text-white tracking-tight leading-tight">{item.descricao}</h3>
-                                <span className="text-xs text-slate-400 mt-1 font-mono">SKU: {item.sku}</span>
-                                <button 
-                                    onClick={() => toggleGraph(item.sku)} 
-                                    className="mt-4 text-xs flex items-center w-max px-2 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-cyan-400 transition-colors border border-slate-600"
-                                >
-                                    <BarChart2 className="mr-2 w-4 h-4"/> {expandedRows[item.sku] ? "Ocultar Curva" : "Visualizar Gráfico"}
-                                </button>
-                            </div>
-                            
-                            <div className="flex flex-1 overflow-x-auto">
-                                {(item.meses || []).map(mes => (
-                                    <div key={mes.mes_banco} className="w-64 p-4 border-r border-slate-700 shrink-0 bg-slate-800/40">
-                                        
-                                        <div className="text-xs font-bold text-slate-400 tracking-wider uppercase mb-3 border-b border-slate-700/60 pb-1.5">
-                                            {mes.mes_str}
-                                        </div>
-                                        
-                                        <div className="flex items-center justify-between mb-4">
-                                            <span className="text-xs font-semibold text-cyan-400">Volume (Cx)</span>
-                                            <input 
-                                                type="number"
-                                                disabled={statusEtapa === 'CONGELADO'}
-                                                className="bg-slate-900 border border-slate-700 focus:border-cyan-500 rounded px-2.5 py-1 text-sm text-white w-28 text-right focus:outline-none focus:ring-1 focus:ring-cyan-500 font-mono disabled:opacity-50 disabled:cursor-not-allowed"
-                                                value={mes.vol_topdown.toString()} 
-                                                onFocus={(e) => e.target.select()} 
-                                                onChange={(e) => handleInputChange(item.sku, mes.mes_banco, e.target.value)}
-                                            />
-                                        </div>
-                                        
-                                        <div className="space-y-2 pt-1">
-                                            <div className="flex justify-between text-xs">
-                                                <span className="text-slate-400">Faturamento</span>
-                                                <span className="text-slate-100 font-medium font-mono">R$ {formatCurrency(mes.rec_topdown)}</span>
-                                            </div>
-                                            <div className="flex justify-between text-xs">
-                                                <span className="text-slate-500">Orçado (Sku)</span>
-                                                <span className="text-slate-400 font-mono">R$ {formatCurrency(mes.rec_orcada)}</span>
-                                            </div>
-                                            <div className="flex justify-between text-xs pt-2 border-t border-slate-700/60 mt-1">
-                                                <span className="text-slate-400 font-medium">Variação</span>
-                                                <span className={`font-mono font-bold ${mes.variacao >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                                                    {mes.variacao > 0 ? '+' : ''}{(mes.variacao * 100).toFixed(1)}%
-                                                </span>
-                                            </div>
-                                        </div>
-
-                                    </div>
-                                ))}
-                            </div>
-
-                        </div>
-
-                        {expandedRows[item.sku] && (
-                            <div className="p-6 bg-slate-950 border-t border-slate-700">
-                                <div className="h-64 w-full">
-                                    <ResponsiveContainer width="100%" height="100%">
-                                        <LineChart data={getRechartsData(item.grafico)} margin={{ top: 5, right: 30, bottom: 5, left: 0 }}>
-                                            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
-                                            <XAxis dataKey="name" stroke="#64748b" tick={{ fill: '#64748b', fontSize: 12 }} tickLine={false} axisLine={false} />
-                                            <YAxis stroke="#64748b" tick={{ fill: '#64748b', fontSize: 12 }} tickLine={false} axisLine={false} tickFormatter={(val) => new Intl.NumberFormat('pt-BR', { notation: "compact" }).format(val)} />
-                                            <Tooltip 
-                                                contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '8px' }}
-                                                itemStyle={{ fontSize: '13px', fontWeight: '500' }}
-                                                labelStyle={{ color: '#94a3b8', marginBottom: '8px', fontSize: '12px', fontWeight: 'bold' }}
-                                            />
-                                            <Legend wrapperStyle={{ paddingTop: '20px', fontSize: '12px' }} iconType="circle" />
-                                            <Line type="monotone" dataKey="realizado" name="Realizado (Cx)" stroke="#94a3b8" strokeWidth={2} dot={{ r: 4, fill: '#94a3b8', strokeWidth: 0 }} connectNulls />
-                                            <Line type="monotone" dataKey="ia" name="Projeção IA" stroke="#a855f7" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls />
-                                            <Line type="monotone" dataKey="lag1" name="Lag 1 (ant.)" stroke="#f59e0b" strokeWidth={2} strokeDasharray="3 3" dot={false} connectNulls />
-                                            <Line type="monotone" dataKey="topdown" name="Top-Down Simulado" stroke="#22d3ee" strokeWidth={3} dot={{ r: 5, fill: '#22d3ee', strokeWidth: 0 }} activeDot={{ r: 7 }} connectNulls />
-                                        </LineChart>
-                                    </ResponsiveContainer>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                ))}
-            </div>
-        </div>
+  // ===================================================================
+  // ÁRVORE CATEGORIA -> SKU
+  // ===================================================================
+  const arvore = useMemo(() => {
+    const term = busca.toLowerCase();
+    const filtrados = dados.filter(d =>
+      (d.sku + ' ' + d.descricao + ' ' + (d.categoria || '')).toLowerCase().includes(term)
     );
+
+    const cats = new Map<string, any>();
+    filtrados.forEach(sku => {
+      const cat = sku.categoria || 'SEM CATEGORIA';
+      if (!cats.has(cat)) {
+        cats.set(cat, { id: cat, chave: cat, nome: cat, tipo: 'categoria', subRows: [] });
+      }
+      cats.get(cat).subRows.push({
+        id: `${cat}|${sku.sku}`, chave: sku.sku, nome: sku.descricao,
+        produto: sku.sku, tipo: 'produto', grafico: sku.grafico, subRows: undefined
+      });
+    });
+    return Array.from(cats.values());
+  }, [dados, busca]);
+
+  // Volume de um nó (categoria soma os filhos; produto é o vivo).
+  const getNodeVol = useCallback((row: any, mesBanco: string): number => {
+    if (row.tipo === 'produto') return getVolVivo(row.produto, mesBanco);
+    if (row.tipo === 'categoria') return row.subRows.reduce((acc: number, f: any) => acc + getVolVivo(f.produto, mesBanco), 0);
+    return 0;
+  }, [getVolVivo]);
+
+  const getNodeFat = useCallback((row: any, mesBanco: string): number => {
+    if (row.tipo === 'produto') return getFatEstimado(row.produto, mesBanco);
+    if (row.tipo === 'categoria') return row.subRows.reduce((acc: number, f: any) => acc + getFatEstimado(f.produto, mesBanco), 0);
+    return 0;
+  }, [getFatEstimado]);
+
+  const getNodeOrc = useCallback((row: any, mesBanco: string): number => {
+    const somaSku = (produto: string) => {
+      const sk = dados.find(d => d.sku === produto);
+      return sk?.meses.find(m => m.mes_banco === mesBanco)?.rec_orcada || 0;
+    };
+    if (row.tipo === 'produto') return somaSku(row.produto);
+    if (row.tipo === 'categoria') return row.subRows.reduce((acc: number, f: any) => acc + somaSku(f.produto), 0);
+    return 0;
+  }, [dados]);
+
+  const getNodeIa = useCallback((row: any, mesBanco: string): number => {
+    const iaSku = (produto: string) => {
+      const sk = dados.find(d => d.sku === produto);
+      return sk?.meses.find(m => m.mes_banco === mesBanco)?.vol_ia || 0;
+    };
+    if (row.tipo === 'produto') return iaSku(row.produto);
+    if (row.tipo === 'categoria') return row.subRows.reduce((acc: number, f: any) => acc + iaSku(f.produto), 0);
+    return 0;
+  }, [dados]);
+
+  // ===================================================================
+  // CARDS DE KPI (topo): IA / TopDown / Orçamento, consolidado dos 3 meses.
+  // Usa faturamento VIVO (estimado) para refletir edições antes de salvar.
+  // ===================================================================
+  const cards = useMemo(() => {
+    let volTd = 0, fatTd = 0, volIa = 0, fatIa = 0, orc = 0;
+    dados.forEach(sku => {
+      sku.meses.forEach(m => {
+        volTd += getVolVivo(sku.sku, m.mes_banco);
+        fatTd += getFatEstimado(sku.sku, m.mes_banco);
+        volIa += m.vol_ia;
+        fatIa += m.fat_ia;
+        orc += m.rec_orcada;
+      });
+    });
+    return { volTd, fatTd, volIa, fatIa, orc };
+  }, [dados, getVolVivo, getFatEstimado]);
+
+  // ===================================================================
+  // GRÁFICO MACRO: barras por mês (Faturamento TopDown vs IA vs Orçamento).
+  // ===================================================================
+  const chartMacro = useMemo(() => {
+    return mesesDisponiveis.map(mes => {
+      let fatTd = 0, fatIa = 0, orc = 0;
+      dados.forEach(sku => {
+        fatTd += getFatEstimado(sku.sku, mes.mes_banco);
+        const m = sku.meses.find(x => x.mes_banco === mes.mes_banco);
+        fatIa += m?.fat_ia || 0;
+        orc += m?.rec_orcada || 0;
+      });
+      return { name: mes.mes_str, TopDown: Math.round(fatTd), IA: Math.round(fatIa), Orcamento: Math.round(orc) };
+    });
+  }, [dados, mesesDisponiveis, getFatEstimado]);
+
+  // ===================================================================
+  // DOSSIÊ (gráfico histórico) — por SKU direto; por categoria soma os SKUs.
+  // ===================================================================
+  const getDossieData = useCallback((row: any) => {
+    if (row.tipo === 'produto') {
+      const g = row.grafico;
+      if (!g?.labels) return [];
+      return g.labels.map((label: string, i: number) => ({
+        name: label,
+        realizado: g.realizado?.[i] ?? null,
+        ia: g.ia?.[i] ?? null,
+        lag1: g.lag1?.[i] ?? null,
+        topdown: g.topdown?.[i] ?? null,
+      }));
+    }
+    // Categoria: soma as séries dos SKUs filhos, alinhando por label.
+    const filhos = row.subRows || [];
+    if (!filhos.length) return [];
+    const labels = filhos[0].grafico?.labels || [];
+    return labels.map((label: string, i: number) => {
+      const soma = (campo: string) => filhos.reduce((acc: number, f: any) => {
+        const v = f.grafico?.[campo]?.[i];
+        return v === null || v === undefined ? acc : acc + v;
+      }, 0);
+      // Se todos os filhos têm null naquele ponto, mantém null (não desenha).
+      const todosNull = (campo: string) => filhos.every((f: any) => {
+        const v = f.grafico?.[campo]?.[i];
+        return v === null || v === undefined;
+      });
+      return {
+        name: label,
+        realizado: todosNull('realizado') ? null : soma('realizado'),
+        ia: todosNull('ia') ? null : soma('ia'),
+        lag1: todosNull('lag1') ? null : soma('lag1'),
+        topdown: todosNull('topdown') ? null : soma('topdown'),
+      };
+    });
+  }, []);
+
+  const toggleChart = (chave: string) => {
+    setChartExpanded(prev => prev === chave ? null : chave);
+  };
+
+  // ===================================================================
+  // AÇÕES: salvar rascunho e congelar etapa.
+  // ===================================================================
+  const handleSalvar = async () => {
+    const alteracoes = Object.entries(celulasEditadas).flatMap(([sku, meses]) =>
+      Object.entries(meses).map(([mes_banco, novo_vol]) => ({ sku, mes_banco, novo_vol }))
+    );
+    if (!alteracoes.length) return alert('Nenhuma alteração pendente para salvar.');
+
+    setSaving(true);
+    try {
+      await axios.post('/api/v1/topdown/salvar', { alteracoes });
+      alert('Rascunho salvo e rateado (Maior Resto) entre os clientes conforme o peso da IA.');
+      await carregarDados();
+    } catch (e) {
+      console.error(e);
+      alert('Erro ao salvar rascunho.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCongelar = async () => {
+    if (!window.confirm('Congelar o Top-Down? Os volumes serão propagados como PARTIDA para as camadas seguintes (exceto a IA). Cada etapa poderá divergir depois. Confirmar?')) return;
+    if (hasPendingChanges && !window.confirm('Há alterações não salvas. Elas serão perdidas ao congelar. Continuar mesmo assim?')) return;
+
+    setSaving(true);
+    try {
+      await axios.post('/api/v1/topdown/congelar');
+      alert('Etapa Top-Down congelada com sucesso.');
+      await carregarDados();
+    } catch (e) {
+      console.error(e);
+      alert('Erro ao congelar etapa.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // ===================================================================
+  // COLUNAS DA TABELA
+  // ===================================================================
+  const columns = useMemo<ColumnDef<any>[]>(() => {
+    if (!arvore.length) return [];
+
+    const cols: ColumnDef<any>[] = [{
+      id: 'nome',
+      header: 'Categoria > SKU',
+      accessorFn: (row: any) => row.nome,
+      cell: (info: any) => {
+        const row = info.row;
+        const { tipo, nome, produto, chave } = row.original;
+        return (
+          <div style={{ paddingLeft: `${row.depth * 28}px` }} className="flex items-center gap-3 py-2">
+            {row.getCanExpand() ? (
+              <button onClick={row.getToggleExpandedHandler()} className="p-1.5 hover:bg-slate-200 rounded-lg text-slate-500 transition-colors">
+                {row.getIsExpanded() ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+              </button>
+            ) : <div className="w-7" />}
+
+            <button onClick={() => toggleChart(chave)} className={`p-1.5 rounded-lg border transition-all shadow-sm ${chartExpanded === chave ? 'bg-indigo-100 text-indigo-600 border-indigo-200' : 'bg-white hover:bg-slate-50 text-slate-400 border-slate-200'}`} title="Abrir dossiê (histórico 24m)">
+              <BarChart3 className="w-3.5 h-3.5" />
+            </button>
+
+            <div className={`w-8 h-8 flex items-center justify-center rounded-xl shadow-sm border ${tipo === 'categoria' ? 'bg-slate-900 text-white border-slate-800' : 'bg-white text-slate-500 border-slate-200'}`}>
+              {tipo === 'categoria' ? <Layers className="w-3.5 h-3.5" /> : <Package className="w-3.5 h-3.5" />}
+            </div>
+
+            <div className="flex flex-col overflow-hidden">
+              <span className={`text-[13px] truncate ${tipo === 'categoria' ? 'font-black uppercase tracking-tighter' : 'font-bold text-slate-600'}`} title={nome}>{nome}</span>
+              {tipo === 'produto' && <span className="text-[10px] text-slate-400 font-black tracking-widest">{produto}</span>}
+            </div>
+          </div>
+        );
+      }
+    }];
+
+    mesesDisponiveis.forEach(mes => {
+      cols.push({
+        id: `mes_${mes.mes_banco}`,
+        header: mes.mes_str,
+        accessorFn: (row: any) => getNodeVol(row, mes.mes_banco),
+        cell: (info: any) => {
+          const row = info.row.original;
+          const vol = getNodeVol(row, mes.mes_banco);
+          const fat = getNodeFat(row, mes.mes_banco);
+          const orc = getNodeOrc(row, mes.mes_banco);
+          const ia = getNodeIa(row, mes.mes_banco);
+          const pend = row.tipo === 'produto' && temPendencia(row.produto, mes.mes_banco);
+
+          return (
+            <div className="flex flex-col items-center justify-center min-w-[150px]">
+              <div className="w-28 mb-1">
+                {row.tipo === 'produto' ? (
+                  <SmartInput value={vol} disabled={isLocked} onChange={(val) => handleEditCell(row.produto, mes.mes_banco, val)} />
+                ) : (
+                  <div className="font-black text-sm text-center text-slate-900">{formatVolume(vol)}</div>
+                )}
+              </div>
+
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <span className="text-[9px] font-bold bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded shadow-sm" title="Sinal IA (ciclo ativo)">IA: {formatVolume(ia)}</span>
+              </div>
+
+              <div className="flex flex-col items-center mt-1">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] font-bold text-emerald-600" title={pend ? 'Faturamento estimado (salve para o valor exato)' : 'Faturamento previsto (micro)'}>
+                    {pend ? '~' : ''}{formatMoeda(fat)}
+                  </span>
+                  {orc > 0 && <VarBadge atual={fat} orcado={orc} />}
+                </div>
+                {orc > 0 && (
+                  <span className="text-[9px] font-bold text-slate-400 mt-0.5" title="Orçamento financeiro">
+                    Orç: {formatMoeda(orc)}
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        }
+      });
+    });
+
+    return cols;
+  }, [arvore, mesesDisponiveis, chartExpanded, isLocked, getNodeVol, getNodeFat, getNodeOrc, getNodeIa, celulasEditadas]);
+
+  const table = useReactTable({
+    data: arvore,
+    columns,
+    state: { expanded, sorting },
+    onExpandedChange: setExpanded,
+    onSortingChange: setSorting,
+    getSubRows: (row: any) => row.subRows,
+    getCoreRowModel: getCoreRowModel(),
+    getExpandedRowModel: getExpandedRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+  });
+
+  if (loading) {
+    return <div className="min-h-screen bg-[#f8fafc] flex items-center justify-center"><Loader2 className="w-12 h-12 text-indigo-600 animate-spin" /></div>;
+  }
+
+  const varConsolidada = calcVar(cards.fatTd, cards.orc);
+
+  return (
+    <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
+      <div className="max-w-[1600px] mx-auto p-6 lg:p-10">
+
+        {/* ---------- HEADER ---------- */}
+        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6 mb-8 bg-white p-8 rounded-[40px] shadow-sm border border-slate-100 relative overflow-hidden">
+          {isLocked && (
+            <div className="absolute top-0 left-0 w-full text-white text-[10px] font-black py-2 flex justify-center items-center gap-3 tracking-[0.3em] uppercase z-10 bg-emerald-500">
+              <ShieldCheck className="w-4 h-4" /> ETAPA TOP-DOWN CONGELADA
+            </div>
+          )}
+          <div className={isLocked ? 'pt-6' : ''}>
+            <div className="flex items-center gap-4">
+              <div className="p-3 bg-indigo-50 rounded-2xl"><Target className="w-8 h-8 text-indigo-600" /></div>
+              <div>
+                <h1 className="text-3xl font-black text-slate-900 tracking-tighter uppercase">Arena Top-Down</h1>
+                <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Ciclo {ciclo} · Marketing sobre o sinal da IA · Meta = Orçamento</p>
+              </div>
+            </div>
+          </div>
+
+          <div className={`flex items-center gap-4 ${isLocked ? 'pt-6' : ''}`}>
+            {!isLocked && (
+              <>
+                <button onClick={handleSalvar} disabled={saving || !hasPendingChanges}
+                  className={`flex items-center gap-2 font-bold py-3 px-5 rounded-2xl transition-all shadow-sm border ${hasPendingChanges ? 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200' : 'bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed'}`}>
+                  {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Salvar Rascunho
+                </button>
+                <button onClick={handleCongelar} disabled={saving}
+                  className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white font-bold py-3 px-8 rounded-2xl shadow-lg shadow-indigo-600/30 transition-all">
+                  {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />} Congelar Arena
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* ---------- CARDS DE KPI ---------- */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+          {/* Baseline IA */}
+          <div className="p-6 rounded-[32px] shadow-sm bg-white border border-slate-100 flex flex-col justify-between min-h-[170px] hover:-translate-y-1 hover:shadow-md transition-all">
+            <div className="flex justify-between items-start">
+              <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-400">Baseline IA</h3>
+              <div className="p-2 rounded-xl bg-slate-50"><Bot className="w-5 h-5 opacity-70" /></div>
+            </div>
+            <div className="mt-auto pt-4">
+              <p className="text-2xl font-black leading-none tracking-tighter">{formatVolume(cards.volIa)} <span className="text-[10px] opacity-60">CX</span></p>
+              <p className="text-xs font-bold text-slate-400 mt-1">{formatMoeda(cards.fatIa)}</p>
+            </div>
+          </div>
+
+          {/* Proposta Top-Down */}
+          <div className="p-6 rounded-[32px] shadow-sm bg-white border border-slate-100 flex flex-col justify-between min-h-[170px] hover:-translate-y-1 hover:shadow-md transition-all">
+            <div className="flex justify-between items-start">
+              <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-400">Proposta Marketing</h3>
+              <div className="p-2 rounded-xl bg-indigo-50"><Wand2 className="w-5 h-5 text-indigo-500" /></div>
+            </div>
+            <div className="mt-auto pt-4">
+              <p className="text-2xl font-black leading-none tracking-tighter text-indigo-700">{formatVolume(cards.volTd)} <span className="text-[10px] opacity-60">CX</span></p>
+              <p className="text-xs font-bold text-slate-400 mt-1">{formatMoeda(cards.fatTd)}</p>
+            </div>
+          </div>
+
+          {/* Orçamento */}
+          <div className="p-6 rounded-[32px] shadow-sm bg-white border border-slate-100 flex flex-col justify-between min-h-[170px] hover:-translate-y-1 hover:shadow-md transition-all">
+            <div className="flex justify-between items-start">
+              <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-400">Orçamento (Meta)</h3>
+              <div className="p-2 rounded-xl bg-slate-50"><Target className="w-5 h-5 opacity-70" /></div>
+            </div>
+            <div className="mt-auto pt-4">
+              <p className="text-2xl font-black leading-none tracking-tighter">{formatMoeda(cards.orc)}</p>
+              <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase tracking-widest">Compromisso financeiro</p>
+            </div>
+          </div>
+
+          {/* Variação consolidada (KPI-âncora) — card escuro de destaque */}
+          <div className="p-6 rounded-[32px] shadow-sm bg-slate-900 text-white flex flex-col justify-between min-h-[170px] relative overflow-hidden hover:-translate-y-1 hover:shadow-md transition-all">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-bl from-indigo-500/20 to-transparent rounded-full -mr-10 -mt-10 blur-xl" />
+            <div className="flex justify-between items-start z-10">
+              <h3 className="text-[11px] font-black uppercase tracking-widest text-indigo-300">TopDown vs Orçamento</h3>
+              <div className="p-2 rounded-xl bg-slate-800">{varConsolidada >= 0 ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}</div>
+            </div>
+            <div className="mt-auto pt-4 z-10">
+              <p className={`text-3xl font-black leading-none tracking-tighter ${varConsolidada >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {varConsolidada >= 0 ? '+' : ''}{varConsolidada.toFixed(1)}%
+              </p>
+              <p className="text-[10px] font-bold text-slate-400 mt-2 uppercase tracking-widest">
+                {contador.skus_ajustados}/{contador.total_skus} SKUs ajustados
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* ---------- GRÁFICO MACRO (barras por mês) ---------- */}
+        <div className="bg-white rounded-[32px] shadow-sm border border-slate-100 p-8 mb-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-xl"><BarChart3 className="w-5 h-5" /></div>
+            <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest">Faturamento por Mês — Marketing vs IA vs Orçamento</h4>
+          </div>
+          <div className="h-72 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartMacro} margin={{ top: 10, right: 20, bottom: 5, left: 10 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                <XAxis dataKey="name" stroke="#94a3b8" tick={{ fill: '#64748b', fontSize: 12, fontWeight: 700 }} tickLine={false} axisLine={false} />
+                <YAxis stroke="#94a3b8" tick={{ fill: '#64748b', fontSize: 12 }} tickLine={false} axisLine={false} tickFormatter={(v) => new Intl.NumberFormat('pt-BR', { notation: 'compact' }).format(v)} />
+                <Tooltip
+                  contentStyle={{ backgroundColor: '#fff', borderColor: '#e2e8f0', borderRadius: '12px', fontSize: '13px' }}
+                  formatter={(v: any) => formatMoeda(v)}
+                />
+                <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '12px', fontWeight: 700 }} iconType="circle" />
+                <Bar dataKey="IA" name="IA" fill="#cbd5e1" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="TopDown" name="Marketing" fill="#6366f1" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="Orcamento" name="Orçamento" fill="#0f172a" radius={[6, 6, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* ---------- BUSCA + CONTADOR ---------- */}
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 mb-4">
+          <div className="relative flex-1 max-w-md">
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <input
+              value={busca} onChange={(e) => setBusca(e.target.value)}
+              placeholder="Buscar SKU, descrição ou categoria..."
+              className="w-full bg-white border border-slate-200 rounded-2xl pl-11 pr-4 py-3 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm"
+            />
+          </div>
+          <div className="flex items-center gap-2 text-xs font-bold">
+            <span className="bg-white border border-slate-200 text-slate-600 px-3 py-2 rounded-xl shadow-sm">{contador.total_skus} SKUs</span>
+            <span className="bg-indigo-50 border border-indigo-100 text-indigo-600 px-3 py-2 rounded-xl shadow-sm flex items-center gap-1.5"><Check className="w-3.5 h-3.5" /> {contador.skus_ajustados} ajustados</span>
+            <span className="bg-slate-50 border border-slate-200 text-slate-400 px-3 py-2 rounded-xl shadow-sm">{contador.skus_intocados} intocados</span>
+          </div>
+        </div>
+
+        {/* ---------- TABELA ---------- */}
+        <div className="bg-white rounded-[32px] shadow-sm border border-slate-100 overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                {table.getHeaderGroups().map(hg => (
+                  <tr key={hg.id} className="border-b border-slate-100">
+                    {hg.headers.map(header => (
+                      <th key={header.id} onClick={header.column.getToggleSortingHandler()}
+                        className="text-left px-4 py-4 text-[11px] font-black text-slate-400 uppercase tracking-widest cursor-pointer select-none hover:text-slate-600 whitespace-nowrap">
+                        {flexRender(header.column.columnDef.header, header.getContext())}
+                        {{ asc: ' ↑', desc: ' ↓' }[header.column.getIsSorted() as string] ?? ''}
+                      </th>
+                    ))}
+                  </tr>
+                ))}
+              </thead>
+              <tbody>
+                {table.getRowModel().rows.map(row => {
+                  const chave = row.original.chave;
+                  const aberto = chartExpanded === chave;
+                  return (
+                    <React.Fragment key={row.id}>
+                      <tr className={`border-b border-slate-50 transition-colors ${row.original.tipo === 'categoria' ? 'bg-slate-50/50 hover:bg-slate-100/50' : 'hover:bg-indigo-50/30'}`}>
+                        {row.getVisibleCells().map(cell => (
+                          <td key={cell.id} className="px-4">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
+                        ))}
+                      </tr>
+                      {aberto && (
+                        <tr>
+                          <td colSpan={row.getVisibleCells().length} className="bg-slate-50/60 px-8 py-6 border-b border-slate-100">
+                            <div className="flex items-center gap-2 mb-4">
+                              <BarChart3 className="w-4 h-4 text-indigo-500" />
+                              <span className="text-xs font-black text-slate-600 uppercase tracking-widest">Dossiê · Histórico 24 meses · {row.original.nome}</span>
+                            </div>
+                            <div className="h-64 w-full">
+                              <ResponsiveContainer width="100%" height="100%">
+                                <LineChart data={getDossieData(row.original)} margin={{ top: 5, right: 30, bottom: 5, left: 0 }}>
+                                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                                  <XAxis dataKey="name" stroke="#94a3b8" tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} />
+                                  <YAxis stroke="#94a3b8" tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={(v) => new Intl.NumberFormat('pt-BR', { notation: 'compact' }).format(v)} />
+                                  <Tooltip contentStyle={{ backgroundColor: '#fff', borderColor: '#e2e8f0', borderRadius: '12px', fontSize: '13px' }} />
+                                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '12px', fontWeight: 700 }} iconType="circle" />
+                                  <Line type="monotone" dataKey="realizado" name="Realizado (Cx)" stroke="#64748b" strokeWidth={2} dot={{ r: 3 }} connectNulls />
+                                  <Line type="monotone" dataKey="ia" name="IA Oficial" stroke="#a855f7" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls />
+                                  <Line type="monotone" dataKey="lag1" name="Ciclo Anterior" stroke="#f59e0b" strokeWidth={2} strokeDasharray="3 3" dot={false} connectNulls />
+                                  <Line type="monotone" dataKey="topdown" name="Top-Down" stroke="#6366f1" strokeWidth={3} dot={{ r: 4 }} activeDot={{ r: 6 }} connectNulls />
+                                </LineChart>
+                              </ResponsiveContainer>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* ---------- TOTALIZADOR (rodapé) ---------- */}
+        {totais.consolidado && (
+          <div className="mt-8 bg-white rounded-[32px] shadow-sm border border-slate-100 p-8">
+            <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-6">Totalizador · Faturamento previsto vs Orçamento</h4>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+              {totais.por_mes.map(t => (
+                <div key={t.mes_banco} className="p-5 rounded-3xl bg-slate-50 border border-slate-100">
+                  <p className="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3">{t.mes_str}</p>
+                  <p className="text-lg font-black text-slate-900 tracking-tighter">{formatMoeda(t.fat_topdown)}</p>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="text-[10px] font-bold text-slate-400">Orç: {formatMoeda(t.rec_orcada)}</span>
+                    <VarBadge atual={t.fat_topdown} orcado={t.rec_orcada} />
+                  </div>
+                </div>
+              ))}
+              <div className="p-5 rounded-3xl bg-slate-900 text-white relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-bl from-indigo-500/20 to-transparent rounded-full -mr-8 -mt-8 blur-xl" />
+                <p className="text-[11px] font-black text-indigo-300 uppercase tracking-widest mb-3 z-10 relative">Consolidado</p>
+                <p className="text-lg font-black tracking-tighter z-10 relative">{formatMoeda(totais.consolidado.fat_topdown)}</p>
+                <div className="flex items-center gap-2 mt-1 z-10 relative">
+                  <span className="text-[10px] font-bold text-slate-400">Orç: {formatMoeda(totais.consolidado.rec_orcada)}</span>
+                  <VarBadge atual={totais.consolidado.fat_topdown} orcado={totais.consolidado.rec_orcada} />
+                </div>
+              </div>
+            </div>
+            <p className="text-[10px] text-slate-400 font-medium mt-4">
+              Os totais refletem o último rascunho salvo (faturamento micro exato = Σ volume × PMV por cliente). Edições não salvas aparecem como estimativa (~) nas células.
+            </p>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
 }
