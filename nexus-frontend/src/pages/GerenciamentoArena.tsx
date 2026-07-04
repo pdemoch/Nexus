@@ -107,7 +107,7 @@ interface TotalMes {
 // =====================================================================
 // COMPONENTE
 // =====================================================================
-export default function GerenciamentoArena() {
+export default function GerenciamentoArena(_props: { usuarioSessao?: any } = {}) {
   const [dados, setDados] = useState<SkuData[]>([]);
   const [totais, setTotais] = useState<{ por_mes: TotalMes[]; consolidado: TotalMes | null }>({ por_mes: [], consolidado: null });
   const [contador, setContador] = useState({ total_skus: 0, skus_ajustados: 0, skus_intocados: 0 });

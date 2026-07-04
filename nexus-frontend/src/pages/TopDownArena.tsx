@@ -109,7 +109,7 @@ interface TotalMes {
 // =====================================================================
 // COMPONENTE PRINCIPAL
 // =====================================================================
-export default function TopDownArena() {
+export default function TopDownArena(_props: { usuarioSessao?: any } = {}) {
   const [dados, setDados] = useState<SkuData[]>([]);
   const [totais, setTotais] = useState<{ por_mes: TotalMes[]; consolidado: TotalMes | null }>({ por_mes: [], consolidado: null });
   const [contador, setContador] = useState<{ total_skus: number; skus_ajustados: number; skus_intocados: number }>({ total_skus: 0, skus_ajustados: 0, skus_intocados: 0 });
