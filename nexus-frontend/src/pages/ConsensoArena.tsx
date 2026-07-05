@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 import axios from 'axios';
 import {
-  BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
 } from 'recharts';
 
 // =====================================================================
@@ -50,16 +50,8 @@ const DualInput = ({
   const onBlur = () => {
     setFoco(false);
     const num = parseInt(local.replace(/\D/g, ''), 10) || 0;
-    // Só comita se o valor REALMENTE mudou em relação ao que veio do banco.
-    // Evita falso "alterações não salvas" quando o input só recebe foco/blur.
-    if (unidade === 'cx') {
-      setLocal(fmtVol(num));
-      if (num !== Math.round(volume)) onCommitVolume(num);
-    } else {
-      setLocal(fmtVol(num));
-      const valorBanco = Math.round(volume * pmvMedio);
-      if (num !== valorBanco) onCommitValor(num);
-    }
+    if (unidade === 'cx') { setLocal(fmtVol(num)); onCommitVolume(num); }
+    else { setLocal(fmtVol(num)); onCommitValor(num); }
   };
   const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') e.currentTarget.blur(); };
 
@@ -106,7 +98,6 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
   const [escopo, setEscopo] = useState<{ nivel: string; nome: string | null }>({ nivel: '', nome: null });
   const [meuCongelamento, setMeuCongelamento] = useState('ABERTO');
   const [etapaBloqueada, setEtapaBloqueada] = useState(false);
-  const [etapaAnteriorPendente, setEtapaAnteriorPendente] = useState(false);
   const [cadeados, setCadeados] = useState<any[]>([]);
 
   const [loading, setLoading] = useState(true);
@@ -115,7 +106,6 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
   const [expanded, setExpanded] = useState({});
   const [sorting, setSorting] = useState<SortingState>([]);
   const [unidade, setUnidade] = useState<'cx' | 'rs'>('cx');
-  const [chartExpanded, setChartExpanded] = useState<string | null>(null);
 
   // Edições locais por folha: { [id]: novoVol }
   const [edicoes, setEdicoes] = useState<{ [id: number]: number }>({});
@@ -125,7 +115,7 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
   const isCoordenador = escopo.nivel === 'Coordenador';
   const modoHierarquia = isAdmin || isGerente;
 
-  const isLocked = etapaBloqueada || etapaAnteriorPendente || (meuCongelamento === 'CONGELADO' && !isAdmin && !isGerente);
+  const isLocked = etapaBloqueada || (meuCongelamento === 'CONGELADO' && !isAdmin && !isGerente);
 
   const carregar = useCallback(async () => {
     setLoading(true);
@@ -140,7 +130,6 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
       setEscopo(dRes.data.escopo || { nivel: '', nome: null });
       setMeuCongelamento(dRes.data.meu_congelamento || 'ABERTO');
       setEtapaBloqueada(dRes.data.etapa_bloqueada || false);
-      setEtapaAnteriorPendente(dRes.data.etapa_anterior_pendente || false);
       setCadeados(cRes.data.cadeados || []);
       setEdicoes({});
       setExpanded({});
@@ -187,25 +176,6 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
   const refMes = useCallback((node: Node, mes: string): MesNode | undefined => {
     return node.meses.find(m => m.mes_banco === mes);
   }, []);
-
-  // Dossiê histórico (24m): realizado + IA oficial + ciclo anterior, mais a
-  // linha META injetada dinamicamente só em M2-M4 (volume vivo). Sem Marketing.
-  const toggleChart = (chave: string) => setChartExpanded(prev => prev === chave ? null : chave);
-
-  const getDossieData = useCallback((node: Node) => {
-    const g = (node as any).grafico;
-    if (!g?.labels) return [];
-    // Mapa label -> volume vivo da meta, só nos meses editáveis (M2-M4).
-    const metaPorLabel: { [label: string]: number } = {};
-    meses.forEach(mc => { metaPorLabel[mc.mes_str] = volNode(node, mc.mes_banco); });
-    return g.labels.map((label: string, i: number) => ({
-      name: label,
-      realizado: g.realizado?.[i] ?? null,
-      ia: g.ia?.[i] ?? null,
-      lag1: g.lag1?.[i] ?? null,
-      meta: label in metaPorLabel ? metaPorLabel[label] : null,
-    }));
-  }, [meses, volNode]);
 
   // --- editar um nó em CAIXAS: rateia proporcional ao vol_meta atual das folhas ---
   const editarNodeVolume = (node: Node, mes: string, novoTotal: number) => {
@@ -272,18 +242,13 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
 
   // ============ CARDS DE COMANDO ============
   const comando = useMemo(() => {
-    let volMeta = 0, fatMeta = 0, volCom = 0, fatCom = 0, volHist = 0, fatHist = 0;
-    // Orçamento é POR SKU (não por cliente): acumula uma vez por sku×mês.
-    const orcPorSkuMes = new Map<string, number>();
+    let volMeta = 0, fatMeta = 0, volCom = 0, fatCom = 0, orc = 0, volHist = 0, fatHist = 0;
     const percorre = (nodes: Node[]) => {
       nodes.forEach(n => {
         if (n.tipo === 'produto') {
           n.meses.forEach(m => {
             volCom += m.vol_comercial; fatCom += m.fat_comercial;
-            volHist += m.vol_hist; fatHist += m.fat_hist;
-            // dedup do orçamento: chave sku|mes; sobrescreve (mesmo valor).
-            const chave = `${n.produto}|${m.mes_banco}`;
-            orcPorSkuMes.set(chave, m.rec_orcada);
+            orc += m.rec_orcada; volHist += m.vol_hist; fatHist += m.fat_hist;
           });
           meses.forEach(mc => {
             volMeta += volNode(n, mc.mes_banco);
@@ -294,28 +259,22 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
       });
     };
     percorre(dados);
-    let orc = 0;
-    orcPorSkuMes.forEach(v => { orc += v; });
     return { volMeta, fatMeta, volCom, fatCom, orc, volHist, fatHist };
   }, [dados, meses, volNode, fatNode]);
 
   // ============ MACRO (barras por mês: Meta vs Comercial vs Orçamento vs Hist) ============
   const chartMacro = useMemo(() => {
     return meses.map(mc => {
-      let fatMeta = 0, fatCom = 0, fatHist = 0;
-      const orcPorSku = new Map<string, number>();
+      let fatMeta = 0, fatCom = 0, orc = 0, fatHist = 0;
       const percorre = (nodes: Node[]) => nodes.forEach(n => {
         if (n.tipo === 'produto') {
           fatMeta += fatNode(n, mc.mes_banco);
           const m = n.meses.find(x => x.mes_banco === mc.mes_banco);
-          fatCom += m?.fat_comercial || 0; fatHist += m?.fat_hist || 0;
-          if (m && n.produto) orcPorSku.set(n.produto, m.rec_orcada);
+          fatCom += m?.fat_comercial || 0; orc += m?.rec_orcada || 0; fatHist += m?.fat_hist || 0;
         }
         if (n.subRows) percorre(n.subRows);
       });
       percorre(dados);
-      let orc = 0;
-      orcPorSku.forEach(v => { orc += v; });
       return {
         name: mc.mes_str,
         Meta: Math.round(fatMeta), Comercial: Math.round(fatCom),
@@ -375,6 +334,18 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
     } finally { setSaving(false); }
   };
 
+  // Congelar a carteira de um responsável a partir do painel (Admin/Gerente).
+  const congelarResponsavel = async (nomeAlvo: string, nivelAlvo: string) => {
+    if (!window.confirm(`Congelar a carteira de "${nomeAlvo}"? Ela ficará somente-leitura até ser reaberta.`)) return;
+    setSaving(true);
+    try {
+      await axios.post('/api/v1/consensus/micro/congelar', { nome_alvo: nomeAlvo, nivel_alvo: nivelAlvo });
+      await carregar();
+    } catch (e: any) {
+      alert(e.response?.data?.detail || 'Erro ao congelar.');
+    } finally { setSaving(false); }
+  };
+
   const publicarEtapa = async () => {
     const msg = `PUBLICAR A ETAPA DE METAS\n\n` +
       `Isto passa o bastão para o Supply e encerra as edições de todos.\n` +
@@ -406,18 +377,12 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
       accessorFn: (r: any) => r.nome,
       cell: (info: any) => {
         const row = info.row;
-        const { tipo, nome, produto, chave } = row.original;
-        const temDossie = tipo === 'cliente' || tipo === 'produto';
+        const { tipo, nome, produto } = row.original;
         return (
           <div style={{ paddingLeft: `${row.depth * 24}px` }} className="flex items-center gap-2.5 py-2 min-w-[280px]">
             {row.getCanExpand() ? (
               <button onClick={row.getToggleExpandedHandler()} className="p-1 hover:bg-slate-200 rounded-lg text-slate-500">
                 {row.getIsExpanded() ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-              </button>
-            ) : <div className="w-6" />}
-            {temDossie ? (
-              <button onClick={() => toggleChart(chave)} className={`p-1 rounded-lg border transition-all ${chartExpanded === chave ? 'bg-indigo-100 text-indigo-600 border-indigo-200' : 'bg-white hover:bg-slate-50 text-slate-400 border-slate-200'}`} title="Abrir dossiê (histórico 24m)">
-                <BarChart3 className="w-3.5 h-3.5" />
               </button>
             ) : <div className="w-6" />}
             <div className={`w-7 h-7 flex items-center justify-center rounded-lg border ${tipo === 'gerente' || tipo === 'coordenador' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
@@ -443,6 +408,7 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
           const fat = fatNode(node, mc.mes_banco);
           const pmvM = pmvMedioNode(node, mc.mes_banco);
           const ref = refMes(node, mc.mes_banco);
+          const orc = ref?.rec_orcada || 0;
           const com = ref?.vol_comercial || 0;
           const hist = ref?.vol_hist || 0;
           const editavel = !isLocked;
@@ -456,12 +422,12 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
                   onCommitValor={(v) => editarNodeValor(node, mc.mes_banco, v)}
                 />
               </div>
-              {/* Faturamento da meta sempre visível */}
+              {/* Faturamento sempre visível + âncora orçamento */}
               <div className="flex items-center gap-1.5">
                 <span className="text-[10px] font-bold text-emerald-600">{fmtMoeda(fat)}</span>
+                {orc > 0 && <VarBadge atual={fat} base={orc} titulo="Meta vs Orçamento" />}
               </div>
-              {/* Referências desta fase: Comercial (BU) e Realizado ano anterior.
-                  Orçamento vive só nos cards/macro (é por SKU, não por cliente). */}
+              {/* Referências: Comercial e Ano anterior */}
               <div className="flex items-center gap-1.5 text-[9px] font-bold text-slate-400">
                 <span title="Comercial (Bottom-Up)">Com: {fmtVol(com)}</span>
                 <span title="Realizado ano anterior">Ant: {fmtVol(hist)}</span>
@@ -472,7 +438,7 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
       });
     });
     return cols;
-  }, [dados, meses, unidade, isLocked, modoHierarquia, volNode, fatNode, pmvMedioNode, refMes, edicoes, chartExpanded]);
+  }, [dados, meses, unidade, isLocked, modoHierarquia, volNode, fatNode, pmvMedioNode, refMes, edicoes]);
 
   const table = useReactTable({
     data: arvore, columns,
@@ -501,12 +467,7 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
               <ShieldCheck className="w-4 h-4" /> CONSENSO PUBLICADO · BASTÃO NO SUPPLY
             </div>
           )}
-          {etapaAnteriorPendente && !etapaBloqueada && (
-            <div className="absolute top-0 left-0 w-full text-white text-[10px] font-black py-2 flex justify-center items-center gap-3 tracking-[0.3em] uppercase z-10 bg-amber-500">
-              <AlertTriangle className="w-4 h-4" /> O BOTTOM-UP (GERÊNCIA COMERCIAL) AINDA NÃO FOI CONGELADO · EDIÇÃO BLOQUEADA
-            </div>
-          )}
-          {!etapaBloqueada && !etapaAnteriorPendente && meuCongelamento === 'CONGELADO' && !modoHierarquia && (
+          {!etapaBloqueada && meuCongelamento === 'CONGELADO' && !modoHierarquia && (
             <div className="absolute top-0 left-0 w-full text-white text-[10px] font-black py-2 flex justify-center items-center gap-3 tracking-[0.3em] uppercase z-10 bg-indigo-500">
               <Lock className="w-4 h-4" /> SUA CARTEIRA ESTÁ CONGELADA
             </div>
@@ -626,7 +587,7 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
         </div>
 
         {/* PAINEL DE CADEADOS (gerente/admin) */}
-        {modoHierarquia && cadeados.length > 0 && (
+        {modoHierarquia && (
           <div className="bg-white rounded-[32px] shadow-sm border border-slate-100 p-8 mb-8">
             <div className="flex items-center justify-between mb-6">
               <div className="flex items-center gap-3">
@@ -635,26 +596,36 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
               </div>
               <span className="text-sm font-black text-slate-600">{progresso.fechados}/{progresso.total} carteiras congeladas</span>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-              {cadeados.map((c, i) => (
-                <div key={i} className="flex items-center justify-between p-4 rounded-2xl border border-slate-100 bg-slate-50">
-                  <div className="flex items-center gap-2.5">
-                    <div className={`w-8 h-8 flex items-center justify-center rounded-xl ${c.status === 'CONGELADO' ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-200 text-slate-400'}`}>
-                      {c.status === 'CONGELADO' ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+            {cadeados.length === 0 ? (
+              <p className="text-sm text-slate-400 font-medium">Nenhum responsável com carteira neste ciclo.</p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {cadeados.map((c, i) => (
+                  <div key={i} className="flex items-center justify-between p-4 rounded-2xl border border-slate-100 bg-slate-50">
+                    <div className="flex items-center gap-2.5 overflow-hidden">
+                      <div className={`w-8 h-8 flex items-center justify-center rounded-xl shrink-0 ${c.status === 'CONGELADO' ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-200 text-slate-400'}`}>
+                        {c.status === 'CONGELADO' ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+                      </div>
+                      <div className="flex flex-col overflow-hidden">
+                        <span className="text-[12px] font-black text-slate-700 truncate" title={c.nome}>{c.nome}</span>
+                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">{c.nivel} · {c.status === 'CONGELADO' ? (c.quando || 'congelado') : 'aberto'}</span>
+                      </div>
                     </div>
-                    <div className="flex flex-col">
-                      <span className="text-[12px] font-black text-slate-700">{c.nome}</span>
-                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">{c.nivel} · {c.quando || '—'}</span>
-                    </div>
+                    {!etapaBloqueada && (
+                      c.status === 'CONGELADO' ? (
+                        <button onClick={() => reabrir(c.nome)} className="flex items-center gap-1.5 text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-lg hover:bg-amber-100 transition-all shrink-0">
+                          <Unlock className="w-3 h-3" /> Reabrir
+                        </button>
+                      ) : (
+                        <button onClick={() => congelarResponsavel(c.nome, c.nivel)} className="flex items-center gap-1.5 text-[10px] font-black text-indigo-600 bg-indigo-50 border border-indigo-200 px-2.5 py-1.5 rounded-lg hover:bg-indigo-100 transition-all shrink-0">
+                          <Lock className="w-3 h-3" /> Congelar
+                        </button>
+                      )
+                    )}
                   </div>
-                  {c.status === 'CONGELADO' && !etapaBloqueada && (
-                    <button onClick={() => reabrir(c.nome)} className="flex items-center gap-1.5 text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-lg hover:bg-amber-100 transition-all">
-                      <Unlock className="w-3 h-3" /> Reabrir
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -690,44 +661,13 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
                 ))}
               </thead>
               <tbody>
-                {table.getRowModel().rows.map(row => {
-                  const chave = row.original.chave;
-                  const aberto = chartExpanded === chave;
-                  return (
-                    <React.Fragment key={row.id}>
-                      <tr className={`border-b border-slate-50 transition-colors ${row.original.tipo === 'gerente' || row.original.tipo === 'coordenador' ? 'bg-slate-50/50' : 'hover:bg-indigo-50/30'}`}>
-                        {row.getVisibleCells().map(cell => (
-                          <td key={cell.id} className="px-4">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
-                        ))}
-                      </tr>
-                      {aberto && (
-                        <tr>
-                          <td colSpan={row.getVisibleCells().length} className="bg-slate-50/60 px-8 py-6 border-b border-slate-100">
-                            <div className="flex items-center gap-2 mb-4">
-                              <BarChart3 className="w-4 h-4 text-indigo-500" />
-                              <span className="text-xs font-black text-slate-600 uppercase tracking-widest">Dossiê · Histórico 24 meses · {row.original.nome}</span>
-                            </div>
-                            <div className="h-64 w-full">
-                              <ResponsiveContainer width="100%" height="100%">
-                                <LineChart data={getDossieData(row.original)} margin={{ top: 5, right: 30, bottom: 5, left: 0 }}>
-                                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                                  <XAxis dataKey="name" stroke="#94a3b8" tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} />
-                                  <YAxis stroke="#94a3b8" tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={(v) => new Intl.NumberFormat('pt-BR', { notation: 'compact' }).format(v)} />
-                                  <Tooltip contentStyle={{ backgroundColor: '#fff', borderColor: '#e2e8f0', borderRadius: '12px', fontSize: '13px' }} />
-                                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '12px', fontWeight: 700 }} iconType="circle" />
-                                  <Line type="monotone" dataKey="realizado" name="Realizado (Cx)" stroke="#64748b" strokeWidth={2} dot={{ r: 3 }} connectNulls />
-                                  <Line type="monotone" dataKey="ia" name="IA Oficial" stroke="#a855f7" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls />
-                                  <Line type="monotone" dataKey="lag1" name="Ciclo Anterior" stroke="#f59e0b" strokeWidth={2} strokeDasharray="3 3" dot={false} connectNulls />
-                                  <Line type="monotone" dataKey="meta" name="Meta (Consenso)" stroke="#6366f1" strokeWidth={3} dot={{ r: 4 }} activeDot={{ r: 6 }} connectNulls />
-                                </LineChart>
-                              </ResponsiveContainer>
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </React.Fragment>
-                  );
-                })}
+                {table.getRowModel().rows.map(row => (
+                  <tr key={row.id} className={`border-b border-slate-50 transition-colors ${row.original.tipo === 'gerente' || row.original.tipo === 'coordenador' ? 'bg-slate-50/50' : 'hover:bg-indigo-50/30'}`}>
+                    {row.getVisibleCells().map(cell => (
+                      <td key={cell.id} className="px-4">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
+                    ))}
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>

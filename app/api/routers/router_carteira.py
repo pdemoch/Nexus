@@ -1,22 +1,21 @@
-# -*- coding: utf-8 -*-
 """
 =====================================================================
-ROUTER CARTEIRA - ETAPA CONSENSO / METAS (vol_meta)
+ROUTER CARTEIRA — ETAPA CONSENSO / METAS (vol_meta)
 =====================================================================
 Onde o número vira compromisso com nome e sobrenome. Coordenadores e
 Gerentes definem a meta da sua carteira, por VOLUME (caixas) ou por
-VALOR (R$), no nível clientexSKU, dentro da sua hierarquia.
+VALOR (R$), no nível cliente×SKU, dentro da sua hierarquia.
 
 Apoia-se INTEIRAMENTE na fundação rls_metas para tudo que é sensível:
 escopo (quem vê o quê), validação de escrita linha a linha, e cadeados
 por responsável com precedência hierárquica.
 
 Regras-chave desta etapa:
-  * RLS por hierarquia: Gerente vê sua gerência; Coordenador sua coordenação.
-  * Edição em qualquer nível da árvore -> rateio para baixo (Maior Resto).
-  * Input em caixas OU reais; reais converte via PMV micro por linha.
-  * Cadeado individual por responsável; superior reabre; Admin publica a etapa.
-  * A proporção de vol_meta desenhada aqui é a que Supply/Final herdam.
+  • RLS por hierarquia: Gerente vê sua gerência; Coordenador sua coordenação.
+  • Edição em qualquer nível da árvore -> rateio para baixo (Maior Resto).
+  • Input em caixas OU reais; reais converte via PMV micro por linha.
+  • Cadeado individual por responsável; superior reabre; Admin publica a etapa.
+  • A proporção de vol_meta desenhada aqui é a que Supply/Final herdam.
 """
 
 import pandas as pd
@@ -29,8 +28,7 @@ from sqlalchemy import text
 from app.core.database import get_db, engine
 from app.api.routers.router_auth import get_current_user
 from app.api.routers.shared_ibp import (
-    get_current_cycle, get_projection_window, get_previous_cycle,
-    resolver_ciclo_fonte, ciclo_para_date,
+    get_current_cycle, get_projection_window,
 )
 from app.api.routers.rls_metas import (
     exigir_acesso_metas, escopo_usuario, clausula_rls,
@@ -50,7 +48,7 @@ class AjusteMeta(BaseModel):
     # Edição em UMA linha granular (id de fato_ibp_granular) ou por nó agregado.
     # O front envia ids das folhas afetadas + o novo volume já rateado, OU
     # envia um nó agregado e deixa o backend ratear. Suportamos os dois:
-    ids_folhas: Optional[List[int]] = None      # folhas explícitas (clientexsku)
+    ids_folhas: Optional[List[int]] = None      # folhas explícitas (cliente×sku)
     novo_volume: Optional[int] = None           # novo total em CAIXAS
     novo_valor_rs: Optional[float] = None        # novo total em R$ (alternativo)
     mes_projetado: str
@@ -104,18 +102,6 @@ def _mapa_coordenadores_do_gerente(db: Session, gerente_nome: str) -> set:
         WHERE TRIM(gerente_nome) = :g AND supervisor_nome IS NOT NULL AND TRIM(supervisor_nome) != ''
     """), {"g": gerente_nome.strip()}).fetchall()
     return {r.coord for r in rows}
-
-
-def _bottomup_congelado(db: Session, ciclo: str) -> bool:
-    """
-    A etapa ANTERIOR ao Consenso é o BottomUP (Gerenciamento). O Consenso só
-    libera edição para Gerente/Coordenador se o BottomUP estiver CONGELADO.
-    Admin fura essa trava (super-usuário para emergências).
-    """
-    st = db.execute(text("""
-        SELECT status FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'BottomUP'
-    """), {"c": ciclo}).scalar()
-    return st == 'CONGELADO'
 
 
 # =====================================================================
@@ -190,10 +176,15 @@ def get_dados_metas(
             f.mes_projetado::DATE AS mes,
             COALESCE(f.vol_meta, 0)      AS vol_meta,
             COALESCE(f.vol_bottomup, 0)  AS vol_base,
-            COALESCE(f.pmv_aplicado, 0)  AS pmv
+            COALESCE(f.pmv_aplicado, 0)  AS pmv,
+            COALESCE(o.rec_orc, 0)       AS rec_orcada
         FROM fato_ibp_granular f
         JOIN dim_clientes c ON f.cgc = c.cgc
         LEFT JOIN dim_produtos p ON f.sku = p.sku
+        LEFT JOIN (
+            SELECT sku, DATE_TRUNC('month', mes_projetado)::DATE AS mes, SUM(receita_orcamento) AS rec_orc
+            FROM fato_orcamento GROUP BY sku, DATE_TRUNC('month', mes_projetado)::DATE
+        ) o ON o.sku = f.sku AND o.mes = f.mes_projetado::DATE
         WHERE f.ciclo_sop = :ciclo
           AND f.mes_projetado IN (:m2, :m3, :m4)
           AND {rls['where']}
@@ -201,51 +192,29 @@ def get_dados_metas(
     """
     df = pd.read_sql(text(sql), engine, params=params)
 
-    # ORÇAMENTO - somado UMA vez por SKUxmês (nunca por cliente, senão infla
-    # ~N vezes no JOIN granular). Vive só no agregado do portfólio (cards/macro),
-    # como no TopDown e no Bottom-Up. Restringe aos SKUs presentes na carteira.
-    skus_carteira = df["sku"].unique().tolist() if not df.empty else []
-    orcamento_map: Dict[tuple, float] = {}
-    if skus_carteira:
-        orc_rows = db.execute(text("""
-            SELECT sku, DATE_TRUNC('month', mes_projetado)::DATE AS mes, SUM(receita_orcamento) AS rec_orc
-            FROM fato_orcamento
-            WHERE sku = ANY(:skus)
-              AND DATE_TRUNC('month', mes_projetado)::DATE = ANY(CAST(:meses AS DATE[]))
-            GROUP BY sku, DATE_TRUNC('month', mes_projetado)::DATE
-        """), {"skus": skus_carteira, "meses": [m2, m3, m4]}).fetchall()
-        for r in orc_rows:
-            orcamento_map[(str(r.sku), r.mes.strftime("%Y-%m-%d"))] = float(r.rec_orc or 0)
-
-    # Realizado do MESMO período no ano anterior (âncora histórica por clientexsku).
-    # Volume = SUM(qt_pedido); Faturamento = SUM(vl_pedido) REAL da venda -
-    # nunca reconstruído por PMV atual (isso inflava o número).
+    # Realizado do MESMO período no ano anterior (âncora histórica por cliente×sku).
+    # Para cada mês projetado, busca vendas do mesmo mês 12 meses atrás.
     from dateutil.relativedelta import relativedelta as _rd
     meses_hist = {m: (pd.to_datetime(m) - _rd(months=12)).strftime("%Y-%m-%d") for m in [m2, m3, m4]}
     hist_rows = db.execute(text("""
-        SELECT cgc, sku, DATE_TRUNC('month', data_pedido)::DATE AS mes,
-               SUM(qt_pedido) AS vol_real, SUM(vl_pedido) AS fat_real
+        SELECT cgc, sku, DATE_TRUNC('month', data_pedido)::DATE AS mes, SUM(qt_pedido) AS vol_real
         FROM fato_vendas
         WHERE DATE_TRUNC('month', data_pedido)::DATE = ANY(CAST(:meses AS DATE[]))
-          AND qt_pedido > 0
         GROUP BY cgc, sku, DATE_TRUNC('month', data_pedido)::DATE
     """), {"meses": list(meses_hist.values())}).fetchall()
-    # Mapa: (cgc, sku, mes_projetado_atual) -> (vol_real, fat_real) do ano anterior.
+    # Mapa: (cgc, sku, mes_projetado_atual) -> vol_real do ano anterior.
     hist_inv = {v: k for k, v in meses_hist.items()}  # mes_hist -> mes_atual
-    realizado_map: Dict[tuple, tuple] = {}
+    realizado_map: Dict[tuple, float] = {}
     for r in hist_rows:
         mes_hist_str = r.mes.strftime("%Y-%m-%d")
         mes_atual = hist_inv.get(mes_hist_str)
         if mes_atual:
-            realizado_map[(str(r.cgc), str(r.sku), mes_atual)] = (float(r.vol_real or 0), float(r.fat_real or 0))
+            realizado_map[(str(r.cgc), str(r.sku), mes_atual)] = float(r.vol_real or 0)
 
     if df.empty:
-        bu_ok = _bottomup_congelado(db, ciclo)
         return {
             "ciclo_ativo": ciclo, "dados": [], "meses": [],
             "meu_congelamento": "ABERTO", "etapa_bloqueada": etapa_metas_bloqueada(db, ciclo),
-            "bottomup_congelado": bu_ok,
-            "etapa_anterior_pendente": (not bu_ok) and (escopo["funcao"] != NIVEL_ADMIN),
             "escopo": {"nivel": escopo["funcao"], "nome": escopo["nome_responsavel"]},
         }
 
@@ -256,149 +225,111 @@ def get_dados_metas(
         {"mes_banco": m4, "mes_str": pd.to_datetime(m4).strftime("%b/%y").capitalize()},
     ]
 
-    # Anexa o realizado histórico REAL (ano anterior) a cada linha: volume e
-    # faturamento vindos direto da venda (qt_pedido / vl_pedido), não de PMV.
-    df["hist_vol"] = df.apply(
-        lambda r: realizado_map.get((str(r["cgc"]), str(r["sku"]), r["mes"].strftime("%Y-%m-%d")), (0.0, 0.0))[0],
-        axis=1
-    )
-    df["hist_fat"] = df.apply(
-        lambda r: realizado_map.get((str(r["cgc"]), str(r["sku"]), r["mes"].strftime("%Y-%m-%d")), (0.0, 0.0))[1],
+    # Anexa o realizado histórico (ano anterior) a cada linha do df, por chave.
+    df["realizado_hist"] = df.apply(
+        lambda r: realizado_map.get((str(r["cgc"]), str(r["sku"]), r["mes"].strftime("%Y-%m-%d")), 0.0),
         axis=1
     )
 
-    # Monta árvore gerente > coordenador > vendedor > cliente > sku, com as
-    # folhas carregando id + pmv (para conversão financeira no front e rateio).
-    def bloco_meses(sub: pd.DataFrame) -> List[dict]:
+    # =================================================================
+    # MONTAGEM OTIMIZADA DA ÁRVORE (sem refiltrar o DataFrame por nó).
+    # Antes: bloco_meses(sub) refiltrava df em CADA nó (O(nós × linhas)),
+    # inviável para Admin (empresa inteira). Agora pré-agregamos com groupby
+    # vetorizado uma vez e montamos a árvore lendo de dicionários indexados.
+    # =================================================================
+    df["fat_meta"] = df["vol_meta"] * df["pmv"]
+    df["fat_com"] = df["vol_base"] * df["pmv"]
+    df["fat_hist"] = df["realizado_hist"] * df["pmv"]
+    df["mes_str_k"] = df["mes"].dt.strftime("%Y-%m-%d")
+
+    NIVEIS = ["gerente", "coordenador", "vendedor", "cliente", "sku"]
+
+    def agrega_por(chaves: List[str]) -> pd.DataFrame:
+        # Uma única agregação vetorizada para um nível da árvore.
+        g = df.groupby(chaves + ["mes_str_k"], sort=False).agg(
+            vol_meta=("vol_meta", "sum"),
+            fat_meta=("fat_meta", "sum"),
+            vol_com=("vol_base", "sum"),
+            fat_com=("fat_com", "sum"),
+            rec_orc=("rec_orcada", "sum"),
+            vol_hist=("realizado_hist", "sum"),
+            fat_hist=("fat_hist", "sum"),
+        ).reset_index()
+        return g
+
+    # Pré-computa os agregados de cada nível de uma vez (5 groupbys totais,
+    # em vez de dezenas de milhares de filtragens).
+    agg_cache: Dict[tuple, Dict[str, dict]] = {}
+    for i in range(len(NIVEIS)):
+        chaves = NIVEIS[: i + 1]
+        gdf = agrega_por(chaves)
+        for row in gdf.itertuples(index=False):
+            keyvals = tuple(getattr(row, c) for c in chaves)
+            mkey = row.mes_str_k
+            agg_cache.setdefault((tuple(chaves), keyvals), {})[mkey] = {
+                "vol_meta": int(row.vol_meta),
+                "fat_meta": round(float(row.fat_meta), 2),
+                "vol_comercial": int(row.vol_com),
+                "fat_comercial": round(float(row.fat_com), 2),
+                "rec_orcada": round(float(row.rec_orc), 2),
+                "vol_hist": int(row.vol_hist),
+                "fat_hist": round(float(row.fat_hist), 2),
+            }
+
+    def bloco_por_chave(chaves: List[str], keyvals: tuple) -> List[dict]:
+        pormes = agg_cache.get((tuple(chaves), keyvals), {})
         out = []
         for mc in meses_cols:
-            mrows = sub[sub["mes"] == pd.to_datetime(mc["mes_banco"])]
-            vol_meta = int(mrows["vol_meta"].sum())
-            fat_meta = float((mrows["vol_meta"] * mrows["pmv"]).sum())
-            # Comercial (Bottom-Up) - faturamento via PMV micro do ciclo.
-            vol_com = int(mrows["vol_base"].sum())
-            fat_com = float((mrows["vol_base"] * mrows["pmv"]).sum())
-            # Ano anterior - volume e faturamento REAIS da venda (não PMV).
-            vol_hist = int(mrows["hist_vol"].sum())
-            fat_hist = float(mrows["hist_fat"].sum())
-            # Orçamento - somado UMA vez por SKU deste sub-nó (nunca por cliente).
-            skus_no_no = mrows["sku"].unique().tolist()
-            rec_orc = sum(orcamento_map.get((str(s), mc["mes_banco"]), 0.0) for s in skus_no_no)
+            d = pormes.get(mc["mes_banco"], {})
             out.append({
                 "mes_banco": mc["mes_banco"], "mes_str": mc["mes_str"],
-                "vol_meta": vol_meta, "fat_meta": round(fat_meta, 2),
-                "vol_comercial": vol_com, "fat_comercial": round(fat_com, 2),
-                "rec_orcada": round(rec_orc, 2),
-                "vol_hist": vol_hist, "fat_hist": round(fat_hist, 2),
+                "vol_meta": d.get("vol_meta", 0), "fat_meta": d.get("fat_meta", 0.0),
+                "vol_comercial": d.get("vol_comercial", 0), "fat_comercial": d.get("fat_comercial", 0.0),
+                "rec_orcada": d.get("rec_orcada", 0.0),
+                "vol_hist": d.get("vol_hist", 0), "fat_hist": d.get("fat_hist", 0.0),
             })
         return out
 
-    def folhas_por_mes(sub: pd.DataFrame) -> Dict[str, List[dict]]:
-        # Para cada mês, as folhas (id, pmv, vol_meta) - usado no rateio do front.
-        d: Dict[str, List[dict]] = {}
-        for mc in meses_cols:
-            mrows = sub[sub["mes"] == pd.to_datetime(mc["mes_banco"])]
-            d[mc["mes_banco"]] = [
-                {"id": int(r.id), "pmv": float(r.pmv), "vol_meta": int(r.vol_meta)}
-                for r in mrows.itertuples()
-            ]
-        return d
+    # Folhas (id, pmv, vol_meta) por SKU×mês — uma passada, indexada.
+    folhas_idx: Dict[tuple, Dict[str, list]] = {}
+    for r in df.itertuples(index=False):
+        chave_sku = (r.gerente, r.coordenador, r.vendedor, r.cliente, r.sku)
+        folhas_idx.setdefault(chave_sku, {}).setdefault(r.mes_str_k, []).append(
+            {"id": int(r.id), "pmv": float(r.pmv), "vol_meta": int(r.vol_meta)}
+        )
 
-    # =================================================================
-    # DOSSIÊ HISTÓRICO (24m) - realizado, IA oficial (ciclo-fonte), lag1.
-    # SEM Marketing. A linha Meta é injetada dinamicamente no front (M2-M4).
-    # =================================================================
-    ciclo_anterior = get_previous_cycle(db)
-    data_ciclo_ativo = ciclo_para_date(ciclo)
-    dt_ini_graf = (data_ciclo_ativo - pd.DateOffset(months=24)).strftime("%Y-%m-01")
-    dt_fim_graf = m4
+    def folhas_do_sku(keyvals: tuple) -> Dict[str, list]:
+        porm = folhas_idx.get(keyvals, {})
+        return {mc["mes_banco"]: porm.get(mc["mes_banco"], []) for mc in meses_cols}
 
-    from datetime import datetime as _dt
-    meses_eixo = []
-    _cur = _dt.strptime(dt_ini_graf, "%Y-%m-%d").date()
-    _lim = _dt.strptime(dt_fim_graf, "%Y-%m-%d").date()
-    from dateutil.relativedelta import relativedelta as _rd2
-    while _cur <= _lim:
-        meses_eixo.append(_cur)
-        _cur = _cur + _rd2(months=1)
-    labels_eixo = [m.strftime("%b/%y").capitalize() for m in meses_eixo]
-
-    skus_set = df["sku"].unique().tolist()
-    cgcs_set = df["cgc"].unique().tolist()
-
-    # Realizado por (cgc, sku, mes) no eixo.
-    real_rows = db.execute(text("""
-        SELECT cgc, sku, DATE_TRUNC('month', data_pedido)::DATE AS mes, SUM(qt_pedido) AS vol
-        FROM fato_vendas
-        WHERE data_pedido >= CAST(:ini AS DATE) AND data_pedido <= CAST(:fim AS DATE)
-          AND cgc = ANY(:cgcs)
-        GROUP BY cgc, sku, DATE_TRUNC('month', data_pedido)::DATE
-    """), {"ini": dt_ini_graf, "fim": dt_fim_graf, "cgcs": cgcs_set}).fetchall()
-    real_map = {(str(r.cgc), str(r.sku), r.mes.strftime("%Y-%m-%d")): float(r.vol or 0) for r in real_rows}
-
-    # lag1 (ciclo anterior) por (cgc, sku, mes).
-    lag_rows = db.execute(text("""
-        SELECT cgc, sku, mes_projetado::DATE AS mes, SUM(vol_final) AS vol
-        FROM fato_ibp_granular WHERE ciclo_sop = :cant AND cgc = ANY(:cgcs)
-        GROUP BY cgc, sku, mes_projetado
-    """), {"cant": ciclo_anterior, "cgcs": cgcs_set}).fetchall()
-    lag_map = {(str(r.cgc), str(r.sku), r.mes.strftime("%Y-%m-%d")): float(r.vol or 0) for r in lag_rows}
-
-    # IA oficial por mês (regra ciclo-fonte). Agrupa meses por ciclo-fonte.
-    mapa_fonte = {}
-    for m in meses_eixo:
-        cf = resolver_ciclo_fonte(m, ciclo)
-        if cf:
-            mapa_fonte.setdefault(cf, []).append(m.strftime("%Y-%m-%d"))
-    ia_map = {}
-    for cf, ms in mapa_fonte.items():
-        rows_ia = db.execute(text("""
-            SELECT cgc, sku, mes_projetado::DATE AS mes, SUM(vol_ia) AS vol
-            FROM fato_ibp_granular
-            WHERE ciclo_sop = :cf AND cgc = ANY(:cgcs)
-              AND mes_projetado = ANY(CAST(:ms AS DATE[]))
-            GROUP BY cgc, sku, mes_projetado
-        """), {"cf": cf, "cgcs": cgcs_set, "ms": ms}).fetchall()
-        for r in rows_ia:
-            ia_map[(str(r.cgc), str(r.sku), r.mes.strftime("%Y-%m-%d"))] = float(r.vol or 0)
-
-    corte_real = data_ciclo_ativo
-
-    def grafico_de(sub: pd.DataFrame) -> dict:
-        # Soma as séries históricas para o conjunto de (cgc,sku) do sub-nó.
-        pares = sub[["cgc", "sku"]].drop_duplicates().values.tolist()
-        s_real, s_ia, s_lag = [], [], []
-        for m in meses_eixo:
-            mk = m.strftime("%Y-%m-%d")
-            rv = sum(real_map.get((str(c), str(s), mk), 0.0) for c, s in pares)
-            s_real.append(rv if m <= corte_real else None)
-            iv = sum(ia_map.get((str(c), str(s), mk), 0.0) for c, s in pares)
-            s_ia.append(iv if any((str(c), str(s), mk) in ia_map for c, s in pares) else None)
-            lv = sum(lag_map.get((str(c), str(s), mk), 0.0) for c, s in pares)
-            s_lag.append(lv if any((str(c), str(s), mk) in lag_map for c, s in pares) else None)
-        return {"labels": labels_eixo, "realizado": s_real, "ia": s_ia, "lag1": s_lag}
+    # Estrutura hierárquica de chaves únicas (sem refiltrar df).
+    from collections import OrderedDict
+    hier: "OrderedDict" = OrderedDict()
+    for r in df[["gerente", "coordenador", "vendedor", "cliente", "sku", "descricao"]].drop_duplicates().itertuples(index=False):
+        hier.setdefault(r.gerente, OrderedDict()) \
+            .setdefault(r.coordenador, OrderedDict()) \
+            .setdefault(r.vendedor, OrderedDict()) \
+            .setdefault(r.cliente, OrderedDict())[r.sku] = r.descricao
 
     arvore = []
-    for gerente, g_df in df.groupby("gerente"):
+    for gerente, coords in hier.items():
         g_node = {"tipo": "gerente", "nome": gerente, "chave": f"G|{gerente}",
-                  "meses": bloco_meses(g_df), "subRows": []}
-        for coord, c_df in g_df.groupby("coordenador"):
+                  "meses": bloco_por_chave(["gerente"], (gerente,)), "subRows": []}
+        for coord, vends in coords.items():
             c_node = {"tipo": "coordenador", "nome": coord, "chave": f"C|{gerente}|{coord}",
-                      "meses": bloco_meses(c_df), "subRows": []}
-            for vend, v_df in c_df.groupby("vendedor"):
+                      "meses": bloco_por_chave(["gerente", "coordenador"], (gerente, coord)), "subRows": []}
+            for vend, clis in vends.items():
                 v_node = {"tipo": "vendedor", "nome": vend, "chave": f"V|{coord}|{vend}",
-                          "meses": bloco_meses(v_df), "subRows": []}
-                for cli, cli_df in v_df.groupby("cliente"):
+                          "meses": bloco_por_chave(["gerente", "coordenador", "vendedor"], (gerente, coord, vend)), "subRows": []}
+                for cli, skus in clis.items():
                     cli_node = {"tipo": "cliente", "nome": cli, "chave": f"CLI|{vend}|{cli}",
-                                "meses": bloco_meses(cli_df), "grafico": grafico_de(cli_df), "subRows": []}
-                    for sku, s_df in cli_df.groupby("sku"):
-                        desc = s_df["descricao"].iloc[0]
+                                "meses": bloco_por_chave(["gerente", "coordenador", "vendedor", "cliente"], (gerente, coord, vend, cli)), "subRows": []}
+                    for sku, desc in skus.items():
                         sku_node = {
                             "tipo": "produto", "nome": desc, "produto": sku,
                             "chave": f"SKU|{cli}|{sku}",
-                            "meses": bloco_meses(s_df),
-                            "folhas": folhas_por_mes(s_df),
-                            "grafico": grafico_de(s_df),
+                            "meses": bloco_por_chave(NIVEIS, (gerente, coord, vend, cli, sku)),
+                            "folhas": folhas_do_sku((gerente, coord, vend, cli, sku)),
                         }
                         cli_node["subRows"].append(sku_node)
                     v_node["subRows"].append(cli_node)
@@ -406,18 +337,12 @@ def get_dados_metas(
             g_node["subRows"].append(c_node)
         arvore.append(g_node)
 
-    # Bloqueio de precedência: BottomUP precisa estar congelado (Admin fura).
-    bu_ok = _bottomup_congelado(db, ciclo)
-    etapa_anterior_pendente = (not bu_ok) and (escopo["funcao"] != NIVEL_ADMIN)
-
     return {
         "ciclo_ativo": ciclo,
         "meses": meses_cols,
         "dados": arvore,
         "meu_congelamento": "CONGELADO" if esta_congelado_para_usuario(db, escopo, ciclo) else "ABERTO",
         "etapa_bloqueada": etapa_metas_bloqueada(db, ciclo),
-        "bottomup_congelado": bu_ok,
-        "etapa_anterior_pendente": etapa_anterior_pendente,
         "escopo": {"nivel": escopo["funcao"], "nome": escopo["nome_responsavel"]},
     }
 
@@ -433,11 +358,6 @@ async def salvar_metas(payload: PayloadSalvarMetas, db: Session = Depends(get_db
     # Trava de etapa: se o Admin já publicou Metas, ninguém edita.
     if etapa_metas_bloqueada(db, ciclo):
         raise HTTPException(status_code=403, detail="A etapa de Metas já foi publicada pelo Administrador. Edições encerradas.")
-
-    # Trava de PRECEDÊNCIA: BottomUP (etapa anterior) tem de estar congelado.
-    # Admin fura (super-usuário). Gerente/Coordenador aguardam a etapa anterior.
-    if escopo["funcao"] != NIVEL_ADMIN and not _bottomup_congelado(db, ciclo):
-        raise HTTPException(status_code=403, detail="O Bottom-Up (Gerência Comercial) ainda não foi congelado. Aguarde a etapa anterior fechar.")
 
     # Cadeado individual: se a carteira do próprio usuário está congelada, bloqueia
     # (exceto Admin). Superior reabre antes de editar (endpoint /reabrir).
@@ -477,7 +397,7 @@ async def salvar_metas(payload: PayloadSalvarMetas, db: Session = Depends(get_db
                 # PRESERVADO ao reconverter, distribui o valor pela proporção de
                 # FATURAMENTO atual de cada folha (vol_meta*pmv), não de volume,
                 # e converte cada fatia pelo PMV micro da folha. Assim
-                # Σ(caixas_folha x pmv_folha) ≈ valor digitado (erro < 1 cx).
+                # Σ(caixas_folha × pmv_folha) ≈ valor digitado (erro < 1 cx).
                 fat_atual = [(float(r.vol_meta) * float(r.pmv)) for r in rows]
                 soma_fat = sum(fat_atual)
                 vols_eq: List[float] = []
@@ -570,43 +490,54 @@ def status_cadeados(db: Session = Depends(get_db), usuario: dict = Depends(get_c
     ciclo = get_current_cycle(db)
     garantir_tabela_cadeados(db)
 
-    # Gerente vê os cadeados dos seus coordenadores; Admin vê todos.
-    if escopo["ve_tudo"]:
-        rows = db.execute(text("""
-            SELECT nome_responsavel, nivel, status, congelado_por, data_congelamento
+    # Lista TODOS os responsáveis do ciclo (coordenadores e gerentes que têm
+    # carteira), com o status de cadeado de cada um — ABERTO se ainda não
+    # congelou. Assim o painel mostra o progresso completo desde o início,
+    # não só quem já fechou.
+    cadeados_existentes = {
+        r.nome.strip(): r for r in db.execute(text("""
+            SELECT TRIM(nome_responsavel) AS nome, nivel, status, congelado_por, data_congelamento
             FROM controle_metas_responsavel WHERE ciclo_sop = :c
-            ORDER BY nivel, nome_responsavel
         """), {"c": ciclo}).fetchall()
+    }
+
+    # Universo de responsáveis conforme o escopo de quem pergunta.
+    if escopo["ve_tudo"]:
+        resp_rows = db.execute(text("""
+            SELECT DISTINCT TRIM(gerente_nome) AS nome, 'Gerente' AS nivel
+            FROM dim_clientes WHERE gerente_nome IS NOT NULL AND TRIM(gerente_nome) != ''
+            UNION
+            SELECT DISTINCT TRIM(supervisor_nome) AS nome, 'Coordenador' AS nivel
+            FROM dim_clientes WHERE supervisor_nome IS NOT NULL AND TRIM(supervisor_nome) != ''
+        """)).fetchall()
     elif escopo["funcao"] == NIVEL_GERENTE:
         coords = _mapa_coordenadores_do_gerente(db, escopo["nome_responsavel"])
-        nomes = list(coords) + [escopo["nome_responsavel"]]
-        rows = db.execute(text("""
-            SELECT nome_responsavel, nivel, status, congelado_por, data_congelamento
-            FROM controle_metas_responsavel
-            WHERE ciclo_sop = :c AND TRIM(nome_responsavel) = ANY(:nomes)
-            ORDER BY nivel, nome_responsavel
-        """), {"c": ciclo, "nomes": nomes}).fetchall()
+        resp_rows = [type("R", (), {"nome": escopo["nome_responsavel"], "nivel": "Gerente"})()]
+        resp_rows += [type("R", (), {"nome": c, "nivel": "Coordenador"})() for c in sorted(coords)]
     else:
-        # Coordenador vê só o próprio.
-        rows = db.execute(text("""
-            SELECT nome_responsavel, nivel, status, congelado_por, data_congelamento
-            FROM controle_metas_responsavel
-            WHERE ciclo_sop = :c AND TRIM(nome_responsavel) = :n
-        """), {"c": ciclo, "n": escopo["nome_responsavel"]}).fetchall()
+        resp_rows = [type("R", (), {"nome": escopo["nome_responsavel"], "nivel": "Coordenador"})()]
 
-    return {
-        "cadeados": [
-            {"nome": r.nome_responsavel, "nivel": r.nivel, "status": r.status,
-             "por": r.congelado_por,
-             "quando": r.data_congelamento.strftime("%d/%m/%Y %H:%M") if r.data_congelamento else None}
-            for r in rows
-        ],
-        "etapa_bloqueada": etapa_metas_bloqueada(db, ciclo),
-    }
+    cadeados = []
+    for rr in resp_rows:
+        nome = rr.nome.strip()
+        existente = cadeados_existentes.get(nome)
+        if existente:
+            cadeados.append({
+                "nome": nome, "nivel": existente.nivel or rr.nivel,
+                "status": existente.status, "por": existente.congelado_por,
+                "quando": existente.data_congelamento.strftime("%d/%m/%Y %H:%M") if existente.data_congelamento else None,
+            })
+        else:
+            cadeados.append({"nome": nome, "nivel": rr.nivel, "status": "ABERTO", "por": None, "quando": None})
+
+    # Ordena: gerentes primeiro, depois coordenadores, alfabético.
+    cadeados.sort(key=lambda c: (0 if c["nivel"] == "Gerente" else 1, c["nome"]))
+
+    return {"cadeados": cadeados, "etapa_bloqueada": etapa_metas_bloqueada(db, ciclo)}
 
 
 # =====================================================================
-# BLOQUEIO FINAL DA ETAPA (só Admin) - passa o bastão ao Supply
+# BLOQUEIO FINAL DA ETAPA (só Admin) — passa o bastão ao Supply
 # =====================================================================
 @router.post("/publicar-etapa")
 async def publicar_etapa_metas(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
@@ -615,7 +546,7 @@ async def publicar_etapa_metas(db: Session = Depends(get_db), usuario: dict = De
     ciclo = get_current_cycle(db)
 
     try:
-        # Grava a trava de ETAPA (origem='Metas') - o Supply verifica isto.
+        # Grava a trava de ETAPA (origem='Metas') — o Supply verifica isto.
         ja = db.execute(text("""
             SELECT id FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'Metas'
         """), {"c": ciclo}).scalar()
