@@ -1,21 +1,22 @@
+# -*- coding: utf-8 -*-
 """
 =====================================================================
-ROUTER CARTEIRA — ETAPA CONSENSO / METAS (vol_meta)
+ROUTER CARTEIRA - ETAPA CONSENSO / METAS (vol_meta)
 =====================================================================
 Onde o número vira compromisso com nome e sobrenome. Coordenadores e
 Gerentes definem a meta da sua carteira, por VOLUME (caixas) ou por
-VALOR (R$), no nível cliente×SKU, dentro da sua hierarquia.
+VALOR (R$), no nível clientexSKU, dentro da sua hierarquia.
 
 Apoia-se INTEIRAMENTE na fundação rls_metas para tudo que é sensível:
 escopo (quem vê o quê), validação de escrita linha a linha, e cadeados
 por responsável com precedência hierárquica.
 
 Regras-chave desta etapa:
-  • RLS por hierarquia: Gerente vê sua gerência; Coordenador sua coordenação.
-  • Edição em qualquer nível da árvore -> rateio para baixo (Maior Resto).
-  • Input em caixas OU reais; reais converte via PMV micro por linha.
-  • Cadeado individual por responsável; superior reabre; Admin publica a etapa.
-  • A proporção de vol_meta desenhada aqui é a que Supply/Final herdam.
+  * RLS por hierarquia: Gerente vê sua gerência; Coordenador sua coordenação.
+  * Edição em qualquer nível da árvore -> rateio para baixo (Maior Resto).
+  * Input em caixas OU reais; reais converte via PMV micro por linha.
+  * Cadeado individual por responsável; superior reabre; Admin publica a etapa.
+  * A proporção de vol_meta desenhada aqui é a que Supply/Final herdam.
 """
 
 import pandas as pd
@@ -28,7 +29,8 @@ from sqlalchemy import text
 from app.core.database import get_db, engine
 from app.api.routers.router_auth import get_current_user
 from app.api.routers.shared_ibp import (
-    get_current_cycle, get_projection_window,
+    get_current_cycle, get_projection_window, get_previous_cycle,
+    resolver_ciclo_fonte, ciclo_para_date,
 )
 from app.api.routers.rls_metas import (
     exigir_acesso_metas, escopo_usuario, clausula_rls,
@@ -48,7 +50,7 @@ class AjusteMeta(BaseModel):
     # Edição em UMA linha granular (id de fato_ibp_granular) ou por nó agregado.
     # O front envia ids das folhas afetadas + o novo volume já rateado, OU
     # envia um nó agregado e deixa o backend ratear. Suportamos os dois:
-    ids_folhas: Optional[List[int]] = None      # folhas explícitas (cliente×sku)
+    ids_folhas: Optional[List[int]] = None      # folhas explícitas (clientexsku)
     novo_volume: Optional[int] = None           # novo total em CAIXAS
     novo_valor_rs: Optional[float] = None        # novo total em R$ (alternativo)
     mes_projetado: str
@@ -199,7 +201,7 @@ def get_dados_metas(
     """
     df = pd.read_sql(text(sql), engine, params=params)
 
-    # ORÇAMENTO — somado UMA vez por SKU×mês (nunca por cliente, senão infla
+    # ORÇAMENTO - somado UMA vez por SKUxmês (nunca por cliente, senão infla
     # ~N vezes no JOIN granular). Vive só no agregado do portfólio (cards/macro),
     # como no TopDown e no Bottom-Up. Restringe aos SKUs presentes na carteira.
     skus_carteira = df["sku"].unique().tolist() if not df.empty else []
@@ -215,8 +217,8 @@ def get_dados_metas(
         for r in orc_rows:
             orcamento_map[(str(r.sku), r.mes.strftime("%Y-%m-%d"))] = float(r.rec_orc or 0)
 
-    # Realizado do MESMO período no ano anterior (âncora histórica por cliente×sku).
-    # Volume = SUM(qt_pedido); Faturamento = SUM(vl_pedido) REAL da venda —
+    # Realizado do MESMO período no ano anterior (âncora histórica por clientexsku).
+    # Volume = SUM(qt_pedido); Faturamento = SUM(vl_pedido) REAL da venda -
     # nunca reconstruído por PMV atual (isso inflava o número).
     from dateutil.relativedelta import relativedelta as _rd
     meses_hist = {m: (pd.to_datetime(m) - _rd(months=12)).strftime("%Y-%m-%d") for m in [m2, m3, m4]}
@@ -273,13 +275,13 @@ def get_dados_metas(
             mrows = sub[sub["mes"] == pd.to_datetime(mc["mes_banco"])]
             vol_meta = int(mrows["vol_meta"].sum())
             fat_meta = float((mrows["vol_meta"] * mrows["pmv"]).sum())
-            # Comercial (Bottom-Up) — faturamento via PMV micro do ciclo.
+            # Comercial (Bottom-Up) - faturamento via PMV micro do ciclo.
             vol_com = int(mrows["vol_base"].sum())
             fat_com = float((mrows["vol_base"] * mrows["pmv"]).sum())
-            # Ano anterior — volume e faturamento REAIS da venda (não PMV).
+            # Ano anterior - volume e faturamento REAIS da venda (não PMV).
             vol_hist = int(mrows["hist_vol"].sum())
             fat_hist = float(mrows["hist_fat"].sum())
-            # Orçamento — somado UMA vez por SKU deste sub-nó (nunca por cliente).
+            # Orçamento - somado UMA vez por SKU deste sub-nó (nunca por cliente).
             skus_no_no = mrows["sku"].unique().tolist()
             rec_orc = sum(orcamento_map.get((str(s), mc["mes_banco"]), 0.0) for s in skus_no_no)
             out.append({
@@ -292,7 +294,7 @@ def get_dados_metas(
         return out
 
     def folhas_por_mes(sub: pd.DataFrame) -> Dict[str, List[dict]]:
-        # Para cada mês, as folhas (id, pmv, vol_meta) — usado no rateio do front.
+        # Para cada mês, as folhas (id, pmv, vol_meta) - usado no rateio do front.
         d: Dict[str, List[dict]] = {}
         for mc in meses_cols:
             mrows = sub[sub["mes"] == pd.to_datetime(mc["mes_banco"])]
@@ -301,6 +303,80 @@ def get_dados_metas(
                 for r in mrows.itertuples()
             ]
         return d
+
+    # =================================================================
+    # DOSSIÊ HISTÓRICO (24m) - realizado, IA oficial (ciclo-fonte), lag1.
+    # SEM Marketing. A linha Meta é injetada dinamicamente no front (M2-M4).
+    # =================================================================
+    ciclo_anterior = get_previous_cycle(db)
+    data_ciclo_ativo = ciclo_para_date(ciclo)
+    dt_ini_graf = (data_ciclo_ativo - pd.DateOffset(months=24)).strftime("%Y-%m-01")
+    dt_fim_graf = m4
+
+    from datetime import datetime as _dt
+    meses_eixo = []
+    _cur = _dt.strptime(dt_ini_graf, "%Y-%m-%d").date()
+    _lim = _dt.strptime(dt_fim_graf, "%Y-%m-%d").date()
+    from dateutil.relativedelta import relativedelta as _rd2
+    while _cur <= _lim:
+        meses_eixo.append(_cur)
+        _cur = _cur + _rd2(months=1)
+    labels_eixo = [m.strftime("%b/%y").capitalize() for m in meses_eixo]
+
+    skus_set = df["sku"].unique().tolist()
+    cgcs_set = df["cgc"].unique().tolist()
+
+    # Realizado por (cgc, sku, mes) no eixo.
+    real_rows = db.execute(text("""
+        SELECT cgc, sku, DATE_TRUNC('month', data_pedido)::DATE AS mes, SUM(qt_pedido) AS vol
+        FROM fato_vendas
+        WHERE data_pedido >= CAST(:ini AS DATE) AND data_pedido <= CAST(:fim AS DATE)
+          AND cgc = ANY(:cgcs)
+        GROUP BY cgc, sku, DATE_TRUNC('month', data_pedido)::DATE
+    """), {"ini": dt_ini_graf, "fim": dt_fim_graf, "cgcs": cgcs_set}).fetchall()
+    real_map = {(str(r.cgc), str(r.sku), r.mes.strftime("%Y-%m-%d")): float(r.vol or 0) for r in real_rows}
+
+    # lag1 (ciclo anterior) por (cgc, sku, mes).
+    lag_rows = db.execute(text("""
+        SELECT cgc, sku, mes_projetado::DATE AS mes, SUM(vol_final) AS vol
+        FROM fato_ibp_granular WHERE ciclo_sop = :cant AND cgc = ANY(:cgcs)
+        GROUP BY cgc, sku, mes_projetado
+    """), {"cant": ciclo_anterior, "cgcs": cgcs_set}).fetchall()
+    lag_map = {(str(r.cgc), str(r.sku), r.mes.strftime("%Y-%m-%d")): float(r.vol or 0) for r in lag_rows}
+
+    # IA oficial por mês (regra ciclo-fonte). Agrupa meses por ciclo-fonte.
+    mapa_fonte = {}
+    for m in meses_eixo:
+        cf = resolver_ciclo_fonte(m, ciclo)
+        if cf:
+            mapa_fonte.setdefault(cf, []).append(m.strftime("%Y-%m-%d"))
+    ia_map = {}
+    for cf, ms in mapa_fonte.items():
+        rows_ia = db.execute(text("""
+            SELECT cgc, sku, mes_projetado::DATE AS mes, SUM(vol_ia) AS vol
+            FROM fato_ibp_granular
+            WHERE ciclo_sop = :cf AND cgc = ANY(:cgcs)
+              AND mes_projetado = ANY(CAST(:ms AS DATE[]))
+            GROUP BY cgc, sku, mes_projetado
+        """), {"cf": cf, "cgcs": cgcs_set, "ms": ms}).fetchall()
+        for r in rows_ia:
+            ia_map[(str(r.cgc), str(r.sku), r.mes.strftime("%Y-%m-%d"))] = float(r.vol or 0)
+
+    corte_real = data_ciclo_ativo
+
+    def grafico_de(sub: pd.DataFrame) -> dict:
+        # Soma as séries históricas para o conjunto de (cgc,sku) do sub-nó.
+        pares = sub[["cgc", "sku"]].drop_duplicates().values.tolist()
+        s_real, s_ia, s_lag = [], [], []
+        for m in meses_eixo:
+            mk = m.strftime("%Y-%m-%d")
+            rv = sum(real_map.get((str(c), str(s), mk), 0.0) for c, s in pares)
+            s_real.append(rv if m <= corte_real else None)
+            iv = sum(ia_map.get((str(c), str(s), mk), 0.0) for c, s in pares)
+            s_ia.append(iv if any((str(c), str(s), mk) in ia_map for c, s in pares) else None)
+            lv = sum(lag_map.get((str(c), str(s), mk), 0.0) for c, s in pares)
+            s_lag.append(lv if any((str(c), str(s), mk) in lag_map for c, s in pares) else None)
+        return {"labels": labels_eixo, "realizado": s_real, "ia": s_ia, "lag1": s_lag}
 
     arvore = []
     for gerente, g_df in df.groupby("gerente"):
@@ -314,7 +390,7 @@ def get_dados_metas(
                           "meses": bloco_meses(v_df), "subRows": []}
                 for cli, cli_df in v_df.groupby("cliente"):
                     cli_node = {"tipo": "cliente", "nome": cli, "chave": f"CLI|{vend}|{cli}",
-                                "meses": bloco_meses(cli_df), "subRows": []}
+                                "meses": bloco_meses(cli_df), "grafico": grafico_de(cli_df), "subRows": []}
                     for sku, s_df in cli_df.groupby("sku"):
                         desc = s_df["descricao"].iloc[0]
                         sku_node = {
@@ -322,6 +398,7 @@ def get_dados_metas(
                             "chave": f"SKU|{cli}|{sku}",
                             "meses": bloco_meses(s_df),
                             "folhas": folhas_por_mes(s_df),
+                            "grafico": grafico_de(s_df),
                         }
                         cli_node["subRows"].append(sku_node)
                     v_node["subRows"].append(cli_node)
@@ -400,7 +477,7 @@ async def salvar_metas(payload: PayloadSalvarMetas, db: Session = Depends(get_db
                 # PRESERVADO ao reconverter, distribui o valor pela proporção de
                 # FATURAMENTO atual de cada folha (vol_meta*pmv), não de volume,
                 # e converte cada fatia pelo PMV micro da folha. Assim
-                # Σ(caixas_folha × pmv_folha) ≈ valor digitado (erro < 1 cx).
+                # Σ(caixas_folha x pmv_folha) ≈ valor digitado (erro < 1 cx).
                 fat_atual = [(float(r.vol_meta) * float(r.pmv)) for r in rows]
                 soma_fat = sum(fat_atual)
                 vols_eq: List[float] = []
@@ -529,7 +606,7 @@ def status_cadeados(db: Session = Depends(get_db), usuario: dict = Depends(get_c
 
 
 # =====================================================================
-# BLOQUEIO FINAL DA ETAPA (só Admin) — passa o bastão ao Supply
+# BLOQUEIO FINAL DA ETAPA (só Admin) - passa o bastão ao Supply
 # =====================================================================
 @router.post("/publicar-etapa")
 async def publicar_etapa_metas(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
@@ -538,7 +615,7 @@ async def publicar_etapa_metas(db: Session = Depends(get_db), usuario: dict = De
     ciclo = get_current_cycle(db)
 
     try:
-        # Grava a trava de ETAPA (origem='Metas') — o Supply verifica isto.
+        # Grava a trava de ETAPA (origem='Metas') - o Supply verifica isto.
         ja = db.execute(text("""
             SELECT id FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'Metas'
         """), {"c": ciclo}).scalar()
