@@ -281,6 +281,22 @@ export default function TopDownArena(_props: { usuarioSessao?: any } = {}) {
   // DOSSIÊ (gráfico histórico) — por SKU direto; por categoria soma os SKUs.
   // ===================================================================
   const getDossieData = useCallback((row: any) => {
+    // Os 3 ÚLTIMOS pontos do eixo são sempre M2, M3, M4 (eixo vai de -24m até M4).
+    // A linha de planejamento (topdown) só existe nesses 3 pontos e é DINÂMICA
+    // (volume vivo). Nos demais meses fica null. Robusto ao formato do label.
+    const g0 = row.tipo === 'produto' ? row.grafico : (row.subRows?.[0]?.grafico);
+    const totalPts = g0?.labels?.length || 0;
+    const idxPlano = [totalPts - 3, totalPts - 2, totalPts - 1]; // M2, M3, M4
+
+    const planoNoIndice = (i: number): number | null => {
+      const pos = idxPlano.indexOf(i);
+      if (pos < 0) return null;                     // não é M2-M4 -> sem linha
+      const mc = mesesDisponiveis[pos];             // pos 0->M2, 1->M3, 2->M4
+      if (!mc) return null;
+      if (row.tipo === 'produto') return getVolVivo(row.produto, mc.mes_banco);
+      return (row.subRows || []).reduce((acc: number, f: any) => acc + getVolVivo(f.produto, mc.mes_banco), 0);
+    };
+
     if (row.tipo === 'produto') {
       const g = row.grafico;
       if (!g?.labels) return [];
@@ -289,10 +305,9 @@ export default function TopDownArena(_props: { usuarioSessao?: any } = {}) {
         realizado: g.realizado?.[i] ?? null,
         ia: g.ia?.[i] ?? null,
         lag1: g.lag1?.[i] ?? null,
-        topdown: g.topdown?.[i] ?? null,
+        topdown: planoNoIndice(i),
       }));
     }
-    // Categoria: soma as séries dos SKUs filhos, alinhando por label.
     const filhos = row.subRows || [];
     if (!filhos.length) return [];
     const labels = filhos[0].grafico?.labels || [];
@@ -301,7 +316,6 @@ export default function TopDownArena(_props: { usuarioSessao?: any } = {}) {
         const v = f.grafico?.[campo]?.[i];
         return v === null || v === undefined ? acc : acc + v;
       }, 0);
-      // Se todos os filhos têm null naquele ponto, mantém null (não desenha).
       const todosNull = (campo: string) => filhos.every((f: any) => {
         const v = f.grafico?.[campo]?.[i];
         return v === null || v === undefined;
@@ -311,10 +325,10 @@ export default function TopDownArena(_props: { usuarioSessao?: any } = {}) {
         realizado: todosNull('realizado') ? null : soma('realizado'),
         ia: todosNull('ia') ? null : soma('ia'),
         lag1: todosNull('lag1') ? null : soma('lag1'),
-        topdown: todosNull('topdown') ? null : soma('topdown'),
+        topdown: planoNoIndice(i),
       };
     });
-  }, []);
+  }, [mesesDisponiveis, getVolVivo]);
 
   const toggleChart = (chave: string) => {
     setChartExpanded(prev => prev === chave ? null : chave);
@@ -686,7 +700,7 @@ export default function TopDownArena(_props: { usuarioSessao?: any } = {}) {
               </div>
             </div>
             <p className="text-[10px] text-slate-400 font-medium mt-4">
-              Os totais refletem o último rascunho salvo (faturamento micro exato = Σ volume × PMV por cliente). Edições não salvas aparecem como estimativa (~) nas células.
+              Os totais refletem o último rascunho salvo. (faturamento micro exato = Σ volume × PMV por cliente). Edições não salvas aparecem como estimativa (~) nas células.
             </p>
           </div>
         )}

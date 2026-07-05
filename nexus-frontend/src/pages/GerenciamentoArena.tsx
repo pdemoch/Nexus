@@ -238,33 +238,57 @@ export default function GerenciamentoArena(_props: { usuarioSessao?: any } = {})
     });
   }, [dados, mesesDisponiveis, getFatEstimado]);
 
-  // Dossiê: por SKU direto; por categoria soma as séries dos filhos.
+  // Dossiê: históricas do backend; planejamento (topdown/bottomup) só em M2-M4
+  // (os 3 últimos pontos do eixo). bottomup é dinâmico (volume vivo).
   const getDossieData = useCallback((row: any) => {
-    const montar = (g: any) => {
+    const g0 = row.tipo === 'produto' ? row.grafico : (row.subRows?.[0]?.grafico);
+    const totalPts = g0?.labels?.length || 0;
+    const idxPlano = [totalPts - 3, totalPts - 2, totalPts - 1];
+
+    const buNoIndice = (i: number): number | null => {
+      const pos = idxPlano.indexOf(i);
+      if (pos < 0) return null;
+      const mc = mesesDisponiveis[pos];
+      if (!mc) return null;
+      if (row.tipo === 'produto') return getVolVivo(row.produto, mc.mes_banco);
+      return (row.subRows || []).reduce((acc: number, f: any) => acc + getVolVivo(f.produto, mc.mes_banco), 0);
+    };
+    const tdNoIndice = (i: number): number | null => {
+      const pos = idxPlano.indexOf(i);
+      if (pos < 0) return null;
+      const mc = mesesDisponiveis[pos];
+      if (!mc) return null;
+      const tdDe = (node: any) => node.meses?.find((x: any) => x.mes_banco === mc.mes_banco)?.vol_td || 0;
+      if (row.tipo === 'produto') return tdDe(row);
+      return (row.subRows || []).reduce((acc: number, f: any) => acc + tdDe(f), 0);
+    };
+
+    if (row.tipo === 'produto') {
+      const g = row.grafico;
       if (!g?.labels) return [];
       return g.labels.map((label: string, i: number) => ({
         name: label,
         realizado: g.realizado?.[i] ?? null,
         ia: g.ia?.[i] ?? null,
         lag1: g.lag1?.[i] ?? null,
-        topdown: g.topdown?.[i] ?? null,
-        bottomup: g.bottomup?.[i] ?? null,
+        topdown: tdNoIndice(i),
+        bottomup: buNoIndice(i),
       }));
-    };
-    if (row.tipo === 'produto') return montar(row.grafico);
+    }
     const filhos = row.subRows || [];
     if (!filhos.length) return [];
     const labels = filhos[0].grafico?.labels || [];
     return labels.map((label: string, i: number) => {
-      const campos = ['realizado', 'ia', 'lag1', 'topdown', 'bottomup'];
       const obj: any = { name: label };
-      campos.forEach(c => {
+      ['realizado', 'ia', 'lag1'].forEach(c => {
         const todosNull = filhos.every((f: any) => { const v = f.grafico?.[c]?.[i]; return v === null || v === undefined; });
         obj[c] = todosNull ? null : filhos.reduce((acc: number, f: any) => { const v = f.grafico?.[c]?.[i]; return (v === null || v === undefined) ? acc : acc + v; }, 0);
       });
+      obj.topdown = tdNoIndice(i);
+      obj.bottomup = buNoIndice(i);
       return obj;
     });
-  }, []);
+  }, [mesesDisponiveis, getVolVivo]);
 
   const toggleChart = (chave: string) => setChartExpanded(prev => prev === chave ? null : chave);
 
@@ -572,6 +596,41 @@ export default function GerenciamentoArena(_props: { usuarioSessao?: any } = {})
                               <BarChart3 className="w-4 h-4 text-indigo-500" />
                               <span className="text-xs font-black text-slate-600 uppercase tracking-widest">Dossiê · Histórico 24 meses · {row.original.nome}</span>
                             </div>
+                            {/* Cards de contexto: consolidado dos 3 meses do nó expandido */}
+                            {(() => {
+                              const node = row.original;
+                              let vIa = 0, vTd = 0, fTd = 0, vBu = 0, fBu = 0, orc = 0;
+                              mesesDisponiveis.forEach(mc => {
+                                vBu += getNodeVol(node, mc.mes_banco);
+                                fBu += getNodeFat(node, mc.mes_banco);
+                                vTd += getNodeCampo(node, mc.mes_banco, 'vol_td');
+                                fTd += getNodeCampo(node, mc.mes_banco, 'fat_td');
+                                vIa += getNodeCampo(node, mc.mes_banco, 'vol_ia');
+                                orc += getNodeCampo(node, mc.mes_banco, 'rec_orcada');
+                              });
+                              const cardData = [
+                                { label: 'IA', vol: vIa, fat: null as number | null, cor: 'text-slate-500' },
+                                { label: 'Marketing (TD)', vol: vTd, fat: fTd, cor: 'text-slate-600' },
+                                { label: 'Comercial (BU)', vol: vBu, fat: fBu, cor: 'text-indigo-700' },
+                                { label: 'Orçamento', vol: null as number | null, fat: orc, cor: 'text-slate-900' },
+                              ];
+                              const varOrc = orc > 0 ? ((fBu - orc) / orc) * 100 : 0;
+                              return (
+                                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
+                                  {cardData.map((c, ci) => (
+                                    <div key={ci} className="bg-white rounded-2xl border border-slate-100 p-3 shadow-sm">
+                                      <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-1">{c.label}</p>
+                                      {c.vol !== null && <p className={`text-sm font-black tracking-tighter ${c.cor}`}>{formatVolume(c.vol)} <span className="text-[8px] opacity-60">cx</span></p>}
+                                      {c.fat !== null && <p className="text-[10px] font-bold text-slate-400 mt-0.5">{formatMoeda(c.fat)}</p>}
+                                    </div>
+                                  ))}
+                                  <div className="bg-slate-900 text-white rounded-2xl p-3 shadow-sm flex flex-col justify-center">
+                                    <p className="text-[9px] font-black uppercase tracking-widest text-indigo-300 mb-1">BU vs Orç</p>
+                                    <p className={`text-base font-black tracking-tighter ${varOrc >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{varOrc >= 0 ? '+' : ''}{varOrc.toFixed(1)}%</p>
+                                  </div>
+                                </div>
+                              );
+                            })()}
                             <div className="h-64 w-full">
                               <ResponsiveContainer width="100%" height="100%">
                                 <LineChart data={getDossieData(row.original)} margin={{ top: 5, right: 30, bottom: 5, left: 0 }}>
@@ -628,7 +687,7 @@ export default function GerenciamentoArena(_props: { usuarioSessao?: any } = {})
               </div>
             </div>
             <p className="text-[10px] text-slate-400 font-medium mt-4">
-              Os totais refletem o último rascunho salvo (faturamento micro exato = Σ volume × PMV por cliente). Edições não salvas aparecem como estimativa (~) nas células. "Ajustado" = Bottom-Up divergiu do Top-Down.
+              Os totais refletem o último rascunho salvo. (faturamento micro exato = Σ volume × PMV por cliente). Edições não salvas aparecem como estimativa (~) nas células. "Ajustado" = Bottom-Up divergiu do Top-Down.
             </p>
           </div>
         )}
