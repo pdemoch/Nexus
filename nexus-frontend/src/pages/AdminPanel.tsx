@@ -297,10 +297,11 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
                                 className="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-xl focus:ring-amber-500 focus:border-amber-500 block w-full p-3 font-bold outline-none cursor-pointer"
                             >
                                 <option value="">Selecione uma etapa...</option>
-                                <option value="Gerenciamento">Gerenciamento (Consenso Equipa)</option>
-                                <option value="Top-Down Arena">Visão Gerencial (Top-Down)</option>
-                                <option value="Supply Review">Fábrica (Supply Review)</option>
-                                <option value="S&OP-Final">S&OP Global (Dashboard Final)</option>
+                                <option value="TopDown">Top-Down (Marketing)</option>
+                                <option value="BottomUP">Bottom-Up (Gerência Comercial)</option>
+                                <option value="Metas">Metas / Consenso (Vendas)</option>
+                                <option value="Supply">Supply (Fábrica)</option>
+                                <option value="Final">S&OP Global (Final)</option>
                             </select>
                             <button onClick={handleDescongelar} disabled={isUnlocking || !origemDesbloqueio} className="mt-2 w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 text-white py-3.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-md shadow-amber-500/20 disabled:opacity-50">
                                 {isUnlocking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Unlock className="w-4 h-4" />} Forçar Reabertura

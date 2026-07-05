@@ -98,34 +98,33 @@ async def reabrir_ciclo(origem: str, db: Session = Depends(get_db), usuario_loga
         raise HTTPException(status_code=403, detail="Acesso negado.")
 
     ciclo_atual = get_current_cycle(db)
+
+    # Vocabulário canônico de etapas (fonte única do passe de bastão).
+    ETAPAS_VALIDAS = {'TOPDOWN', 'BOTTOMUP', 'METAS', 'SUPPLY', 'FINAL'}
+    origem_norm = origem.strip().upper()
+    if origem_norm not in ETAPAS_VALIDAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Origem inválida: '{origem}'. Use uma das etapas: TopDown, BottomUP, Metas, Supply, Final."
+        )
+
     try:
-        # 1. Lógica especial para o Gerenciamento (Destranca todos os vendedores)
-        if origem.strip().upper() == "GERENCIAMENTO":
-            deletados = db.query(ControleCiclo).filter(
-                ControleCiclo.ciclo_sop == ciclo_atual,
-                ~func.upper(func.trim(ControleCiclo.origem)).in_([
-                    'TOP-DOWN ARENA', 'SUPPLY REVIEW', 'S&OP-FINAL'
-                ])
-            ).delete(synchronize_session=False)
-
-            db.commit()
-
-            if deletados > 0:
-                return {"status": "success", "message": f"Todos os {deletados} bloqueios de Vendedores foram removidos!"}
-            return {"status": "success", "message": "A tela de Gerenciamento já se encontra aberta."}
-
-        # 2. Lógica padrão para as etapas globais
-        cadeado = db.query(ControleCiclo).filter(
+        # Reabrir uma etapa = remover o cadeado (registro CONGELADO) dela.
+        # Todas as etapas são tratadas igual: apaga o registro de trava da etapa.
+        # (No Consenso/Metas, travas por vendedor vivem em estrutura separada e
+        #  serão reabertas por endpoint próprio quando essa etapa for construída.)
+        cadeados = db.query(ControleCiclo).filter(
             ControleCiclo.ciclo_sop == ciclo_atual,
-            func.upper(func.trim(ControleCiclo.origem)) == origem.strip().upper()
-        ).first()
+            func.upper(func.trim(ControleCiclo.origem)) == origem_norm
+        ).all()
 
-        if cadeado:
-            db.delete(cadeado)
+        if cadeados:
+            for c in cadeados:
+                db.delete(c)
             db.commit()
-            return {"status": "success", "message": f"O cadeado de '{origem}' foi removido com sucesso!"}
+            return {"status": "success", "message": f"Etapa '{origem}' reaberta com sucesso ({len(cadeados)} cadeado(s) removido(s))."}
 
-        return {"status": "success", "message": f"A tela de '{origem}' já se encontra aberta."}
+        return {"status": "success", "message": f"A etapa '{origem}' já se encontra aberta."}
 
     except Exception as e:
         db.rollback()

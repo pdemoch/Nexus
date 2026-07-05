@@ -1,488 +1,684 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
-import { useReactTable, getCoreRowModel, flexRender, getExpandedRowModel } from '@tanstack/react-table';
-import { 
-  Check, TrendingUp, Filter, Loader2, ChevronDown, ChevronRight, Lock, LockOpen, Search, X, Store, Package, Users, Download, Activity, Target, ShieldCheck, PieChart, LayoutList, Save
+import {
+  useReactTable, getCoreRowModel, flexRender, getExpandedRowModel,
+  getSortedRowModel, SortingState, ColumnDef
+} from '@tanstack/react-table';
+import {
+  Loader2, ChevronDown, ChevronRight, Lock, Unlock, Search, BarChart3,
+  TrendingUp, TrendingDown, Target, Users, Store, Package, Check, ShieldCheck,
+  Save, Layers, DollarSign, Box, AlertTriangle, History, Briefcase, Sparkles
 } from 'lucide-react';
 import axios from 'axios';
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
+} from 'recharts';
 
-const formatMoeda = (valor: number | string | undefined | null) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Number(valor) || 0);
-const formatVolume = (val: number | string | undefined | null) => Math.round(Number(val) || 0).toLocaleString('pt-BR');
+// =====================================================================
+// HELPERS
+// =====================================================================
+const fmtMoeda = (v: any) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(Number(v) || 0));
+const fmtVol = (v: any) => (Math.round(Number(v) || 0)).toLocaleString('pt-BR');
+const calcVar = (atual: number, base: number) => base > 0 ? ((atual - base) / base) * 100 : 0;
 
-// COMPONENTE DUAL INPUT LARGURA AMPLIADA
-const DualInput = ({ refRS, currentRS, onChange, disabled }: any) => {
-  const [valRS, setValRS] = useState(formatMoeda(currentRS).replace('R$', '').trim());
-  const [valPerc, setValPerc] = useState(refRS > 0 ? ((currentRS / refRS) * 100).toFixed(1) : '0');
-  const [isFocused, setIsFocused] = useState<'RS'|'PERC'|null>(null);
+const VarBadge = ({ atual = 0, base = 0, titulo = 'vs Orçamento' }: { atual?: number, base?: number, titulo?: string }) => {
+  if (base === 0) return null;
+  const v = calcVar(atual, base);
+  const pos = v >= 0;
+  return (
+    <span title={titulo} className={`text-[9px] font-black flex items-center gap-0.5 px-1.5 py-0.5 rounded ${pos ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+      {pos ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />} {Math.abs(v).toFixed(1)}%
+    </span>
+  );
+};
+
+// Input dual: alterna entre CAIXAS e REAIS. Preserva o valor exato.
+const DualInput = ({
+  volume, pmvMedio, disabled, unidade, onCommitVolume, onCommitValor
+}: {
+  volume: number; pmvMedio: number; disabled: boolean; unidade: 'cx' | 'rs';
+  onCommitVolume: (v: number) => void; onCommitValor: (v: number) => void;
+}) => {
+  const valorAtual = unidade === 'cx' ? volume : Math.round(volume * pmvMedio);
+  const [local, setLocal] = useState(fmtVol(valorAtual));
+  const [foco, setFoco] = useState(false);
 
   useEffect(() => {
-    if (!isFocused) {
-      setValRS(formatMoeda(currentRS).replace('R$', '').trim());
-      setValPerc(refRS > 0 ? ((currentRS / refRS) * 100).toFixed(1) : '0');
-    }
-  }, [currentRS, refRS, isFocused]);
+    if (!foco) setLocal(unidade === 'cx' ? fmtVol(volume) : fmtVol(Math.round(volume * pmvMedio)));
+  }, [volume, pmvMedio, unidade, foco]);
 
-  const handleBlurRS = () => {
-    setIsFocused(null);
-    const num = parseInt(valRS.replace(/\D/g, ''), 10) || 0;
-    onChange(num);
+  const onFocus = () => { setFoco(true); setLocal(local.replace(/\./g, '')); };
+  const onBlur = () => {
+    setFoco(false);
+    const num = parseInt(local.replace(/\D/g, ''), 10) || 0;
+    if (unidade === 'cx') { setLocal(fmtVol(num)); onCommitVolume(num); }
+    else { setLocal(fmtVol(num)); onCommitValor(num); }
   };
-
-  const handleBlurPerc = () => {
-    setIsFocused(null);
-    const perc = parseFloat(valPerc.replace(',', '.')) || 0;
-    const num = (perc / 100) * refRS;
-    onChange(num);
-  };
+  const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') e.currentTarget.blur(); };
 
   return (
-    <div className="flex items-center gap-1.5 w-full bg-slate-50 p-1.5 rounded-xl border border-slate-200 shadow-inner">
-      <div className="relative flex-[0.8] flex items-center">
-        <span className="absolute left-1.5 text-[9px] font-black text-slate-400">%</span>
-        <input 
-          type="text" value={valPerc} disabled={disabled}
-          onFocus={() => setIsFocused('PERC')} onBlur={handleBlurPerc} onChange={e => setValPerc(e.target.value)}
-          className={`w-full pl-5 pr-1 py-1.5 rounded-lg text-center text-sm font-black outline-none transition-all ${disabled ? 'bg-transparent text-slate-400 cursor-not-allowed' : 'bg-white text-indigo-700 shadow-sm focus:ring-1 ring-indigo-400'}`}
-          title="% Baseado no Teto da Etapa Superior"
-        />
-      </div>
-      <div className="relative flex-[1.2] flex items-center">
-        <span className="absolute left-1.5 text-[9px] font-black text-slate-400">R$</span>
-        <input 
-          type="text" value={valRS} disabled={disabled}
-          onFocus={() => {setIsFocused('RS'); setValRS(valRS.replace(/\./g, ''));}} onBlur={handleBlurRS} onChange={e => setValRS(e.target.value)}
-          className={`w-full pl-6 pr-1 py-1.5 rounded-lg text-center text-sm font-black outline-none transition-all ${disabled ? 'bg-transparent text-slate-400 cursor-not-allowed' : 'bg-white text-emerald-700 shadow-sm focus:ring-1 ring-emerald-400'}`}
-        />
-      </div>
+    <div className="relative">
+      <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[9px] font-black text-slate-400">{unidade === 'rs' ? 'R$' : ''}</span>
+      <input
+        type="text" value={local} disabled={disabled}
+        onFocus={onFocus} onBlur={onBlur} onKeyDown={onKey} onChange={(e) => setLocal(e.target.value)}
+        className={`w-full text-center rounded-lg py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500
+          ${unidade === 'rs' ? 'pl-6' : ''}
+          ${disabled ? 'text-slate-900 font-black bg-transparent cursor-not-allowed' : 'text-indigo-700 font-black bg-indigo-50 shadow-inner'}`}
+      />
     </div>
   );
 };
 
-export default function ConsensoArena({ usuarioSessao }: { usuarioSessao?: any }) {
-  const role = (usuarioSessao?.funcao || '').toLowerCase();
-  const isGerenteOrAdmin = role.includes('admin') || role.includes('diretoria') || role.includes('gerente');
+// =====================================================================
+// TIPAGEM
+// =====================================================================
+interface MesNode {
+  mes_banco: string; mes_str: string;
+  vol_meta: number; fat_meta: number;
+  vol_comercial: number; fat_comercial: number;
+  rec_orcada: number;
+  vol_hist: number; fat_hist: number;
+}
+interface Folha { id: number; pmv: number; vol_meta: number; }
+interface Node {
+  tipo: 'gerente' | 'coordenador' | 'vendedor' | 'cliente' | 'produto';
+  nome: string; produto?: string; chave: string;
+  meses: MesNode[];
+  folhas?: { [mes: string]: Folha[] };
+  subRows?: Node[];
+}
 
-  const [viewMode, setViewMode] = useState<'carteira' | 'portfolio'>('carteira');
-  const [dadosBrutos, setDadosBrutos] = useState<any[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isInitializing, setIsInitializing] = useState(true); 
-  
-  const [celulasEditadas, setCelulasEditadas] = useState<any>({});
+// =====================================================================
+// COMPONENTE
+// =====================================================================
+export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
+  const [dados, setDados] = useState<Node[]>([]);
+  const [meses, setMeses] = useState<{ mes_banco: string; mes_str: string }[]>([]);
+  const [ciclo, setCiclo] = useState('');
+  const [escopo, setEscopo] = useState<{ nivel: string; nome: string | null }>({ nivel: '', nome: null });
+  const [meuCongelamento, setMeuCongelamento] = useState('ABERTO');
+  const [etapaBloqueada, setEtapaBloqueada] = useState(false);
+  const [cadeados, setCadeados] = useState<any[]>([]);
+
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [busca, setBusca] = useState('');
   const [expanded, setExpanded] = useState({});
-  const [isFechado, setIsFechado] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
-  
-  const [lockedNodes, setLockedNodes] = useState<Set<string>>(new Set());
-  const [lockedTargets, setLockedTargets] = useState<Record<string, Record<string, number>>>({}); 
+  const [sorting, setSorting] = useState<SortingState>([]);
+  const [unidade, setUnidade] = useState<'cx' | 'rs'>('cx');
 
-  const [opcoesBusca, setOpcoesBusca] = useState<{gerentes: string[], coordenadores: string[], vendedores: string[]}>({gerentes: [], coordenadores: [], vendedores: []});
-  const [nomeResponsavel, setNomeResponsavel] = useState('');
+  // Edições locais por folha: { [id]: novoVol }
+  const [edicoes, setEdicoes] = useState<{ [id: number]: number }>({});
 
-  const colunasData = dadosBrutos?.length > 0 ? (dadosBrutos[0]?.subRows[0]?.subRows[0]?.subRows[0]?.subRows[0]?.meses || []) : [];
+  const isAdmin = escopo.nivel === 'Administrador';
+  const isGerente = escopo.nivel === 'Gerente';
+  const isCoordenador = escopo.nivel === 'Coordenador';
+  const modoHierarquia = isAdmin || isGerente;
 
-  useEffect(() => {
-    axios.get('/api/v1/consensus/micro/filtros').then(res => {
-        const opcoes = res.data || {gerentes: [], coordenadores: [], vendedores: []};
-        setOpcoesBusca(opcoes);
-        if (isGerenteOrAdmin && opcoes.gerentes?.length > 0) {
-            setNomeResponsavel(opcoes.gerentes[0]);
-        } else if (!isGerenteOrAdmin && opcoes.coordenadores?.length > 0) {
-            setNomeResponsavel(opcoes.coordenadores[0]);
-        }
-    }).catch(console.error)
-    .finally(() => setIsInitializing(false));
-  }, [isGerenteOrAdmin]);
+  const isLocked = etapaBloqueada || (meuCongelamento === 'CONGELADO' && !isAdmin && !isGerente);
 
-  const fetchData = useCallback(async () => {
-    if (isGerenteOrAdmin && !nomeResponsavel) return; 
-    setIsLoading(true);
+  const carregar = useCallback(async () => {
+    setLoading(true);
     try {
-      const res = await axios.get('/api/v1/consensus/micro', { params: { nome_responsavel: nomeResponsavel }});
-      setDadosBrutos(res.data?.dados || []);
-      setIsFechado(res.data?.is_fechado || false);
-      
-      // Limpa edições antigas para recalcular com base no banco, 
-      // mas preserva 'lockedNodes' e 'lockedTargets' para não resetar o rateio em progresso!
-      setCelulasEditadas({}); 
-      setExpanded({}); 
-      setViewMode('carteira');
-    } catch (e) { console.error(e); } finally { setIsLoading(false); }
-  }, [nomeResponsavel, isGerenteOrAdmin]);
+      const [dRes, cRes] = await Promise.all([
+        axios.get('/api/v1/consensus/micro'),
+        axios.get('/api/v1/consensus/micro/cadeados'),
+      ]);
+      setDados(dRes.data.dados || []);
+      setMeses(dRes.data.meses || []);
+      setCiclo(dRes.data.ciclo_ativo || '');
+      setEscopo(dRes.data.escopo || { nivel: '', nome: null });
+      setMeuCongelamento(dRes.data.meu_congelamento || 'ABERTO');
+      setEtapaBloqueada(dRes.data.etapa_bloqueada || false);
+      setCadeados(cRes.data.cadeados || []);
+      setEdicoes({});
+      setExpanded({});
+    } catch (e) {
+      console.error('Erro ao carregar Consenso:', e);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => { carregar(); }, [carregar]);
 
-  const nodeMap = useMemo(() => {
-    const map: any = {};
-    const traverse = (nodes: any[]) => {
+  const temPend = Object.keys(edicoes).length > 0;
+
+  // --- volume vivo de uma folha (edição ou banco) ---
+  const volFolha = useCallback((f: Folha) => {
+    const e = edicoes[f.id];
+    return e !== undefined ? e : f.vol_meta;
+  }, [edicoes]);
+
+  // --- agrega um nó no mês: soma folhas vivas de todas as subárvores ---
+  const coletaFolhas = useCallback((node: Node, mes: string): Folha[] => {
+    if (node.tipo === 'produto') return node.folhas?.[mes] || [];
+    let acc: Folha[] = [];
+    (node.subRows || []).forEach(s => { acc = acc.concat(coletaFolhas(s, mes)); });
+    return acc;
+  }, []);
+
+  const volNode = useCallback((node: Node, mes: string) => {
+    return coletaFolhas(node, mes).reduce((a, f) => a + volFolha(f), 0);
+  }, [coletaFolhas, volFolha]);
+
+  const fatNode = useCallback((node: Node, mes: string) => {
+    return coletaFolhas(node, mes).reduce((a, f) => a + volFolha(f) * f.pmv, 0);
+  }, [coletaFolhas, volFolha]);
+
+  const pmvMedioNode = useCallback((node: Node, mes: string) => {
+    const folhas = coletaFolhas(node, mes);
+    const v = folhas.reduce((a, f) => a + volFolha(f), 0);
+    const fat = folhas.reduce((a, f) => a + volFolha(f) * f.pmv, 0);
+    return v > 0 ? fat / v : (folhas.length ? folhas[0].pmv : 0);
+  }, [coletaFolhas, volFolha]);
+
+  const refMes = useCallback((node: Node, mes: string): MesNode | undefined => {
+    return node.meses.find(m => m.mes_banco === mes);
+  }, []);
+
+  // --- editar um nó em CAIXAS: rateia proporcional ao vol_meta atual das folhas ---
+  const editarNodeVolume = (node: Node, mes: string, novoTotal: number) => {
+    const folhas = coletaFolhas(node, mes);
+    if (!folhas.length) return;
+    const pesos = folhas.map(f => volFolha(f));
+    const soma = pesos.reduce((a, b) => a + b, 0);
+    const partes = maiorRestoLocal(novoTotal, soma > 0 ? pesos : folhas.map(() => 1));
+    const novo = { ...edicoes };
+    folhas.forEach((f, i) => { novo[f.id] = partes[i]; });
+    setEdicoes(novo);
+  };
+
+  // --- editar um nó em REAIS: distribui por faturamento atual, converte por PMV ---
+  const editarNodeValor = (node: Node, mes: string, novoValorRS: number) => {
+    const folhas = coletaFolhas(node, mes);
+    if (!folhas.length) return;
+    const fatAtual = folhas.map(f => volFolha(f) * f.pmv);
+    const somaFat = fatAtual.reduce((a, b) => a + b, 0);
+    let volsEq: number[];
+    if (somaFat > 0) {
+      volsEq = folhas.map((f, i) => f.pmv > 0 ? (novoValorRS * (fatAtual[i] / somaFat)) / f.pmv : 0);
+    } else {
+      const validas = folhas.filter(f => f.pmv > 0).length || 1;
+      volsEq = folhas.map(f => f.pmv > 0 ? (novoValorRS / validas) / f.pmv : 0);
+    }
+    const totalCx = Math.round(volsEq.reduce((a, b) => a + b, 0));
+    const partes = maiorRestoLocal(totalCx, volsEq);
+    const novo = { ...edicoes };
+    folhas.forEach((f, i) => { novo[f.id] = partes[i]; });
+    setEdicoes(novo);
+  };
+
+  // --- coleta ids+volumes editados para enviar ao backend ---
+  const montarAjustes = () => {
+    // Agrupa por mês não é necessário: enviamos por folha com o novo volume,
+    // mas o backend rateia por nó. Aqui mandamos as folhas afetadas diretamente
+    // como um único ajuste "manual" por conjunto de ids com novo_volume=soma.
+    // Simplificação robusta: um ajuste por folha individual (id única).
+    return Object.entries(edicoes).map(([id, vol]) => ({
+      ids_folhas: [Number(id)],
+      novo_volume: Number(vol),
+      mes_projetado: '',   // não usado quando ids_folhas é explícito por folha
+    }));
+  };
+
+  // ============ ÁRVORE (filtrada por busca) ============
+  const arvore = useMemo(() => {
+    const term = busca.toLowerCase();
+    if (!term) return dados;
+    const filtra = (nodes: Node[]): Node[] => {
+      const out: Node[] = [];
       for (const n of nodes) {
-        map[n.chave_matriz] = n;
-        if (n.subRows) traverse(n.subRows);
+        const selfMatch = (n.nome + ' ' + (n.produto || '')).toLowerCase().includes(term);
+        const kids = n.subRows ? filtra(n.subRows) : undefined;
+        if (selfMatch || (kids && kids.length)) {
+          out.push({ ...n, subRows: kids && kids.length ? kids : n.subRows });
+        }
       }
+      return out;
     };
-    traverse(dadosBrutos);
-    return map;
-  }, [dadosBrutos]);
+    return filtra(dados);
+  }, [dados, busca]);
 
-  const getSimulations = useCallback((node: any, mes: string) => {
-    if (node.tipo === 'produto' || node.tipo === 'produto_macro') {
-      const edit = celulasEditadas[node.chave_matriz]?.[mes];
-      const m = (node.meses || []).find((x: any) => x.mes_banco === mes);
-      const cx = edit !== undefined ? edit.novo_volume : (m?.vol_meta || 0);
-      return { cx, rs: cx * (m?.pmv || 0), base_rs: m?.rec_base || 0 };
-    }
-    const children = (node.subRows || []).map((c: any) => getSimulations(c, mes));
-    return {
-      cx: children.reduce((s: number, c: any) => s + c.cx, 0),
-      rs: children.reduce((s: number, c: any) => s + c.rs, 0),
-      base_rs: children.reduce((s: number, c: any) => s + c.base_rs, 0)
+  // ============ CARDS DE COMANDO ============
+  const comando = useMemo(() => {
+    let volMeta = 0, fatMeta = 0, volCom = 0, fatCom = 0, orc = 0, volHist = 0, fatHist = 0;
+    const percorre = (nodes: Node[]) => {
+      nodes.forEach(n => {
+        if (n.tipo === 'produto') {
+          n.meses.forEach(m => {
+            volCom += m.vol_comercial; fatCom += m.fat_comercial;
+            orc += m.rec_orcada; volHist += m.vol_hist; fatHist += m.fat_hist;
+          });
+          meses.forEach(mc => {
+            volMeta += volNode(n, mc.mes_banco);
+            fatMeta += fatNode(n, mc.mes_banco);
+          });
+        }
+        if (n.subRows) percorre(n.subRows);
+      });
     };
-  }, [celulasEditadas]);
+    percorre(dados);
+    return { volMeta, fatMeta, volCom, fatCom, orc, volHist, fatHist };
+  }, [dados, meses, volNode, fatNode]);
 
-  const handleEditCascade = (chaveNode: string, mes: string, novoValorRS: number) => {
-    if (isFechado) return;
-    setCelulasEditadas((prev: any) => {
-      const next = { ...prev };
-      const target = nodeMap[chaveNode];
-      if (!target) return next;
-
-      const leaves: any[] = [];
-      const getLeaves = (n: any) => { if (n.tipo === 'produto') leaves.push(n); else (n.subRows || []).forEach(getLeaves); };
-      getLeaves(target);
-
-      const totalBase = leaves.reduce((s, l) => s + ((l.meses||[]).find((m:any)=>m.mes_banco===mes)?.rec_base || 0), 0);
-      const fractions = leaves.map(l => {
-          const m = (l.meses||[]).find((x:any)=>x.mes_banco===mes);
-          const weight = m?.rec_base || 0;
-          const targetRS = totalBase > 0 ? (weight / totalBase) * novoValorRS : (1/leaves.length) * novoValorRS;
-          const pmv = m?.pmv || 1;
-          const exactCX = targetRS / pmv;
-          const intCX = Math.floor(exactCX);
-          return { leaf: l, intCX, pmv, rem: (exactCX - intCX) * pmv };
+  // ============ MACRO (barras por mês: Meta vs Comercial vs Orçamento vs Hist) ============
+  const chartMacro = useMemo(() => {
+    return meses.map(mc => {
+      let fatMeta = 0, fatCom = 0, orc = 0, fatHist = 0;
+      const percorre = (nodes: Node[]) => nodes.forEach(n => {
+        if (n.tipo === 'produto') {
+          fatMeta += fatNode(n, mc.mes_banco);
+          const m = n.meses.find(x => x.mes_banco === mc.mes_banco);
+          fatCom += m?.fat_comercial || 0; orc += m?.rec_orcada || 0; fatHist += m?.fat_hist || 0;
+        }
+        if (n.subRows) percorre(n.subRows);
       });
-
-      let currentRS = fractions.reduce((s, i) => s + (i.intCX * i.pmv), 0);
-      fractions.sort((a, b) => b.rem - a.rem);
-      for (let i = 0; i < fractions.length; i++) {
-          if (currentRS + fractions[i].pmv <= novoValorRS + (fractions[i].pmv / 2)) {
-              fractions[i].intCX++; currentRS += fractions[i].pmv;
-          }
-      }
-
-      fractions.forEach(i => {
-          if (!next[i.leaf.chave_matriz]) next[i.leaf.chave_matriz] = {};
-          next[i.leaf.chave_matriz][mes] = { novo_volume: i.intCX };
-      });
-      return next;
+      percorre(dados);
+      return {
+        name: mc.mes_str,
+        Meta: Math.round(fatMeta), Comercial: Math.round(fatCom),
+        Orcamento: Math.round(orc), 'Ano Anterior': Math.round(fatHist),
+      };
     });
+  }, [dados, meses, fatNode]);
+
+  // ============ PROGRESSO DE CADEADOS ============
+  const progresso = useMemo(() => {
+    const total = cadeados.length;
+    const fechados = cadeados.filter(c => c.status === 'CONGELADO').length;
+    return { total, fechados };
+  }, [cadeados]);
+
+  // ============ AÇÕES ============
+  const salvar = async () => {
+    if (!temPend) return alert('Nenhuma alteração pendente.');
+    setSaving(true);
+    try {
+      await axios.post('/api/v1/consensus/micro/salvar', { ajustes: montarAjustes() });
+      await carregar();
+    } catch (e: any) {
+      alert(e.response?.data?.detail || 'Erro ao salvar.');
+    } finally { setSaving(false); }
   };
 
-  const toggleLock = (row: any, isOk: boolean) => {
-    if (!isOk) return alert("Erro de Tolerância! A soma total da equipe superior não está em 100%. Equilibre os valores antes de travar a etapa.");
-    
-    setLockedNodes(prev => {
-        const next = new Set(prev);
-        const chave = row.chave_matriz;
-        
-        if (next.has(chave)) {
-            next.delete(chave);
-        } else {
-            next.add(chave);
-            const targets: any = {};
-            colunasData.forEach((m: any) => {
-                targets[m.mes_banco] = getSimulations(row, m.mes_banco).rs;
-            });
-            setLockedTargets(lt => ({ ...lt, [chave]: targets }));
-        }
-        return next;
-    });
+  const congelar = async (nomeAlvo?: string, nivelAlvo?: string) => {
+    const alvoTxt = nomeAlvo || escopo.nome || 'sua carteira';
+    // Cerimônia: resumo do compromisso antes de confirmar.
+    const totalFat = comando.fatMeta;
+    const varOrc = calcVar(comando.fatMeta, comando.orc);
+    const msg = `CONGELAR ${alvoTxt}\n\n` +
+      `Faturamento comprometido: ${fmtMoeda(totalFat)}\n` +
+      `Variação vs Orçamento: ${varOrc >= 0 ? '+' : ''}${varOrc.toFixed(1)}%\n\n` +
+      `Ao congelar, sua carteira fica somente-leitura. Um superior pode reabri-la se necessário. Confirmar?`;
+    if (!window.confirm(msg)) return;
+    if (temPend && !window.confirm('Há alterações não salvas que serão perdidas. Continuar?')) return;
+
+    setSaving(true);
+    try {
+      await axios.post('/api/v1/consensus/micro/congelar', { nome_alvo: nomeAlvo || null, nivel_alvo: nivelAlvo || null });
+      await carregar();
+    } catch (e: any) {
+      alert(e.response?.data?.detail || 'Erro ao congelar.');
+    } finally { setSaving(false); }
   };
 
-  // Visão Macro 
-  const dadosPortfolio = useMemo(() => {
-    if (viewMode !== 'portfolio') return [];
-    const folhas: any[] = [];
-    const extract = (nodes: any[]) => nodes.forEach(n => { if (n.tipo === 'produto') folhas.push(n); else extract(n.subRows || []); });
-    extract(dadosBrutos);
+  const reabrir = async (nomeAlvo: string) => {
+    if (!window.confirm(`Reabrir a carteira de "${nomeAlvo}"? Ela poderá ser editada novamente.`)) return;
+    setSaving(true);
+    try {
+      await axios.post('/api/v1/consensus/micro/reabrir', { nome_alvo: nomeAlvo });
+      await carregar();
+    } catch (e: any) {
+      alert(e.response?.data?.detail || 'Erro ao reabrir.');
+    } finally { setSaving(false); }
+  };
 
-    const mapa: any = {};
-    folhas.forEach(f => {
-        const cat = f.categoria || 'Geral';
-        const seg = f.segmento || 'Sem Segmento';
-        if (!mapa[cat]) mapa[cat] = { tipo: 'categoria', nome: cat, subRows: {}, chave_matriz: `CAT|${cat}` };
-        if (!mapa[cat].subRows[seg]) mapa[cat].subRows[seg] = { tipo: 'segmento', nome: seg, subRows: {}, chave_matriz: `SEG|${cat}|${seg}` };
+  const publicarEtapa = async () => {
+    const msg = `PUBLICAR A ETAPA DE METAS\n\n` +
+      `Isto passa o bastão para o Supply e encerra as edições de todos.\n` +
+      `${progresso.fechados}/${progresso.total} carteiras congeladas.\n\n` +
+      `Confirmar a publicação do consenso?`;
+    if (!window.confirm(msg)) return;
+    setSaving(true);
+    try {
+      await axios.post('/api/v1/consensus/micro/publicar-etapa');
+      await carregar();
+    } catch (e: any) {
+      alert(e.response?.data?.detail || 'Erro ao publicar etapa.');
+    } finally { setSaving(false); }
+  };
 
-        let skuNode = mapa[cat].subRows[seg].subRows[f.produto];
-        if (!skuNode) {
-            skuNode = { tipo: 'produto_macro', nome: f.nome, produto: f.produto, descricao: f.descricao, chave_matriz: `MACRO|${f.produto}`, meses: colunasData.map((m:any) => ({ mes_banco: m.mes_banco, mes_str: m.mes_str, vol_meta: 0, vol_sim: 0 })) };
-            mapa[cat].subRows[seg].subRows[f.produto] = skuNode;
-        }
-        colunasData.forEach((m:any) => {
-            const mIdx = skuNode.meses.findIndex((x:any) => x.mes_banco === m.mes_banco);
-            const orig = (f.meses || []).find((x:any) => x.mes_banco === m.mes_banco);
-            if (mIdx !== -1 && orig) {
-                skuNode.meses[mIdx].vol_meta += orig.vol_base;
-                skuNode.meses[mIdx].vol_sim += getSimulations(f, m.mes_banco).cx;
-            }
-        });
-    });
+  // ============ COLUNAS ============
+  const columns = useMemo<ColumnDef<any>[]>(() => {
+    if (!dados.length) return [];
+    const iconePorTipo = (t: string) =>
+      t === 'gerente' ? <Briefcase className="w-3.5 h-3.5 text-purple-600" /> :
+      t === 'coordenador' ? <Users className="w-3.5 h-3.5 text-indigo-600" /> :
+      t === 'vendedor' ? <Users className="w-3.5 h-3.5 text-blue-500" /> :
+      t === 'cliente' ? <Store className="w-3.5 h-3.5 text-slate-500" /> :
+      <Package className="w-3.5 h-3.5 text-slate-400" />;
 
-    return Object.values(mapa).map((cat: any) => {
-        const catMesesMapa: any = {};
-        cat.subRows = Object.values(cat.subRows).map((seg: any) => {
-            const segMesesMapa: any = {};
-            seg.subRows = Object.values(seg.subRows);
-            seg.subRows.forEach((sku: any) => {
-                sku.meses.forEach((m: any) => {
-                    if(!segMesesMapa[m.mes_banco]) segMesesMapa[m.mes_banco] = { mes_banco: m.mes_banco, vol_meta: 0, vol_sim: 0 };
-                    segMesesMapa[m.mes_banco].vol_meta += m.vol_meta;
-                    segMesesMapa[m.mes_banco].vol_sim += m.vol_sim;
-                });
-            });
-            seg.meses = Object.values(segMesesMapa);
-            seg.meses.forEach((m: any) => {
-                if(!catMesesMapa[m.mes_banco]) catMesesMapa[m.mes_banco] = { mes_banco: m.mes_banco, vol_meta: 0, vol_sim: 0 };
-                catMesesMapa[m.mes_banco].vol_meta += m.vol_meta;
-                catMesesMapa[m.mes_banco].vol_sim += m.vol_sim;
-            });
-            return seg;
-        });
-        cat.meses = Object.values(catMesesMapa);
-        return cat;
-    });
-  }, [dadosBrutos, viewMode, colunasData, getSimulations]);
-
-  const isSaveBlocked = useMemo(() => {
-    if (!dadosBrutos || dadosBrutos.length === 0) return false;
-    for (const m of (colunasData || [])) {
-      let rs_total = 0; let base_total = 0;
-      dadosBrutos.forEach(ger => {
-          const sim = getSimulations(ger, m.mes_banco);
-          rs_total += sim.rs; base_total += sim.base_rs;
-      });
-      if (base_total > 0) {
-        const percent = (rs_total / base_total) * 100;
-        if (percent < 99 || percent > 101) return true; 
-      }
-    }
-    return false;
-  }, [dadosBrutos, colunasData, getSimulations]);
-
-  const columns = useMemo(() => {
-    if (dadosBrutos.length === 0) return [];
-    
-    const baseCols: any[] = [{
-      id: 'nome', 
-      header: viewMode === 'carteira' ? 'Árvore Comercial (Cascata)' : 'Mix de Portfólio (Leitura)',
-      accessorKey: 'nome', 
+    const cols: ColumnDef<any>[] = [{
+      id: 'nome',
+      header: modoHierarquia ? 'Hierarquia > Cliente > SKU' : 'Cliente > SKU',
+      accessorFn: (r: any) => r.nome,
       cell: (info: any) => {
-        const r = info.row; const t = r.original.tipo;
-        const icon = t === 'gerente' ? <Target className="w-5 h-5 text-purple-600"/> : t === 'coordenador' ? <Users className="w-4 h-4 text-indigo-600"/> : t === 'vendedor' ? <Users className="w-4 h-4 text-blue-500"/> : t === 'cliente' ? <Store className="w-4 h-4 text-slate-500"/> : <Package className="w-4 h-4 text-slate-400"/>;
+        const row = info.row;
+        const { tipo, nome, produto } = row.original;
         return (
-          <div style={{ paddingLeft: `${r.depth * 2}rem` }} className="flex items-start gap-3 py-2 min-w-[350px]">
-            {r.getCanExpand() ? (<button onClick={r.getToggleExpandedHandler()} className="mt-0.5 p-1.5 text-slate-400 hover:bg-slate-100 rounded-lg">{r.getIsExpanded() ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}</button>) : <div className="w-7"/>}
-            <div className="w-8 h-8 rounded-full bg-slate-50 flex items-center justify-center border shadow-sm shrink-0 mt-0.5">{icon}</div>
-            
-            <div className="flex flex-col">
-              {t === 'produto' || t === 'produto_macro' ? (
-                 <>
-                   <span className="text-sm font-black text-slate-700">{r.original.produto}</span>
-                   <span className="text-[10px] font-bold text-slate-400 mt-0.5 whitespace-normal leading-tight max-w-[280px]">{r.original.descricao}</span>
-                 </>
-              ) : (
-                 <span className={`text-sm ${t==='gerente'?'font-black uppercase': t==='coordenador'?'font-bold':'font-medium text-slate-600'} truncate max-w-[280px]`}>{info.getValue()}</span>
-              )}
+          <div style={{ paddingLeft: `${row.depth * 24}px` }} className="flex items-center gap-2.5 py-2 min-w-[280px]">
+            {row.getCanExpand() ? (
+              <button onClick={row.getToggleExpandedHandler()} className="p-1 hover:bg-slate-200 rounded-lg text-slate-500">
+                {row.getIsExpanded() ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+              </button>
+            ) : <div className="w-6" />}
+            <div className={`w-7 h-7 flex items-center justify-center rounded-lg border ${tipo === 'gerente' || tipo === 'coordenador' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
+              {iconePorTipo(tipo)}
+            </div>
+            <div className="flex flex-col overflow-hidden">
+              <span className={`text-[12px] truncate ${tipo === 'produto' ? 'font-bold text-slate-600' : 'font-black text-slate-800'}`} title={nome}>{nome}</span>
+              {produto && <span className="text-[9px] text-slate-400 font-black tracking-widest">{produto}</span>}
             </div>
           </div>
         );
       }
     }];
 
-    colunasData.forEach((m: any) => {
-      baseCols.push({
-        id: `m_${m.mes_banco}`, header: m.mes_str,
+    meses.forEach(mc => {
+      cols.push({
+        id: `mes_${mc.mes_banco}`,
+        header: mc.mes_str,
+        accessorFn: (r: any) => volNode(r, mc.mes_banco),
         cell: (info: any) => {
-          const row = info.row.original; const mStr = m.mes_banco;
-          
-          if (viewMode === 'portfolio') {
-              const d = (row.meses || []).find((x:any)=>x.mes_banco===mStr);
-              return <div className="text-right w-44"><div className="font-black text-slate-800">{formatVolume(d?.vol_sim)} cx</div><div className="text-[10px] text-slate-400">Meta: {formatVolume(d?.vol_meta)} cx</div></div>;
-          }
-
-          const { cx, rs, base_rs } = getSimulations(row, mStr);
-          let parentRefRS = base_rs; 
-          let isOk = false;
-
-          if (row.tipo === 'gerente') {
-              const p = base_rs > 0 ? (rs / base_rs) * 100 : 100;
-              isOk = p >= 99 && p <= 101;
-          } 
-          else if (row.tipo === 'coordenador') {
-              const parts = row.chave_matriz.split('|');
-              const parentKey = `G|${parts[1]}`;
-              const parentNode = nodeMap[parentKey];
-              if (parentNode) {
-                  const parentSim = getSimulations(parentNode, mStr);
-                  parentRefRS = parentSim.base_rs; 
-                  const p = parentSim.base_rs > 0 ? (parentSim.rs / parentSim.base_rs) * 100 : 100;
-                  isOk = p >= 99 && p <= 101; 
-              }
-          } 
-          else if (row.tipo === 'vendedor') {
-              const parts = row.chave_matriz.split('|');
-              const parentKey = `C|${parts[1]}|${parts[2]}`;
-              const parentNode = nodeMap[parentKey];
-              if (parentNode) {
-                  if (lockedNodes.has(parentKey)) {
-                      const target = lockedTargets[parentKey]?.[mStr] || getSimulations(parentNode, mStr).base_rs;
-                      parentRefRS = target; 
-                      const parentSim = getSimulations(parentNode, mStr);
-                      const p = target > 0 ? (parentSim.rs / target) * 100 : 100;
-                      isOk = p >= 99 && p <= 101;
-                  } else {
-                      parentRefRS = getSimulations(parentNode, mStr).base_rs;
-                  }
-              }
-          }
-
-          const isLocked = lockedNodes.has(row.chave_matriz);
-          const isEditableType = row.tipo === 'coordenador' || row.tipo === 'vendedor';
-          
-          let canEdit = false;
-          if (!isFechado && isEditableType) {
-             if (row.tipo === 'coordenador' && !isLocked) canEdit = true;
-             if (row.tipo === 'vendedor') {
-                 const parts = row.chave_matriz.split('|');
-                 const parentKey = `C|${parts[1]}|${parts[2]}`;
-                 if (lockedNodes.has(parentKey) && !isLocked) canEdit = true;
-             }
-          }
+          const node: Node = info.row.original;
+          const vol = volNode(node, mc.mes_banco);
+          const fat = fatNode(node, mc.mes_banco);
+          const pmvM = pmvMedioNode(node, mc.mes_banco);
+          const ref = refMes(node, mc.mes_banco);
+          const orc = ref?.rec_orcada || 0;
+          const com = ref?.vol_comercial || 0;
+          const hist = ref?.vol_hist || 0;
+          const editavel = !isLocked;
 
           return (
-            <div className="flex flex-col items-center w-52">
-                <div className="flex w-full justify-between items-center mb-1 px-1">
-                    <span className="text-[9px] text-slate-400 font-bold uppercase tracking-widest" title="Histórico Base Real">
-                        Hist: {formatMoeda(base_rs)}
-                    </span>
-                    {/* O Botão de trancar fica escondido se isFechado for true */}
-                    {!isFechado && isEditableType && (
-                        <button onClick={()=>toggleLock(row, isOk)} className={`p-1 rounded ${isLocked ? 'bg-rose-100 text-rose-600' : isOk ? 'bg-emerald-100 text-emerald-600 hover:bg-emerald-200 shadow-sm shadow-emerald-400/50' : 'bg-slate-100 text-slate-300 cursor-not-allowed'}`} title={isLocked ? "Desbloquear" : isOk ? "Travar Valor" : "Ajuste o Rateio do nível superior para fechar 100%"}>
-                            {isLocked ? <Lock className="w-3 h-3"/> : <LockOpen className="w-3 h-3"/>}
-                        </button>
-                    )}
-                </div>
-                
-                {isEditableType ? (
-                    <DualInput refRS={parentRefRS} currentRS={rs} disabled={!canEdit} onChange={(val: number) => handleEditCascade(row.chave_matriz, mStr, val)} />
-                ) : (
-                    <div className="w-full text-center py-2 bg-slate-50 rounded-xl border font-black text-slate-700 text-sm shadow-inner">{formatMoeda(rs)}</div>
-                )}
-                
-                <div className="mt-1.5 w-full flex flex-col items-center">
-                    <span className="text-[10px] font-black text-slate-500">{formatVolume(cx)} CX</span>
-                    <div className={`mt-1 h-1 w-[80%] rounded-full transition-colors duration-500 ${isOk ? 'bg-emerald-400' : 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.5)]'}`} />
-                </div>
+            <div className="flex flex-col items-center min-w-[150px] gap-1">
+              <div className="w-32">
+                <DualInput
+                  volume={vol} pmvMedio={pmvM} disabled={!editavel} unidade={unidade}
+                  onCommitVolume={(v) => editarNodeVolume(node, mc.mes_banco, v)}
+                  onCommitValor={(v) => editarNodeValor(node, mc.mes_banco, v)}
+                />
+              </div>
+              {/* Faturamento sempre visível + âncora orçamento */}
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] font-bold text-emerald-600">{fmtMoeda(fat)}</span>
+                {orc > 0 && <VarBadge atual={fat} base={orc} titulo="Meta vs Orçamento" />}
+              </div>
+              {/* Referências: Comercial e Ano anterior */}
+              <div className="flex items-center gap-1.5 text-[9px] font-bold text-slate-400">
+                <span title="Comercial (Bottom-Up)">Com: {fmtVol(com)}</span>
+                <span title="Realizado ano anterior">Ant: {fmtVol(hist)}</span>
+              </div>
             </div>
           );
         }
       });
     });
-    return baseCols;
-  }, [viewMode, colunasData, getSimulations, lockedNodes, isFechado, nodeMap, lockedTargets]);
+    return cols;
+  }, [dados, meses, unidade, isLocked, modoHierarquia, volNode, fatNode, pmvMedioNode, refMes, edicoes]);
 
-  const table = useReactTable({ data: viewMode === 'carteira' ? dadosBrutos : dadosPortfolio, columns, state: { expanded }, onExpandedChange: setExpanded, getSubRows: r => r.subRows, getCoreRowModel: getCoreRowModel(), getExpandedRowModel: getExpandedRowModel() });
+  const table = useReactTable({
+    data: arvore, columns,
+    state: { expanded, sorting },
+    onExpandedChange: setExpanded, onSortingChange: setSorting,
+    getSubRows: (r: any) => r.subRows,
+    getCoreRowModel: getCoreRowModel(),
+    getExpandedRowModel: getExpandedRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+  });
 
-  const handleSalvar = async (finalizar: boolean) => {
-    if (finalizar && isSaveBlocked) return alert("Erro Crítico: Você possui desvios na meta global. Corrija o rateio para o Teto Original antes de publicar para Supply.");
-    setIsProcessing(true);
-    const leafEdits = Object.entries(celulasEditadas).filter(([chave]) => chave.split('|').length === 6); 
-    const ajustes = leafEdits.flatMap(([chave, meses]: any) => Object.entries(meses).map(([m, v]: any) => ({ chave, mes_projetado: m, novo_volume: v.novo_volume })));
-    
-    try {
-      await axios.post(`/api/v1/consensus/micro/salvar`, { origem_ajuste: 'Metas_Equipe', finalizar_etapa: finalizar, ajustes });
-      alert(finalizar ? "✅ Metas publicadas com sucesso! Supply Chain notificado." : "💾 Rascunho gravado e mix de caixas atualizado na Fato.");
-      fetchData(); 
-    } catch (e: any) { alert("Erro ao salvar."); }
-    finally { setIsProcessing(false); }
-  };
-
-  const handleExportCSV = () => window.open('/api/v1/consensus/micro/exportar', '_blank');
-
-  if (isInitializing || (isGerenteOrAdmin && !nomeResponsavel && opcoesBusca.gerentes.length > 0)) {
-      return (
-          <div className="h-screen w-full flex flex-col justify-center items-center bg-[#f8fafc]">
-              <Loader2 className="w-12 h-12 text-purple-600 animate-spin mb-4" />
-              <h2 className="text-sm font-black text-slate-400 uppercase tracking-widest">Sincronizando com a Fonte da Verdade...</h2>
-          </div>
-      );
+  if (loading) {
+    return <div className="min-h-screen bg-[#f8fafc] flex items-center justify-center"><Loader2 className="w-12 h-12 text-indigo-600 animate-spin" /></div>;
   }
 
-  if (dadosBrutos.length === 0 && !isLoading) {
-      return (
-          <div className="h-screen w-full flex flex-col justify-center items-center bg-[#f8fafc]">
-              <Target className="w-12 h-12 text-slate-300 mb-4" />
-              <h2 className="text-xl font-black text-slate-500">Nenhum dado encontrado para sua equipe.</h2>
-          </div>
-      );
-  }
+  const varComando = calcVar(comando.fatMeta, comando.orc);
 
   return (
     <div className="w-full bg-[#f8fafc] font-sans min-h-screen pb-20">
-      <div className="max-w-[1600px] mx-auto p-6 lg:p-12 relative">
-        
-        {isFechado && !isLoading && (
-            <div className="w-full bg-emerald-500 text-white text-[11px] font-black py-2 flex justify-center items-center gap-2 tracking-widest uppercase rounded-t-3xl shadow-sm"><ShieldCheck className="w-4 h-4" /> METAS PUBLICADAS PARA SUPPLY (FECHADO)</div>
+      <div className="max-w-[1600px] mx-auto p-6 lg:p-10">
+
+        {/* HEADER */}
+        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6 mb-8 bg-white p-8 rounded-[40px] shadow-sm border border-slate-100 relative overflow-hidden">
+          {etapaBloqueada && (
+            <div className="absolute top-0 left-0 w-full text-white text-[10px] font-black py-2 flex justify-center items-center gap-3 tracking-[0.3em] uppercase z-10 bg-emerald-500">
+              <ShieldCheck className="w-4 h-4" /> CONSENSO PUBLICADO · BASTÃO NO SUPPLY
+            </div>
+          )}
+          {!etapaBloqueada && meuCongelamento === 'CONGELADO' && !modoHierarquia && (
+            <div className="absolute top-0 left-0 w-full text-white text-[10px] font-black py-2 flex justify-center items-center gap-3 tracking-[0.3em] uppercase z-10 bg-indigo-500">
+              <Lock className="w-4 h-4" /> SUA CARTEIRA ESTÁ CONGELADA
+            </div>
+          )}
+          <div className={etapaBloqueada || (meuCongelamento === 'CONGELADO' && !modoHierarquia) ? 'pt-6' : ''}>
+            <div className="flex items-center gap-4">
+              <div className="p-3 bg-indigo-50 rounded-2xl"><Sparkles className="w-8 h-8 text-indigo-600" /></div>
+              <div>
+                <h1 className="text-3xl font-black text-slate-900 tracking-tighter uppercase">Consenso de Metas</h1>
+                <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">
+                  Ciclo {ciclo} · {escopo.nivel} {escopo.nome ? `· ${escopo.nome}` : ''} · Meta = Orçamento
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className={`flex items-center gap-3 ${etapaBloqueada || (meuCongelamento === 'CONGELADO' && !modoHierarquia) ? 'pt-6' : ''}`}>
+            {/* Alternador de unidade */}
+            <div className="flex items-center bg-slate-100 rounded-2xl p-1">
+              <button onClick={() => setUnidade('cx')} className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-black transition-all ${unidade === 'cx' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400'}`}>
+                <Box className="w-3.5 h-3.5" /> CAIXAS
+              </button>
+              <button onClick={() => setUnidade('rs')} className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-black transition-all ${unidade === 'rs' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400'}`}>
+                <DollarSign className="w-3.5 h-3.5" /> REAIS
+              </button>
+            </div>
+
+            {!etapaBloqueada && !isLocked && (
+              <>
+                <button onClick={salvar} disabled={saving || !temPend}
+                  className={`flex items-center gap-2 font-bold py-3 px-5 rounded-2xl transition-all shadow-sm border ${temPend ? 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200' : 'bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed'}`}>
+                  {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Salvar
+                </button>
+                <button onClick={() => congelar()} disabled={saving}
+                  className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white font-bold py-3 px-6 rounded-2xl shadow-lg shadow-indigo-600/30 transition-all">
+                  {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />} Congelar Carteira
+                </button>
+              </>
+            )}
+            {isAdmin && !etapaBloqueada && (
+              <button onClick={publicarEtapa} disabled={saving}
+                className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-bold py-3 px-6 rounded-2xl shadow-lg shadow-emerald-600/30 transition-all">
+                <ShieldCheck className="w-4 h-4" /> Publicar Etapa
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* CARDS DE COMANDO */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+          <div className="p-6 rounded-[28px] shadow-sm bg-white border-2 border-indigo-200 flex flex-col justify-between min-h-[160px] hover:-translate-y-1 hover:shadow-md transition-all">
+            <div className="flex justify-between items-start">
+              <h3 className="text-[10px] font-black uppercase tracking-widest text-indigo-500">Minha Meta</h3>
+              <div className="p-2 rounded-xl bg-indigo-50"><Target className="w-4 h-4 text-indigo-500" /></div>
+            </div>
+            <div className="mt-auto pt-3">
+              <p className="text-xl font-black leading-none tracking-tighter text-indigo-700">{fmtVol(comando.volMeta)} <span className="text-[9px] opacity-60">CX</span></p>
+              <p className="text-[11px] font-bold text-slate-400 mt-1">{fmtMoeda(comando.fatMeta)}</p>
+            </div>
+          </div>
+          <div className="p-6 rounded-[28px] shadow-sm bg-white border border-slate-100 flex flex-col justify-between min-h-[160px] hover:-translate-y-1 hover:shadow-md transition-all">
+            <div className="flex justify-between items-start">
+              <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-400">Comercial (BU)</h3>
+              <div className="p-2 rounded-xl bg-slate-50"><Users className="w-4 h-4 opacity-70" /></div>
+            </div>
+            <div className="mt-auto pt-3">
+              <p className="text-xl font-black leading-none tracking-tighter">{fmtVol(comando.volCom)} <span className="text-[9px] opacity-60">CX</span></p>
+              <p className="text-[11px] font-bold text-slate-400 mt-1">{fmtMoeda(comando.fatCom)}</p>
+            </div>
+          </div>
+          <div className="p-6 rounded-[28px] shadow-sm bg-white border border-slate-100 flex flex-col justify-between min-h-[160px] hover:-translate-y-1 hover:shadow-md transition-all">
+            <div className="flex justify-between items-start">
+              <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-400">Ano Anterior</h3>
+              <div className="p-2 rounded-xl bg-slate-50"><History className="w-4 h-4 opacity-70" /></div>
+            </div>
+            <div className="mt-auto pt-3">
+              <p className="text-xl font-black leading-none tracking-tighter">{fmtVol(comando.volHist)} <span className="text-[9px] opacity-60">CX</span></p>
+              <p className="text-[11px] font-bold text-slate-400 mt-1">{fmtMoeda(comando.fatHist)}</p>
+            </div>
+          </div>
+          <div className="p-6 rounded-[28px] shadow-sm bg-slate-900 text-white flex flex-col justify-between min-h-[160px] relative overflow-hidden hover:-translate-y-1 hover:shadow-md transition-all">
+            <div className="absolute top-0 right-0 w-28 h-28 bg-gradient-to-bl from-indigo-500/20 to-transparent rounded-full -mr-8 -mt-8 blur-xl" />
+            <div className="flex justify-between items-start z-10">
+              <h3 className="text-[10px] font-black uppercase tracking-widest text-indigo-300">Meta vs Orçamento</h3>
+              <div className="p-2 rounded-xl bg-slate-800">{varComando >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}</div>
+            </div>
+            <div className="mt-auto pt-3 z-10">
+              <p className={`text-2xl font-black leading-none tracking-tighter ${varComando >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {varComando >= 0 ? '+' : ''}{varComando.toFixed(1)}%
+              </p>
+              <p className="text-[9px] font-bold text-slate-400 mt-2 uppercase tracking-widest">Orçamento: {fmtMoeda(comando.orc)}</p>
+            </div>
+          </div>
+        </div>
+
+        {/* MACRO */}
+        <div className="bg-white rounded-[32px] shadow-sm border border-slate-100 p-8 mb-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-xl"><BarChart3 className="w-5 h-5" /></div>
+            <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest">Faturamento por Mês — Meta · Comercial · Orçamento · Ano Anterior</h4>
+          </div>
+          <div className="h-72 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartMacro} margin={{ top: 10, right: 20, bottom: 5, left: 10 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                <XAxis dataKey="name" stroke="#94a3b8" tick={{ fill: '#64748b', fontSize: 12, fontWeight: 700 }} tickLine={false} axisLine={false} />
+                <YAxis stroke="#94a3b8" tick={{ fill: '#64748b', fontSize: 12 }} tickLine={false} axisLine={false} tickFormatter={(v) => new Intl.NumberFormat('pt-BR', { notation: 'compact' }).format(v)} />
+                <Tooltip contentStyle={{ backgroundColor: '#fff', borderColor: '#e2e8f0', borderRadius: '12px', fontSize: '13px' }} formatter={(v: any) => fmtMoeda(v)} />
+                <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '12px', fontWeight: 700 }} iconType="circle" />
+                <Bar dataKey="Ano Anterior" fill="#cbd5e1" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="Comercial" fill="#a5b4fc" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="Meta" fill="#6366f1" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="Orcamento" name="Orçamento" fill="#0f172a" radius={[6, 6, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* PAINEL DE CADEADOS (gerente/admin) */}
+        {modoHierarquia && cadeados.length > 0 && (
+          <div className="bg-white rounded-[32px] shadow-sm border border-slate-100 p-8 mb-8">
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-xl"><Lock className="w-5 h-5" /></div>
+                <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest">Progresso do Consenso</h4>
+              </div>
+              <span className="text-sm font-black text-slate-600">{progresso.fechados}/{progresso.total} carteiras congeladas</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {cadeados.map((c, i) => (
+                <div key={i} className="flex items-center justify-between p-4 rounded-2xl border border-slate-100 bg-slate-50">
+                  <div className="flex items-center gap-2.5">
+                    <div className={`w-8 h-8 flex items-center justify-center rounded-xl ${c.status === 'CONGELADO' ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-200 text-slate-400'}`}>
+                      {c.status === 'CONGELADO' ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+                    </div>
+                    <div className="flex flex-col">
+                      <span className="text-[12px] font-black text-slate-700">{c.nome}</span>
+                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">{c.nivel} · {c.quando || '—'}</span>
+                    </div>
+                  </div>
+                  {c.status === 'CONGELADO' && !etapaBloqueada && (
+                    <button onClick={() => reabrir(c.nome)} className="flex items-center gap-1.5 text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-lg hover:bg-amber-100 transition-all">
+                      <Unlock className="w-3 h-3" /> Reabrir
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
         )}
 
-        <div className={`flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 bg-white p-6 shadow-sm border border-slate-100 ${isFechado ? 'rounded-b-[32px]' : 'rounded-[32px]'}`}>
-          <div>
-            <h1 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tighter"><Target className="w-8 h-8 text-purple-600" /> Metas da Equipe</h1>
-            <p className="text-sm font-bold text-slate-400 mt-1 uppercase tracking-widest pl-11">S&OP Gated Waterfall (Distribuição Financeira Top-Down)</p>
+        {/* BUSCA */}
+        <div className="flex items-center gap-3 mb-4">
+          <div className="relative flex-1 max-w-md">
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <input value={busca} onChange={(e) => setBusca(e.target.value)} placeholder="Buscar cliente, SKU ou responsável..."
+              className="w-full bg-white border border-slate-200 rounded-2xl pl-11 pr-4 py-3 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm" />
           </div>
-          <div className="flex items-center gap-3">
-             <button onClick={handleExportCSV} className="flex items-center gap-2 text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-5 py-3 rounded-2xl text-xs font-black tracking-widest uppercase transition-all"><Download className="w-4 h-4" /> Exportar CSV</button>
-             {!isFechado && <button onClick={() => handleSalvar(false)} disabled={isProcessing} className="flex items-center gap-2 text-slate-600 bg-slate-100 hover:bg-slate-200 px-5 py-3 rounded-2xl text-xs font-black tracking-widest uppercase transition-all"><Save className="w-4 h-4" /> Rascunho</button>}
-             {!isFechado && <button onClick={() => handleSalvar(true)} disabled={isProcessing || isSaveBlocked} className={`flex items-center gap-2 text-white px-6 py-3 rounded-2xl text-sm font-black tracking-widest uppercase transition-all shadow-lg ${isSaveBlocked ? 'bg-slate-300 cursor-not-allowed' : 'bg-slate-900 hover:bg-black'}`}>{isProcessing ? <Loader2 className="w-4 h-4 animate-spin"/> : <Check className="w-4 h-4" />} Publicar (Supply)</button>}
-          </div>
+          {temPend && (
+            <span className="flex items-center gap-1.5 text-[11px] font-black text-amber-600 bg-amber-50 border border-amber-200 px-3 py-2 rounded-xl">
+              <AlertTriangle className="w-3.5 h-3.5" /> {Object.keys(edicoes).length} alterações não salvas
+            </span>
+          )}
         </div>
 
-        <div className="flex flex-col md:flex-row gap-4 mb-6">
-            <div className="flex bg-slate-200 p-1.5 rounded-[20px] shadow-inner w-full md:w-auto">
-               <button onClick={() => setViewMode('carteira')} className={`flex-1 md:flex-none flex items-center gap-2 px-6 py-2.5 rounded-[16px] text-xs font-black uppercase tracking-widest transition-all ${viewMode === 'carteira' ? 'bg-white text-purple-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Users className="w-4 h-4"/> 1. Edição em Cascata</button>
-               <button onClick={() => setViewMode('portfolio')} className={`flex-1 md:flex-none flex items-center gap-2 px-6 py-2.5 rounded-[16px] text-xs font-black uppercase tracking-widest transition-all ${viewMode === 'portfolio' ? 'bg-white text-purple-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><LayoutList className="w-4 h-4"/> 2. Impacto Portfólio</button>
-            </div>
-            {viewMode === 'carteira' && isGerenteOrAdmin && (
-                <div className="flex items-center gap-4 bg-white p-2 rounded-[20px] shadow-sm border border-slate-100 px-4">
-                    <select value={nomeResponsavel} onChange={e => setNomeResponsavel(e.target.value)} className="bg-transparent text-sm font-bold text-slate-700 outline-none cursor-pointer">
-                        {opcoesBusca?.gerentes.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                    </select>
-                </div>
-            )}
-        </div>
-
-        <div className="bg-white rounded-[40px] shadow-2xl border border-slate-100 overflow-hidden relative min-h-[400px]">
-          {isLoading ? <div className="h-64 flex justify-center items-center"><Loader2 className="w-8 h-8 animate-spin text-purple-600"/></div> : (
-          <div className="overflow-x-auto pb-4">
-            <table className="w-full text-left border-collapse">
-              <thead className="bg-slate-50 border-b-2 border-slate-200 shadow-sm">
+        {/* TABELA */}
+        <div className="bg-white rounded-[32px] shadow-sm border border-slate-100 overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
                 {table.getHeaderGroups().map(hg => (
-                  <tr key={hg.id}>
-                    {hg.headers.map(h => (
-                      <th key={h.id} className="px-6 py-5 text-[10px] font-black text-slate-500 uppercase tracking-widest">{flexRender(h.column.columnDef.header, h.getContext())}</th>
+                  <tr key={hg.id} className="border-b border-slate-100">
+                    {hg.headers.map(header => (
+                      <th key={header.id} onClick={header.column.getToggleSortingHandler()}
+                        className="text-left px-4 py-4 text-[11px] font-black text-slate-400 uppercase tracking-widest cursor-pointer select-none hover:text-slate-600 whitespace-nowrap">
+                        {flexRender(header.column.columnDef.header, header.getContext())}
+                        {{ asc: ' ↑', desc: ' ↓' }[header.column.getIsSorted() as string] ?? ''}
+                      </th>
                     ))}
                   </tr>
                 ))}
               </thead>
               <tbody>
                 {table.getRowModel().rows.map(row => (
-                  <tr key={row.id} className={`border-b border-slate-50 transition-colors ${row.getIsExpanded() ? 'bg-purple-50/20' : row.depth === 0 ? 'bg-slate-50/50' : 'hover:bg-slate-50'}`}>
-                    {row.getVisibleCells().map(cell => (<td key={cell.id} className="px-6 py-3">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>))}
+                  <tr key={row.id} className={`border-b border-slate-50 transition-colors ${row.original.tipo === 'gerente' || row.original.tipo === 'coordenador' ? 'bg-slate-50/50' : 'hover:bg-indigo-50/30'}`}>
+                    {row.getVisibleCells().map(cell => (
+                      <td key={cell.id} className="px-4">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
+                    ))}
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-          )}
         </div>
+
+        <p className="text-[10px] text-slate-400 font-medium mt-4">
+          Você edita em caixas ou reais — o outro lado é sempre consequência exata do PMV real de cada cliente. A soma reconcilia automaticamente; o valor digitado é preservado. Congelar sua carteira a torna somente-leitura até um superior reabrir.
+        </p>
+
       </div>
     </div>
   );
 }
+
+// =====================================================================
+// Maior Resto local (soma exata no cliente antes de enviar)
+// =====================================================================
+function maiorRestoLocal(total: number, pesos: number[]): number[] {
+  const n = pesos.length;
+  if (n === 0) return [];
+  const soma = pesos.reduce((a, b) => a + b, 0);
+  if (soma <= 0) {
+    const base = Math.floor(total / n);
+    const resto = total - base * n;
+    const p = new Array(n).fill(base);
+    for (let i = 0; i < resto; i++) p[i]++;
+    return p;
+  }
+  const dist = pesos.map(p => (p / soma) * total);
+  const piso = dist.map(x => Math.floor(x));
+  const frac = dist.map((x, i) => x - piso[i]);
+  let sobra = total - piso.reduce((a, b) => a + b, 0);
+  const ordem = frac.map((f, i) => [f, i] as [number, number]).sort((a, b) => b[0] - a[0]);
+  for (let k = 0; k < sobra; k++) piso[ordem[k][1]]++;
+  return piso;
+}     
