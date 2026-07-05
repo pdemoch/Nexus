@@ -104,6 +104,18 @@ def _mapa_coordenadores_do_gerente(db: Session, gerente_nome: str) -> set:
     return {r.coord for r in rows}
 
 
+def _bottomup_congelado(db: Session, ciclo: str) -> bool:
+    """
+    A etapa ANTERIOR ao Consenso é o BottomUP (Gerenciamento). O Consenso só
+    libera edição para Gerente/Coordenador se o BottomUP estiver CONGELADO.
+    Admin fura essa trava (super-usuário para emergências).
+    """
+    st = db.execute(text("""
+        SELECT status FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'BottomUP'
+    """), {"c": ciclo}).scalar()
+    return st == 'CONGELADO'
+
+
 # =====================================================================
 # FILTROS (opções de navegação conforme escopo)
 # =====================================================================
@@ -176,15 +188,10 @@ def get_dados_metas(
             f.mes_projetado::DATE AS mes,
             COALESCE(f.vol_meta, 0)      AS vol_meta,
             COALESCE(f.vol_bottomup, 0)  AS vol_base,
-            COALESCE(f.pmv_aplicado, 0)  AS pmv,
-            COALESCE(o.rec_orc, 0)       AS rec_orcada
+            COALESCE(f.pmv_aplicado, 0)  AS pmv
         FROM fato_ibp_granular f
         JOIN dim_clientes c ON f.cgc = c.cgc
         LEFT JOIN dim_produtos p ON f.sku = p.sku
-        LEFT JOIN (
-            SELECT sku, DATE_TRUNC('month', mes_projetado)::DATE AS mes, SUM(receita_orcamento) AS rec_orc
-            FROM fato_orcamento GROUP BY sku, DATE_TRUNC('month', mes_projetado)::DATE
-        ) o ON o.sku = f.sku AND o.mes = f.mes_projetado::DATE
         WHERE f.ciclo_sop = :ciclo
           AND f.mes_projetado IN (:m2, :m3, :m4)
           AND {rls['where']}
@@ -192,29 +199,51 @@ def get_dados_metas(
     """
     df = pd.read_sql(text(sql), engine, params=params)
 
+    # ORÇAMENTO — somado UMA vez por SKU×mês (nunca por cliente, senão infla
+    # ~N vezes no JOIN granular). Vive só no agregado do portfólio (cards/macro),
+    # como no TopDown e no Bottom-Up. Restringe aos SKUs presentes na carteira.
+    skus_carteira = df["sku"].unique().tolist() if not df.empty else []
+    orcamento_map: Dict[tuple, float] = {}
+    if skus_carteira:
+        orc_rows = db.execute(text("""
+            SELECT sku, DATE_TRUNC('month', mes_projetado)::DATE AS mes, SUM(receita_orcamento) AS rec_orc
+            FROM fato_orcamento
+            WHERE sku = ANY(:skus)
+              AND DATE_TRUNC('month', mes_projetado)::DATE = ANY(CAST(:meses AS DATE[]))
+            GROUP BY sku, DATE_TRUNC('month', mes_projetado)::DATE
+        """), {"skus": skus_carteira, "meses": [m2, m3, m4]}).fetchall()
+        for r in orc_rows:
+            orcamento_map[(str(r.sku), r.mes.strftime("%Y-%m-%d"))] = float(r.rec_orc or 0)
+
     # Realizado do MESMO período no ano anterior (âncora histórica por cliente×sku).
-    # Para cada mês projetado, busca vendas do mesmo mês 12 meses atrás.
+    # Volume = SUM(qt_pedido); Faturamento = SUM(vl_pedido) REAL da venda —
+    # nunca reconstruído por PMV atual (isso inflava o número).
     from dateutil.relativedelta import relativedelta as _rd
     meses_hist = {m: (pd.to_datetime(m) - _rd(months=12)).strftime("%Y-%m-%d") for m in [m2, m3, m4]}
     hist_rows = db.execute(text("""
-        SELECT cgc, sku, DATE_TRUNC('month', data_pedido)::DATE AS mes, SUM(qt_pedido) AS vol_real
+        SELECT cgc, sku, DATE_TRUNC('month', data_pedido)::DATE AS mes,
+               SUM(qt_pedido) AS vol_real, SUM(vl_pedido) AS fat_real
         FROM fato_vendas
         WHERE DATE_TRUNC('month', data_pedido)::DATE = ANY(CAST(:meses AS DATE[]))
+          AND qt_pedido > 0
         GROUP BY cgc, sku, DATE_TRUNC('month', data_pedido)::DATE
     """), {"meses": list(meses_hist.values())}).fetchall()
-    # Mapa: (cgc, sku, mes_projetado_atual) -> vol_real do ano anterior.
+    # Mapa: (cgc, sku, mes_projetado_atual) -> (vol_real, fat_real) do ano anterior.
     hist_inv = {v: k for k, v in meses_hist.items()}  # mes_hist -> mes_atual
-    realizado_map: Dict[tuple, float] = {}
+    realizado_map: Dict[tuple, tuple] = {}
     for r in hist_rows:
         mes_hist_str = r.mes.strftime("%Y-%m-%d")
         mes_atual = hist_inv.get(mes_hist_str)
         if mes_atual:
-            realizado_map[(str(r.cgc), str(r.sku), mes_atual)] = float(r.vol_real or 0)
+            realizado_map[(str(r.cgc), str(r.sku), mes_atual)] = (float(r.vol_real or 0), float(r.fat_real or 0))
 
     if df.empty:
+        bu_ok = _bottomup_congelado(db, ciclo)
         return {
             "ciclo_ativo": ciclo, "dados": [], "meses": [],
             "meu_congelamento": "ABERTO", "etapa_bloqueada": etapa_metas_bloqueada(db, ciclo),
+            "bottomup_congelado": bu_ok,
+            "etapa_anterior_pendente": (not bu_ok) and (escopo["funcao"] != NIVEL_ADMIN),
             "escopo": {"nivel": escopo["funcao"], "nome": escopo["nome_responsavel"]},
         }
 
@@ -225,9 +254,14 @@ def get_dados_metas(
         {"mes_banco": m4, "mes_str": pd.to_datetime(m4).strftime("%b/%y").capitalize()},
     ]
 
-    # Anexa o realizado histórico (ano anterior) a cada linha do df, por chave.
-    df["realizado_hist"] = df.apply(
-        lambda r: realizado_map.get((str(r["cgc"]), str(r["sku"]), r["mes"].strftime("%Y-%m-%d")), 0.0),
+    # Anexa o realizado histórico REAL (ano anterior) a cada linha: volume e
+    # faturamento vindos direto da venda (qt_pedido / vl_pedido), não de PMV.
+    df["hist_vol"] = df.apply(
+        lambda r: realizado_map.get((str(r["cgc"]), str(r["sku"]), r["mes"].strftime("%Y-%m-%d")), (0.0, 0.0))[0],
+        axis=1
+    )
+    df["hist_fat"] = df.apply(
+        lambda r: realizado_map.get((str(r["cgc"]), str(r["sku"]), r["mes"].strftime("%Y-%m-%d")), (0.0, 0.0))[1],
         axis=1
     )
 
@@ -239,12 +273,15 @@ def get_dados_metas(
             mrows = sub[sub["mes"] == pd.to_datetime(mc["mes_banco"])]
             vol_meta = int(mrows["vol_meta"].sum())
             fat_meta = float((mrows["vol_meta"] * mrows["pmv"]).sum())
-            # Referências desta fase: Comercial (bottomup), Orçamento, Realizado 12m.
+            # Comercial (Bottom-Up) — faturamento via PMV micro do ciclo.
             vol_com = int(mrows["vol_base"].sum())
             fat_com = float((mrows["vol_base"] * mrows["pmv"]).sum())
-            rec_orc = float(mrows["rec_orcada"].sum())
-            vol_hist = int(mrows["realizado_hist"].sum())
-            fat_hist = float((mrows["realizado_hist"] * mrows["pmv"]).sum())
+            # Ano anterior — volume e faturamento REAIS da venda (não PMV).
+            vol_hist = int(mrows["hist_vol"].sum())
+            fat_hist = float(mrows["hist_fat"].sum())
+            # Orçamento — somado UMA vez por SKU deste sub-nó (nunca por cliente).
+            skus_no_no = mrows["sku"].unique().tolist()
+            rec_orc = sum(orcamento_map.get((str(s), mc["mes_banco"]), 0.0) for s in skus_no_no)
             out.append({
                 "mes_banco": mc["mes_banco"], "mes_str": mc["mes_str"],
                 "vol_meta": vol_meta, "fat_meta": round(fat_meta, 2),
@@ -292,12 +329,18 @@ def get_dados_metas(
             g_node["subRows"].append(c_node)
         arvore.append(g_node)
 
+    # Bloqueio de precedência: BottomUP precisa estar congelado (Admin fura).
+    bu_ok = _bottomup_congelado(db, ciclo)
+    etapa_anterior_pendente = (not bu_ok) and (escopo["funcao"] != NIVEL_ADMIN)
+
     return {
         "ciclo_ativo": ciclo,
         "meses": meses_cols,
         "dados": arvore,
         "meu_congelamento": "CONGELADO" if esta_congelado_para_usuario(db, escopo, ciclo) else "ABERTO",
         "etapa_bloqueada": etapa_metas_bloqueada(db, ciclo),
+        "bottomup_congelado": bu_ok,
+        "etapa_anterior_pendente": etapa_anterior_pendente,
         "escopo": {"nivel": escopo["funcao"], "nome": escopo["nome_responsavel"]},
     }
 
@@ -313,6 +356,11 @@ async def salvar_metas(payload: PayloadSalvarMetas, db: Session = Depends(get_db
     # Trava de etapa: se o Admin já publicou Metas, ninguém edita.
     if etapa_metas_bloqueada(db, ciclo):
         raise HTTPException(status_code=403, detail="A etapa de Metas já foi publicada pelo Administrador. Edições encerradas.")
+
+    # Trava de PRECEDÊNCIA: BottomUP (etapa anterior) tem de estar congelado.
+    # Admin fura (super-usuário). Gerente/Coordenador aguardam a etapa anterior.
+    if escopo["funcao"] != NIVEL_ADMIN and not _bottomup_congelado(db, ciclo):
+        raise HTTPException(status_code=403, detail="O Bottom-Up (Gerência Comercial) ainda não foi congelado. Aguarde a etapa anterior fechar.")
 
     # Cadeado individual: se a carteira do próprio usuário está congelada, bloqueia
     # (exceto Admin). Superior reabre antes de editar (endpoint /reabrir).
