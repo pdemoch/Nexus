@@ -176,21 +176,33 @@ def get_dados_metas(
             f.mes_projetado::DATE AS mes,
             COALESCE(f.vol_meta, 0)      AS vol_meta,
             COALESCE(f.vol_bottomup, 0)  AS vol_base,
-            COALESCE(f.pmv_aplicado, 0)  AS pmv,
-            COALESCE(o.rec_orc, 0)       AS rec_orcada
+            COALESCE(f.pmv_aplicado, 0)  AS pmv
         FROM fato_ibp_granular f
         JOIN dim_clientes c ON f.cgc = c.cgc
         LEFT JOIN dim_produtos p ON f.sku = p.sku
-        LEFT JOIN (
-            SELECT sku, DATE_TRUNC('month', mes_projetado)::DATE AS mes, SUM(receita_orcamento) AS rec_orc
-            FROM fato_orcamento GROUP BY sku, DATE_TRUNC('month', mes_projetado)::DATE
-        ) o ON o.sku = f.sku AND o.mes = f.mes_projetado::DATE
         WHERE f.ciclo_sop = :ciclo
           AND f.mes_projetado IN (:m2, :m3, :m4)
           AND {rls['where']}
           {filtro_resp}
     """
     df = pd.read_sql(text(sql), engine, params=params)
+
+    # ORÇAMENTO — por SKU×mês, somado UMA vez. Buscado à parte (nunca no JOIN
+    # granular, senão multiplica pelo nº de clientes do SKU). Aplicado ao df de
+    # forma que só a PRIMEIRA linha de cada SKU×mês carrega o valor; as demais
+    # ficam zero. Assim qualquer soma por nó conta cada SKU uma única vez.
+    orcamento_map: Dict[tuple, float] = {}
+    if not df.empty:
+        skus_carteira = df["sku"].unique().tolist()
+        orc_rows = db.execute(text("""
+            SELECT sku, DATE_TRUNC('month', mes_projetado)::DATE AS mes, SUM(receita_orcamento) AS rec_orc
+            FROM fato_orcamento
+            WHERE sku = ANY(:skus)
+              AND DATE_TRUNC('month', mes_projetado)::DATE = ANY(CAST(:meses AS DATE[]))
+            GROUP BY sku, DATE_TRUNC('month', mes_projetado)::DATE
+        """), {"skus": skus_carteira, "meses": [m2, m3, m4]}).fetchall()
+        for r in orc_rows:
+            orcamento_map[(str(r.sku), r.mes.strftime("%Y-%m-%d"))] = float(r.rec_orc or 0)
 
     # Realizado do MESMO período no ano anterior (âncora histórica por cliente×sku).
     # Para cada mês projetado, busca vendas do mesmo mês 12 meses atrás.
@@ -251,7 +263,6 @@ def get_dados_metas(
             fat_meta=("fat_meta", "sum"),
             vol_com=("vol_base", "sum"),
             fat_com=("fat_com", "sum"),
-            rec_orc=("rec_orcada", "sum"),
             vol_hist=("realizado_hist", "sum"),
             fat_hist=("fat_hist", "sum"),
         ).reset_index()
@@ -271,13 +282,27 @@ def get_dados_metas(
                 "fat_meta": round(float(row.fat_meta), 2),
                 "vol_comercial": int(row.vol_com),
                 "fat_comercial": round(float(row.fat_com), 2),
-                "rec_orcada": round(float(row.rec_orc), 2),
                 "vol_hist": int(row.vol_hist),
                 "fat_hist": round(float(row.fat_hist), 2),
             }
 
+    # Orçamento por nó = soma do orçamento dos SKUs DISTINTOS do nó (cada SKU
+    # uma vez), por mês. Pré-computa o conjunto de SKUs de cada nó.
+    orc_cache: Dict[tuple, Dict[str, float]] = {}
+    for i in range(len(NIVEIS)):
+        chaves = NIVEIS[: i + 1]
+        skus_por_no = df.groupby(chaves, sort=False)["sku"].unique()
+        for keyvals, skus in skus_por_no.items():
+            kv = keyvals if isinstance(keyvals, tuple) else (keyvals,)
+            por_mes = {}
+            for mc in meses_cols:
+                mk = mc["mes_banco"]
+                por_mes[mk] = round(sum(orcamento_map.get((str(s), mk), 0.0) for s in skus), 2)
+            orc_cache[(tuple(chaves), kv)] = por_mes
+
     def bloco_por_chave(chaves: List[str], keyvals: tuple) -> List[dict]:
         pormes = agg_cache.get((tuple(chaves), keyvals), {})
+        orcmes = orc_cache.get((tuple(chaves), keyvals), {})
         out = []
         for mc in meses_cols:
             d = pormes.get(mc["mes_banco"], {})
@@ -285,7 +310,7 @@ def get_dados_metas(
                 "mes_banco": mc["mes_banco"], "mes_str": mc["mes_str"],
                 "vol_meta": d.get("vol_meta", 0), "fat_meta": d.get("fat_meta", 0.0),
                 "vol_comercial": d.get("vol_comercial", 0), "fat_comercial": d.get("fat_comercial", 0.0),
-                "rec_orcada": d.get("rec_orcada", 0.0),
+                "rec_orcada": orcmes.get(mc["mes_banco"], 0.0),
                 "vol_hist": d.get("vol_hist", 0), "fat_hist": d.get("fat_hist", 0.0),
             })
         return out
@@ -501,19 +526,32 @@ def status_cadeados(db: Session = Depends(get_db), usuario: dict = Depends(get_c
         """), {"c": ciclo}).fetchall()
     }
 
-    # Universo de responsáveis conforme o escopo de quem pergunta.
+    # Universo de responsáveis conforme o escopo. RESTRITO a quem tem carteira
+    # no ciclo (existe em fato_ibp_granular do ciclo ativo) — não o dim_clientes
+    # inteiro, senão aparecem responsáveis sem carteira no progresso.
     if escopo["ve_tudo"]:
         resp_rows = db.execute(text("""
-            SELECT DISTINCT TRIM(gerente_nome) AS nome, 'Gerente' AS nivel
-            FROM dim_clientes WHERE gerente_nome IS NOT NULL AND TRIM(gerente_nome) != ''
+            SELECT DISTINCT TRIM(c.gerente_nome) AS nome, 'Gerente' AS nivel
+            FROM fato_ibp_granular f
+            JOIN dim_clientes c ON f.cgc = c.cgc
+            WHERE f.ciclo_sop = :ciclo AND c.gerente_nome IS NOT NULL AND TRIM(c.gerente_nome) != ''
             UNION
-            SELECT DISTINCT TRIM(supervisor_nome) AS nome, 'Coordenador' AS nivel
-            FROM dim_clientes WHERE supervisor_nome IS NOT NULL AND TRIM(supervisor_nome) != ''
-        """)).fetchall()
+            SELECT DISTINCT TRIM(c.supervisor_nome) AS nome, 'Coordenador' AS nivel
+            FROM fato_ibp_granular f
+            JOIN dim_clientes c ON f.cgc = c.cgc
+            WHERE f.ciclo_sop = :ciclo AND c.supervisor_nome IS NOT NULL AND TRIM(c.supervisor_nome) != ''
+        """), {"ciclo": ciclo}).fetchall()
     elif escopo["funcao"] == NIVEL_GERENTE:
-        coords = _mapa_coordenadores_do_gerente(db, escopo["nome_responsavel"])
+        # Coordenadores da gerência QUE TÊM carteira no ciclo.
+        coord_rows = db.execute(text("""
+            SELECT DISTINCT TRIM(c.supervisor_nome) AS nome
+            FROM fato_ibp_granular f
+            JOIN dim_clientes c ON f.cgc = c.cgc
+            WHERE f.ciclo_sop = :ciclo AND TRIM(c.gerente_nome) = :g
+              AND c.supervisor_nome IS NOT NULL AND TRIM(c.supervisor_nome) != ''
+        """), {"ciclo": ciclo, "g": escopo["nome_responsavel"]}).fetchall()
         resp_rows = [type("R", (), {"nome": escopo["nome_responsavel"], "nivel": "Gerente"})()]
-        resp_rows += [type("R", (), {"nome": c, "nivel": "Coordenador"})() for c in sorted(coords)]
+        resp_rows += [type("R", (), {"nome": r.nome, "nivel": "Coordenador"})() for r in coord_rows]
     else:
         resp_rows = [type("R", (), {"nome": escopo["nome_responsavel"], "nivel": "Coordenador"})()]
 
