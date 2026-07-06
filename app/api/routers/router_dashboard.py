@@ -106,13 +106,13 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
             })
         
         # CORREÇÃO 2: Bypass do ORM substituído por raw SQL para evitar erros de UndefinedTable
-        reg_status = db.execute(text("SELECT status FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'S&OP-Final'"), {"c": ciclo_atual}).scalar()
-        is_locked = (reg_status == 'Fechado')
+        reg_status = db.execute(text("SELECT status FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'Final'"), {"c": ciclo_atual}).scalar()
+        is_locked = (reg_status == 'CONGELADO')
         
-        reg_sp_status = db.execute(text("SELECT status FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'Supply Review'"), {"c": ciclo_atual}).scalar()
+        reg_sp_status = db.execute(text("SELECT status FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'Supply'"), {"c": ciclo_atual}).scalar()
         
-        if not is_locked and (reg_sp_status != 'Fechado'):
-            return {"status": "success", "is_locked": True, "lock_message": "Aguardando encerramento do Supply Review (Fase 3)", "dados": dados_enriquecidos, "orcamento": orc_dict}
+        if not is_locked and (reg_sp_status != 'CONGELADO'):
+            return {"status": "success", "is_locked": True, "lock_message": "Aguardando o Supply passar o bastao (etapa anterior)", "dados": dados_enriquecidos, "orcamento": orc_dict}
 
         return {"status": "success", "is_locked": is_locked, "lock_message": "Demanda Irrestrita Publicada" if is_locked else "Plano Aberto para Approvação Final", "dados": dados_enriquecidos, "orcamento": orc_dict}
     except Exception as e:
@@ -241,11 +241,11 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
             registrar_log_auditoria(db=db, ciclo=ciclo, origem="S&OP Global (Dashboard Final)", usuario=nome_user, sku=sku, cliente="TODOS_OS_CLIENTES", mes=data_alvo, v_antigo=int(total_base_antigo), v_novo=volume_alvo)
 
         # CORREÇÃO 3: Proteção ao atualizar tabela de controle de ciclos no banco (Aprovação)
-        id_controle = db.execute(text("SELECT id FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'S&OP-Final'"), {"c": ciclo}).scalar()
+        id_controle = db.execute(text("SELECT id FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'Final'"), {"c": ciclo}).scalar()
         if id_controle:
-            db.execute(text("UPDATE controle_ciclos SET status = 'Fechado' WHERE id = :id"), {"id": id_controle})
+            db.execute(text("UPDATE controle_ciclos SET status = 'CONGELADO' WHERE id = :id"), {"id": id_controle})
         else:
-            db.execute(text("INSERT INTO controle_ciclos (ciclo_sop, origem, status) VALUES (:c, 'S&OP-Final', 'Fechado')"), {"c": ciclo})
+            db.execute(text("INSERT INTO controle_ciclos (ciclo_sop, origem, status) VALUES (:c, 'Final', 'CONGELADO')"), {"c": ciclo})
 
         db.commit()
         return {"status": "success", "message": "S&OP Consolidado e Metas travadas com sucesso!"}

@@ -6,7 +6,7 @@ import {
 import { 
   Loader2, ChevronDown, ChevronRight, Layers, Lock, Download, AlertTriangle, 
   ShieldCheck, Check, Globe, Package, Users, Search, BarChart3, TrendingUp, 
-  TrendingDown, Bot, Wand2, Target, ArrowUp, ArrowDown, ArrowUpDown
+  TrendingDown, Bot, Wand2, Target, ArrowUp, ArrowDown, ArrowUpDown, LayoutDashboard
 } from 'lucide-react';
 import axios from 'axios';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
@@ -129,6 +129,7 @@ export default function GlobalDashboard() {
   const [loadingGrafico, setLoadingGrafico] = useState<string | null>(null);
   
   const [celulasEditadas, setCelulasEditadas] = useState<any>({});
+  const [viewMode, setViewMode] = useState<'executivo' | 'detalhe'>('executivo');
 
   const handleEditCell = (sku: string, mesBanco: string, novoValor: number) => {
     setCelulasEditadas((prev: any) => ({ ...prev, [sku]: { ...(prev[sku] || {}), [mesBanco]: novoValor } }));
@@ -299,6 +300,57 @@ export default function GlobalDashboard() {
       { id: 'final', label: 'Plano Final', v: t_final, r: r_final, bV: t_sp, orc: r_orc, icon: <Check className="w-5 h-5 opacity-70" /> }
     ];
   }, [arvoreDados, getDynamicRowVol]);
+
+  // =============================================================
+  // AGREGADOS EXECUTIVOS (modo CEO/CFO) — derivados do que já existe.
+  // =============================================================
+  const executivo = useMemo(() => {
+    const finalStat = stats.find(s => s.id === 'final');
+    const rFinal = finalStat?.r || 0;
+    const vFinal = finalStat?.v || 0;
+    const rOrc = finalStat?.orc || 0;
+
+    let unmetBrl = 0, volAnterior = 0, rBu = 0;
+    arvoreDados.forEach((cat: any) => {
+      cat.subRows.forEach((sku: any) => {
+        sku.meses.forEach((m: any) => {
+          const pmv = getPmvSeguro(m);
+          unmetBrl += Math.max(0, (m.vol_bu || 0) - (m.vol_sp || 0)) * pmv;
+          volAnterior += (m.vol_anterior || 0);
+          rBu += (m.vol_bu || 0) * pmv;
+        });
+      });
+    });
+
+    const gapOrcBrl = rFinal - rOrc;
+    const gapOrcPct = rOrc > 0 ? (gapOrcBrl / rOrc) * 100 : 0;
+    const varCicloPct = volAnterior > 0 ? ((vFinal - volAnterior) / volAnterior) * 100 : 0;
+
+    // Concentração de risco: categorias que mais destoam do orçamento (R$).
+    const porCategoria = arvoreDados.map((cat: any) => {
+      let catFinal = 0, catOrc = 0;
+      cat.subRows.forEach((sku: any) => {
+        sku.meses.forEach((m: any) => {
+          const pmv = getPmvSeguro(m);
+          catFinal += getDynamicRowVol(sku, m.mes_banco) * pmv;
+          catOrc += (m.rec_orc || 0);
+        });
+      });
+      const gap = catFinal - catOrc;
+      const gapPct = catOrc > 0 ? (gap / catOrc) * 100 : 0;
+      return { nome: cat.nome, final: catFinal, orc: catOrc, gap, gapPct };
+    });
+
+    const risco = [...porCategoria].sort((a, b) => a.gap - b.gap); // mais negativo primeiro
+    const abaixoOrc = risco.filter(c => c.gap < 0).slice(0, 5);
+    const acimaOrc = [...porCategoria].sort((a, b) => b.gap - a.gap).filter(c => c.gap > 0).slice(0, 5);
+
+    return {
+      rFinal, vFinal, rOrc, gapOrcBrl, gapOrcPct,
+      unmetBrl, varCicloPct, rBu,
+      abaixoOrc, acimaOrc,
+    };
+  }, [stats, arvoreDados, getDynamicRowVol]);
 
   const chartDataBar = useMemo(() => {
     if (!mesesDisponiveis.length) return [];
@@ -491,6 +543,14 @@ export default function GlobalDashboard() {
            </div>
            
            <div className={`flex items-center gap-4 ${isLocked ? "pt-6" : ""}`}>
+             <div className="flex items-center bg-slate-100 rounded-2xl p-1">
+               <button onClick={() => setViewMode('executivo')} className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-black transition-all ${viewMode === 'executivo' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400'}`}>
+                 <LayoutDashboard className="w-3.5 h-3.5" /> Executivo
+               </button>
+               <button onClick={() => setViewMode('detalhe')} className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-black transition-all ${viewMode === 'detalhe' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400'}`}>
+                 <Layers className="w-3.5 h-3.5" /> Detalhe
+               </button>
+             </div>
              <button onClick={handleExportExcel} className="flex items-center gap-2 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold py-3 px-5 rounded-2xl transition-all shadow-sm border border-slate-200">
                <Download className="w-4 h-4" /> Exportar Oficial
              </button>
@@ -501,6 +561,133 @@ export default function GlobalDashboard() {
            </div>
         </div>
 
+        {/* ===================== MODO EXECUTIVO (CEO/CFO) ===================== */}
+        {viewMode === 'executivo' && (
+          <>
+            {/* Painel de números grandes */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+              <div className="p-7 rounded-[32px] shadow-sm bg-slate-900 text-white flex flex-col justify-between min-h-[200px] relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-40 h-40 bg-gradient-to-bl from-indigo-500/20 to-transparent rounded-full -mr-12 -mt-12 blur-2xl" />
+                <div className="flex justify-between items-start z-10">
+                  <h3 className="text-[11px] font-black uppercase tracking-widest text-indigo-300">Plano Final</h3>
+                  <Check className="w-5 h-5" />
+                </div>
+                <div className="mt-auto pt-3 z-10">
+                  <p className="text-3xl font-black tracking-tighter">{formatMoeda(executivo.rFinal)}</p>
+                  <p className="text-[11px] font-bold text-slate-400 mt-1">{formatVolume(executivo.vFinal)} caixas</p>
+                </div>
+              </div>
+
+              <div className={`p-7 rounded-[32px] shadow-sm bg-white border-2 flex flex-col justify-between min-h-[200px] ${executivo.gapOrcBrl >= 0 ? 'border-emerald-200' : 'border-rose-200'}`}>
+                <div className="flex justify-between items-start">
+                  <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-400">Final vs Orçamento</h3>
+                  {executivo.gapOrcBrl >= 0 ? <TrendingUp className="w-5 h-5 text-emerald-500" /> : <TrendingDown className="w-5 h-5 text-rose-500" />}
+                </div>
+                <div className="mt-auto pt-3">
+                  <p className={`text-3xl font-black tracking-tighter ${executivo.gapOrcBrl >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                    {executivo.gapOrcPct >= 0 ? '+' : ''}{executivo.gapOrcPct.toFixed(1)}%
+                  </p>
+                  <p className="text-[11px] font-bold text-slate-400 mt-1">{executivo.gapOrcBrl >= 0 ? '+' : ''}{formatMoeda(executivo.gapOrcBrl)} vs orçado</p>
+                </div>
+              </div>
+
+              <div className="p-7 rounded-[32px] shadow-sm bg-white border border-slate-100 flex flex-col justify-between min-h-[200px]">
+                <div className="flex justify-between items-start">
+                  <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-400">Demanda Não Atendida</h3>
+                  <AlertTriangle className="w-5 h-5 text-amber-500" />
+                </div>
+                <div className="mt-auto pt-3">
+                  <p className="text-3xl font-black tracking-tighter text-amber-600">{formatMoeda(executivo.unmetBrl)}</p>
+                  <p className="text-[11px] font-bold text-slate-400 mt-1">venda deixada na mesa pela restrição fabril</p>
+                </div>
+              </div>
+
+              <div className="p-7 rounded-[32px] shadow-sm bg-white border border-slate-100 flex flex-col justify-between min-h-[200px]">
+                <div className="flex justify-between items-start">
+                  <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-400">Variação vs Ciclo Anterior</h3>
+                  {executivo.varCicloPct >= 0 ? <TrendingUp className="w-5 h-5 text-emerald-500" /> : <TrendingDown className="w-5 h-5 text-rose-500" />}
+                </div>
+                <div className="mt-auto pt-3">
+                  <p className={`text-3xl font-black tracking-tighter ${executivo.varCicloPct >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                    {executivo.varCicloPct >= 0 ? '+' : ''}{executivo.varCicloPct.toFixed(1)}%
+                  </p>
+                  <p className="text-[11px] font-bold text-slate-400 mt-1">crescimento do plano vs ciclo passado</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Waterfall da destilação (receita por etapa) */}
+            <div className="bg-white rounded-[32px] shadow-sm border border-slate-100 p-8 mb-8">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-xl"><TrendingUp className="w-5 h-5" /></div>
+                <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest">A Jornada do Número — Receita por Etapa do Ciclo</h4>
+              </div>
+              <div className="h-72 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={stats.map(s => ({ name: s.label, Receita: Math.round(s.r), Orcamento: Math.round(s.orc) }))} margin={{ top: 10, right: 20, bottom: 5, left: 10 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                    <XAxis dataKey="name" stroke="#94a3b8" tick={{ fill: '#64748b', fontSize: 12, fontWeight: 700 }} tickLine={false} axisLine={false} />
+                    <YAxis stroke="#94a3b8" tick={{ fill: '#64748b', fontSize: 12 }} tickLine={false} axisLine={false} tickFormatter={(v) => new Intl.NumberFormat('pt-BR', { notation: 'compact' }).format(v)} />
+                    <Tooltip contentStyle={{ backgroundColor: '#fff', borderColor: '#e2e8f0', borderRadius: '12px', fontSize: '13px' }} formatter={(v: any) => formatMoeda(v)} />
+                    <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '12px', fontWeight: 700 }} iconType="circle" />
+                    <Bar dataKey="Receita" fill="#6366f1" radius={[6, 6, 0, 0]} />
+                    <Line dataKey="Orcamento" name="Orçamento" stroke="#0f172a" strokeWidth={2} dot={{ r: 3 }} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            {/* Concentração de risco */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-10">
+              <div className="bg-white rounded-[32px] shadow-sm border border-slate-100 p-8">
+                <div className="flex items-center gap-3 mb-5">
+                  <div className="p-2 bg-rose-50 text-rose-600 rounded-xl"><TrendingDown className="w-4 h-4" /></div>
+                  <h4 className="text-xs font-black text-slate-800 uppercase tracking-widest">Categorias Abaixo do Orçamento</h4>
+                </div>
+                {executivo.abaixoOrc.length === 0 ? (
+                  <p className="text-sm text-slate-400 font-medium">Nenhuma categoria abaixo do orçamento. Plano saudável.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {executivo.abaixoOrc.map((c: any, i: number) => (
+                      <div key={i} className="flex items-center justify-between p-3 rounded-xl bg-rose-50/50 border border-rose-100">
+                        <span className="text-[12px] font-black text-slate-700 truncate">{c.nome}</span>
+                        <div className="flex items-center gap-3 shrink-0">
+                          <span className="text-[11px] font-bold text-slate-400">{formatMoeda(c.gap)}</span>
+                          <span className="text-[11px] font-black text-rose-600">{c.gapPct.toFixed(1)}%</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="bg-white rounded-[32px] shadow-sm border border-slate-100 p-8">
+                <div className="flex items-center gap-3 mb-5">
+                  <div className="p-2 bg-emerald-50 text-emerald-600 rounded-xl"><TrendingUp className="w-4 h-4" /></div>
+                  <h4 className="text-xs font-black text-slate-800 uppercase tracking-widest">Categorias Acima do Orçamento</h4>
+                </div>
+                {executivo.acimaOrc.length === 0 ? (
+                  <p className="text-sm text-slate-400 font-medium">Nenhuma categoria acima do orçamento.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {executivo.acimaOrc.map((c: any, i: number) => (
+                      <div key={i} className="flex items-center justify-between p-3 rounded-xl bg-emerald-50/50 border border-emerald-100">
+                        <span className="text-[12px] font-black text-slate-700 truncate">{c.nome}</span>
+                        <div className="flex items-center gap-3 shrink-0">
+                          <span className="text-[11px] font-bold text-slate-400">{formatMoeda(c.gap)}</span>
+                          <span className="text-[11px] font-black text-emerald-600">+{c.gapPct.toFixed(1)}%</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* ===================== MODO DETALHE (edição) ===================== */}
+        {viewMode === 'detalhe' && (
+        <>
         {/* --- CARDS EXECUTIVOS ALINHADOS --- */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6 mb-10">
           {stats.map((card, i) => (
@@ -705,6 +892,8 @@ export default function GlobalDashboard() {
              </table>
            </div>
         </div>
+        </>
+        )}
       </div>
     </div>
   );
