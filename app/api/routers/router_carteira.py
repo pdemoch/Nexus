@@ -105,6 +105,18 @@ def _mapa_coordenadores_do_gerente(db: Session, gerente_nome: str) -> set:
     return {r.coord for r in rows}
 
 
+def _bottomup_congelado(db: Session, ciclo: str) -> bool:
+    """
+    A etapa ANTERIOR ao Consenso e o BottomUP (Gerenciamento). O Consenso so
+    libera edicao para Gerente/Coordenador se o BottomUP estiver CONGELADO.
+    Admin fura essa trava (super-usuario para emergencias).
+    """
+    st = db.execute(text("""
+        SELECT status FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'BottomUP'
+    """), {"c": ciclo}).scalar()
+    return st == 'CONGELADO'
+
+
 # =====================================================================
 # FILTROS (opções de navegação conforme escopo)
 # =====================================================================
@@ -225,9 +237,12 @@ def get_dados_metas(
             realizado_map[(str(r.cgc), str(r.sku), mes_atual)] = float(r.vol_real or 0)
 
     if df.empty:
+        bu_ok = _bottomup_congelado(db, ciclo)
         return {
             "ciclo_ativo": ciclo, "dados": [], "meses": [],
             "meu_congelamento": "ABERTO", "etapa_bloqueada": etapa_metas_bloqueada(db, ciclo),
+            "bottomup_congelado": bu_ok,
+            "etapa_anterior_pendente": (not bu_ok) and (escopo["funcao"] != NIVEL_ADMIN),
             "escopo": {"nivel": escopo["funcao"], "nome": escopo["nome_responsavel"]},
         }
 
@@ -363,12 +378,15 @@ def get_dados_metas(
             g_node["subRows"].append(c_node)
         arvore.append(g_node)
 
+    bu_ok = _bottomup_congelado(db, ciclo)
     return {
         "ciclo_ativo": ciclo,
         "meses": meses_cols,
         "dados": arvore,
         "meu_congelamento": "CONGELADO" if esta_congelado_para_usuario(db, escopo, ciclo) else "ABERTO",
         "etapa_bloqueada": etapa_metas_bloqueada(db, ciclo),
+        "bottomup_congelado": bu_ok,
+        "etapa_anterior_pendente": (not bu_ok) and (escopo["funcao"] != NIVEL_ADMIN),
         "escopo": {"nivel": escopo["funcao"], "nome": escopo["nome_responsavel"]},
     }
 
@@ -384,6 +402,11 @@ async def salvar_metas(payload: PayloadSalvarMetas, db: Session = Depends(get_db
     # Trava de etapa: se o Admin já publicou Metas, ninguém edita.
     if etapa_metas_bloqueada(db, ciclo):
         raise HTTPException(status_code=403, detail="A etapa de Metas já foi publicada pelo Administrador. Edições encerradas.")
+
+    # Trava de PRECEDENCIA: BottomUP (etapa anterior) tem de estar congelado.
+    # Admin fura. Gerente/Coordenador aguardam a etapa anterior fechar.
+    if escopo["funcao"] != NIVEL_ADMIN and not _bottomup_congelado(db, ciclo):
+        raise HTTPException(status_code=403, detail="O Bottom-Up (Gerencia Comercial) ainda nao foi congelado. Aguarde a etapa anterior fechar.")
 
     # Cadeado individual: se a carteira do próprio usuário está congelada, bloqueia
     # (exceto Admin). Superior reabre antes de editar (endpoint /reabrir).
