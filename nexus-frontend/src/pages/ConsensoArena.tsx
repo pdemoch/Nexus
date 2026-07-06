@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 import axios from 'axios';
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
+  BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
 } from 'recharts';
 
 // =====================================================================
@@ -106,6 +106,9 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
   const [expanded, setExpanded] = useState({});
   const [sorting, setSorting] = useState<SortingState>([]);
   const [unidade, setUnidade] = useState<'cx' | 'rs'>('cx');
+  const [chartExpanded, setChartExpanded] = useState<string | null>(null);
+  const [dossieCache, setDossieCache] = useState<{ [chave: string]: any }>({});
+  const [dossieLoading, setDossieLoading] = useState<string | null>(null);
 
   // Edições locais por folha: { [id]: novoVol }
   const [edicoes, setEdicoes] = useState<{ [id: number]: number }>({});
@@ -177,6 +180,47 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
     return node.meses.find(m => m.mes_banco === mes);
   }, []);
 
+  // Dossiê sob demanda: busca o histórico do nó só ao expandir (não pesa o /dados).
+  const toggleDossie = useCallback(async (node: Node) => {
+    const chave = node.chave;
+    if (chartExpanded === chave) { setChartExpanded(null); return; }
+    setChartExpanded(chave);
+    if (dossieCache[chave]) return; // já carregado
+    setDossieLoading(chave);
+    try {
+      const params: any = { tipo: node.tipo };
+      if (node.tipo === 'produto') { params.sku = node.produto; params.cliente = node.nome; }
+      else if (node.tipo === 'cliente') { params.cliente = node.nome; }
+      const res = await axios.get('/api/v1/consensus/micro/dossie', { params });
+      setDossieCache(prev => ({ ...prev, [chave]: res.data }));
+    } catch (e) {
+      console.error('Erro ao carregar dossiê:', e);
+      setDossieCache(prev => ({ ...prev, [chave]: { labels: [], realizado: [], ia: [], lag1: [] } }));
+    } finally {
+      setDossieLoading(null);
+    }
+  }, [chartExpanded, dossieCache]);
+
+  // Monta os dados do gráfico: histórico (do cache) + linha Meta dinâmica (M2-M4).
+  const getDossieChartData = useCallback((node: Node) => {
+    const g = dossieCache[node.chave];
+    if (!g?.labels) return [];
+    const totalPts = g.labels.length;
+    const idxPlano = [totalPts - 3, totalPts - 2, totalPts - 1]; // M2, M3, M4
+    return g.labels.map((label: string, i: number) => {
+      let meta: number | null = null;
+      const pos = idxPlano.indexOf(i);
+      if (pos >= 0 && meses[pos]) meta = volNode(node, meses[pos].mes_banco);
+      return {
+        name: label,
+        realizado: g.realizado?.[i] ?? null,
+        ia: g.ia?.[i] ?? null,
+        lag1: g.lag1?.[i] ?? null,
+        meta,
+      };
+    });
+  }, [dossieCache, meses, volNode]);
+
   // --- editar um nó em CAIXAS: rateia proporcional ao vol_meta atual das folhas ---
   const editarNodeVolume = (node: Node, mes: string, novoTotal: number) => {
     const folhas = coletaFolhas(node, mes);
@@ -242,13 +286,16 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
 
   // ============ CARDS DE COMANDO ============
   const comando = useMemo(() => {
-    let volMeta = 0, fatMeta = 0, volCom = 0, fatCom = 0, orc = 0, volHist = 0, fatHist = 0;
+    let volMeta = 0, fatMeta = 0, volCom = 0, fatCom = 0, volHist = 0, fatHist = 0;
+    // Orçamento é por SKU (não por cliente): dedup por sku|mes, conta uma vez.
+    const orcPorSkuMes = new Map<string, number>();
     const percorre = (nodes: Node[]) => {
       nodes.forEach(n => {
         if (n.tipo === 'produto') {
           n.meses.forEach(m => {
             volCom += m.vol_comercial; fatCom += m.fat_comercial;
-            orc += m.rec_orcada; volHist += m.vol_hist; fatHist += m.fat_hist;
+            volHist += m.vol_hist; fatHist += m.fat_hist;
+            orcPorSkuMes.set(`${n.produto}|${m.mes_banco}`, m.rec_orcada);
           });
           meses.forEach(mc => {
             volMeta += volNode(n, mc.mes_banco);
@@ -259,22 +306,28 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
       });
     };
     percorre(dados);
+    let orc = 0;
+    orcPorSkuMes.forEach(v => { orc += v; });
     return { volMeta, fatMeta, volCom, fatCom, orc, volHist, fatHist };
   }, [dados, meses, volNode, fatNode]);
 
   // ============ MACRO (barras por mês: Meta vs Comercial vs Orçamento vs Hist) ============
   const chartMacro = useMemo(() => {
     return meses.map(mc => {
-      let fatMeta = 0, fatCom = 0, orc = 0, fatHist = 0;
+      let fatMeta = 0, fatCom = 0, fatHist = 0;
+      const orcPorSku = new Map<string, number>();
       const percorre = (nodes: Node[]) => nodes.forEach(n => {
         if (n.tipo === 'produto') {
           fatMeta += fatNode(n, mc.mes_banco);
           const m = n.meses.find(x => x.mes_banco === mc.mes_banco);
-          fatCom += m?.fat_comercial || 0; orc += m?.rec_orcada || 0; fatHist += m?.fat_hist || 0;
+          fatCom += m?.fat_comercial || 0; fatHist += m?.fat_hist || 0;
+          if (m && n.produto) orcPorSku.set(n.produto, m.rec_orcada);
         }
         if (n.subRows) percorre(n.subRows);
       });
       percorre(dados);
+      let orc = 0;
+      orcPorSku.forEach(v => { orc += v; });
       return {
         name: mc.mes_str,
         Meta: Math.round(fatMeta), Comercial: Math.round(fatCom),
@@ -334,18 +387,6 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
     } finally { setSaving(false); }
   };
 
-  // Congelar a carteira de um responsável a partir do painel (Admin/Gerente).
-  const congelarResponsavel = async (nomeAlvo: string, nivelAlvo: string) => {
-    if (!window.confirm(`Congelar a carteira de "${nomeAlvo}"? Ela ficará somente-leitura até ser reaberta.`)) return;
-    setSaving(true);
-    try {
-      await axios.post('/api/v1/consensus/micro/congelar', { nome_alvo: nomeAlvo, nivel_alvo: nivelAlvo });
-      await carregar();
-    } catch (e: any) {
-      alert(e.response?.data?.detail || 'Erro ao congelar.');
-    } finally { setSaving(false); }
-  };
-
   const publicarEtapa = async () => {
     const msg = `PUBLICAR A ETAPA DE METAS\n\n` +
       `Isto passa o bastão para o Supply e encerra as edições de todos.\n` +
@@ -377,12 +418,18 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
       accessorFn: (r: any) => r.nome,
       cell: (info: any) => {
         const row = info.row;
-        const { tipo, nome, produto } = row.original;
+        const { tipo, nome, produto, chave } = row.original;
+        const temDossie = tipo === 'cliente' || tipo === 'produto';
         return (
           <div style={{ paddingLeft: `${row.depth * 24}px` }} className="flex items-center gap-2.5 py-2 min-w-[280px]">
             {row.getCanExpand() ? (
               <button onClick={row.getToggleExpandedHandler()} className="p-1 hover:bg-slate-200 rounded-lg text-slate-500">
                 {row.getIsExpanded() ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+              </button>
+            ) : <div className="w-6" />}
+            {temDossie ? (
+              <button onClick={() => toggleDossie(row.original)} className={`p-1 rounded-lg border transition-all ${chartExpanded === chave ? 'bg-indigo-100 text-indigo-600 border-indigo-200' : 'bg-white hover:bg-slate-50 text-slate-400 border-slate-200'}`} title="Dossiê (histórico 24m)">
+                <BarChart3 className="w-3.5 h-3.5" />
               </button>
             ) : <div className="w-6" />}
             <div className={`w-7 h-7 flex items-center justify-center rounded-lg border ${tipo === 'gerente' || tipo === 'coordenador' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
@@ -438,7 +485,7 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
       });
     });
     return cols;
-  }, [dados, meses, unidade, isLocked, modoHierarquia, volNode, fatNode, pmvMedioNode, refMes, edicoes]);
+  }, [dados, meses, unidade, isLocked, modoHierarquia, volNode, fatNode, pmvMedioNode, refMes, edicoes, chartExpanded, toggleDossie]);
 
   const table = useReactTable({
     data: arvore, columns,
@@ -587,7 +634,7 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
         </div>
 
         {/* PAINEL DE CADEADOS (gerente/admin) */}
-        {modoHierarquia && (
+        {modoHierarquia && cadeados.length > 0 && (
           <div className="bg-white rounded-[32px] shadow-sm border border-slate-100 p-8 mb-8">
             <div className="flex items-center justify-between mb-6">
               <div className="flex items-center gap-3">
@@ -596,36 +643,26 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
               </div>
               <span className="text-sm font-black text-slate-600">{progresso.fechados}/{progresso.total} carteiras congeladas</span>
             </div>
-            {cadeados.length === 0 ? (
-              <p className="text-sm text-slate-400 font-medium">Nenhum responsável com carteira neste ciclo.</p>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {cadeados.map((c, i) => (
-                  <div key={i} className="flex items-center justify-between p-4 rounded-2xl border border-slate-100 bg-slate-50">
-                    <div className="flex items-center gap-2.5 overflow-hidden">
-                      <div className={`w-8 h-8 flex items-center justify-center rounded-xl shrink-0 ${c.status === 'CONGELADO' ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-200 text-slate-400'}`}>
-                        {c.status === 'CONGELADO' ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
-                      </div>
-                      <div className="flex flex-col overflow-hidden">
-                        <span className="text-[12px] font-black text-slate-700 truncate" title={c.nome}>{c.nome}</span>
-                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">{c.nivel} · {c.status === 'CONGELADO' ? (c.quando || 'congelado') : 'aberto'}</span>
-                      </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {cadeados.map((c, i) => (
+                <div key={i} className="flex items-center justify-between p-4 rounded-2xl border border-slate-100 bg-slate-50">
+                  <div className="flex items-center gap-2.5">
+                    <div className={`w-8 h-8 flex items-center justify-center rounded-xl ${c.status === 'CONGELADO' ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-200 text-slate-400'}`}>
+                      {c.status === 'CONGELADO' ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
                     </div>
-                    {!etapaBloqueada && (
-                      c.status === 'CONGELADO' ? (
-                        <button onClick={() => reabrir(c.nome)} className="flex items-center gap-1.5 text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-lg hover:bg-amber-100 transition-all shrink-0">
-                          <Unlock className="w-3 h-3" /> Reabrir
-                        </button>
-                      ) : (
-                        <button onClick={() => congelarResponsavel(c.nome, c.nivel)} className="flex items-center gap-1.5 text-[10px] font-black text-indigo-600 bg-indigo-50 border border-indigo-200 px-2.5 py-1.5 rounded-lg hover:bg-indigo-100 transition-all shrink-0">
-                          <Lock className="w-3 h-3" /> Congelar
-                        </button>
-                      )
-                    )}
+                    <div className="flex flex-col">
+                      <span className="text-[12px] font-black text-slate-700">{c.nome}</span>
+                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">{c.nivel} · {c.quando || '—'}</span>
+                    </div>
                   </div>
-                ))}
-              </div>
-            )}
+                  {c.status === 'CONGELADO' && !etapaBloqueada && (
+                    <button onClick={() => reabrir(c.nome)} className="flex items-center gap-1.5 text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-lg hover:bg-amber-100 transition-all">
+                      <Unlock className="w-3 h-3" /> Reabrir
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
@@ -661,13 +698,77 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
                 ))}
               </thead>
               <tbody>
-                {table.getRowModel().rows.map(row => (
-                  <tr key={row.id} className={`border-b border-slate-50 transition-colors ${row.original.tipo === 'gerente' || row.original.tipo === 'coordenador' ? 'bg-slate-50/50' : 'hover:bg-indigo-50/30'}`}>
-                    {row.getVisibleCells().map(cell => (
-                      <td key={cell.id} className="px-4">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
-                    ))}
-                  </tr>
-                ))}
+                {table.getRowModel().rows.map(row => {
+                  const chave = row.original.chave;
+                  const aberto = chartExpanded === chave;
+                  const carregando = dossieLoading === chave;
+                  return (
+                    <React.Fragment key={row.id}>
+                      <tr className={`border-b border-slate-50 transition-colors ${row.original.tipo === 'gerente' || row.original.tipo === 'coordenador' ? 'bg-slate-50/50' : 'hover:bg-indigo-50/30'}`}>
+                        {row.getVisibleCells().map(cell => (
+                          <td key={cell.id} className="px-4">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
+                        ))}
+                      </tr>
+                      {aberto && (
+                        <tr>
+                          <td colSpan={row.getVisibleCells().length} className="bg-slate-50/60 px-8 py-6 border-b border-slate-100">
+                            <div className="flex items-center gap-2 mb-4">
+                              <BarChart3 className="w-4 h-4 text-indigo-500" />
+                              <span className="text-xs font-black text-slate-600 uppercase tracking-widest">Dossiê · Histórico 24 meses · {row.original.nome}</span>
+                            </div>
+                            {/* Cards de contexto: consolidado dos 3 meses do nó */}
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+                              {(() => {
+                                const node = row.original;
+                                let vMeta = 0, vCom = 0, vHist = 0;
+                                meses.forEach(mc => {
+                                  vMeta += volNode(node, mc.mes_banco);
+                                  const m = refMes(node, mc.mes_banco);
+                                  vCom += m?.vol_comercial || 0; vHist += m?.vol_hist || 0;
+                                });
+                                const cards = [
+                                  { l: 'Meta (Consenso)', v: vMeta, cor: 'text-indigo-700' },
+                                  { l: 'Comercial (BU)', v: vCom, cor: 'text-slate-700' },
+                                  { l: 'Ano Anterior', v: vHist, cor: 'text-slate-500' },
+                                  { l: 'Meta vs Ano Ant.', v: null, pct: vHist > 0 ? ((vMeta - vHist) / vHist) * 100 : 0, cor: '' },
+                                ];
+                                return cards.map((c, ci) => (
+                                  <div key={ci} className={`rounded-2xl border p-3 shadow-sm ${ci === 3 ? 'bg-slate-900' : 'bg-white border-slate-100'}`}>
+                                    <p className={`text-[9px] font-black uppercase tracking-widest mb-1 ${ci === 3 ? 'text-indigo-300' : 'text-slate-400'}`}>{c.l}</p>
+                                    {c.v !== null ? (
+                                      <p className={`text-sm font-black tracking-tighter ${c.cor}`}>{fmtVol(c.v)} <span className="text-[8px] opacity-60">cx</span></p>
+                                    ) : (
+                                      <p className={`text-base font-black tracking-tighter ${(c.pct || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{(c.pct || 0) >= 0 ? '+' : ''}{(c.pct || 0).toFixed(1)}%</p>
+                                    )}
+                                  </div>
+                                ));
+                              })()}
+                            </div>
+                            {carregando ? (
+                              <div className="h-64 flex items-center justify-center"><Loader2 className="w-8 h-8 text-indigo-500 animate-spin" /></div>
+                            ) : (
+                              <div className="h-64 w-full">
+                                <ResponsiveContainer width="100%" height="100%">
+                                  <LineChart data={getDossieChartData(row.original)} margin={{ top: 5, right: 30, bottom: 5, left: 0 }}>
+                                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                                    <XAxis dataKey="name" stroke="#94a3b8" tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} />
+                                    <YAxis stroke="#94a3b8" tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={(v) => new Intl.NumberFormat('pt-BR', { notation: 'compact' }).format(v)} />
+                                    <Tooltip contentStyle={{ backgroundColor: '#fff', borderColor: '#e2e8f0', borderRadius: '12px', fontSize: '13px' }} />
+                                    <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '12px', fontWeight: 700 }} iconType="circle" />
+                                    <Line type="monotone" dataKey="realizado" name="Realizado (Cx)" stroke="#64748b" strokeWidth={2} dot={{ r: 3 }} connectNulls />
+                                    <Line type="monotone" dataKey="ia" name="IA Oficial" stroke="#a855f7" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls />
+                                    <Line type="monotone" dataKey="lag1" name="Ciclo Anterior" stroke="#f59e0b" strokeWidth={2} strokeDasharray="3 3" dot={false} connectNulls />
+                                    <Line type="monotone" dataKey="meta" name="Meta (Consenso)" stroke="#6366f1" strokeWidth={3} dot={{ r: 4 }} activeDot={{ r: 6 }} connectNulls />
+                                  </LineChart>
+                                </ResponsiveContainer>
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>

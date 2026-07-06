@@ -28,7 +28,8 @@ from sqlalchemy import text
 from app.core.database import get_db, engine
 from app.api.routers.router_auth import get_current_user
 from app.api.routers.shared_ibp import (
-    get_current_cycle, get_projection_window,
+    get_current_cycle, get_projection_window, get_previous_cycle,
+    resolver_ciclo_fonte, ciclo_para_date,
 )
 from app.api.routers.rls_metas import (
     exigir_acesso_metas, escopo_usuario, clausula_rls,
@@ -504,6 +505,116 @@ async def reabrir_metas(payload: PayloadReabrir, db: Session = Depends(get_db), 
 
     reabrir_cadeado(db, escopo, ciclo, alvo, pertence_ao_escopo=pertence)
     return {"status": "sucesso", "mensagem": f"Carteira de '{alvo}' reaberta."}
+
+
+# =====================================================================
+# DOSSIÊ SOB DEMANDA — histórico 24m de UM nó (cliente ou SKU) ao expandir.
+# Não pesa o /dados: só é chamado quando o usuário abre um gráfico.
+# =====================================================================
+@router.get("/dossie")
+def dossie_no(
+    tipo: str = Query(...),          # 'cliente' ou 'produto'
+    cliente: Optional[str] = Query(None),
+    sku: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    usuario: dict = Depends(get_current_user)
+):
+    escopo = exigir_acesso_metas(usuario)
+    ciclo = get_current_cycle(db)
+    meses = get_projection_window(db, ciclo)
+    if len(meses) < 3:
+        raise HTTPException(status_code=500, detail="Janela incompleta.")
+    m2, m3, m4 = meses[0], meses[1], meses[2]
+
+    # RLS: restringe os CGCs ao escopo do usuário.
+    rls = clausula_rls(escopo, alias_cli="c")
+
+    # Descobre os pares (cgc, sku) do nó pedido, dentro do escopo.
+    filtros = "f.ciclo_sop = :ciclo"
+    params: Dict[str, Any] = {"ciclo": ciclo, **rls["params"]}
+    if tipo == "produto" and sku:
+        filtros += " AND f.sku = :sku"
+        params["sku"] = sku
+        if cliente:
+            filtros += " AND TRIM(c.razaosocial) = :cli"
+            params["cli"] = cliente
+    elif tipo == "cliente" and cliente:
+        filtros += " AND TRIM(c.razaosocial) = :cli"
+        params["cli"] = cliente
+    else:
+        raise HTTPException(status_code=400, detail="Informe cliente e/ou sku.")
+
+    pares_rows = db.execute(text(f"""
+        SELECT DISTINCT f.cgc, f.sku
+        FROM fato_ibp_granular f JOIN dim_clientes c ON f.cgc = c.cgc
+        WHERE {filtros} AND {rls['where']}
+    """), params).fetchall()
+    if not pares_rows:
+        return {"labels": [], "realizado": [], "ia": [], "lag1": [], "meta": []}
+
+    cgcs = list({str(r.cgc) for r in pares_rows})
+    skus = list({str(r.sku) for r in pares_rows})
+
+    # Eixo de 24 meses até M4.
+    ciclo_anterior = get_previous_cycle(db)
+    data_ativo = ciclo_para_date(ciclo)
+    from datetime import datetime as _dt
+    from dateutil.relativedelta import relativedelta as _rd
+    ini = (data_ativo - _rd(months=24)).replace(day=1)
+    fim = _dt.strptime(m4, "%Y-%m-%d").date()
+    meses_eixo = []
+    cur = ini
+    while cur <= fim:
+        meses_eixo.append(cur)
+        cur = cur + _rd(months=1)
+    labels = [m.strftime("%b/%y").capitalize() for m in meses_eixo]
+    corte_real = data_ativo
+
+    # Realizado (fato_vendas).
+    real_rows = db.execute(text("""
+        SELECT DATE_TRUNC('month', data_pedido)::DATE AS mes, SUM(qt_pedido) AS vol
+        FROM fato_vendas
+        WHERE cgc = ANY(:cgcs) AND sku = ANY(:skus)
+          AND data_pedido >= CAST(:ini AS DATE) AND data_pedido <= CAST(:fim AS DATE)
+        GROUP BY DATE_TRUNC('month', data_pedido)::DATE
+    """), {"cgcs": cgcs, "skus": skus, "ini": ini.strftime("%Y-%m-%d"), "fim": m4}).fetchall()
+    real_map = {r.mes.strftime("%Y-%m-%d"): float(r.vol or 0) for r in real_rows}
+
+    # lag1 (ciclo anterior).
+    lag_rows = db.execute(text("""
+        SELECT mes_projetado::DATE AS mes, SUM(vol_final) AS vol
+        FROM fato_ibp_granular
+        WHERE ciclo_sop = :cant AND cgc = ANY(:cgcs) AND sku = ANY(:skus)
+        GROUP BY mes_projetado
+    """), {"cant": ciclo_anterior, "cgcs": cgcs, "skus": skus}).fetchall()
+    lag_map = {r.mes.strftime("%Y-%m-%d"): float(r.vol or 0) for r in lag_rows}
+
+    # IA oficial por mês (regra ciclo-fonte).
+    mapa_fonte = {}
+    for m in meses_eixo:
+        cf = resolver_ciclo_fonte(m, ciclo)
+        if cf:
+            mapa_fonte.setdefault(cf, []).append(m.strftime("%Y-%m-%d"))
+    ia_map = {}
+    for cf, ms in mapa_fonte.items():
+        rows_ia = db.execute(text("""
+            SELECT mes_projetado::DATE AS mes, SUM(vol_ia) AS vol
+            FROM fato_ibp_granular
+            WHERE ciclo_sop = :cf AND cgc = ANY(:cgcs) AND sku = ANY(:skus)
+              AND mes_projetado = ANY(CAST(:ms AS DATE[]))
+            GROUP BY mes_projetado
+        """), {"cf": cf, "cgcs": cgcs, "skus": skus, "ms": ms}).fetchall()
+        for r in rows_ia:
+            ia_map[r.mes.strftime("%Y-%m-%d")] = float(r.vol or 0)
+
+    s_real, s_ia, s_lag = [], [], []
+    for m in meses_eixo:
+        mk = m.strftime("%Y-%m-%d")
+        s_real.append(real_map.get(mk, 0.0) if m <= corte_real else None)
+        s_ia.append(ia_map.get(mk) if mk in ia_map else None)
+        s_lag.append(lag_map.get(mk) if mk in lag_map else None)
+
+    return {"labels": labels, "realizado": s_real, "ia": s_ia, "lag1": s_lag}
 
 
 # =====================================================================
