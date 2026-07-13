@@ -23,6 +23,13 @@ const formatMoeda = (valor: any) => {
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(num));
 };
 
+// PMV e preco unitario: precisa de centavos (ex.: R$ 128,09).
+const formatMoedaPreciso = (valor: any) => {
+  const num = Number(valor);
+  if (isNaN(num)) return 'R$ 0,00';
+  return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(num);
+};
+
 const formatVolume = (val: any) => {
   const num = Number(val);
   if (isNaN(num)) return '0';
@@ -424,6 +431,15 @@ export default function TopDownArena(_props: { usuarioSessao?: any } = {}) {
           const ia = getNodeIa(row, mes.mes_banco);
           const pend = row.tipo === 'produto' && temPendencia(row.produto, mes.mes_banco);
 
+          // Tooltip de auditoria: a conta que gera o faturamento deste mes.
+          // O PMV e o preco efetivo do mes (ponderado pelo mix de clientes).
+          const pmvMes = row.tipo === 'produto'
+            ? getPmvExib(row.produto, mes.mes_banco)
+            : (vol > 0 ? fat / vol : 0);
+          const tipCalculo = `${formatVolume(vol)} cx x ${formatMoedaPreciso(pmvMes)} = ${formatMoeda(fat)}`
+            + (orc > 0 ? `\nOrcamento: ${formatMoeda(orc)}` : '')
+            + (pend ? `\n(estimado - salve para o valor exato)` : '');
+
           return (
             <div className="flex flex-col items-center justify-center min-w-[150px]">
               <div className="w-28 mb-1">
@@ -439,8 +455,8 @@ export default function TopDownArena(_props: { usuarioSessao?: any } = {}) {
               </div>
 
               <div className="flex flex-col items-center mt-1">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] font-bold text-emerald-600" title={pend ? 'Faturamento estimado (salve para o valor exato)' : 'Faturamento previsto (micro)'}>
+                <div className="flex items-center gap-1.5" title={tipCalculo}>
+                  <span className="text-[10px] font-bold text-emerald-600 cursor-help">
                     {pend ? '~' : ''}{formatMoeda(fat)}
                   </span>
                   {orc > 0 && <VarBadge atual={fat} orcado={orc} />}
@@ -458,7 +474,7 @@ export default function TopDownArena(_props: { usuarioSessao?: any } = {}) {
     });
 
     return cols;
-  }, [arvore, mesesDisponiveis, chartExpanded, isLocked, getNodeVol, getNodeFat, getNodeOrc, getNodeIa, celulasEditadas]);
+  }, [arvore, mesesDisponiveis, chartExpanded, isLocked, getNodeVol, getNodeFat, getNodeOrc, getNodeIa, celulasEditadas, getPmvExib]);
 
   const table = useReactTable({
     data: arvore,

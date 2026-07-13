@@ -105,18 +105,6 @@ def _mapa_coordenadores_do_gerente(db: Session, gerente_nome: str) -> set:
     return {r.coord for r in rows}
 
 
-def _bottomup_congelado(db: Session, ciclo: str) -> bool:
-    """
-    A etapa ANTERIOR ao Consenso e o BottomUP (Gerenciamento). O Consenso so
-    libera edicao para Gerente/Coordenador se o BottomUP estiver CONGELADO.
-    Admin fura essa trava (super-usuario para emergencias).
-    """
-    st = db.execute(text("""
-        SELECT status FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'BottomUP'
-    """), {"c": ciclo}).scalar()
-    return st == 'CONGELADO'
-
-
 # =====================================================================
 # FILTROS (opções de navegação conforme escopo)
 # =====================================================================
@@ -217,32 +205,10 @@ def get_dados_metas(
         for r in orc_rows:
             orcamento_map[(str(r.sku), r.mes.strftime("%Y-%m-%d"))] = float(r.rec_orc or 0)
 
-    # Realizado do MESMO período no ano anterior (âncora histórica por cliente×sku).
-    # Para cada mês projetado, busca vendas do mesmo mês 12 meses atrás.
-    from dateutil.relativedelta import relativedelta as _rd
-    meses_hist = {m: (pd.to_datetime(m) - _rd(months=12)).strftime("%Y-%m-%d") for m in [m2, m3, m4]}
-    hist_rows = db.execute(text("""
-        SELECT cgc, sku, DATE_TRUNC('month', data_pedido)::DATE AS mes, SUM(qt_pedido) AS vol_real
-        FROM fato_vendas
-        WHERE DATE_TRUNC('month', data_pedido)::DATE = ANY(CAST(:meses AS DATE[]))
-        GROUP BY cgc, sku, DATE_TRUNC('month', data_pedido)::DATE
-    """), {"meses": list(meses_hist.values())}).fetchall()
-    # Mapa: (cgc, sku, mes_projetado_atual) -> vol_real do ano anterior.
-    hist_inv = {v: k for k, v in meses_hist.items()}  # mes_hist -> mes_atual
-    realizado_map: Dict[tuple, float] = {}
-    for r in hist_rows:
-        mes_hist_str = r.mes.strftime("%Y-%m-%d")
-        mes_atual = hist_inv.get(mes_hist_str)
-        if mes_atual:
-            realizado_map[(str(r.cgc), str(r.sku), mes_atual)] = float(r.vol_real or 0)
-
     if df.empty:
-        bu_ok = _bottomup_congelado(db, ciclo)
         return {
             "ciclo_ativo": ciclo, "dados": [], "meses": [],
             "meu_congelamento": "ABERTO", "etapa_bloqueada": etapa_metas_bloqueada(db, ciclo),
-            "bottomup_congelado": bu_ok,
-            "etapa_anterior_pendente": (not bu_ok) and (escopo["funcao"] != NIVEL_ADMIN),
             "escopo": {"nivel": escopo["funcao"], "nome": escopo["nome_responsavel"]},
         }
 
@@ -253,12 +219,6 @@ def get_dados_metas(
         {"mes_banco": m4, "mes_str": pd.to_datetime(m4).strftime("%b/%y").capitalize()},
     ]
 
-    # Anexa o realizado histórico (ano anterior) a cada linha do df, por chave.
-    df["realizado_hist"] = df.apply(
-        lambda r: realizado_map.get((str(r["cgc"]), str(r["sku"]), r["mes"].strftime("%Y-%m-%d")), 0.0),
-        axis=1
-    )
-
     # =================================================================
     # MONTAGEM OTIMIZADA DA ÁRVORE (sem refiltrar o DataFrame por nó).
     # Antes: bloco_meses(sub) refiltrava df em CADA nó (O(nós × linhas)),
@@ -267,7 +227,6 @@ def get_dados_metas(
     # =================================================================
     df["fat_meta"] = df["vol_meta"] * df["pmv"]
     df["fat_com"] = df["vol_base"] * df["pmv"]
-    df["fat_hist"] = df["realizado_hist"] * df["pmv"]
     df["mes_str_k"] = df["mes"].dt.strftime("%Y-%m-%d")
 
     NIVEIS = ["gerente", "coordenador", "vendedor", "cliente", "sku"]
@@ -279,8 +238,6 @@ def get_dados_metas(
             fat_meta=("fat_meta", "sum"),
             vol_com=("vol_base", "sum"),
             fat_com=("fat_com", "sum"),
-            vol_hist=("realizado_hist", "sum"),
-            fat_hist=("fat_hist", "sum"),
         ).reset_index()
         return g
 
@@ -298,8 +255,6 @@ def get_dados_metas(
                 "fat_meta": round(float(row.fat_meta), 2),
                 "vol_comercial": int(row.vol_com),
                 "fat_comercial": round(float(row.fat_com), 2),
-                "vol_hist": int(row.vol_hist),
-                "fat_hist": round(float(row.fat_hist), 2),
             }
 
     # Orçamento por nó = soma do orçamento dos SKUs DISTINTOS do nó (cada SKU
@@ -327,7 +282,6 @@ def get_dados_metas(
                 "vol_meta": d.get("vol_meta", 0), "fat_meta": d.get("fat_meta", 0.0),
                 "vol_comercial": d.get("vol_comercial", 0), "fat_comercial": d.get("fat_comercial", 0.0),
                 "rec_orcada": orcmes.get(mc["mes_banco"], 0.0),
-                "vol_hist": d.get("vol_hist", 0), "fat_hist": d.get("fat_hist", 0.0),
             })
         return out
 
@@ -378,15 +332,12 @@ def get_dados_metas(
             g_node["subRows"].append(c_node)
         arvore.append(g_node)
 
-    bu_ok = _bottomup_congelado(db, ciclo)
     return {
         "ciclo_ativo": ciclo,
         "meses": meses_cols,
         "dados": arvore,
         "meu_congelamento": "CONGELADO" if esta_congelado_para_usuario(db, escopo, ciclo) else "ABERTO",
         "etapa_bloqueada": etapa_metas_bloqueada(db, ciclo),
-        "bottomup_congelado": bu_ok,
-        "etapa_anterior_pendente": (not bu_ok) and (escopo["funcao"] != NIVEL_ADMIN),
         "escopo": {"nivel": escopo["funcao"], "nome": escopo["nome_responsavel"]},
     }
 
@@ -402,11 +353,6 @@ async def salvar_metas(payload: PayloadSalvarMetas, db: Session = Depends(get_db
     # Trava de etapa: se o Admin já publicou Metas, ninguém edita.
     if etapa_metas_bloqueada(db, ciclo):
         raise HTTPException(status_code=403, detail="A etapa de Metas já foi publicada pelo Administrador. Edições encerradas.")
-
-    # Trava de PRECEDENCIA: BottomUP (etapa anterior) tem de estar congelado.
-    # Admin fura. Gerente/Coordenador aguardam a etapa anterior fechar.
-    if escopo["funcao"] != NIVEL_ADMIN and not _bottomup_congelado(db, ciclo):
-        raise HTTPException(status_code=403, detail="O Bottom-Up (Gerencia Comercial) ainda nao foi congelado. Aguarde a etapa anterior fechar.")
 
     # Cadeado individual: se a carteira do próprio usuário está congelada, bloqueia
     # (exceto Admin). Superior reabre antes de editar (endpoint /reabrir).

@@ -12,6 +12,8 @@ import axios from 'axios';
 
 const fmtVol = (v: any) => (Math.round(Number(v) || 0)).toLocaleString('pt-BR');
 const fmtMoeda = (v: any) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(Number(v) || 0));
+// PMV e preco unitario: precisa de centavos.
+const fmtMoedaPreciso = (v: any) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(v) || 0);
 
 const MOTIVOS = [
   { valor: 'capacidade_producao', label: 'Capacidade de Produção' },
@@ -257,6 +259,12 @@ export default function SupplyReviewArena(_props: { usuarioSessao?: any } = {}) 
           const justAtual = edKey?.justificativa ?? mesNode?.justificativa ?? '';
           const temDivergencia = Math.abs(gap) > 0;
 
+          // Faturamento da entrega + auditoria do calculo (volume x PMV).
+          const pmvMes = pmvMedioSku(node, mc.mes_banco);
+          const fatSupply = supply * pmvMes;
+          const tipCalculo = `${fmtVol(supply)} cx x ${fmtMoedaPreciso(pmvMes)} = ${fmtMoeda(fatSupply)}`
+            + `\nMeta do Consenso: ${fmtVol(meta)} cx`;
+
           return (
             <div className="flex flex-col items-center min-w-[160px] gap-1">
               {ehSku ? (
@@ -264,6 +272,10 @@ export default function SupplyReviewArena(_props: { usuarioSessao?: any } = {}) 
               ) : (
                 <span className="text-sm font-black text-slate-800 py-1.5">{fmtVol(supply)}</span>
               )}
+              {/* Faturamento da entrega (auditavel no tooltip) */}
+              <span className="text-[10px] font-black text-emerald-600 cursor-help" title={tipCalculo}>
+                {fmtMoeda(fatSupply)}
+              </span>
               {/* gap vs Consenso */}
               <div className="flex items-center gap-1.5">
                 <span className="text-[9px] font-bold text-slate-400">Meta: {fmtVol(meta)}</span>
@@ -306,7 +318,7 @@ export default function SupplyReviewArena(_props: { usuarioSessao?: any } = {}) 
       });
     });
     return cols;
-  }, [dados, meses, isLocked, edicoes, justAberta, volNode, metaNode]);
+  }, [dados, meses, isLocked, edicoes, justAberta, volNode, metaNode, pmvMedioSku]);
 
   const table = useReactTable({
     data: arvore, columns,

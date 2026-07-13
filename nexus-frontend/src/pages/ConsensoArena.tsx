@@ -6,7 +6,7 @@ import {
 import {
   Loader2, ChevronDown, ChevronRight, Lock, Unlock, Search, BarChart3,
   TrendingUp, TrendingDown, Target, Users, Store, Package, Check, ShieldCheck,
-  Save, Layers, DollarSign, Box, AlertTriangle, History, Briefcase, Sparkles
+  Save, Layers, DollarSign, Box, AlertTriangle, Briefcase, Sparkles
 } from 'lucide-react';
 import axios from 'axios';
 import {
@@ -17,6 +17,8 @@ import {
 // HELPERS
 // =====================================================================
 const fmtMoeda = (v: any) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(Number(v) || 0));
+// PMV e preco unitario: precisa de centavos.
+const fmtMoedaPreciso = (v: any) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(v) || 0);
 const fmtVol = (v: any) => (Math.round(Number(v) || 0)).toLocaleString('pt-BR');
 const calcVar = (atual: number, base: number) => base > 0 ? ((atual - base) / base) * 100 : 0;
 
@@ -77,7 +79,6 @@ interface MesNode {
   vol_meta: number; fat_meta: number;
   vol_comercial: number; fat_comercial: number;
   rec_orcada: number;
-  vol_hist: number; fat_hist: number;
 }
 interface Folha { id: number; pmv: number; vol_meta: number; }
 interface Node {
@@ -98,7 +99,6 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
   const [escopo, setEscopo] = useState<{ nivel: string; nome: string | null }>({ nivel: '', nome: null });
   const [meuCongelamento, setMeuCongelamento] = useState('ABERTO');
   const [etapaBloqueada, setEtapaBloqueada] = useState(false);
-  const [etapaAnteriorPendente, setEtapaAnteriorPendente] = useState(false);
   const [cadeados, setCadeados] = useState<any[]>([]);
 
   const [loading, setLoading] = useState(true);
@@ -119,7 +119,7 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
   const isCoordenador = escopo.nivel === 'Coordenador';
   const modoHierarquia = isAdmin || isGerente;
 
-  const isLocked = etapaBloqueada || etapaAnteriorPendente || (meuCongelamento === 'CONGELADO' && !isAdmin && !isGerente);
+  const isLocked = etapaBloqueada || (meuCongelamento === 'CONGELADO' && !isAdmin && !isGerente);
 
   const carregar = useCallback(async () => {
     setLoading(true);
@@ -134,7 +134,6 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
       setEscopo(dRes.data.escopo || { nivel: '', nome: null });
       setMeuCongelamento(dRes.data.meu_congelamento || 'ABERTO');
       setEtapaBloqueada(dRes.data.etapa_bloqueada || false);
-      setEtapaAnteriorPendente(dRes.data.etapa_anterior_pendente || false);
       setCadeados(cRes.data.cadeados || []);
       setEdicoes({});
       setExpanded({});
@@ -288,7 +287,7 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
 
   // ============ CARDS DE COMANDO ============
   const comando = useMemo(() => {
-    let volMeta = 0, fatMeta = 0, volCom = 0, fatCom = 0, volHist = 0, fatHist = 0;
+    let volMeta = 0, fatMeta = 0, volCom = 0, fatCom = 0;
     // Orçamento é por SKU (não por cliente): dedup por sku|mes, conta uma vez.
     const orcPorSkuMes = new Map<string, number>();
     const percorre = (nodes: Node[]) => {
@@ -296,7 +295,6 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
         if (n.tipo === 'produto') {
           n.meses.forEach(m => {
             volCom += m.vol_comercial; fatCom += m.fat_comercial;
-            volHist += m.vol_hist; fatHist += m.fat_hist;
             orcPorSkuMes.set(`${n.produto}|${m.mes_banco}`, m.rec_orcada);
           });
           meses.forEach(mc => {
@@ -310,19 +308,19 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
     percorre(dados);
     let orc = 0;
     orcPorSkuMes.forEach(v => { orc += v; });
-    return { volMeta, fatMeta, volCom, fatCom, orc, volHist, fatHist };
+    return { volMeta, fatMeta, volCom, fatCom, orc };
   }, [dados, meses, volNode, fatNode]);
 
   // ============ MACRO (barras por mês: Meta vs Comercial vs Orçamento vs Hist) ============
   const chartMacro = useMemo(() => {
     return meses.map(mc => {
-      let fatMeta = 0, fatCom = 0, fatHist = 0;
+      let fatMeta = 0, fatCom = 0;
       const orcPorSku = new Map<string, number>();
       const percorre = (nodes: Node[]) => nodes.forEach(n => {
         if (n.tipo === 'produto') {
           fatMeta += fatNode(n, mc.mes_banco);
           const m = n.meses.find(x => x.mes_banco === mc.mes_banco);
-          fatCom += m?.fat_comercial || 0; fatHist += m?.fat_hist || 0;
+          fatCom += m?.fat_comercial || 0;
           if (m && n.produto) orcPorSku.set(n.produto, m.rec_orcada);
         }
         if (n.subRows) percorre(n.subRows);
@@ -333,7 +331,7 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
       return {
         name: mc.mes_str,
         Meta: Math.round(fatMeta), Comercial: Math.round(fatCom),
-        Orcamento: Math.round(orc), 'Ano Anterior': Math.round(fatHist),
+        Orcamento: Math.round(orc),
       };
     });
   }, [dados, meses, fatNode]);
@@ -386,17 +384,6 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
       await carregar();
     } catch (e: any) {
       alert(e.response?.data?.detail || 'Erro ao reabrir.');
-    } finally { setSaving(false); }
-  };
-
-  const congelarResponsavel = async (nomeAlvo: string, nivelAlvo: string) => {
-    if (!window.confirm(`Congelar a carteira de "${nomeAlvo}"? Ela ficará somente-leitura até ser reaberta.`)) return;
-    setSaving(true);
-    try {
-      await axios.post('/api/v1/consensus/micro/congelar', { nome_alvo: nomeAlvo, nivel_alvo: nivelAlvo });
-      await carregar();
-    } catch (e: any) {
-      alert(e.response?.data?.detail || 'Erro ao congelar.');
     } finally { setSaving(false); }
   };
 
@@ -470,8 +457,15 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
           const ref = refMes(node, mc.mes_banco);
           const orc = ref?.rec_orcada || 0;
           const com = ref?.vol_comercial || 0;
-          const hist = ref?.vol_hist || 0;
           const editavel = !isLocked;
+
+          // Auditoria do calculo. No no SKU (folha) o PMV e o preco EXATO do par
+          // cliente x SKU. Nos niveis acima e o preco efetivo do agregado
+          // (media ponderada pelo mix). Em ambos: volume x PMV = faturamento.
+          const ehFolha = node.tipo === 'produto';
+          const tipCalculo = `${fmtVol(vol)} cx x ${fmtMoedaPreciso(pmvM)} = ${fmtMoeda(fat)}`
+            + (ehFolha ? `\nPMV do par cliente x SKU (preco exato).` : `\nPMV efetivo (ponderado pelo mix).`)
+            + (orc > 0 ? `\nOrcamento: ${fmtMoeda(orc)}` : '');
 
           return (
             <div className="flex flex-col items-center min-w-[150px] gap-1">
@@ -482,15 +476,14 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
                   onCommitValor={(v) => editarNodeValor(node, mc.mes_banco, v)}
                 />
               </div>
-              {/* Faturamento sempre visível + âncora orçamento */}
-              <div className="flex items-center gap-1.5">
-                <span className="text-[10px] font-bold text-emerald-600">{fmtMoeda(fat)}</span>
+              {/* Faturamento sempre visível + âncora orçamento (auditável no tooltip) */}
+              <div className="flex items-center gap-1.5" title={tipCalculo}>
+                <span className="text-[10px] font-bold text-emerald-600 cursor-help">{fmtMoeda(fat)}</span>
                 {orc > 0 && <VarBadge atual={fat} base={orc} titulo="Meta vs Orçamento" />}
               </div>
-              {/* Referências: Comercial e Ano anterior */}
+              {/* Referência: Comercial (Bottom-Up) */}
               <div className="flex items-center gap-1.5 text-[9px] font-bold text-slate-400">
                 <span title="Comercial (Bottom-Up)">Com: {fmtVol(com)}</span>
-                <span title="Realizado ano anterior">Ant: {fmtVol(hist)}</span>
               </div>
             </div>
           );
@@ -527,12 +520,7 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
               <ShieldCheck className="w-4 h-4" /> CONSENSO PUBLICADO · BASTÃO NO SUPPLY
             </div>
           )}
-          {etapaAnteriorPendente && !etapaBloqueada && (
-            <div className="absolute top-0 left-0 w-full text-white text-[10px] font-black py-2 flex justify-center items-center gap-3 tracking-[0.3em] uppercase z-10 bg-amber-500">
-              <AlertTriangle className="w-4 h-4" /> O BOTTOM-UP (GERÊNCIA COMERCIAL) AINDA NÃO FOI CONGELADO · EDIÇÃO BLOQUEADA
-            </div>
-          )}
-          {!etapaBloqueada && !etapaAnteriorPendente && meuCongelamento === 'CONGELADO' && !modoHierarquia && (
+          {!etapaBloqueada && meuCongelamento === 'CONGELADO' && !modoHierarquia && (
             <div className="absolute top-0 left-0 w-full text-white text-[10px] font-black py-2 flex justify-center items-center gap-3 tracking-[0.3em] uppercase z-10 bg-indigo-500">
               <Lock className="w-4 h-4" /> SUA CARTEIRA ESTÁ CONGELADA
             </div>
@@ -603,16 +591,6 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
               <p className="text-[11px] font-bold text-slate-400 mt-1">{fmtMoeda(comando.fatCom)}</p>
             </div>
           </div>
-          <div className="p-6 rounded-[28px] shadow-sm bg-white border border-slate-100 flex flex-col justify-between min-h-[160px] hover:-translate-y-1 hover:shadow-md transition-all">
-            <div className="flex justify-between items-start">
-              <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-400">Ano Anterior</h3>
-              <div className="p-2 rounded-xl bg-slate-50"><History className="w-4 h-4 opacity-70" /></div>
-            </div>
-            <div className="mt-auto pt-3">
-              <p className="text-xl font-black leading-none tracking-tighter">{fmtVol(comando.volHist)} <span className="text-[9px] opacity-60">CX</span></p>
-              <p className="text-[11px] font-bold text-slate-400 mt-1">{fmtMoeda(comando.fatHist)}</p>
-            </div>
-          </div>
           <div className="p-6 rounded-[28px] shadow-sm bg-slate-900 text-white flex flex-col justify-between min-h-[160px] relative overflow-hidden hover:-translate-y-1 hover:shadow-md transition-all">
             <div className="absolute top-0 right-0 w-28 h-28 bg-gradient-to-bl from-indigo-500/20 to-transparent rounded-full -mr-8 -mt-8 blur-xl" />
             <div className="flex justify-between items-start z-10">
@@ -632,7 +610,7 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
         <div className="bg-white rounded-[32px] shadow-sm border border-slate-100 p-8 mb-8">
           <div className="flex items-center gap-3 mb-6">
             <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-xl"><BarChart3 className="w-5 h-5" /></div>
-            <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest">Faturamento por Mês — Meta · Comercial · Orçamento · Ano Anterior</h4>
+            <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest">Faturamento por Mês — Meta · Comercial · Orçamento</h4>
           </div>
           <div className="h-72 w-full">
             <ResponsiveContainer width="100%" height="100%">
@@ -642,7 +620,6 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
                 <YAxis stroke="#94a3b8" tick={{ fill: '#64748b', fontSize: 12 }} tickLine={false} axisLine={false} tickFormatter={(v) => new Intl.NumberFormat('pt-BR', { notation: 'compact' }).format(v)} />
                 <Tooltip contentStyle={{ backgroundColor: '#fff', borderColor: '#e2e8f0', borderRadius: '12px', fontSize: '13px' }} formatter={(v: any) => fmtMoeda(v)} />
                 <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '12px', fontWeight: 700 }} iconType="circle" />
-                <Bar dataKey="Ano Anterior" fill="#cbd5e1" radius={[6, 6, 0, 0]} />
                 <Bar dataKey="Comercial" fill="#a5b4fc" radius={[6, 6, 0, 0]} />
                 <Bar dataKey="Meta" fill="#6366f1" radius={[6, 6, 0, 0]} />
                 <Bar dataKey="Orcamento" name="Orçamento" fill="#0f172a" radius={[6, 6, 0, 0]} />
@@ -652,7 +629,7 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
         </div>
 
         {/* PAINEL DE CADEADOS (gerente/admin) */}
-        {modoHierarquia && (
+        {modoHierarquia && cadeados.length > 0 && (
           <div className="bg-white rounded-[32px] shadow-sm border border-slate-100 p-8 mb-8">
             <div className="flex items-center justify-between mb-6">
               <div className="flex items-center gap-3">
@@ -661,36 +638,26 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
               </div>
               <span className="text-sm font-black text-slate-600">{progresso.fechados}/{progresso.total} carteiras congeladas</span>
             </div>
-            {cadeados.length === 0 ? (
-              <p className="text-sm text-slate-400 font-medium">Nenhum responsável com carteira neste ciclo.</p>
-            ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
               {cadeados.map((c, i) => (
                 <div key={i} className="flex items-center justify-between p-4 rounded-2xl border border-slate-100 bg-slate-50">
-                  <div className="flex items-center gap-2.5 overflow-hidden">
-                    <div className={`w-8 h-8 flex items-center justify-center rounded-xl shrink-0 ${c.status === 'CONGELADO' ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-200 text-slate-400'}`}>
+                  <div className="flex items-center gap-2.5">
+                    <div className={`w-8 h-8 flex items-center justify-center rounded-xl ${c.status === 'CONGELADO' ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-200 text-slate-400'}`}>
                       {c.status === 'CONGELADO' ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
                     </div>
-                    <div className="flex flex-col overflow-hidden">
-                      <span className="text-[12px] font-black text-slate-700 truncate" title={c.nome}>{c.nome}</span>
-                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">{c.nivel} · {c.status === 'CONGELADO' ? (c.quando || 'congelado') : 'aberto'}</span>
+                    <div className="flex flex-col">
+                      <span className="text-[12px] font-black text-slate-700">{c.nome}</span>
+                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">{c.nivel} · {c.quando || '—'}</span>
                     </div>
                   </div>
-                  {!etapaBloqueada && (
-                    c.status === 'CONGELADO' ? (
-                      <button onClick={() => reabrir(c.nome)} className="flex items-center gap-1.5 text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-lg hover:bg-amber-100 transition-all shrink-0">
-                        <Unlock className="w-3 h-3" /> Reabrir
-                      </button>
-                    ) : (
-                      <button onClick={() => congelarResponsavel(c.nome, c.nivel)} className="flex items-center gap-1.5 text-[10px] font-black text-indigo-600 bg-indigo-50 border border-indigo-200 px-2.5 py-1.5 rounded-lg hover:bg-indigo-100 transition-all shrink-0">
-                        <Lock className="w-3 h-3" /> Congelar
-                      </button>
-                    )
+                  {c.status === 'CONGELADO' && !etapaBloqueada && (
+                    <button onClick={() => reabrir(c.nome)} className="flex items-center gap-1.5 text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-lg hover:bg-amber-100 transition-all">
+                      <Unlock className="w-3 h-3" /> Reabrir
+                    </button>
                   )}
                 </div>
               ))}
             </div>
-            )}
           </div>
         )}
 
@@ -745,24 +712,24 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
                               <span className="text-xs font-black text-slate-600 uppercase tracking-widest">Dossiê · Histórico 24 meses · {row.original.nome}</span>
                             </div>
                             {/* Cards de contexto: consolidado dos 3 meses do nó */}
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+                            <div className="grid grid-cols-3 gap-3 mb-6">
                               {(() => {
                                 const node = row.original;
-                                let vMeta = 0, vCom = 0, vHist = 0;
+                                let vMeta = 0, vCom = 0;
                                 meses.forEach(mc => {
                                   vMeta += volNode(node, mc.mes_banco);
                                   const m = refMes(node, mc.mes_banco);
-                                  vCom += m?.vol_comercial || 0; vHist += m?.vol_hist || 0;
+                                  vCom += m?.vol_comercial || 0;
                                 });
+                                const varCom = vCom > 0 ? ((vMeta - vCom) / vCom) * 100 : 0;
                                 const cards = [
                                   { l: 'Meta (Consenso)', v: vMeta, cor: 'text-indigo-700' },
                                   { l: 'Comercial (BU)', v: vCom, cor: 'text-slate-700' },
-                                  { l: 'Ano Anterior', v: vHist, cor: 'text-slate-500' },
-                                  { l: 'Meta vs Ano Ant.', v: null, pct: vHist > 0 ? ((vMeta - vHist) / vHist) * 100 : 0, cor: '' },
+                                  { l: 'Meta vs Comercial', v: null, pct: varCom, cor: '' },
                                 ];
                                 return cards.map((c, ci) => (
-                                  <div key={ci} className={`rounded-2xl border p-3 shadow-sm ${ci === 3 ? 'bg-slate-900' : 'bg-white border-slate-100'}`}>
-                                    <p className={`text-[9px] font-black uppercase tracking-widest mb-1 ${ci === 3 ? 'text-indigo-300' : 'text-slate-400'}`}>{c.l}</p>
+                                  <div key={ci} className={`rounded-2xl border p-3 shadow-sm ${ci === 2 ? 'bg-slate-900' : 'bg-white border-slate-100'}`}>
+                                    <p className={`text-[9px] font-black uppercase tracking-widest mb-1 ${ci === 2 ? 'text-indigo-300' : 'text-slate-400'}`}>{c.l}</p>
                                     {c.v !== null ? (
                                       <p className={`text-sm font-black tracking-tighter ${c.cor}`}>{fmtVol(c.v)} <span className="text-[8px] opacity-60">cx</span></p>
                                     ) : (
