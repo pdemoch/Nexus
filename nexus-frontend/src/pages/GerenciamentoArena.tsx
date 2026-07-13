@@ -22,6 +22,12 @@ const formatMoeda = (valor: any) => {
   if (isNaN(num)) return 'R$ 0';
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(num));
 };
+// PMV é preço unitário: precisa de centavos (ex.: R$ 18,45).
+const formatMoedaPreciso = (valor: any) => {
+  const num = Number(valor);
+  if (isNaN(num)) return 'R$ 0,00';
+  return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(num);
+};
 const formatVolume = (val: any) => {
   const num = Number(val);
   if (isNaN(num)) return '0';
@@ -172,6 +178,18 @@ export default function GerenciamentoArena(_props: { usuarioSessao?: any } = {})
   const getFatEstimado = useCallback((sku: string, mesBanco: string): number => {
     return getVolVivo(sku, mesBanco) * getPmvExib(sku, mesBanco);
   }, [getVolVivo, getPmvExib]);
+
+  // PMV efetivo do SKU na janela (média ponderada pelo volume vivo dos 3 meses).
+  // É exatamente o preço que multiplica o volume para gerar o faturamento.
+  const getPmvMedioSku = useCallback((sku: string): number => {
+    let vol = 0, fat = 0;
+    mesesDisponiveis.forEach(mc => {
+      const v = getVolVivo(sku, mc.mes_banco);
+      vol += v;
+      fat += v * getPmvExib(sku, mc.mes_banco);
+    });
+    return vol > 0 ? fat / vol : 0;
+  }, [mesesDisponiveis, getVolVivo, getPmvExib]);
 
   const handleEditCell = (sku: string, mesBanco: string, novoVol: number) => {
     setCelulasEditadas(prev => ({ ...prev, [sku]: { ...(prev[sku] || {}), [mesBanco]: novoVol } }));
@@ -344,7 +362,14 @@ export default function GerenciamentoArena(_props: { usuarioSessao?: any } = {})
             </div>
             <div className="flex flex-col overflow-hidden">
               <span className={`text-[13px] truncate ${tipo === 'categoria' ? 'font-black uppercase tracking-tighter' : 'font-bold text-slate-600'}`} title={nome}>{nome}</span>
-              {tipo === 'produto' && <span className="text-[10px] text-slate-400 font-black tracking-widest">{produto}</span>}
+              {tipo === 'produto' && (
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-slate-400 font-black tracking-widest">{produto}</span>
+                  <span className="text-[10px] font-black text-emerald-600 bg-emerald-50 border border-emerald-100 px-1.5 py-0.5 rounded" title="PMV usado no cálculo do faturamento (média ponderada da janela)">
+                    PMV {formatMoedaPreciso(getPmvMedioSku(produto))}
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         );
@@ -401,7 +426,7 @@ export default function GerenciamentoArena(_props: { usuarioSessao?: any } = {})
       });
     });
     return cols;
-  }, [arvore, mesesDisponiveis, chartExpanded, editDisabled, getNodeVol, getNodeFat, getNodeCampo, celulasEditadas]);
+  }, [arvore, mesesDisponiveis, chartExpanded, editDisabled, getNodeVol, getNodeFat, getNodeCampo, celulasEditadas, getPmvMedioSku]);
 
   const table = useReactTable({
     data: arvore, columns,
