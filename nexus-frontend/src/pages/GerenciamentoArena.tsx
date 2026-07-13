@@ -15,14 +15,14 @@ import {
 } from 'recharts';
 
 // =====================================================================
-// HELPERS (padrão GlobalDashboard)
+// HELPERS (padrao GlobalDashboard)
 // =====================================================================
 const formatMoeda = (valor: any) => {
   const num = Number(valor);
   if (isNaN(num)) return 'R$ 0';
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(num));
 };
-// PMV é preço unitário: precisa de centavos (ex.: R$ 18,45).
+// PMV e preco unitario: precisa de centavos (ex.: R$ 18,45).
 const formatMoedaPreciso = (valor: any) => {
   const num = Number(valor);
   if (isNaN(num)) return 'R$ 0,00';
@@ -35,7 +35,7 @@ const formatVolume = (val: any) => {
 };
 const calcVar = (atual: number, base: number) => base > 0 ? ((atual - base) / base) * 100 : 0;
 
-// Badge de variação vs Orçamento (âncora) — colorido.
+// Badge de variacao vs Orcamento (ancora) - colorido.
 const VarBadge = ({ atual = 0, base = 0 }: { atual?: number, base?: number }) => {
   const v = calcVar(atual, base);
   if (base === 0) return null;
@@ -47,7 +47,7 @@ const VarBadge = ({ atual = 0, base = 0 }: { atual?: number, base?: number }) =>
   );
 };
 
-// Badge de divergência vs TopDown (proeminente, secundário) — neutro/rotulado.
+// Badge de divergencia vs TopDown (proeminente, secundario) - neutro/rotulado.
 const DivBadge = ({ atual = 0, base = 0 }: { atual?: number, base?: number }) => {
   const v = calcVar(atual, base);
   if (base === 0) return null;
@@ -59,7 +59,7 @@ const DivBadge = ({ atual = 0, base = 0 }: { atual?: number, base?: number }) =>
   );
 };
 
-// Input de volume em caixas (máscara pt-BR).
+// Input de volume em caixas (mascara pt-BR).
 const SmartInput = ({ value, onChange, disabled }: { value: number, onChange: (val: number) => void, disabled: boolean }) => {
   const [localVal, setLocalVal] = useState((value !== undefined && value !== null) ? formatVolume(value) : '0');
   const [isFocused, setIsFocused] = useState(false);
@@ -179,18 +179,6 @@ export default function GerenciamentoArena(_props: { usuarioSessao?: any } = {})
     return getVolVivo(sku, mesBanco) * getPmvExib(sku, mesBanco);
   }, [getVolVivo, getPmvExib]);
 
-  // PMV efetivo do SKU na janela (média ponderada pelo volume vivo dos 3 meses).
-  // É exatamente o preço que multiplica o volume para gerar o faturamento.
-  const getPmvMedioSku = useCallback((sku: string): number => {
-    let vol = 0, fat = 0;
-    mesesDisponiveis.forEach(mc => {
-      const v = getVolVivo(sku, mc.mes_banco);
-      vol += v;
-      fat += v * getPmvExib(sku, mc.mes_banco);
-    });
-    return vol > 0 ? fat / vol : 0;
-  }, [mesesDisponiveis, getVolVivo, getPmvExib]);
-
   const handleEditCell = (sku: string, mesBanco: string, novoVol: number) => {
     setCelulasEditadas(prev => ({ ...prev, [sku]: { ...(prev[sku] || {}), [mesBanco]: novoVol } }));
   };
@@ -213,7 +201,7 @@ export default function GerenciamentoArena(_props: { usuarioSessao?: any } = {})
     return Array.from(cats.values());
   }, [dados, busca]);
 
-  // Agregadores de nó (categoria soma filhos; produto usa vivo).
+  // Agregadores de no (categoria soma filhos; produto usa vivo).
   const somaFilhos = (row: any, fn: (produto: string) => number) =>
     row.subRows.reduce((acc: number, f: any) => acc + fn(f.produto), 0);
 
@@ -243,7 +231,7 @@ export default function GerenciamentoArena(_props: { usuarioSessao?: any } = {})
     return { volBu, fatBu, volTd, fatTd, volIa, fatIa, orc };
   }, [dados, getVolVivo, getFatEstimado]);
 
-  // Macro: 4 barras por mês (IA, Marketing, Comercial, Orçamento) em faturamento.
+  // Macro: 4 barras por mes (IA, Marketing, Comercial, Orcamento) em faturamento.
   const chartMacro = useMemo(() => {
     return mesesDisponiveis.map(mes => {
       let fatBu = 0, fatTd = 0, fatIa = 0, orc = 0;
@@ -256,8 +244,8 @@ export default function GerenciamentoArena(_props: { usuarioSessao?: any } = {})
     });
   }, [dados, mesesDisponiveis, getFatEstimado]);
 
-  // Dossiê: históricas do backend; planejamento (topdown/bottomup) só em M2-M4
-  // (os 3 últimos pontos do eixo). bottomup é dinâmico (volume vivo).
+  // Dossie: historicas do backend; planejamento (topdown/bottomup) so em M2-M4
+  // (os 3 ultimos pontos do eixo). bottomup e dinamico (volume vivo).
   const getDossieData = useCallback((row: any) => {
     const g0 = row.tipo === 'produto' ? row.grafico : (row.subRows?.[0]?.grafico);
     const totalPts = g0?.labels?.length || 0;
@@ -362,14 +350,7 @@ export default function GerenciamentoArena(_props: { usuarioSessao?: any } = {})
             </div>
             <div className="flex flex-col overflow-hidden">
               <span className={`text-[13px] truncate ${tipo === 'categoria' ? 'font-black uppercase tracking-tighter' : 'font-bold text-slate-600'}`} title={nome}>{nome}</span>
-              {tipo === 'produto' && (
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] text-slate-400 font-black tracking-widest">{produto}</span>
-                  <span className="text-[10px] font-black text-emerald-600 bg-emerald-50 border border-emerald-100 px-1.5 py-0.5 rounded" title="PMV usado no cálculo do faturamento (média ponderada da janela)">
-                    PMV {formatMoedaPreciso(getPmvMedioSku(produto))}
-                  </span>
-                </div>
-              )}
+              {tipo === 'produto' && <span className="text-[10px] text-slate-400 font-black tracking-widest">{produto}</span>}
             </div>
           </div>
         );
@@ -391,34 +372,37 @@ export default function GerenciamentoArena(_props: { usuarioSessao?: any } = {})
           const orc = getNodeCampo(row, mes.mes_banco, 'rec_orcada');
           const pend = row.tipo === 'produto' && temPendencia(row.produto, mes.mes_banco);
 
+          const pmvMes = row.tipo === 'produto' ? getPmvExib(row.produto, mes.mes_banco) : (vol > 0 ? fat / vol : 0);
+          // Tooltip de auditoria: a conta completa (volume x PMV = faturamento).
+          const tipCalculo = `${formatVolume(vol)} cx x ${formatMoedaPreciso(pmvMes)} = ${formatMoeda(fat)}`
+            + (orc > 0 ? `\nOrçamento: ${formatMoeda(orc)}` : '')
+            + (pend ? '\n(estimado — salve para o valor exato)' : '');
+
           return (
-            <div className="flex flex-col items-center justify-center min-w-[160px]">
-              <div className="w-28 mb-1">
+            <div className="flex flex-col items-center justify-center min-w-[150px] py-1">
+              {/* 1. PROTAGONISTA: o volume que se decide */}
+              <div className="w-28">
                 {row.tipo === 'produto' ? (
                   <SmartInput value={vol} disabled={editDisabled} onChange={(val) => handleEditCell(row.produto, mes.mes_banco, val)} />
                 ) : (
-                  <div className="font-black text-sm text-center text-slate-900">{formatVolume(vol)}</div>
+                  <div className="font-black text-sm text-center text-slate-900 py-1.5">{formatVolume(vol)}</div>
                 )}
               </div>
 
-              {/* Duas referências: IA e TopDown */}
-              <div className="flex items-center gap-1.5 mb-1.5">
-                <span className="text-[9px] font-bold bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded shadow-sm" title="Sinal IA">IA: {formatVolume(volIa)}</span>
-                <span className="text-[9px] font-bold bg-indigo-50 text-indigo-500 px-1.5 py-0.5 rounded shadow-sm" title="Proposta Marketing (Top-Down)">TD: {formatVolume(volTd)}</span>
+              {/* 2. CONSEQUÊNCIA: faturamento + variação vs orçamento (a âncora) */}
+              <div className="flex items-center gap-1.5 mt-1.5" title={tipCalculo}>
+                <span className="text-[11px] font-black text-emerald-600 cursor-help">
+                  {pend ? '~' : ''}{formatMoeda(fat)}
+                </span>
+                {orc > 0 && <VarBadge atual={fat} base={orc} />}
               </div>
 
-              {/* Faturamento + âncora (vs orçamento) + divergência (vs TopDown) */}
-              <div className="flex flex-col items-center mt-1 gap-1">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] font-bold text-emerald-600" title={pend ? 'Estimado (salve para o exato)' : 'Faturamento previsto (micro)'}>
-                    {pend ? '~' : ''}{formatMoeda(fat)}
-                  </span>
-                  {orc > 0 && <VarBadge atual={fat} base={orc} />}
-                </div>
-                <div className="flex items-center gap-1.5">
-                  {fatTd > 0 && <DivBadge atual={fat} base={fatTd} />}
-                  {orc > 0 && <span className="text-[9px] font-bold text-slate-400" title="Orçamento">Orç: {formatMoeda(orc)}</span>}
-                </div>
+              {/* 3. REFERÊNCIAS: discretas, só para ancorar a decisão */}
+              <div className="flex items-center gap-2 mt-1.5 text-[9px] font-bold text-slate-400">
+                <span title="Sinal da IA">IA {formatVolume(volIa)}</span>
+                <span className="text-slate-200">·</span>
+                <span title="Proposta do Marketing (Top-Down)">TD {formatVolume(volTd)}</span>
+                {fatTd > 0 && <DivBadge atual={fat} base={fatTd} />}
               </div>
             </div>
           );
@@ -426,7 +410,7 @@ export default function GerenciamentoArena(_props: { usuarioSessao?: any } = {})
       });
     });
     return cols;
-  }, [arvore, mesesDisponiveis, chartExpanded, editDisabled, getNodeVol, getNodeFat, getNodeCampo, celulasEditadas, getPmvMedioSku]);
+  }, [arvore, mesesDisponiveis, chartExpanded, editDisabled, getNodeVol, getNodeFat, getNodeCampo, celulasEditadas, getPmvExib]);
 
   const table = useReactTable({
     data: arvore, columns,

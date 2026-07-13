@@ -4,11 +4,55 @@ from dateutil.relativedelta import relativedelta
 
 from app.core.database import SessionLocal
 from app.models.domain_models import FatoIbpGranular
+from sqlalchemy import text
 
 from app.etl.extractor import GobiExtractor
 from app.etl.transformer import NexusTransformer
 from app.etl.loader import NexusLoader
 from app.ml.forecaster import NexusForecaster
+
+
+def _auditar_pmv_zerado(ciclo_alvo: str, log_callback=print):
+    """
+    Sentinela do PMV. Conta linhas do ciclo que continuaram sem preço após a
+    precificação. Preço zerado NAO e inofensivo: a linha entra no plano com
+    volume mas receita ZERO, subestimando o faturamento e distorcendo toda
+    comparacao com orcamento. Se isto disparar, algum SKU nao tem venda valida
+    (qt>0 e vl>0) em lugar nenhum e precisa de preco manual.
+    """
+    try:
+        with SessionLocal() as db:
+            row = db.execute(text("""
+                SELECT COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE COALESCE(pmv_aplicado, 0) = 0) AS zerado
+                FROM fato_ibp_granular
+                WHERE ciclo_sop = :c
+            """), {"c": ciclo_alvo}).fetchone()
+
+            total = int(row.total or 0)
+            zerado = int(row.zerado or 0)
+
+            if zerado == 0:
+                log_callback(f"✅ [PMV-AUDIT] Todas as {total} linhas do ciclo {ciclo_alvo} têm preço.")
+                return
+
+            pct = (100.0 * zerado / total) if total else 0.0
+            log_callback(
+                f"⚠️ [PMV-AUDIT] ATENÇÃO: {zerado} de {total} linhas ({pct:.1f}%) "
+                f"do ciclo {ciclo_alvo} continuam SEM PREÇO (pmv_aplicado = 0). "
+                f"Estas linhas entram no plano com receita ZERO e subestimam o faturamento."
+            )
+
+            skus = db.execute(text("""
+                SELECT DISTINCT sku FROM fato_ibp_granular
+                WHERE ciclo_sop = :c AND COALESCE(pmv_aplicado, 0) = 0
+                LIMIT 10
+            """), {"c": ciclo_alvo}).fetchall()
+            if skus:
+                lista = ", ".join(str(s.sku) for s in skus)
+                log_callback(f"⚠️ [PMV-AUDIT] SKUs sem preço (amostra): {lista}")
+    except Exception as e:
+        log_callback(f"⚠️ [PMV-AUDIT] Falha ao auditar PMV: {e}")
 
 
 async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print):
@@ -64,8 +108,21 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print):
 
         if ciclo_existe:
             log_callback(f"🛡️ [SECURITY] O ciclo {ciclo_alvo} já existe! IA e Rateio abortados para proteger o S&OP atual.")
+
+            # PRECIFICAÇÃO SEMPRE RODA — mesmo em ciclo existente.
+            # Ela é idempotente (Passo 1 só toca pares com venda própria; Passo 2
+            # só preenche linhas com pmv=0), então nunca sobrescreve preço bom.
+            # Rodar aqui garante que pares NOVOS (cliente/produto que entraram no
+            # plano depois do nascimento do ciclo) não fiquem com preço zerado —
+            # o que zeraria a receita deles e distorceria todo o S&OP em silêncio.
+            log_callback("\n💰 [PMV] Reprecificando (idempotente) para cobrir pares sem preço...")
+            await asyncio.to_thread(loader.executar_precificacao_ciclo, ciclo_alvo, log_callback)
+
+            # Sentinela: alerta se sobrou alguma linha sem preço.
+            await asyncio.to_thread(_auditar_pmv_zerado, ciclo_alvo, log_callback)
+
             log_callback("✅ Sincronização de Dados finalizada com sucesso.")
-            return  # <-- ISTO PARA O PIPELINE AQUI.
+            return  # IA e Rateio permanecem bloqueados (protege o S&OP em curso).
 
         # ====================================================================
         # 3. PREVISÃO DA IA, RATEIO E PRECIFICAÇÃO (Só roda se for ciclo novo)
@@ -78,6 +135,9 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print):
 
         log_callback("\n💰 [PMV] Definindo preços pela última venda (base de precificação global)...")
         await asyncio.to_thread(loader.executar_precificacao_ciclo, ciclo_alvo, log_callback)
+
+        # Sentinela: nenhuma linha pode ficar sem preço (receita zero silenciosa).
+        await asyncio.to_thread(_auditar_pmv_zerado, ciclo_alvo, log_callback)
 
         log_callback("\n✅ Pipeline Executado com Sucesso Absoluto!")
 
