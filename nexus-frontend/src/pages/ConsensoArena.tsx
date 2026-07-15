@@ -387,6 +387,27 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
     } finally { setSaving(false); }
   };
 
+  // Admin: congela TODAS as carteiras ainda abertas de uma só vez.
+  const congelarTodas = async () => {
+    const abertas = cadeados.filter(c => c.status !== 'CONGELADO');
+    if (abertas.length === 0) { alert('Todas as carteiras já estão congeladas.'); return; }
+    const msg = `CONGELAR TODAS AS CARTEIRAS ABERTAS\n\n` +
+      `${abertas.length} carteira(s) serão congeladas de uma vez.\n` +
+      `Faturamento total comprometido: ${fmtMoeda(comando.fatMeta)}\n\n` +
+      `Cada uma ficará somente-leitura. Confirmar?`;
+    if (!window.confirm(msg)) return;
+
+    setSaving(true);
+    try {
+      for (const c of abertas) {
+        await axios.post('/api/v1/consensus/micro/congelar', { nome_alvo: c.nome, nivel_alvo: c.nivel });
+      }
+      await carregar();
+    } catch (e: any) {
+      alert(e.response?.data?.detail || 'Erro ao congelar todas.');
+    } finally { setSaving(false); }
+  };
+
   const publicarEtapa = async () => {
     const msg = `PUBLICAR A ETAPA DE METAS\n\n` +
       `Isto passa o bastão para o Supply e encerra as edições de todos.\n` +
@@ -636,24 +657,37 @@ export default function ConsensoArena(_props: { usuarioSessao?: any } = {}) {
                 <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-xl"><Lock className="w-5 h-5" /></div>
                 <h4 className="text-sm font-black text-slate-800 uppercase tracking-widest">Progresso do Consenso</h4>
               </div>
-              <span className="text-sm font-black text-slate-600">{progresso.fechados}/{progresso.total} carteiras congeladas</span>
+              <div className="flex items-center gap-4">
+                <span className="text-sm font-black text-slate-600">{progresso.fechados}/{progresso.total} carteiras congeladas</span>
+                {isAdmin && !etapaBloqueada && progresso.fechados < progresso.total && (
+                  <button onClick={congelarTodas} disabled={saving} className="flex items-center gap-1.5 text-[11px] font-black text-white bg-indigo-600 hover:bg-indigo-700 px-3.5 py-2 rounded-xl shadow-sm transition-all disabled:opacity-50">
+                    <Lock className="w-3.5 h-3.5" /> Congelar Todas
+                  </button>
+                )}
+              </div>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
               {cadeados.map((c, i) => (
                 <div key={i} className="flex items-center justify-between p-4 rounded-2xl border border-slate-100 bg-slate-50">
-                  <div className="flex items-center gap-2.5">
-                    <div className={`w-8 h-8 flex items-center justify-center rounded-xl ${c.status === 'CONGELADO' ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-200 text-slate-400'}`}>
+                  <div className="flex items-center gap-2.5 overflow-hidden">
+                    <div className={`w-8 h-8 flex items-center justify-center rounded-xl shrink-0 ${c.status === 'CONGELADO' ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-200 text-slate-400'}`}>
                       {c.status === 'CONGELADO' ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
                     </div>
-                    <div className="flex flex-col">
-                      <span className="text-[12px] font-black text-slate-700">{c.nome}</span>
-                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">{c.nivel} · {c.quando || '—'}</span>
+                    <div className="flex flex-col overflow-hidden">
+                      <span className="text-[12px] font-black text-slate-700 truncate" title={c.nome}>{c.nome}</span>
+                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">{c.nivel} · {c.status === 'CONGELADO' ? (c.quando || 'congelado') : 'aberto'}</span>
                     </div>
                   </div>
-                  {c.status === 'CONGELADO' && !etapaBloqueada && (
-                    <button onClick={() => reabrir(c.nome)} className="flex items-center gap-1.5 text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-lg hover:bg-amber-100 transition-all">
-                      <Unlock className="w-3 h-3" /> Reabrir
-                    </button>
+                  {!etapaBloqueada && (
+                    c.status === 'CONGELADO' ? (
+                      <button onClick={() => reabrir(c.nome)} className="flex items-center gap-1.5 text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-lg hover:bg-amber-100 transition-all shrink-0">
+                        <Unlock className="w-3 h-3" /> Reabrir
+                      </button>
+                    ) : (
+                      <button onClick={() => congelar(c.nome, c.nivel)} disabled={saving} className="flex items-center gap-1.5 text-[10px] font-black text-indigo-600 bg-indigo-50 border border-indigo-200 px-2.5 py-1.5 rounded-lg hover:bg-indigo-100 transition-all shrink-0 disabled:opacity-50">
+                        <Lock className="w-3 h-3" /> Congelar
+                      </button>
+                    )
                   )}
                 </div>
               ))}
