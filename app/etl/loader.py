@@ -45,7 +45,7 @@ class NexusLoader:
                 db.commit()
 
             # ------------------------------------------------------------
-            # 1. SKUs vendidos (df_silver) — o pai da dimensao.
+            # 1. SKUs vendidos (df_silver) — o pai da dimensao..
             # ------------------------------------------------------------
             skus_vendas = set()
             desc_reais = {}  # sku -> descricao REAL do produto (vinda da API 150)
