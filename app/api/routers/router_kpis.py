@@ -87,56 +87,53 @@ def listar_meses_auditaveis(db: Session):
 
 
 def _montar_base(db: Session, meses: List[str], visao: str, filtros: dict = None) -> pd.DataFrame:
-    """Base micro por mes (cgc x sku), previsto + realizado + dimensoes atuais."""
+    """
+    Base por MES x SKU (grao SKU — cliente nao entra mais).
+    UNIVERSO = fato_ibp_granular: todo SKU planejado no ciclo N-2 entra,
+    inclusive os planejados com ZERO (BISCOITOS, HUMMM...). SKU que nao esta
+    na fato_ibp fica fora (nao foi planejado, nao ha plano para auditar).
+    REALIZADO = total da fato_vendas por SKU (bate com o ERP), trazido por
+    left join sobre o universo do plano.
+    """
     frames = []
     for mes in meses:
         ciclo = _ciclo_para_mes(mes)
         mes_date = _mes_date_sql(mes)
+
+        # PREVISTO agregado por SKU (soma todos os clientes do plano).
         prev = db.execute(text("""
-            SELECT f.cgc, f.sku,
+            SELECT f.sku,
                 COALESCE(p.categoria,'SEM CATEGORIA') AS categoria,
                 COALESCE(p.segmento,'SEM SEGMENTO')   AS segmento,
                 COALESCE(p.descricao, f.sku)          AS descricao,
-                COALESCE(c.razaosocial,'SEM CLIENTE') AS razaosocial,
-                COALESCE(c.regional,'N/A')            AS regional,
-                COALESCE(c.vendedor_nome,'SEM VENDEDOR')       AS vendedor_nome,
-                COALESCE(c.supervisor_nome,'SEM COORDENADOR')  AS supervisor_nome,
                 SUM(f.vol_final) AS prev_final_cx, SUM(f.vol_ia) AS prev_ia_cx,
                 SUM(f.vol_final * f.pmv_aplicado) AS prev_final_rs,
                 SUM(f.vol_ia * f.pmv_aplicado)    AS prev_ia_rs
             FROM fato_ibp_granular f
-            LEFT JOIN dim_clientes c ON f.cgc = c.cgc
             LEFT JOIN dim_produtos p ON f.sku = p.sku
             WHERE f.ciclo_sop = :ciclo AND f.mes_projetado = :mes_date
-            GROUP BY f.cgc, f.sku, p.categoria, p.segmento, p.descricao,
-                     c.razaosocial, c.regional, c.vendedor_nome, c.supervisor_nome
+            GROUP BY f.sku, p.categoria, p.segmento, p.descricao
         """), {"ciclo": ciclo, "mes_date": mes_date}).fetchall()
 
+        # REALIZADO total por SKU (fato_vendas completa — bate com ERP).
         real = db.execute(text("""
-            SELECT cgc, sku, SUM(qt_pedido) AS real_cx, SUM(vl_pedido) AS real_rs
+            SELECT sku, SUM(qt_pedido) AS real_cx, SUM(vl_pedido) AS real_rs
             FROM fato_vendas
             WHERE TO_CHAR(data_pedido,'MM/YYYY') = :mes AND qt_pedido > 0
-            GROUP BY cgc, sku
+            GROUP BY sku
         """), {"mes": mes}).fetchall()
 
         df_prev = pd.DataFrame([dict(r._mapping) for r in prev])
         df_real = pd.DataFrame([dict(r._mapping) for r in real])
-        if df_prev.empty and df_real.empty:
-            continue
-        cols_prev = ["cgc","sku","categoria","segmento","descricao","razaosocial","regional",
-                     "vendedor_nome","supervisor_nome","prev_final_cx","prev_ia_cx","prev_final_rs","prev_ia_rs"]
         if df_prev.empty:
-            df_prev = pd.DataFrame(columns=cols_prev)
+            continue  # sem plano no ciclo = nada a auditar neste mes
         if df_real.empty:
-            df_real = pd.DataFrame(columns=["cgc","sku","real_cx","real_rs"])
+            df_real = pd.DataFrame(columns=["sku","real_cx","real_rs"])
 
-        # =============================================================
-        # A FATO_IBP E O PAI DA AUDITORIA: left join do PREVISTO com o
-        # realizado. So se audita o que estava no plano; venda de par nao
-        # planejado fica FORA dos indicadores (a fato_vendas permanece
-        # completa como registro — o escopo e da auditoria, nao do dado).
-        # =============================================================
-        df = pd.merge(df_prev, df_real, on=["cgc","sku"], how="left")
+        # fato_ibp e o PAI: left join do plano (universo) com o realizado.
+        # SKU planejado que nao vendeu -> realizado 0. SKU que vendeu sem
+        # plano nao entra (nao esta no universo do plano).
+        df = pd.merge(df_prev, df_real, on="sku", how="left")
         df["mes_ano"] = mes
         frames.append(df)
 
@@ -150,11 +147,13 @@ def _montar_base(db: Session, meses: List[str], visao: str, filtros: dict = None
     else:
         base["previsto_final"], base["previsto_ia"], base["realizado"] = base["prev_final_cx"], base["prev_ia_cx"], base["real_cx"]
 
-    # Aplica filtros de recorte (categoria/regional/coordenador/etc.).
+
+    # Filtros de recorte no grao SKU: so dimensoes de PRODUTO.
     if filtros:
+        col_prod = {"categoria": "categoria", "segmento": "segmento", "sku": "sku"}
         for dim, valor in filtros.items():
-            if valor and dim in COL_MAP:
-                base = base[base[COL_MAP[dim]].astype(str) == str(valor)]
+            if valor and dim in col_prod:
+                base = base[base[col_prod[dim]].astype(str) == str(valor)]
     return base
 
 
