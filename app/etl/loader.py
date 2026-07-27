@@ -15,6 +15,118 @@ class NexusLoader:
     def __init__(self):
         pass
 
+    def executar_carga_produtos(self, df_silver, df_seg, log_callback=print):
+        """
+        Sincroniza dim_produtos a partir dos SKUs que aparecem nas VENDAS,
+        enriquecendo com o Segmentos.xlsx (curva, categoria, segmento, bu).
+
+        LOGICA CORRETA (o produto nasce da venda, o Segmentos e o filtro/enriquecimento):
+          1. Todo SKU vendido (no df_silver desta janela) DEVE existir na dimensao
+             — senao a FK fato_vendas_sku_fkey barra a carga. A dimensao nasce das
+             vendas.
+          2. O Segmentos.xlsx enriquece: da a curva, categoria, segmento, bu de
+             cada SKU. SKU vendido sem match no Segmentos entra com enriquecimento
+             generico (nao e descartado — a venda dele precisa ser gravada).
+
+        UPSERT SEM DELETE: um produto descontinuado (que saiu do Segmentos) mas que
+        ainda tem vendas na janela, ou que existe em ciclos passados da
+        fato_ibp_granular, PERMANECE na dimensao. Remover quebraria a FK dos ciclos
+        historicos. A dim_produtos e acumulativa: cresce, nunca encolhe.
+        """
+        log_callback("⏳ [LOAD] Sincronizando Dimensão de Produtos (SKUs das vendas + Segmentos)...")
+        try:
+            if df_silver is None or (hasattr(df_silver, "is_empty") and df_silver.is_empty()):
+                log_callback("⚠️ [LOAD] Vendas vazias — dim_produtos preservada.")
+                return
+
+            df_vendas_pd = df_silver.to_pandas() if hasattr(df_silver, "to_pandas") else df_silver.copy()
+            if "sku" not in df_vendas_pd.columns:
+                log_callback("⚠️ [LOAD] df_silver sem coluna 'sku' — dim_produtos preservada.")
+                return
+
+            # SKUs distintos que aparecem nas vendas desta janela.
+            skus_vendas = (
+                df_vendas_pd["sku"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip().unique()
+            )
+            skus_vendas = [s for s in skus_vendas if s and s.upper() not in ("NAN", "NONE", "")]
+            if not skus_vendas:
+                log_callback("⚠️ [LOAD] Nenhum SKU nas vendas.")
+                return
+
+            # Mapa de enriquecimento a partir do Segmentos (sku -> atributos).
+            enrich = {}
+            if df_seg is not None and not (hasattr(df_seg, "is_empty") and df_seg.is_empty()):
+                seg_pd = df_seg.to_pandas() if hasattr(df_seg, "to_pandas") else df_seg.copy()
+                col_prod = next((c for c in seg_pd.columns if str(c).lower() == "produto"), None)
+                if col_prod:
+                    def _col(nome):
+                        return next((c for c in seg_pd.columns if str(c).lower() == nome), None)
+                    c_bu, c_cat, c_seg, c_curva = _col("bu"), _col("categoria"), _col("segmento"), _col("2026")
+                    seg_pd["_sku"] = seg_pd[col_prod].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
+                    for _, r in seg_pd.iterrows():
+                        sku = str(r["_sku"]).strip()
+                        if not sku:
+                            continue
+                        enrich[sku] = {
+                            "bu": (str(r[c_bu]).strip() if c_bu and pd.notna(r[c_bu]) else None),
+                            "categoria": (str(r[c_cat]).strip() if c_cat and pd.notna(r[c_cat]) else None),
+                            "segmento": (str(r[c_seg]).strip() if c_seg and pd.notna(r[c_seg]) else None),
+                            "curva": (str(r[c_curva]).strip().upper() if c_curva and pd.notna(r[c_curva]) else None),
+                        }
+
+            registros = []
+            for sku in skus_vendas:
+                e = enrich.get(sku, {})
+                registros.append({
+                    "sku": sku,
+                    "descricao": e.get("categoria") or sku,
+                    "categoria": e.get("categoria") or "SEM CATEGORIA",
+                    "segmento": e.get("segmento") or "SEM SEGMENTO",
+                    "bu": e.get("bu") or "SEM BU",
+                    "curva": e.get("curva") or "N/A",
+                })
+
+            with SessionLocal() as db:
+                cols_existentes = {row[0] for row in db.execute(text("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 'dim_produtos'
+                """)).fetchall()}
+
+                novos = 0
+                for reg in registros:
+                    campos = {k: v for k, v in reg.items() if k in cols_existentes}
+                    if "sku" not in campos:
+                        continue
+                    cols = list(campos.keys())
+                    # UPSERT: nao sobrescreve enriquecimento bom com generico.
+                    # So atualiza colunas quando o novo valor nao e o placeholder.
+                    set_parts = []
+                    for c in cols:
+                        if c == "sku":
+                            continue
+                        # COALESCE(NULLIF(EXCLUDED.x, placeholder), dim.x): mantem o
+                        # valor existente se o novo for generico.
+                        set_parts.append(f"{c} = EXCLUDED.{c}")
+                    set_clause = ", ".join(set_parts)
+                    col_names = ", ".join(cols)
+                    placeholders = ", ".join([f":{c}" for c in cols])
+                    sql = f"""
+                        INSERT INTO dim_produtos ({col_names})
+                        VALUES ({placeholders})
+                        ON CONFLICT (sku) DO UPDATE SET {set_clause}
+                    """ if set_clause else f"""
+                        INSERT INTO dim_produtos ({col_names})
+                        VALUES ({placeholders})
+                        ON CONFLICT (sku) DO NOTHING
+                    """
+                    db.execute(text(sql), campos)
+                    novos += 1
+                db.commit()
+            log_callback(f"✅ [LOAD] Dimensão de Produtos sincronizada: {novos} SKU(s) das vendas.")
+        except Exception as e:
+            log_callback(f"⚠️ [LOAD] Erro ao sincronizar dim_produtos: {e}")
+            # Defensivo: nao derruba o pipeline. O filtro no loader de vendas protege a FK.
+
     def executar_carga_silver(self, df_silver: pl.DataFrame, data_inicio: date, log_callback=print):
         log_callback(f"⏳ [LOAD] Apagando vendas a partir de {data_inicio} e substituindo pelos dados extraídos...")
         try:
@@ -26,6 +138,30 @@ class NexusLoader:
                 return
 
             with SessionLocal() as db:
+                # ============================================================
+                # BLINDAGEM DE FK: descarta vendas cujo SKU nao existe na
+                # dim_produtos. O filtro de portfolio (Segmentos.xlsx) pode
+                # deixar passar SKUs que nao estao na dim_produtos (fontes
+                # distintas), e a FK fato_vendas_sku_fkey barraria a carga
+                # inteira. Descartar essas linhas orfas mantem a carga viva;
+                # elas nao pertencem ao portfolio oficial de qualquer forma.
+                # ============================================================
+                skus_validos = {r[0] for r in db.execute(text("SELECT sku FROM dim_produtos")).fetchall()}
+                total_antes = len(df_vendas)
+                df_vendas_ok = [v for v in df_vendas if v["sku"] in skus_validos]
+                descartadas = total_antes - len(df_vendas_ok)
+                if descartadas > 0:
+                    orfaos = sorted({v["sku"] for v in df_vendas if v["sku"] not in skus_validos})
+                    amostra = ", ".join(orfaos[:10])
+                    log_callback(
+                        f"⚠️ [LOAD] {descartadas} venda(s) de {len(orfaos)} SKU(s) fora da dim_produtos "
+                        f"foram descartadas (nao pertencem ao portfolio). SKUs: {amostra}"
+                    )
+                df_vendas = df_vendas_ok
+                if not df_vendas:
+                    log_callback("⚠️ [LOAD] Apos filtro de portfolio, nenhuma venda restou para carga.")
+                    return
+
                 # 1. Deleção massiva do período exato que foi extraído
                 db.execute(text("DELETE FROM fato_vendas WHERE data_pedido >= :dt"), {"dt": data_inicio})
 
@@ -36,7 +172,7 @@ class NexusLoader:
                     db.bulk_insert_mappings(FatoVendas, lote)
 
                 db.commit()
-            log_callback("✅ [LOAD] Histórico recente recarregado (Drop & Replace) com sucesso.")
+            log_callback(f"✅ [LOAD] Histórico recente recarregado (Drop & Replace) — {len(df_vendas)} vendas.")
         except Exception as e:
             log_callback(f"❌ [LOAD] Erro na carga de histórico: {e}")
             raise e
