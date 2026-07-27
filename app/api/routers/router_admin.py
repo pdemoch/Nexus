@@ -169,6 +169,7 @@ async def exportar_base_granular(db: Session = Depends(get_db), usuario_logado: 
             WHERE f.ciclo_sop = :ciclo
               AND f.mes_projetado >= :m2
               AND f.mes_projetado <= :m4
+              AND UPPER(TRIM(COALESCE(c.bloqueado, 'ATIVO'))) != 'INATIVO'
             ORDER BY c.gerente_nome, c.supervisor_nome, f.vendedor_nome, c.razaosocial, f.sku
         """
 
