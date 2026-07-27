@@ -1,659 +1,355 @@
-from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks
+"""
+=====================================================================
+ ROUTER KPIS — MOTOR DE DESVIOS (ACURACIA DO S&OP)  ·  "Desvios MT"
+=====================================================================
+Tela unica de acuracia gamificada. Compara o que o S&OP CONGELOU contra o
+REALIZADO de fato, medindo WMAPE, MAPE, BIAS, FVA e Acuracia por multiplas
+dimensoes, e monta um placar competitivo (ranking) com o Nexus Bot (a IA)
+como competidor nomeado.
+
+REGRA TEMPORAL (dinamica, nunca hardcoded):
+  Realizado do mes N  vs  congelado do ciclo N-2.
+  Ex.: vendas 07/2026 (fato_vendas) vs ciclo 05/2026 (fato_ibp_granular).
+  Ao virar 08/2026, o mes entra sozinho (ciclo 06 existe + vendas de ago).
+
+FONTES:
+  Previsto  -> fato_ibp_granular, ciclo N-2: vol_final (humano) e vol_ia (IA).
+  Realizado -> fato_vendas do mes N: qt_pedido (cx) e vl_pedido (R$).
+  Pessoas   -> dim_clientes (cadastro ATUAL nos dois lados p/ consistencia):
+               supervisor_nome = coordenador; vendedor_nome = vendedor.
+  Cliente   -> agrupado por razaosocial.  Inativos excluidos (filtro canonico).
+
+O ranking das PESSOAS e sobre o vol_final (o que elas controlam).
+O vol_ia vira o Nexus Bot (benchmark do FVA).
+Prefixo: /api/v1/kpis
+"""
+
+from fastapi import APIRouter, HTTPException, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 import pandas as pd
 import numpy as np
 import datetime
-import sys
 from dateutil.relativedelta import relativedelta
-from typing import List, Optional
-import aiohttp
-import s3fs  # <-- Biblioteca crucial para buscar os Parquets dinamicamente
+from typing import List
 
 from app.core.database import get_db
-from app.core.state import AppState
-from app.api.routers.router_auth import get_current_user
-from app.core.config import settings
-from app.models.domain_models import FatoEstoqueD0
-import os
+
+router = APIRouter(prefix="/api/v1/kpis", tags=["Desvios e Acuracia do S&OP"])
 
 
-router = APIRouter(prefix="/api/v1/kpis", tags=["Auditoria, KPIs e Riscos de Estoque"])
-
-# ==========================================
-# CONFIGURAÇÕES AWS S3 (CREDENCIAIS)
-# ==========================================
-AWS_STORAGE_OPTIONS = {
-    "key": os.getenv("AWS_ACCESS_KEY_ID"),
-    "secret": os.getenv("AWS_SECRET_ACCESS_KEY"),
-    "client_kwargs": {"region_name": "us-east-1"}
+# =====================================================================
+# DIMENSOES (dinamicas, sem hardcode de valores)
+# =====================================================================
+DIMENSOES = {
+    "sku": "SKU", "categoria": "Categoria", "segmento": "Segmento",
+    "cliente": "Cliente", "regional": "Regional",
+    "vendedor": "Vendedor", "coordenador": "Coordenador",
 }
-S3_BUCKET = "nexus-datalake-linea-prd"
-S3_PREFIX = f"s3://{S3_BUCKET}/snapshots/estoque"
+COL_MAP = {
+    "sku": "sku", "categoria": "categoria", "segmento": "segmento",
+    "cliente": "razaosocial", "regional": "regional",
+    "vendedor": "vendedor_nome", "coordenador": "supervisor_nome",
+}
+# Pesos da nota do jogo (suaves no lancamento: bias doi pouco).
+PESO_BIAS = 0.15
+PESO_FVA = 0.20
 
-def obter_mes_atual_str() -> str:
-    """Retorna o mês atual no formato MM/YYYY ajustado para o fuso de Brasília (UTC-3)."""
-    hoje_brasilia = datetime.datetime.utcnow() - datetime.timedelta(hours=3)
-    return hoje_brasilia.strftime("%m/%Y")
 
-def obter_ciclo_meta_seguro(db: Session, mes_alvo: str) -> str:
-    """Retorna o ciclo de S&OP correspondente de forma segura."""
-    try:
-        mes, ano = mes_alvo.split('/')
-        dt_alvo = datetime.date(int(ano), int(mes), 1)
-        dt_lag2 = dt_alvo - relativedelta(months=2)
-        ciclo_ideal = dt_lag2.strftime("%m/%Y")
-        
-        existe = db.execute(text("SELECT 1 FROM fato_ibp_granular WHERE ciclo_sop = :c LIMIT 1"), {"c": ciclo_ideal}).scalar()
-        if existe:
-            return ciclo_ideal
-            
-        max_ciclo = db.execute(text("SELECT MAX(ciclo_sop) FROM fato_ibp_granular")).scalar()
-        return max_ciclo or obter_mes_atual_str()
-    except:
-        return obter_mes_atual_str()
+def _ciclo_para_mes(mes_ano: str) -> str:
+    """'MM/YYYY' -> ciclo N-2 'MM/YYYY' (deriva da data, nunca constante)."""
+    mes, ano = mes_ano.split("/")
+    dt = datetime.date(int(ano), int(mes), 1)
+    return (dt - relativedelta(months=2)).strftime("%m/%Y")
 
-# ==============================================================================
-# 1. FILTROS EXCEL DINÂMICOS
-# ==============================================================================
-@router.get("/filtros-auditoria")
-async def carregar_filtros_auditoria(lente: str = "kpis", db: Session = Depends(get_db)):
-    try:
-        query_f = text("SELECT DISTINCT categoria, segmento FROM dim_produtos WHERE categoria IS NOT NULL AND segmento IS NOT NULL")
-        df_f = pd.read_sql(query_f, db.bind)
-        
-        if lente == "sellout":
-            q_meses = text("SELECT DISTINCT mes_ano FROM fato_mtrix_historico_mensal ORDER BY mes_ano DESC")
-            df_m = pd.read_sql(q_meses, db.bind)
-            meses = [f"{str(m).split('-')[1]}/{str(m).split('-')[0]}" for m in df_m["mes_ano"].unique() if m] if not df_m.empty else []
-            
-            query_cli = text("""
-                SELECT DISTINCT c.razaosocial 
-                FROM fato_mtrix_historico_mensal m JOIN dim_clientes c ON m.cgc = c.cgc
-                WHERE c.razaosocial IS NOT NULL ORDER BY c.razaosocial
-            """)
-            df_cli = pd.read_sql(query_cli, db.bind)
-        else:
-            q_meses = text("""
-                SELECT DISTINCT TO_CHAR(mes_projetado, 'MM/YYYY') as mes_ano, TO_CHAR(mes_projetado, 'YYYY-MM') as sort_key 
-                FROM fato_ibp_granular WHERE mes_projetado >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 month'
-                ORDER BY sort_key ASC
-            """)
-            df_m = pd.read_sql(q_meses, db.bind)
-            meses = list(df_m["mes_ano"].unique()) if not df_m.empty else []
-            
-            query_cli = text("SELECT DISTINCT razaosocial FROM dim_clientes WHERE razaosocial IS NOT NULL ORDER BY razaosocial")
-            df_cli = pd.read_sql(query_cli, db.bind)
 
-        if not meses: meses = [obter_mes_atual_str()]
+def _mes_date_sql(mes_ano: str) -> str:
+    mes, ano = mes_ano.split("/")
+    return f"{ano}-{mes.zfill(2)}-01"
 
-        return {
-            "pares_cat_seg": df_f.to_dict(orient="records") if not df_f.empty else [],
-            "categorias": sorted(df_f["categoria"].unique().tolist()) if not df_f.empty else [],
-            "segmentos": sorted(df_f["segmento"].unique().tolist()) if not df_f.empty else [],
-            "clientes": df_cli["razaosocial"].tolist() if not df_cli.empty else [],
-            "meses_disponiveis": meses
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-# ==============================================================================
-# 2. MOTOR DE AUDITORIA (SELL-OUT MTRIX)
-# ==============================================================================
-@router.get("/auditoria-dinamica")
-async def carregar_auditoria_cpfr(
-    lente: str = "sellout", categoria: str = "Todas", segmento: str = "Todos", razaosocial: str = "Todos",
-    meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)
-):
-    if not meses_horizonte: meses_horizonte = [obter_mes_atual_str()]
+def listar_meses_auditaveis(db: Session) -> List[str]:
+    """Meses com realizado (fato_vendas) E ciclo N-2 congelado disponivel."""
+    meses_venda = db.execute(text("""
+        SELECT DISTINCT TO_CHAR(data_pedido, 'MM/YYYY') AS mes
+        FROM fato_vendas WHERE qt_pedido > 0
+    """)).fetchall()
+    set_venda = {r.mes for r in meses_venda}
+    ciclos = db.execute(text("SELECT DISTINCT ciclo_sop FROM fato_ibp_granular")).fetchall()
+    set_ciclos = {r.ciclo_sop for r in ciclos}
+    auditaveis = [m for m in set_venda if _ciclo_para_mes(m) in set_ciclos]
+    auditaveis.sort(key=lambda m: (m.split("/")[1], m.split("/")[0]))
+    return auditaveis
 
-    try:
-        resultados_meses = []
 
-        for mes_str in meses_horizonte:
-            mes_sql = f"{mes_str.split('/')[1]}-{mes_str.split('/')[0]}" 
-            ciclo_congelado = obter_ciclo_meta_seguro(db, mes_str)
+def _montar_base(db: Session, meses: List[str], visao: str) -> pd.DataFrame:
+    """Base micro (cgc x sku x mes): previsto + realizado + dimensoes atuais."""
+    frames = []
+    for mes in meses:
+        ciclo = _ciclo_para_mes(mes)
+        mes_date = _mes_date_sql(mes)
 
-            clausula_filtro = ""
-            filtro_cliente = ""
-            params_query = {"mes_sql": mes_sql, "ciclo_congelado": ciclo_congelado, "mes_str": mes_str}
-            
-            if categoria != "Todas":
-                clausula_filtro += " AND p.categoria = :categoria"
-                params_query["categoria"] = categoria
-            if segmento != "Todos":
-                clausula_filtro += " AND p.segmento = :segmento"
-                params_query["segmento"] = segmento
-            if razaosocial != "Todos":
-                filtro_cliente = " AND c.razaosocial = :razaosocial"
-                params_query["razaosocial"] = razaosocial
+        prev = db.execute(text("""
+            SELECT f.cgc, f.sku,
+                COALESCE(p.categoria,'SEM CATEGORIA') AS categoria,
+                COALESCE(p.segmento,'SEM SEGMENTO')   AS segmento,
+                COALESCE(c.razaosocial,'SEM CLIENTE') AS razaosocial,
+                COALESCE(c.regional,'N/A')            AS regional,
+                COALESCE(c.vendedor_nome,'SEM VENDEDOR')       AS vendedor_nome,
+                COALESCE(c.supervisor_nome,'SEM COORDENADOR')  AS supervisor_nome,
+                SUM(f.vol_final) AS prev_final_cx, SUM(f.vol_ia) AS prev_ia_cx,
+                SUM(f.vol_final * f.pmv_aplicado) AS prev_final_rs,
+                SUM(f.vol_ia * f.pmv_aplicado)    AS prev_ia_rs
+            FROM fato_ibp_granular f
+            LEFT JOIN dim_clientes c ON f.cgc = c.cgc
+            LEFT JOIN dim_produtos p ON f.sku = p.sku
+            WHERE f.ciclo_sop = :ciclo AND f.mes_projetado = :mes_date
+              AND UPPER(TRIM(COALESCE(c.bloqueado,'ATIVO'))) != 'INATIVO'
+            GROUP BY f.cgc, f.sku, p.categoria, p.segmento, c.razaosocial,
+                     c.regional, c.vendedor_nome, c.supervisor_nome
+        """), {"ciclo": ciclo, "mes_date": mes_date}).fetchall()
 
-            query = text(f"""
-                WITH Ultimo_Ciclo_Mtrix AS (SELECT MAX(ciclo_sop) as max_ciclo FROM fato_mtrix_historico_mensal WHERE mes_ano = :mes_sql),
-                Distribuidores AS (SELECT DISTINCT cgc FROM fato_mtrix_historico_mensal WHERE mes_ano = :mes_sql AND ciclo_sop = (SELECT max_ciclo FROM Ultimo_Ciclo_Mtrix) AND cgc IS NOT NULL),
-                Sellout AS (
-                    SELECT s.sku, SUM(s.volume_sellout) AS vol_sellout_real 
-                    FROM fato_mtrix_historico_mensal s LEFT JOIN dim_clientes c ON s.cgc = c.cgc
-                    WHERE s.mes_ano = :mes_sql AND s.ciclo_sop = (SELECT max_ciclo FROM Ultimo_Ciclo_Mtrix) {filtro_cliente}
-                    GROUP BY s.sku
-                ),
-                Metas_Pareadas AS (
-                    SELECT i.sku, SUM(i.vol_ia) AS vol_ia_congelado, SUM(i.vol_final) AS vol_comercial_congelado 
-                    FROM fato_ibp_granular i INNER JOIN Distribuidores d ON i.cgc = d.cgc LEFT JOIN dim_clientes c ON i.cgc = c.cgc
-                    WHERE TO_CHAR(i.mes_projetado, 'YYYY-MM') = :mes_sql AND i.ciclo_sop = :ciclo_congelado {filtro_cliente}
-                    GROUP BY i.sku
-                ),
-                Estoque AS (
-                    SELECT e.sku, SUM(e.estoque_atual_caixas) AS estoque_atual_caixas, AVG(e.dias_cobertura) AS dias_cobertura 
-                    FROM fato_mtrix_snapshot e LEFT JOIN dim_clientes c ON e.cgc = c.cgc
-                    WHERE e.ciclo_sop = (SELECT MAX(ciclo_sop) FROM fato_mtrix_snapshot) {filtro_cliente}
-                    GROUP BY e.sku
-                )
-                SELECT p.sku, p.descricao, p.categoria, p.segmento, :mes_str AS mes_ano, COALESCE(s.vol_sellout_real, 0) AS vol_real, COALESCE(m.vol_ia_congelado, 0) AS vol_ia_congelado, COALESCE(m.vol_comercial_congelado, 0) AS vol_comercial_congelado, COALESCE(e.estoque_atual_caixas, 0) AS estoque_canal, COALESCE(e.dias_cobertura, 0) AS dias_cobertura
-                FROM dim_produtos p LEFT JOIN Sellout s ON p.sku = s.sku LEFT JOIN Metas_Pareadas m ON p.sku = m.sku LEFT JOIN Estoque e ON p.sku = e.sku
-                WHERE 1=1 {clausula_filtro} AND (COALESCE(s.vol_sellout_real, 0) > 0 OR COALESCE(m.vol_ia_congelado, 0) > 0 OR COALESCE(m.vol_comercial_congelado, 0) > 0 OR COALESCE(e.estoque_atual_caixas, 0) > 0)
-            """)
-            df = pd.read_sql(query, db.bind, params=params_query)
-            if not df.empty: resultados_meses.append(df)
+        real = db.execute(text("""
+            SELECT cgc, sku, SUM(qt_pedido) AS real_cx, SUM(vl_pedido) AS real_rs
+            FROM fato_vendas
+            WHERE TO_CHAR(data_pedido,'MM/YYYY') = :mes AND qt_pedido > 0
+            GROUP BY cgc, sku
+        """), {"mes": mes}).fetchall()
 
-        if not resultados_meses: return {"kpis_globais": {}, "cronologia": [], "tabela_skus": []}
-        df_c = pd.concat(resultados_meses, ignore_index=True)
-        
-        for col in ["vol_real", "vol_ia_congelado", "vol_comercial_congelado"]:
-            df_c[col] = pd.to_numeric(df_c[col], errors='coerce').fillna(0)
+        df_prev = pd.DataFrame([dict(r._mapping) for r in prev])
+        df_real = pd.DataFrame([dict(r._mapping) for r in real])
+        if df_prev.empty and df_real.empty:
+            continue
+        if df_prev.empty:
+            df_prev = pd.DataFrame(columns=["cgc","sku","categoria","segmento","razaosocial",
+                "regional","vendedor_nome","supervisor_nome","prev_final_cx","prev_ia_cx","prev_final_rs","prev_ia_rs"])
+        if df_real.empty:
+            df_real = pd.DataFrame(columns=["cgc","sku","real_cx","real_rs"])
 
-        df_sku = df_c.groupby(["sku", "descricao", "categoria", "segmento"]).agg({"vol_real": "sum", "vol_ia_congelado": "sum", "vol_comercial_congelado": "sum", "estoque_canal": "last", "dias_cobertura": "last"}).reset_index()
+        df = pd.merge(df_prev, df_real, on=["cgc","sku"], how="outer")
+        df["mes_ano"] = mes
 
-        df_sku["mape_ia"] = np.where(df_sku["vol_real"] > 0, np.abs(df_sku["vol_real"] - df_sku["vol_ia_congelado"]) / df_sku["vol_real"], np.where(df_sku["vol_ia_congelado"] > 0, 1.0, 0.0))
-        df_sku["mape_comercial"] = np.where(df_sku["vol_real"] > 0, np.abs(df_sku["vol_real"] - df_sku["vol_comercial_congelado"]) / df_sku["vol_real"], np.where(df_sku["vol_comercial_congelado"] > 0, 1.0, 0.0))
-        df_sku["fva"] = df_sku["mape_ia"] - df_sku["mape_comercial"]
-        
-        df_sku["erro_abs_comercial"] = np.abs(df_sku["vol_real"] - df_sku["vol_comercial_congelado"])
-        df_sku = df_sku.sort_values(by="erro_abs_comercial", ascending=False)
+        # Linhas so-realizado (vendeu sem prever): busca dimensoes no cadastro.
+        faltantes = df["razaosocial"].isna()
+        if faltantes.any():
+            for _, k in df.loc[faltantes, ["cgc","sku"]].drop_duplicates().iterrows():
+                info = db.execute(text("""
+                    SELECT COALESCE(p.categoria,'SEM CATEGORIA') AS categoria,
+                           COALESCE(p.segmento,'SEM SEGMENTO') AS segmento,
+                           COALESCE(c.razaosocial,'SEM CLIENTE') AS razaosocial,
+                           COALESCE(c.regional,'N/A') AS regional,
+                           COALESCE(c.vendedor_nome,'SEM VENDEDOR') AS vendedor_nome,
+                           COALESCE(c.supervisor_nome,'SEM COORDENADOR') AS supervisor_nome
+                    FROM (SELECT :cgc AS cgc, :sku AS sku) x
+                    LEFT JOIN dim_clientes c ON x.cgc = c.cgc
+                    LEFT JOIN dim_produtos p ON x.sku = p.sku
+                """), {"cgc": k["cgc"], "sku": k["sku"]}).fetchone()
+                if info:
+                    m = (df["cgc"]==k["cgc"]) & (df["sku"]==k["sku"]) & faltantes
+                    for campo in ["categoria","segmento","razaosocial","regional","vendedor_nome","supervisor_nome"]:
+                        df.loc[m, campo] = getattr(info, campo)
+        frames.append(df)
 
-        soma_real = df_sku["vol_real"].sum()
-        soma_ia = df_sku["vol_ia_congelado"].sum()
-        soma_comercial = df_sku["vol_comercial_congelado"].sum()
-
-        wmape_ia = df_sku["mape_ia"].sum() / len(df_sku) if len(df_sku) > 0 else 0
-        wmape_comercial = df_sku["mape_comercial"].sum() / len(df_sku) if len(df_sku) > 0 else 0
-        
-        if soma_real > 0:
-            wmape_ia = np.abs(df_sku["vol_real"] - df_sku["vol_ia_congelado"]).sum() / soma_real
-            wmape_comercial = np.abs(df_sku["vol_real"] - df_sku["vol_comercial_congelado"]).sum() / soma_real
-
-        bias_ia = (soma_ia - soma_real) / soma_real if soma_real > 0 else 0.0
-        bias_humano = (soma_comercial - soma_real) / soma_real if soma_real > 0 else 0.0
-
-        return {
-            "kpis_globais": {
-                "wmape_ia": round(wmape_ia, 4), "wmape_comercial": round(wmape_comercial, 4),
-                "fva": round(wmape_ia - wmape_comercial, 4), 
-                "bias_ia": round(bias_ia, 4), "bias_humano": round(bias_humano, 4), 
-                "cobertura_media_canal": int(df_c[df_c["dias_cobertura"] < 999]["dias_cobertura"].mean()) if not df_c.empty else 0
-            },
-            "cronologia": [], "tabela_skus": df_sku.to_dict(orient="records")
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ==============================================================================
-# 3. TORRE DE CONTROLE MTD E DESVIOS
-# ==============================================================================
-@router.get("/torre-controle")
-async def carregar_torre_controle(
-    visao: str = "caixas", categoria: str = "Todas", segmento: str = "Todos", razaosocial: str = "Todos",
-    meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)
-):
-    if not meses_horizonte: meses_horizonte = [obter_mes_atual_str()]
-
-    try:
-        resultados = []
-        for mes_str in meses_horizonte:
-            mes_sql = f"{mes_str.split('/')[1]}-{mes_str.split('/')[0]}" 
-            ciclo_congelado = obter_ciclo_meta_seguro(db, mes_str)
-            
-            clausula_filtro = ""
-            filtro_cliente = ""
-            params_query = {"mes_sql": mes_sql, "ciclo_congelado": ciclo_congelado, "mes_str": mes_str}
-            
-            if categoria != "Todas": clausula_filtro += " AND p.categoria = :categoria"; params_query["categoria"] = categoria
-            if segmento != "Todos": clausula_filtro += " AND p.segmento = :segmento"; params_query["segmento"] = segmento
-            if razaosocial != "Todos": filtro_cliente = " AND c.razaosocial = :razaosocial"; params_query["razaosocial"] = razaosocial
-
-            f_r = "v.qt_pedido" if visao == "caixas" else "v.vl_pedido"
-            f_mi = "m.vol_ia" if visao == "caixas" else "(m.vol_ia * m.pmv_aplicado)"
-            f_mh = "m.vol_final" if visao == "caixas" else "(m.vol_final * m.pmv_aplicado)"
-
-            query = text(f"""
-                WITH Vendas AS (
-                    SELECT v.sku, SUM({f_r}) AS val_real 
-                    FROM fato_vendas v LEFT JOIN dim_clientes c ON v.cgc = c.cgc
-                    WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql {filtro_cliente} GROUP BY v.sku
-                ),
-                Metas AS (
-                    SELECT m.sku, SUM({f_mi}) AS val_meta_ia, SUM({f_mh}) AS val_meta_hum 
-                    FROM fato_ibp_granular m LEFT JOIN dim_clientes c ON m.cgc = c.cgc
-                    WHERE TO_CHAR(m.mes_projetado, 'YYYY-MM') = :mes_sql AND m.ciclo_sop = :ciclo_congelado {filtro_cliente} GROUP BY m.sku
-                )
-                SELECT p.sku, p.descricao, p.categoria, p.segmento, :mes_str AS mes_ano, COALESCE(v.val_real, 0) AS val_real, COALESCE(m.val_meta_ia, 0) AS val_meta_ia, COALESCE(m.val_meta_hum, 0) AS val_meta_hum
-                FROM dim_produtos p LEFT JOIN Vendas v ON p.sku = v.sku LEFT JOIN Metas m ON p.sku = m.sku
-                WHERE 1=1 {clausula_filtro} AND (COALESCE(v.val_real, 0) > 0 OR COALESCE(m.val_meta_ia, 0) > 0 OR COALESCE(m.val_meta_hum, 0) > 0)
-            """)
-            df_m = pd.read_sql(query, db.bind, params=params_query)
-            if not df_m.empty: resultados.append(df_m)
-
-        if not resultados: return {"graficos": [], "skus": [], "kpis_globais": {}}
-        df = pd.concat(resultados, ignore_index=True)
-        
-        for col in ['val_real', 'val_meta_ia', 'val_meta_hum']:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-        cronologia = []
-        for m in meses_horizonte:
-            df_m = df[df["mes_ano"] == m]
-            if df_m.empty: continue
-            sr, sm_ia, sm_hum = df_m["val_real"].sum(), df_m["val_meta_ia"].sum(), df_m["val_meta_hum"].sum()
-
-            wmape_ia = (np.abs(df_m["val_real"] - df_m["val_meta_ia"]).sum() / sr) if sr > 0 else 1.0
-            wmape_humano = (np.abs(df_m["val_real"] - df_m["val_meta_hum"]).sum() / sr) if sr > 0 else 1.0
-            bias_ia = ((sm_ia - sr) / sr) if sr > 0 else 0
-            bias_humano = ((sm_hum - sr) / sr) if sr > 0 else 0
-            
-            cronologia.append({"mes": m, "wmape_ia": round(wmape_ia, 4), "wmape_humano": round(wmape_humano, 4), "bias_ia": round(bias_ia, 4), "bias_humano": round(bias_humano, 4)})
-
-        sr_total, sm_ia_total, sm_hum_total = df["val_real"].sum(), df["val_meta_ia"].sum(), df["val_meta_hum"].sum()
-        wmape_ia_g = (np.abs(df["val_real"] - df["val_meta_ia"]).sum() / sr_total) if sr_total > 0 else 1.0
-        wmape_hum_g = (np.abs(df["val_real"] - df["val_meta_hum"]).sum() / sr_total) if sr_total > 0 else 1.0
-        
-        kpis_globais = {
-            "wmape_ia": round(wmape_ia_g, 4), "wmape_comercial": round(wmape_hum_g, 4),
-            "fva": round(wmape_ia_g - wmape_hum_g, 4), "bias_ia": round(((sm_ia_total - sr_total) / sr_total) if sr_total > 0 else 0, 4),
-            "bias_humano": round(((sm_hum_total - sr_total) / sr_total) if sr_total > 0 else 0, 4)
-        }
-
-        df_sku = df.groupby(["sku", "descricao"]).agg({"val_real": "sum", "val_meta_ia": "sum", "val_meta_hum": "sum"}).reset_index()
-        df_sku["gap_ia"] = df_sku["val_meta_ia"] - df_sku["val_real"]
-        df_sku["gap_humano"] = df_sku["val_meta_hum"] - df_sku["val_real"]
-        df_sku["mape_ia"] = np.where(df_sku["val_real"] > 0, np.abs(df_sku["gap_ia"]) / df_sku["val_real"], np.where(df_sku["val_meta_ia"] > 0, 1.0, 0.0))
-        df_sku["mape_humano"] = np.where(df_sku["val_real"] > 0, np.abs(df_sku["gap_humano"]) / df_sku["val_real"], np.where(df_sku["val_meta_hum"] > 0, 1.0, 0.0))
-        df_sku["erro_absoluto"] = np.abs(df_sku["gap_humano"])
-        
-        return {"graficos": cronologia, "skus": df_sku.sort_values(by="erro_absoluto", ascending=False).to_dict(orient="records"), "kpis_globais": kpis_globais}
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/torre-controle/clientes/{sku}")
-async def drilldown_clientes_kpis(sku: str, visao: str = "caixas", data_snapshot: str = Query(None), meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)):
-    if not meses_horizonte: meses_horizonte = [obter_mes_atual_str()]
-    try:
-        resultados = []
-        for mes_str in meses_horizonte:
-            mes_sql = f"{mes_str.split('/')[1]}-{mes_str.split('/')[0]}" 
-            ciclo_congelado = obter_ciclo_meta_seguro(db, mes_str)
-            
-            f_r = "qt_pedido" if visao == "caixas" else "vl_pedido"
-            f_i = "vol_ia" if visao == "caixas" else "(vol_ia * pmv_aplicado)"
-            f_m = "vol_final" if visao == "caixas" else "(vol_final * pmv_aplicado)"
-
-            query = text(f"""
-                WITH Vendas AS (SELECT cgc, SUM({f_r}) AS val_real FROM fato_vendas WHERE TO_CHAR(data_pedido, 'YYYY-MM') = :mes_sql AND sku = :sku GROUP BY cgc),
-                Metas AS (SELECT cgc, SUM({f_i}) AS val_meta_ia, SUM({f_m}) AS val_meta_hum FROM fato_ibp_granular WHERE TO_CHAR(mes_projetado, 'YYYY-MM') = :mes_sql AND ciclo_sop = :ciclo_congelado AND sku = :sku GROUP BY cgc),
-                CliGeral AS (SELECT COALESCE(v.cgc, m.cgc) as cgc, COALESCE(v.val_real, 0) as val_real, COALESCE(m.val_meta_ia, 0) as val_meta_ia, COALESCE(m.val_meta_hum, 0) as val_meta_hum FROM Vendas v FULL OUTER JOIN Metas m ON v.cgc = m.cgc)
-                SELECT cg.cgc, c.razaosocial, cg.val_real, cg.val_meta_ia, cg.val_meta_hum, (cg.val_meta_ia - cg.val_real) AS gap_ia, (cg.val_meta_hum - cg.val_real) AS gap_humano 
-                FROM CliGeral cg LEFT JOIN dim_clientes c ON cg.cgc = c.cgc WHERE cg.val_real > 0 OR cg.val_meta_ia > 0 OR cg.val_meta_hum > 0 
-            """)
-            df = pd.read_sql(query, db.bind, params={"mes_sql": mes_sql, "ciclo_congelado": ciclo_congelado, "sku": sku})
-            if not df.empty: resultados.append(df)
-        if not resultados: return []
-        df_final = pd.concat(resultados)
-        for col in ['val_real', 'val_meta_ia', 'val_meta_hum', 'gap_ia', 'gap_humano']: df_final[col] = pd.to_numeric(df_final[col], errors='coerce').fillna(0)
-        return df_final.groupby(["cgc", "razaosocial"]).sum().reset_index().sort_values(by="gap_humano", ascending=False).fillna("Não Cadastrado").to_dict(orient="records")
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
-
-# ==============================================================================
-# 4. INTELIGÊNCIA DE ESTOQUE E DEMANDA OCULTA
-# ==============================================================================
-async def sincronizar_estoque_api90(db: Session, usuario: dict):
-    from app.core.state import AppState
-    AppState.logs.append("[EXTRACT] Baixando posições de Estoque da GOBI (Pode demorar)...")
-    headers = {"Authorization": f"Bearer {settings.GOBI_TOKEN}"}
-    base_url = "https://gobi-api.lineaalimentos.com.br/v1/reports/90/data"
-    limit = 5000
-    offset = 0
-    lote_anterior = []
-    estoque_novo = {}
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            while True:
-                params = {"streaming": "true", "format": "json", "limit": limit, "offset": offset}
-                async with session.get(base_url, headers=headers, params=params, timeout=5) as response:
-                    if response.status != 200: break
-                    dados = await response.json(content_type=None)
-                    if not dados or not isinstance(dados, list): break
-                    if lote_anterior and dados[0] == lote_anterior[0]: break
-                    
-                    for row in dados:
-                        if str(row.get('arm', '')).strip() == "05":
-                            sku = str(row.get('produto', '')).replace(".0", "").strip()
-                            try: qtd = float(row.get('quantidade', 0))
-                            except: qtd = 0.0
-                            if sku: estoque_novo[sku] = estoque_novo.get(sku, 0) + qtd
-                    
-                    lote_anterior = dados
-                    offset += len(dados)
-                    if len(dados) < limit: break
-    except Exception as e:
-        print(f"API Gobi Inacessível. Pulando injeção em tempo real: {e}")
-        AppState.logs.append("⚠️ API Gobi Inacessível. Gerando baseline matemático...")
-
-    db.execute(text("TRUNCATE TABLE fato_estoque_d0"))
-    agora = datetime.datetime.utcnow()
-    novos_registros = [FatoEstoqueD0(sku=sku, qtd_dispo=qtd, data_atualizacao=agora) for sku, qtd in estoque_novo.items()]
-    
-    if novos_registros: 
-        db.bulk_save_objects(novos_registros)
-        msg = "Estoque Sincronizado com Sucesso via ERP Gobi API."
+    if not frames:
+        return pd.DataFrame()
+    base = pd.concat(frames, ignore_index=True)
+    for col in ["prev_final_cx","prev_ia_cx","prev_final_rs","prev_ia_rs","real_cx","real_rs"]:
+        base[col] = pd.to_numeric(base[col], errors="coerce").fillna(0.0)
+    if visao == "financeiro":
+        base["previsto_final"], base["previsto_ia"], base["realizado"] = base["prev_final_rs"], base["prev_ia_rs"], base["real_rs"]
     else:
-        mock_query = text("""
-            INSERT INTO fato_estoque_d0 (sku, qtd_dispo, data_atualizacao)
-            SELECT sku, ROUND(SUM(vol_final) * (0.6 + (RANDOM() * 0.6))), NOW()
-            FROM fato_ibp_granular WHERE ciclo_sop = (SELECT MAX(ciclo_sop) FROM fato_ibp_granular) GROUP BY sku
-        """)
-        db.execute(mock_query)
-        msg = "Conexão Gobi Falhou. Estoque Matemático Injetado."
-    db.commit()
-    return {"status": "success", "count": len(novos_registros), "message": msg}
+        base["previsto_final"], base["previsto_ia"], base["realizado"] = base["prev_final_cx"], base["prev_ia_cx"], base["real_cx"]
+    return base
 
-@router.post("/sync-stock")
-async def rota_sincronizar_estoque(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
-    if usuario.get('funcao') not in ['Administrador', 'Supply Chain', 'Gerente', 'C-Level']:
-        raise HTTPException(status_code=403, detail="Sem permissão.")
+
+def _metricas(grupo: pd.DataFrame) -> dict:
+    """
+    WMAPE   = Σ|real-prev| / Σreal          (erro ponderado por volume)
+    MAPE    = media |real-prev|/real (real>0) (informativo)
+    BIAS    = (Σprev - Σreal) / Σreal        (>0 preve demais; <0 de menos)
+    Acuracia= max(0, 1-WMAPE)
+    FVA     = WMAPE_ia - WMAPE_final         (>0 humano agregou valor)
+    Nota    = Acuracia - 0.15*|BIAS| + 0.20*FVA  (0-100)
+    """
+    soma_real = grupo["realizado"].sum()
+    soma_final = grupo["previsto_final"].sum()
+    soma_ia = grupo["previsto_ia"].sum()
+    erro_final = np.abs(grupo["realizado"] - grupo["previsto_final"]).sum()
+    erro_ia = np.abs(grupo["realizado"] - grupo["previsto_ia"]).sum()
+
+    if soma_real > 0:
+        wmape_final = erro_final / soma_real
+        wmape_ia = erro_ia / soma_real
+        bias_final = (soma_final - soma_real) / soma_real
+        bias_ia = (soma_ia - soma_real) / soma_real
+        com_real = grupo[grupo["realizado"] > 0]
+        mape_final = (np.abs(com_real["realizado"]-com_real["previsto_final"])/com_real["realizado"]).mean() if len(com_real)>0 else 0.0
+    else:
+        wmape_final = 1.0 if soma_final > 0 else 0.0
+        wmape_ia = 1.0 if soma_ia > 0 else 0.0
+        bias_final = 1.0 if soma_final > 0 else 0.0
+        bias_ia = 1.0 if soma_ia > 0 else 0.0
+        mape_final = 1.0 if soma_final > 0 else 0.0
+
+    acuracia = max(0.0, 1.0 - wmape_final)
+    fva = wmape_ia - wmape_final
+    nota = max(0.0, min(1.0, acuracia - abs(bias_final)*PESO_BIAS + fva*PESO_FVA)) * 100.0
+    if abs(bias_final) < 0.05: vies = "equilibrado"
+    elif bias_final > 0: vies = "prevê demais"
+    else: vies = "prevê de menos"
+
+    return {
+        "previsto_final": round(float(soma_final),2), "previsto_ia": round(float(soma_ia),2),
+        "realizado": round(float(soma_real),2), "wmape": round(float(wmape_final),4),
+        "wmape_ia": round(float(wmape_ia),4), "mape": round(float(mape_final),4),
+        "bias": round(float(bias_final),4), "bias_ia": round(float(bias_ia),4),
+        "vies_label": vies, "fva": round(float(fva),4), "acuracia": round(float(acuracia),4),
+        "nota": round(float(nota),1), "linhas": int(len(grupo)),
+    }
+
+
+def _metricas_bot(base: pd.DataFrame) -> dict:
+    """Nexus Bot: usa vol_ia como 'plano' do competidor. E a regua do FVA."""
+    espelho = base.copy()
+    espelho["previsto_final"] = espelho["previsto_ia"]
+    m = _metricas(espelho)
+    m["fva"] = 0.0
+    m["nota"] = round(max(0.0, min(1.0, m["acuracia"] - abs(m["bias"])*PESO_BIAS)) * 100.0, 1)
+    return m
+
+
+# =====================================================================
+# ROTAS
+# =====================================================================
+@router.get("/meses-auditaveis")
+async def meses_auditaveis(db: Session = Depends(get_db)):
     try:
-        return await sincronizar_estoque_api90(db, usuario)
+        return {"meses": listar_meses_auditaveis(db),
+                "dimensoes": [{"chave": k, "label": v} for k, v in DIMENSOES.items()]}
     except Exception as e:
-        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/sync-all")
-async def sincronizar_tudo(background_tasks: BackgroundTasks, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
-    if usuario.get('funcao') not in ['Administrador', 'Supply Chain', 'Gerente', 'C-Level']:
-        raise HTTPException(status_code=403, detail="Sem permissão.")
-    try:
-        from app.workers.snapshot_worker import main as rotina_master
-        from app.core.state import AppState
-        import asyncio
-        
-        AppState.pipeline_rodando = True
-        AppState.logs = ["[SYSTEM] Sincronização Mestra acionada manualmente..."]
-        
-        def run_rotina():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(rotina_master(is_manual=True))
-            finally:
-                AppState.pipeline_rodando = False
-                loop.close()
 
-        background_tasks.add_task(run_rotina)
-        return {"status": "success", "message": "Orquestrador mestre disparado em background."}
+@router.get("/ranking")
+async def ranking(dimensao: str = Query("coordenador"), meses: List[str] = Query(None),
+                  visao: str = Query("caixas"), db: Session = Depends(get_db)):
+    try:
+        if dimensao not in DIMENSOES:
+            raise HTTPException(status_code=400, detail=f"Dimensao invalida: {list(DIMENSOES.keys())}")
+        if not meses:
+            meses = listar_meses_auditaveis(db)
+        if not meses:
+            return {"dimensao": dimensao, "visao": visao, "meses": [], "itens": [], "totais": {}}
+        base = _montar_base(db, meses, visao)
+        if base.empty:
+            return {"dimensao": dimensao, "visao": visao, "meses": meses, "itens": [], "totais": {}}
+
+        gcol = COL_MAP[dimensao]
+        itens = []
+        for chave, grupo in base.groupby(gcol):
+            m = _metricas(grupo); m["nome"] = str(chave); m["eh_bot"] = False
+            if dimensao == "sku":
+                m["descricao"] = str(grupo["categoria"].iloc[0]) if "categoria" in grupo else ""
+            itens.append(m)
+
+        # Nexus Bot: so nas dimensoes de PESSOAS.
+        if dimensao in ("vendedor", "coordenador"):
+            bot = _metricas_bot(base); bot["nome"] = "Nexus Bot"; bot["eh_bot"] = True
+            itens.append(bot)
+
+        itens.sort(key=lambda x: (-x["nota"], -x["realizado"]))
+        pos_bot = next((i for i, it in enumerate(itens) if it.get("eh_bot")), None)
+        for i, it in enumerate(itens):
+            it["posicao"] = i + 1
+            if pos_bot is not None and not it.get("eh_bot"):
+                it["acima_do_bot"] = i < pos_bot
+
+        return {"dimensao": dimensao, "visao": visao, "meses": meses,
+                "itens": itens, "totais": _metricas(base)}
+    except HTTPException:
+        raise
     except Exception as e:
-        AppState.pipeline_rodando = False
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/riscos-estoque")
-async def carregar_riscos_estoque(
-    categoria: str = "Todas", segmento: str = "Todos", razaosocial: str = "Todos",
-    meses_horizonte: List[str] = Query(None), 
-    data_snapshot: str = Query(None),
-    db: Session = Depends(get_db)
-):
-    hoje_brasilia = datetime.datetime.utcnow() - datetime.timedelta(hours=3)
-    hoje_str = hoje_brasilia.strftime("%Y-%m-%d")
-    data_alvo_str = data_snapshot if data_snapshot else hoje_str
 
+@router.get("/drilldown")
+async def drilldown(dimensao: str = Query(...), valor: str = Query(...),
+                    meses: List[str] = Query(None), visao: str = Query("caixas"),
+                    sub_dimensao: str = Query("sku"), db: Session = Depends(get_db)):
     try:
-        # 🟢 MODO MÁQUINA DO TEMPO: Leitura direta do AWS S3 Parquet
-        if data_alvo_str != hoje_str:
-            caminho_s3 = f"{S3_PREFIX}/{data_alvo_str.replace('-', '_')}_riscoestoque.parquet"
-            try:
-                df_sku = pd.read_parquet(caminho_s3, engine='pyarrow', storage_options=AWS_STORAGE_OPTIONS)
-                if categoria != "Todas": df_sku = df_sku[df_sku['categoria'] == categoria]
-                if segmento != "Todos": df_sku = df_sku[df_sku['segmento'] == segmento]
-            except Exception as e:
-                return {"estoque_sku": [], "kpis_globais": {
-                    "total_ruptura_rs": 0, "total_sobra_rs": 0, "total_ruptura_vol": 0, "total_sobra_vol": 0, "meta_caixas": 0, "realizado_caixas": 0,
-                    "ultima_atualizacao": f"Snapshot não encontrado"
-                }}
-                
-        # 🔴 MODO AO VIVO: Consulta e Cálculos no PostgreSQL (Hoje)
-        else:
-            mes_sql = f"{data_alvo_str.split('-')[0]}-{data_alvo_str.split('-')[1]}"
-            ciclo_congelado = obter_ciclo_meta_seguro(db, datetime.date.today().strftime("%m/%Y"))
-            
-            clausula_filtro = ""
-            filtro_cliente = ""
-            params_query = {"mes_sql": mes_sql, "ciclo_congelado": ciclo_congelado}
-            if categoria != "Todas": clausula_filtro += " AND p.categoria = :categoria"; params_query["categoria"] = categoria
-            if segmento != "Todos": clausula_filtro += " AND p.segmento = :segmento"; params_query["segmento"] = segmento
-            if razaosocial != "Todos": filtro_cliente = " AND c.razaosocial = :razaosocial"; params_query["razaosocial"] = razaosocial
-
-            query_sku = text(f"""
-                WITH Estoque AS (SELECT sku, SUM(qtd_dispo) as estoque_atual FROM fato_estoque_d0 GROUP BY sku),
-                Vendas AS (
-                    SELECT v.sku, SUM(v.qt_pedido) as vendas_mtd, SUM(v.qtfatura) as faturado_mtd, SUM(v.qtcorte) as corte_mtd,
-                           SUM(v.vl_pedido) as vl_pedido, SUM(v.vlfatura) as vl_faturado, SUM(v.vlcorte) as vl_corte
-                    FROM fato_vendas v LEFT JOIN dim_clientes c ON v.cgc = c.cgc
-                    WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql {filtro_cliente} GROUP BY v.sku
-                ),
-                Hist_Clientes AS (
-                    SELECT v.sku, c.regional, c.razaosocial, SUM(v.qt_pedido) / 3.0 as media_vol
-                    FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
-                    WHERE v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '3 months' 
-                      AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM') {filtro_cliente}
-                    GROUP BY v.sku, c.regional, c.razaosocial
-                ),
-                Freq_Clientes AS (
-                    SELECT v.sku, c.regional, c.razaosocial, COUNT(DISTINCT TO_CHAR(v.data_pedido, 'YYYY-MM')) as freq_meses
-                    FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
-                    WHERE v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '6 months' 
-                      AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM') {filtro_cliente}
-                    GROUP BY v.sku, c.regional, c.razaosocial
-                ),
-                MTD_Clientes AS (
-                    SELECT v.sku, c.regional, c.razaosocial, SUM(v.qt_pedido) as mtd_vol
-                    FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
-                    WHERE TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql {filtro_cliente}
-                    GROUP BY v.sku, c.regional, c.razaosocial
-                ),
-                Previsao_Clientes AS (
-                    SELECT h.sku, h.regional, h.razaosocial, COALESCE(h.media_vol, 0) as media_vol, COALESCE(m.mtd_vol, 0) as mtd_vol, COALESCE(f.freq_meses, 0) as freq_meses,
-                        CASE WHEN COALESCE(m.mtd_vol, 0) >= COALESCE(h.media_vol, 0) * 0.6 THEN 0 ELSE GREATEST(0, COALESCE(h.media_vol, 0) - COALESCE(m.mtd_vol, 0)) END as previsao_vol
-                    FROM Hist_Clientes h
-                    LEFT JOIN MTD_Clientes m ON h.sku = m.sku AND h.regional = m.regional AND h.razaosocial = m.razaosocial
-                    LEFT JOIN Freq_Clientes f ON h.sku = f.sku AND h.regional = f.regional AND h.razaosocial = f.razaosocial
-                    WHERE COALESCE(f.freq_meses, 0) >= 4
-                ),
-                Previsao_SKU AS (SELECT sku, SUM(previsao_vol) as previsao_entrada_vol FROM Previsao_Clientes GROUP BY sku),
-                Metas AS (
-                    SELECT m.sku, SUM(m.vol_final) as meta_mes, COALESCE(SUM(m.vol_final * m.pmv_aplicado) / NULLIF(SUM(m.vol_final), 0), MAX(m.pmv_aplicado)) as pmv 
-                    FROM fato_ibp_granular m LEFT JOIN dim_clientes c ON m.cgc = c.cgc
-                    WHERE TO_CHAR(m.mes_projetado, 'YYYY-MM') = :mes_sql AND m.ciclo_sop = :ciclo_congelado {filtro_cliente}
-                    GROUP BY m.sku
-                )
-                SELECT p.sku, p.descricao, p.categoria, p.segmento, COALESCE(e.estoque_atual, 0) as estoque_atual, COALESCE(v.vendas_mtd, 0) as vendas_mtd_vol, 
-                       COALESCE(v.faturado_mtd, 0) as faturado_mtd_vol, COALESCE(v.corte_mtd, 0) as corte_mtd_vol, COALESCE(v.vl_pedido, 0) as vl_pedido,
-                       COALESCE(v.vl_faturado, 0) as vl_faturado, COALESCE(v.vl_corte, 0) as vl_corte, COALESCE(prev.previsao_entrada_vol, 0) as previsao_entrada_vol,
-                       COALESCE(m.meta_mes, 0) as meta_mes_vol, COALESCE(m.pmv, 0) as pmv
-                FROM dim_produtos p 
-                LEFT JOIN Estoque e ON p.sku = e.sku 
-                LEFT JOIN Vendas v ON p.sku = v.sku 
-                LEFT JOIN Previsao_SKU prev ON p.sku = prev.sku
-                LEFT JOIN Metas m ON p.sku = m.sku
-                WHERE 1=1 {clausula_filtro} AND (COALESCE(e.estoque_atual, 0) > 0 OR COALESCE(v.vendas_mtd, 0) > 0 OR COALESCE(m.meta_mes, 0) > 0 OR COALESCE(prev.previsao_entrada_vol, 0) > 0)
-            """)
-            
-            df_sku = pd.read_sql(query_sku, db.bind, params=params_query)
-            if df_sku.empty: 
-                return {"estoque_sku": [], "kpis_globais": {
-                    "total_ruptura_rs": 0, "total_sobra_rs": 0, "total_ruptura_vol": 0, "total_sobra_vol": 0, "meta_caixas": 0, "realizado_caixas": 0
-                }}
-
-        # MATEMÁTICA FINAL
-        for col in ['meta_mes_vol', 'vendas_mtd_vol', 'faturado_mtd_vol', 'corte_mtd_vol', 'estoque_atual', 'pmv', 'vl_pedido', 'vl_faturado', 'vl_corte', 'previsao_entrada_vol']: 
-            df_sku[col] = pd.to_numeric(df_sku[col], errors='coerce').fillna(0)
-            
-        df_sku['estoque_rs'] = df_sku['estoque_atual'] * df_sku['pmv']
-        df_sku['meta_mes_rs'] = df_sku['meta_mes_vol'] * df_sku['pmv']
-        
-        df_sku['carteira_aberto_vol'] = np.maximum(0, df_sku['vendas_mtd_vol'] - df_sku['faturado_mtd_vol'] - df_sku['corte_mtd_vol'])
-        df_sku['carteira_aberto_rs'] = np.maximum(0, df_sku['vl_pedido'] - df_sku['vl_faturado'] - df_sku['vl_corte'])
-        
-        df_sku['previsao_entrada_rs'] = df_sku['previsao_entrada_vol'] * df_sku['pmv']
-        
-        df_sku['projecao_fim_mes_vol'] = df_sku['vendas_mtd_vol'] + df_sku['previsao_entrada_vol']
-        df_sku['projecao_fim_mes_rs'] = df_sku['vl_pedido'] + df_sku['previsao_entrada_rs']
-        
-        df_sku['gap_meta_vol'] = df_sku['projecao_fim_mes_vol'] - df_sku['meta_mes_vol']
-        df_sku['gap_meta_rs'] = df_sku['projecao_fim_mes_rs'] - df_sku['meta_mes_rs']
-
-        df_sku['demanda_futura_vol'] = df_sku['carteira_aberto_vol'] + df_sku['previsao_entrada_vol']
-        df_sku['ruptura_vol'] = np.maximum(0, df_sku['demanda_futura_vol'] - df_sku['estoque_atual'])
-        df_sku['ruptura_rs'] = df_sku['ruptura_vol'] * df_sku['pmv']
-        
-        df_sku['sobra_vol'] = np.maximum(0, df_sku['estoque_atual'] - df_sku['demanda_futura_vol'])
-        df_sku['sobra_rs'] = df_sku['sobra_vol'] * df_sku['pmv']
-
-        try:
-            dt_att = db.execute(text("SELECT MAX(data_atualizacao) FROM fato_estoque_d0")).scalar()
-            if dt_att:
-                ultima_atualizacao = (dt_att - datetime.timedelta(hours=3)).strftime("%H:%M")
-            else:
-                ultima_atualizacao = "Ao Vivo"
-        except:
-            ultima_atualizacao = "Ao Vivo"
-
-        kpis = {
-            "total_ruptura_rs": float(df_sku['ruptura_rs'].sum()), 
-            "total_ruptura_vol": float(df_sku['ruptura_vol'].sum()), 
-            "total_sobra_rs": float(df_sku['sobra_rs'].sum()), 
-            "total_sobra_vol": float(df_sku['sobra_vol'].sum()),
-            "meta_caixas": float(df_sku['meta_mes_vol'].sum()), 
-            "realizado_caixas": float(df_sku['vendas_mtd_vol'].sum()),
-            "ultima_atualizacao": ultima_atualizacao if data_alvo_str == hoje_str else "Dados de Snapshot"
-        }
-
-        return {"estoque_sku": df_sku.to_dict(orient="records"), "kpis_globais": kpis}
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
-
-# ==============================================================================
-# 5. DRILL-DOWN HÍBRIDO (POSTGRES + S3 PARQUET: MTRIX E PMR GOLD)
-# ==============================================================================
-@router.get("/riscos-estoque/drilldown-clientes/{sku}")
-async def drilldown_riscos_clientes(sku: str, data_snapshot: str = Query(None), meses_horizonte: List[str] = Query(None), db: Session = Depends(get_db)):
-    try:
-        hoje_str = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).strftime("%Y-%m-%d")
-        data_alvo_str = data_snapshot if data_snapshot else hoje_str
-        mes_sql = f"{data_alvo_str.split('-')[0]}-{data_alvo_str.split('-')[1]}"
-        ciclo_congelado = obter_ciclo_meta_seguro(db, datetime.date.today().strftime("%m/%Y"))
-        
-        # 1. BASE QUENTE (PostgreSQL): Buscando Vendas e extraindo o CGC para servir de ponte
-        query = text("""
-            WITH Hist_Clientes AS (
-                SELECT c.cgc, c.regional, c.razaosocial, SUM(v.qt_pedido) / 3.0 as media_vol
-                FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
-                WHERE v.sku = :sku AND v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '3 months' AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM')
-                GROUP BY c.cgc, c.regional, c.razaosocial
-            ),
-            Freq_Clientes AS (
-                SELECT c.cgc, c.regional, c.razaosocial, COUNT(DISTINCT TO_CHAR(v.data_pedido, 'YYYY-MM')) as freq_meses
-                FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
-                WHERE v.sku = :sku AND v.data_pedido >= TO_DATE(:mes_sql, 'YYYY-MM') - INTERVAL '6 months' AND v.data_pedido < TO_DATE(:mes_sql, 'YYYY-MM')
-                GROUP BY c.cgc, c.regional, c.razaosocial
-            ),
-            MTD_Clientes AS (
-                SELECT c.cgc, c.regional, c.razaosocial, SUM(v.qt_pedido) as mtd_vol
-                FROM fato_vendas v JOIN dim_clientes c ON v.cgc = c.cgc
-                WHERE v.sku = :sku AND TO_CHAR(v.data_pedido, 'YYYY-MM') = :mes_sql
-                GROUP BY c.cgc, c.regional, c.razaosocial
-            )
-            SELECT 
-                h.cgc, h.regional, h.razaosocial, 
-                COALESCE(h.media_vol, 0) as media_vol, 
-                COALESCE(m.mtd_vol, 0) as mtd_vol, 
-                COALESCE(f.freq_meses, 0) as freq_meses,
-                CASE 
-                    WHEN COALESCE(m.mtd_vol, 0) >= COALESCE(h.media_vol, 0) * 0.6 THEN 0 
-                    ELSE GREATEST(0, COALESCE(h.media_vol, 0) - COALESCE(m.mtd_vol, 0)) 
-                END as previsao_vol
-            FROM Hist_Clientes h
-            LEFT JOIN MTD_Clientes m ON h.cgc = m.cgc
-            LEFT JOIN Freq_Clientes f ON h.cgc = f.cgc
-            WHERE COALESCE(f.freq_meses, 0) >= 4 
-        """)
-        
-        df_pg = pd.read_sql(query, db.bind, params={"mes_sql": mes_sql, "ciclo_congelado": ciclo_congelado, "sku": sku})
-        
-        if df_pg.empty:
-            return []
-
-        # 2. BASE FRIA (AWS S3): Instanciando o sistema de arquivos para ler os Data Lakes
-        fs = s3fs.S3FileSystem(key=AWS_STORAGE_OPTIONS["key"], secret=AWS_STORAGE_OPTIONS["secret"])
-
-        # a) Buscar o último arquivo de Estoque da MTRIX
-        df_mtrix = pd.DataFrame(columns=["cgc", "estoque_mtrix"])
-        try:
-            arquivos_mtrix = fs.glob(f"s3://{S3_BUCKET}/mtrix/*estoque*.parquet")
-            if arquivos_mtrix:
-                ultimo_mtrix = sorted(arquivos_mtrix)[-1]
-                df_temp = pd.read_parquet(f"s3://{ultimo_mtrix}", storage_options=AWS_STORAGE_OPTIONS)
-                df_temp = df_temp[df_temp['sku'] == sku]
-                if not df_temp.empty:
-                    df_mtrix = df_temp.groupby('cgc')['estoque'].sum().reset_index()
-                    df_mtrix.rename(columns={'estoque': 'estoque_mtrix'}, inplace=True)
-        except Exception as e:
-            print(f"[Aviso] S3 MTRIX Inacessível ou Vazio: {e}")
-
-        # b) Buscar o arquivo GOLD Financeiro de PMR
-        df_pmr = pd.DataFrame(columns=["cgc", "pmr"])
-        try:
-            # Aponta cirurgicamente para a Camada Gold gerada pelo financeiro_worker.py
-            caminho_gold = f"s3://{S3_BUCKET}/financeiro/pmr/pmr_clientes_gold.parquet"
-            df_temp_pmr = pd.read_parquet(caminho_gold, storage_options=AWS_STORAGE_OPTIONS)
-            if not df_temp_pmr.empty:
-                df_pmr = df_temp_pmr[['cgc', 'pmr_dias']].rename(columns={'pmr_dias': 'pmr'})
-        except Exception as e:
-            print(f"[Aviso] S3 PMR Financeiro Inacessível: {e}")
-
-        # 3. O MERGE (Cruzamento Relacional em Memória via CGC)
-        df_merged = df_pg.merge(df_mtrix, on='cgc', how='left').merge(df_pmr, on='cgc', how='left')
-
-        # 4. AGRUPAMENTO PARA A TELA (Por Razão Social)
-        df_final = df_merged.groupby(['regional', 'razaosocial']).agg({
-            'media_vol': 'sum',
-            'mtd_vol': 'sum',
-            'freq_meses': 'max',
-            'previsao_vol': 'sum',
-            'estoque_mtrix': 'sum',
-            'pmr': 'mean'
-        }).reset_index()
-
-        # 5. TRATAMENTO VISUAL (Nulos e Strings Especiais)
-        registros_processados = []
-        for _, row in df_final.iterrows():
-            linha = row.to_dict()
-            linha['pmr'] = round(linha['pmr'], 1) if pd.notnull(linha['pmr']) else 0
-            
-            val_estoque = linha['estoque_mtrix']
-            if pd.isnull(val_estoque) or val_estoque == 0:
-                linha['estoque_mtrix'] = "sem mtrix"
-            else:
-                linha['estoque_mtrix'] = int(val_estoque)
-                
-            registros_processados.append(linha)
-
-        return sorted(registros_processados, key=lambda x: (x['previsao_vol'], x['mtd_vol']), reverse=True)
-
+        if dimensao not in DIMENSOES or sub_dimensao not in DIMENSOES:
+            raise HTTPException(status_code=400, detail="Dimensao invalida.")
+        if not meses:
+            meses = listar_meses_auditaveis(db)
+        if not meses:
+            return {"itens": []}
+        base = _montar_base(db, meses, visao)
+        if base.empty:
+            return {"itens": []}
+        recorte = base[base[COL_MAP[dimensao]].astype(str) == valor]
+        if recorte.empty:
+            return {"itens": []}
+        sub_col = COL_MAP[sub_dimensao]
+        itens = []
+        for chave, grupo in recorte.groupby(sub_col):
+            m = _metricas(grupo); m["nome"] = str(chave); itens.append(m)
+        itens.sort(key=lambda x: (x["acuracia"], -x["realizado"]))
+        return {"dimensao": dimensao, "valor": valor, "sub_dimensao": sub_dimensao,
+                "visao": visao, "meses": meses, "itens": itens}
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Falha no Drilldown Híbrido: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/evolucao")
+async def evolucao(visao: str = Query("caixas"), db: Session = Depends(get_db)):
+    try:
+        meses = listar_meses_auditaveis(db)
+        serie = []
+        for mes in meses:
+            base = _montar_base(db, [mes], visao)
+            if base.empty:
+                continue
+            m = _metricas(base); bot = _metricas_bot(base)
+            serie.append({"mes": mes, "acuracia": round(m["acuracia"]*100,1),
+                "acuracia_bot": round(bot["acuracia"]*100,1), "bias": round(m["bias"]*100,1),
+                "fva": round(m["fva"]*100,1), "vies_label": m["vies_label"], "realizado": m["realizado"]})
+        return {"visao": visao, "serie": serie}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/diagnostico")
+async def diagnostico(visao: str = Query("caixas"), meses: List[str] = Query(None),
+                      db: Session = Depends(get_db)):
+    try:
+        if not meses:
+            meses = listar_meses_auditaveis(db)
+        base = _montar_base(db, meses, visao)
+        if base.empty:
+            return {"por_categoria": [], "por_regional": [], "dispersao_sku": []}
+
+        def _agrupar(col):
+            out = []
+            for chave, grupo in base.groupby(col):
+                m = _metricas(grupo)
+                out.append({"nome": str(chave), "acuracia": round(m["acuracia"]*100,1),
+                    "wmape": round(m["wmape"]*100,1), "bias": round(m["bias"]*100,1), "realizado": m["realizado"]})
+            out.sort(key=lambda x: x["acuracia"])
+            return out
+
+        dispersao = []
+        for sku, grupo in base.groupby("sku"):
+            m = _metricas(grupo)
+            if m["realizado"] <= 0:
+                continue
+            dispersao.append({"sku": str(sku), "categoria": str(grupo["categoria"].iloc[0]),
+                "volume": m["realizado"], "erro_pct": round(m["wmape"]*100,1), "acuracia": round(m["acuracia"]*100,1)})
+        dispersao.sort(key=lambda x: -x["volume"])
+
+        return {"visao": visao, "meses": meses,
+                "por_categoria": _agrupar("categoria"), "por_regional": _agrupar("regional"),
+                "dispersao_sku": dispersao}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

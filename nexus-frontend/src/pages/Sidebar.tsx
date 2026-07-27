@@ -10,15 +10,15 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
   const [isCollapsed, setIsCollapsed] = useState(false);
 
   const allNavItems = [
-    { id: 'dashboard', label: 'Plano de Demanda', icon: LayoutDashboard, roles: ['Administrador', 'Gerente', 'Supply Chain', 'Marketing', 'C-Level'] },
+    { id: 'dashboard', label: 'Demanda Final', icon: LayoutDashboard, roles: ['Administrador', 'Gerente', 'Supply Chain', 'Marketing', 'C-Level'] },
     { id: 'soe-radar', label: 'S&OE (construção)', icon: Activity, roles: ['Administrador'] },
     { id: 'inbound', label: 'Mapa Produtivo (construção)', icon: Factory, roles: ['Administrador'] },
     { id: 'auditoria', label: 'KPIs (construção)', icon: Crosshair, roles: ['Administrador'] },
-    { id: 'topdown', label: 'Plano Irrestrito', icon: BarChart3, roles: ['Administrador', 'Marketing'] },
+    { id: 'topdown', label: 'Demanda Marketing', icon: BarChart3, roles: ['Administrador', 'Marketing'] },
     { id: 'npd', label: 'Inovações', icon: Rocket, roles: ['Administrador', 'Marketing'] },
     { id: 'supply', label: 'Supply Review', icon: Factory, roles: ['Administrador', 'Supply Chain'] },
-    { id: 'consenso', label: 'Metas da Equipe', icon: Users, roles: ['Administrador', 'Gerente'] },
-    { id: 'gerenciamento', label: 'Gestão de Carteiras', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },
+    { id: 'consenso', label: 'Metas Comercial', icon: Users, roles: ['Administrador', 'Gerente'] },
+    { id: 'gerenciamento', label: 'Demanda Comercial', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },
     { id: 'admin', label: 'Painel Admin', icon: Settings, roles: ['Administrador'] },
     { id: 'ccc', label: 'Engenharia de Caixa (construção)', icon: Landmark, roles: ['Administrador'] },
   ];

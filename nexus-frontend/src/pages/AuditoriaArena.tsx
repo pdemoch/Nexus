@@ -1,845 +1,490 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import axios from 'axios';
-import { 
-  ShoppingCart, TrendingUp, TrendingDown, Factory, Target, Activity, 
-  Search, RefreshCw, Package, ChevronDown, ChevronRight, AlertTriangle, DollarSign, Users, Download, Calendar, Clock, Terminal
+import {
+  Trophy, Medal, Bot, TrendingUp, TrendingDown, ChevronDown, ChevronRight,
+  Loader2, HelpCircle, Target, Activity, BarChart3, ArrowUp, ArrowDown, Minus, Crown
 } from 'lucide-react';
-import { ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, LineChart, Line, ReferenceLine, ComposedChart, Bar, Legend } from 'recharts';
+import {
+  LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+  Legend, ResponsiveContainer, ScatterChart, Scatter, ZAxis, Cell, ReferenceLine
+} from 'recharts';
 
-// --- HELPERS DE FORMATAÇÃO E FUSO HORÁRIO ---
-const formatFin = (valor: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(valor || 0));
-const formatVol = (val: number) => Math.round(val || 0).toLocaleString('pt-BR');
-const formatPct = (val: number) => new Intl.NumberFormat('pt-BR', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(val || 0);
+// ============================================================
+// HELPERS
+// ============================================================
+const fmtNum = (v: any, visao: string) => {
+  const n = Number(v) || 0;
+  if (visao === 'financeiro') {
+    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(n));
+  }
+  return Math.round(n).toLocaleString('pt-BR');
+};
+const fmtPct = (v: any) => `${(Number(v) || 0).toFixed(1)}%`;
 
-// Captura a data corrente sob o fuso de Brasília (UTC-3)
-const obterDataBrasilia = () => {
-  const d = new Date();
-  const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
-  return new Date(utc + (3600000 * -3));
+// Cor por faixa de acurácia/nota (verde bom, âmbar médio, vermelho ruim).
+const corNota = (nota: number) => {
+  if (nota >= 80) return { txt: 'text-emerald-600', bg: 'bg-emerald-50', ring: 'ring-emerald-200', bar: '#059669' };
+  if (nota >= 60) return { txt: 'text-amber-600', bg: 'bg-amber-50', ring: 'ring-amber-200', bar: '#d97706' };
+  return { txt: 'text-rose-600', bg: 'bg-rose-50', ring: 'ring-rose-200', bar: '#e11d48' };
 };
 
-// --- COMPONENTE DROPDOWN MESES ---
-const ExcelTreeDropdown = ({ titulo, options, selected, onChange }: any) => {
-  const [open, setOpen] = useState(false);
-  const groupedOptions = useMemo(() => {
-    return options.reduce((acc: any, mes: string) => {
-      const ano = mes.split('/')[1];
-      if (!acc[ano]) acc[ano] = [];
-      acc[ano].push(mes);
-      return acc;
-    }, {});
-  }, [options]);
+// Tooltip educativo (o "?" que explica a métrica com o número real).
+const Explica = ({ titulo, texto }: { titulo: string; texto: string }) => (
+  <span className="group relative inline-flex items-center ml-1 align-middle">
+    <HelpCircle className="w-3.5 h-3.5 text-slate-300 hover:text-slate-500 cursor-help" />
+    <span className="invisible group-hover:visible absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-slate-900 text-white text-[11px] leading-relaxed rounded-xl shadow-xl font-medium">
+      <span className="block font-black mb-1 text-indigo-300">{titulo}</span>
+      {texto}
+    </span>
+  </span>
+);
 
-  const toggleMonth = (val: string) => selected.includes(val) && selected.length > 1 ? onChange(selected.filter((v: string) => v !== val)) : !selected.includes(val) && onChange([...selected, val]);
-  const toggleYear = (ano: string, mesesDoAno: string[]) => {
-    const todosSelecionados = mesesDoAno.every(m => selected.includes(m));
-    if (todosSelecionados) {
-      if (selected.length > mesesDoAno.length) onChange(selected.filter((m: string) => !mesesDoAno.includes(m)));
-    } else {
-      const novos = new Set([...selected, ...mesesDoAno]);
-      onChange(Array.from(novos));
+const DIM_LABELS: Record<string, string> = {
+  coordenador: 'Coordenador', vendedor: 'Vendedor', cliente: 'Cliente',
+  regional: 'Regional', categoria: 'Categoria', segmento: 'Segmento', sku: 'SKU',
+};
+
+// ============================================================
+// COMPONENTE PRINCIPAL
+// ============================================================
+export default function AuditoriaArena() {
+  const [aba, setAba] = useState<'ranking' | 'analise'>('ranking');
+  const [visao, setVisao] = useState<'caixas' | 'financeiro'>('caixas');
+  const [dimensao, setDimensao] = useState('coordenador');
+  const [mesesDisp, setMesesDisp] = useState<string[]>([]);
+  const [mesesSel, setMesesSel] = useState<string[]>([]);
+
+  const [ranking, setRanking] = useState<any[]>([]);
+  const [totais, setTotais] = useState<any>({});
+  const [loading, setLoading] = useState(false);
+  const [expandido, setExpandido] = useState<string | null>(null);
+  const [drill, setDrill] = useState<Record<string, any[]>>({});
+
+  const [evolucao, setEvolucao] = useState<any[]>([]);
+  const [diag, setDiag] = useState<any>({ por_categoria: [], por_regional: [], dispersao_sku: [] });
+
+  // Carrega meses auditáveis (dinâmico).
+  useEffect(() => {
+    axios.get('/api/v1/kpis/meses-auditaveis').then(r => {
+      setMesesDisp(r.data.meses || []);
+      setMesesSel(r.data.meses || []);
+    }).catch(() => {});
+  }, []);
+
+  const paramsMeses = useMemo(() => {
+    const p = new URLSearchParams();
+    p.append('visao', visao);
+    mesesSel.forEach(m => p.append('meses', m));
+    return p;
+  }, [visao, mesesSel]);
+
+  // Carrega ranking.
+  const carregarRanking = useCallback(async () => {
+    if (mesesSel.length === 0) return;
+    setLoading(true);
+    try {
+      const p = new URLSearchParams(paramsMeses);
+      p.append('dimensao', dimensao);
+      const r = await axios.get(`/api/v1/kpis/ranking?${p.toString()}`);
+      setRanking(r.data.itens || []);
+      setTotais(r.data.totais || {});
+    } catch { setRanking([]); }
+    finally { setLoading(false); }
+  }, [dimensao, paramsMeses, mesesSel]);
+
+  useEffect(() => { if (aba === 'ranking') carregarRanking(); }, [aba, carregarRanking]);
+
+  // Carrega análise.
+  useEffect(() => {
+    if (aba !== 'analise' || mesesSel.length === 0) return;
+    axios.get(`/api/v1/kpis/evolucao?visao=${visao}`).then(r => setEvolucao(r.data.serie || [])).catch(() => {});
+    axios.get(`/api/v1/kpis/diagnostico?${paramsMeses.toString()}`).then(r => setDiag(r.data)).catch(() => {});
+  }, [aba, visao, paramsMeses, mesesSel]);
+
+  // Drilldown de um item do ranking.
+  const toggleDrill = async (nome: string) => {
+    if (expandido === nome) { setExpandido(null); return; }
+    setExpandido(nome);
+    if (!drill[nome]) {
+      try {
+        const p = new URLSearchParams(paramsMeses);
+        p.append('dimensao', dimensao);
+        p.append('valor', nome);
+        p.append('sub_dimensao', 'sku');
+        const r = await axios.get(`/api/v1/kpis/drilldown?${p.toString()}`);
+        setDrill(prev => ({ ...prev, [nome]: r.data.itens || [] }));
+      } catch { setDrill(prev => ({ ...prev, [nome]: [] })); }
     }
   };
 
+  const dimsPessoa = dimensao === 'coordenador' || dimensao === 'vendedor';
+
   return (
-    <div className="relative" onMouseLeave={() => setOpen(false)}>
-      <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2 block">{titulo}</label>
-      <div onClick={() => setOpen(!open)} className="w-full bg-slate-950 border border-slate-800 text-sm p-2 rounded-lg text-slate-300 flex justify-between items-center cursor-pointer shadow-inner">
-         <span className="truncate pr-2 font-bold text-indigo-300">{selected.length} Meses Selecionados</span>
-         <span className="text-[10px] text-slate-500">▼</span>
+    <div className="min-h-screen bg-slate-50 p-6 lg:p-8">
+      <div className="max-w-[1500px] mx-auto">
+
+        {/* CABEÇALHO */}
+        <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+          <div>
+            <h1 className="text-2xl font-black text-slate-900 tracking-tight flex items-center gap-2">
+              <Trophy className="w-7 h-7 text-indigo-600" /> Desvios · Placar de Acurácia
+            </h1>
+            <p className="text-sm text-slate-500 font-medium mt-0.5">
+              Quem posiciona melhor o produto no cliente erra menos. O plano congelado vs o que vendeu de fato.
+            </p>
+          </div>
+
+          {/* Toggle caixas/financeiro */}
+          <div className="flex items-center bg-white rounded-2xl p-1 shadow-sm border border-slate-100">
+            <button onClick={() => setVisao('caixas')} className={`px-4 py-2 rounded-xl text-xs font-black transition-all ${visao === 'caixas' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400'}`}>
+              Caixas
+            </button>
+            <button onClick={() => setVisao('financeiro')} className={`px-4 py-2 rounded-xl text-xs font-black transition-all ${visao === 'financeiro' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400'}`}>
+              Financeiro
+            </button>
+          </div>
+        </div>
+
+        {/* ABAS */}
+        <div className="flex items-center gap-2 mb-6">
+          <button onClick={() => setAba('ranking')} className={`flex items-center gap-2 px-5 py-2.5 rounded-2xl text-sm font-black transition-all ${aba === 'ranking' ? 'bg-slate-900 text-white shadow-lg' : 'bg-white text-slate-500 border border-slate-100'}`}>
+            <Trophy className="w-4 h-4" /> Ranking
+          </button>
+          <button onClick={() => setAba('analise')} className={`flex items-center gap-2 px-5 py-2.5 rounded-2xl text-sm font-black transition-all ${aba === 'analise' ? 'bg-slate-900 text-white shadow-lg' : 'bg-white text-slate-500 border border-slate-100'}`}>
+            <Activity className="w-4 h-4" /> Análise da Empresa
+          </button>
+
+          {/* Seletor de meses (chips) */}
+          <div className="flex items-center gap-1.5 ml-auto flex-wrap">
+            {mesesDisp.map(m => {
+              const on = mesesSel.includes(m);
+              return (
+                <button key={m} onClick={() => setMesesSel(on ? mesesSel.filter(x => x !== m) : [...mesesSel, m])}
+                  className={`px-3 py-1.5 rounded-xl text-[11px] font-black transition-all ${on ? 'bg-indigo-100 text-indigo-700 ring-1 ring-indigo-200' : 'bg-white text-slate-400 border border-slate-100'}`}>
+                  {m}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {aba === 'ranking' ? (
+          <RankingView
+            visao={visao} dimensao={dimensao} setDimensao={setDimensao}
+            ranking={ranking} totais={totais} loading={loading}
+            expandido={expandido} toggleDrill={toggleDrill} drill={drill}
+            dimsPessoa={dimsPessoa}
+          />
+        ) : (
+          <AnaliseView visao={visao} evolucao={evolucao} diag={diag} />
+        )}
       </div>
-      {open && (
-        <div className="absolute top-full left-0 mt-1 w-full min-w-[220px] bg-slate-800 border border-slate-700 rounded-lg shadow-2xl z-50 p-2 max-h-72 overflow-y-auto">
-           {Object.entries(groupedOptions).sort(([a], [b]) => Number(b) - Number(a)).map(([ano, meses]: any) => {
-             const todosSelecionados = meses.every((m: string) => selected.includes(m));
-             return (
-               <div key={ano} className="mb-2">
-                 <div className="flex items-center gap-2 p-1.5 bg-slate-900/50 rounded cursor-pointer hover:bg-slate-700 transition-colors" onClick={() => toggleYear(ano, meses)}>
-                   <input type="checkbox" readOnly checked={todosSelecionados} className="accent-indigo-500 w-4 h-4" />
-                   <span className="font-black text-sm text-indigo-400">Ano {ano}</span>
-                 </div>
-                 <div className="pl-6 pt-1 flex flex-col gap-1">
-                   {meses.map((m: string) => (
-                     <label key={m} className="flex items-center gap-3 p-1 hover:bg-slate-700 rounded cursor-pointer text-xs text-slate-200">
-                       <input type="checkbox" checked={selected.includes(m)} onChange={() => toggleMonth(m)} className="accent-indigo-500 w-3.5 h-3.5 cursor-pointer" /> {m}
-                     </label>
-                   ))}
-                 </div>
-               </div>
-             )
-           })}
+    </div>
+  );
+}
+
+// ============================================================
+// ABA RANKING (o jogo)
+// ============================================================
+function RankingView({ visao, dimensao, setDimensao, ranking, totais, loading, expandido, toggleDrill, drill, dimsPessoa }: any) {
+  return (
+    <>
+      {/* CARTÕES DE SAÚDE — linguagem humana */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <CardSaude
+          titulo="Acurácia do time" valor={fmtPct(totais.acuracia * 100)}
+          sub={`de cada 100, erramos ${Math.round((totais.wmape || 0) * 100)}`}
+          icone={<Target className="w-5 h-5" />} tom={totais.acuracia >= 0.8 ? 'bom' : totais.acuracia >= 0.6 ? 'medio' : 'ruim'}
+          ajuda="Acurácia = 1 − WMAPE. De cada 100 caixas vendidas, quantas o plano acertou. Ponderada por volume: itens grandes pesam mais."
+        />
+        <CardSaude
+          titulo="Tendência" valor={totais.vies_label || '—'}
+          sub={`viés de ${fmtPct((totais.bias || 0) * 100)}`}
+          icone={totais.bias > 0 ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}
+          tom={Math.abs(totais.bias || 0) < 0.05 ? 'bom' : 'medio'}
+          ajuda="BIAS = (previsto − realizado) / realizado. Mostra se o time sistematicamente prevê demais (infla estoque) ou de menos (rupturas). Perto de zero é saudável."
+        />
+        <CardSaude
+          titulo="Valor vs Nexus Bot" valor={totais.fva >= 0 ? 'Supera a IA' : 'Abaixo da IA'}
+          sub={`FVA ${fmtPct((totais.fva || 0) * 100)}`}
+          icone={<Bot className="w-5 h-5" />} tom={totais.fva >= 0 ? 'bom' : 'ruim'}
+          ajuda="FVA (Forecast Value Added) = erro da IA − erro do humano. Positivo: o ajuste humano melhorou a previsão da máquina. Negativo: seria melhor confiar na IA."
+        />
+        <CardSaude
+          titulo={visao === 'financeiro' ? 'Realizado (R$)' : 'Realizado (cx)'} valor={fmtNum(totais.realizado, visao)}
+          sub="volume vendido no período" icone={<BarChart3 className="w-5 h-5" />} tom="neutro"
+          ajuda="Volume total efetivamente vendido (qt_pedido / vl_pedido) no período auditado. É a base que pondera todos os erros."
+        />
+      </div>
+
+      {/* SELETOR DE DIMENSÃO */}
+      <div className="flex items-center gap-1.5 mb-4 flex-wrap">
+        <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest mr-1">Ranquear por</span>
+        {Object.keys(DIM_LABELS).map(d => (
+          <button key={d} onClick={() => setDimensao(d)}
+            className={`px-3.5 py-1.5 rounded-xl text-xs font-black transition-all ${dimensao === d ? 'bg-indigo-600 text-white shadow' : 'bg-white text-slate-500 border border-slate-100'}`}>
+            {DIM_LABELS[d]}
+          </button>
+        ))}
+      </div>
+
+      {/* PLACAR */}
+      <div className="bg-white rounded-[28px] shadow-sm border border-slate-100 overflow-hidden">
+        {loading ? (
+          <div className="p-16 flex items-center justify-center text-slate-400"><Loader2 className="w-6 h-6 animate-spin mr-2" /> Calculando o placar...</div>
+        ) : ranking.length === 0 ? (
+          <div className="p-16 text-center text-slate-400 font-medium">Sem dados para o período selecionado.</div>
+        ) : (
+          <div className="divide-y divide-slate-50">
+            {/* Cabeçalho */}
+            <div className="grid grid-cols-12 gap-2 px-6 py-3 bg-slate-50/50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
+              <div className="col-span-1">#</div>
+              <div className="col-span-4">{DIM_LABELS[dimensao]}</div>
+              <div className="col-span-2 text-center">Nota <Explica titulo="Nota do jogo (0–100)" texto="Combina acurácia (base), penalidade leve por viés, e bônus por superar o Nexus Bot. É o que decide a posição." /></div>
+              <div className="col-span-2 text-center">Acertou</div>
+              <div className="col-span-1 text-center">Tende a</div>
+              <div className="col-span-2 text-center">vs Bot</div>
+            </div>
+
+            {ranking.map((it: any) => (
+              <LinhaRanking key={it.nome} it={it} visao={visao} dimensao={dimensao}
+                dimsPessoa={dimsPessoa} expandido={expandido} toggleDrill={toggleDrill} drill={drill} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* EXPLICAÇÃO DOS CÁLCULOS */}
+      <ExplicacaoCalculos />
+    </>
+  );
+}
+
+function LinhaRanking({ it, visao, dimensao, dimsPessoa, expandido, toggleDrill, drill }: any) {
+  const c = corNota(it.nota);
+  const aberto = expandido === it.nome;
+  const podio = it.posicao <= 3 && !it.eh_bot;
+  const medalCor = it.posicao === 1 ? 'text-yellow-500' : it.posicao === 2 ? 'text-slate-400' : 'text-amber-700';
+
+  if (it.eh_bot) {
+    return (
+      <div className="grid grid-cols-12 gap-2 px-6 py-4 items-center bg-gradient-to-r from-indigo-50/70 to-transparent border-y-2 border-indigo-100">
+        <div className="col-span-1 font-black text-indigo-400">{it.posicao}º</div>
+        <div className="col-span-4 flex items-center gap-2">
+          <div className="w-8 h-8 rounded-xl bg-indigo-600 flex items-center justify-center"><Bot className="w-4 h-4 text-white" /></div>
+          <span className="font-black text-indigo-700">Nexus Bot</span>
+          <span className="text-[9px] font-black text-indigo-400 bg-indigo-100 px-2 py-0.5 rounded-full uppercase tracking-wider">a régua</span>
+        </div>
+        <div className="col-span-2 text-center"><span className="text-lg font-black text-indigo-600">{it.nota}</span></div>
+        <div className="col-span-2 text-center font-bold text-indigo-500">{fmtPct(it.acuracia * 100)}</div>
+        <div className="col-span-1 text-center text-[10px] font-bold text-indigo-400">{it.vies_label}</div>
+        <div className="col-span-2 text-center text-[10px] font-black text-indigo-400 uppercase">benchmark</div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div onClick={() => toggleDrill(it.nome)} className="grid grid-cols-12 gap-2 px-6 py-4 items-center hover:bg-slate-50/50 cursor-pointer transition-colors">
+        <div className="col-span-1 flex items-center gap-1">
+          {podio ? <Medal className={`w-5 h-5 ${medalCor}`} /> : <span className="font-black text-slate-400">{it.posicao}º</span>}
+        </div>
+        <div className="col-span-4 flex items-center gap-2 min-w-0">
+          {aberto ? <ChevronDown className="w-4 h-4 text-slate-300 shrink-0" /> : <ChevronRight className="w-4 h-4 text-slate-300 shrink-0" />}
+          <span className="font-black text-slate-700 truncate" title={it.nome}>{it.nome}</span>
+          {it.acima_do_bot && <span title="Acima do Nexus Bot" className="shrink-0 inline-flex"><Crown className="w-3.5 h-3.5 text-yellow-500" /></span>}
+        </div>
+        <div className="col-span-2 text-center">
+          <span className={`inline-block px-3 py-1 rounded-xl font-black ${c.txt} ${c.bg} ring-1 ${c.ring}`}>{it.nota}</span>
+        </div>
+        <div className="col-span-2 text-center font-black text-slate-700">{fmtPct(it.acuracia * 100)}</div>
+        <div className="col-span-1 text-center">
+          {it.vies_label === 'prevê demais' ? <ArrowUp className="w-4 h-4 text-rose-400 mx-auto" />
+            : it.vies_label === 'prevê de menos' ? <ArrowDown className="w-4 h-4 text-sky-400 mx-auto" />
+            : <Minus className="w-4 h-4 text-emerald-400 mx-auto" />}
+        </div>
+        <div className="col-span-2 text-center">
+          {dimsPessoa ? (
+            it.acima_do_bot
+              ? <span className="text-[10px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg">supera ✓</span>
+              : <span className="text-[10px] font-black text-rose-500 bg-rose-50 px-2 py-1 rounded-lg">abaixo</span>
+          ) : <span className="text-[10px] text-slate-300">—</span>}
+        </div>
+      </div>
+
+      {/* DRILLDOWN: onde essa pessoa mais erra */}
+      {aberto && (
+        <div className="px-6 pb-4 bg-slate-50/40">
+          <div className="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-2 pt-2">Onde {it.nome} mais erra (piores SKUs)</div>
+          {!drill[it.nome] ? (
+            <div className="text-slate-400 text-xs flex items-center gap-2 py-2"><Loader2 className="w-4 h-4 animate-spin" /> carregando...</div>
+          ) : drill[it.nome].length === 0 ? (
+            <div className="text-slate-400 text-xs py-2">Sem detalhamento.</div>
+          ) : (
+            <div className="space-y-1">
+              {drill[it.nome].slice(0, 8).map((d: any, i: number) => (
+                <div key={i} className="flex items-center justify-between text-xs bg-white rounded-lg px-3 py-2 border border-slate-100">
+                  <span className="font-bold text-slate-600 truncate">{d.nome}</span>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="text-slate-400">Real: {fmtNum(d.realizado, visao)}</span>
+                    <span className={`font-black ${corNota(d.acuracia * 100).txt}`}>{fmtPct(d.acuracia * 100)}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
   );
-};
+}
 
-// --- COMPONENTE SORT HEADER ---
-const SortableHeader = ({ field, label, currentSort, requestSort, className = "text-right" }: any) => {
-  const isSorted = currentSort.key === field;
+function CardSaude({ titulo, valor, sub, icone, tom, ajuda }: any) {
+  const tomCor = tom === 'bom' ? 'text-emerald-600' : tom === 'ruim' ? 'text-rose-600' : tom === 'medio' ? 'text-amber-600' : 'text-slate-700';
+  const tomBg = tom === 'bom' ? 'bg-emerald-50' : tom === 'ruim' ? 'bg-rose-50' : tom === 'medio' ? 'bg-amber-50' : 'bg-slate-100';
   return (
-    <th onClick={() => requestSort(field)} className={`px-3 py-4 cursor-pointer hover:text-white transition-colors select-none ${className}`}>
-      {label} {isSorted ? (currentSort.direction === 'asc' ? '↑' : '↓') : ''}
-    </th>
+    <div className="bg-white rounded-[24px] shadow-sm border border-slate-100 p-5">
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{titulo}<Explica titulo={titulo} texto={ajuda} /></span>
+        <div className={`p-2 rounded-xl ${tomBg} ${tomCor}`}>{icone}</div>
+      </div>
+      <div className={`text-2xl font-black tracking-tight ${tomCor}`}>{valor}</div>
+      <div className="text-[11px] font-bold text-slate-400 mt-1">{sub}</div>
+    </div>
   );
 }
 
-// --- DRILL-DOWN CLIENTES ---
-const RowSKUDrillDown = ({ row, visao, mesesSelecionados, formatador, dataSnapshot }: any) => {
-  const [expandido, setExpandido] = useState(false);
-  const [clientes, setClientes] = useState<any[]>([]);
-  const [carregando, setCarregando] = useState(false);
-
-  const carregarClientes = async () => {
-    if (expandido) { setExpandido(false); return; }
-    setCarregando(true); setExpandido(true);
-    try {
-      const params = new URLSearchParams({ visao, data_snapshot: dataSnapshot });
-      mesesSelecionados.forEach((m: string) => params.append('meses_horizonte', m));
-      const res = await axios.get(`/api/v1/kpis/torre-controle/clientes/${row.sku}?${params.toString()}`);
-      setClientes(res.data);
-    } catch (e) { } finally { setCarregando(false); }
-  };
-
+// ============================================================
+// ABA ANÁLISE (a empresa)
+// ============================================================
+function AnaliseView({ visao, evolucao, diag }: any) {
   return (
-    <React.Fragment>
-      <tr className="hover:bg-slate-800/30 transition-colors cursor-pointer group border-b border-slate-800/50" onClick={carregarClientes}>
-        <td className="px-4 py-3">
-          <div className="flex items-center gap-3">
-            <button className="text-slate-500 group-hover:text-indigo-400">{expandido ? <ChevronDown className="w-5 h-5"/> : <ChevronRight className="w-5 h-5"/>}</button>
-            <div className="flex flex-col"><span className="font-bold text-slate-200">{row.descricao}</span><span className="text-[10px] text-slate-500 font-mono">{row.sku}</span></div>
-          </div>
-        </td>
-        <td className="px-3 py-3 text-right font-semibold text-indigo-400">{formatador(row.val_meta_ia || 0)}</td>
-        <td className="px-3 py-3 text-right font-semibold text-sky-400">{formatador(row.val_meta_hum || 0)}</td>
-        <td className="px-3 py-3 text-right font-black text-white">{formatador(row.val_real || 0)}</td>
-        <td className="px-3 py-3 text-right font-bold bg-slate-950/20 border-l border-slate-800/50">
-           <span className={(row.gap_ia || 0) > 0 ? 'text-rose-400' : 'text-emerald-400'}>{(row.gap_ia || 0) > 0 ? 'Falta ' : 'Over '}{formatador(Math.abs(row.gap_ia || 0))}</span>
-        </td>
-        <td className="px-3 py-3 text-right font-bold bg-slate-950/20">
-           <span className={(row.gap_humano || 0) > 0 ? 'text-rose-400' : 'text-emerald-400'}>{(row.gap_humano || 0) > 0 ? 'Falta ' : 'Over '}{formatador(Math.abs(row.gap_humano || 0))}</span>
-        </td>
-        <td className="px-3 py-3 text-right font-mono font-bold text-rose-400 bg-slate-950/40 border-l border-slate-800/50">{formatPct(row.mape_ia || 0)}</td>
-        <td className="px-3 py-3 text-right font-mono font-bold text-rose-400 bg-slate-950/40">{formatPct(row.mape_humano || 0)}</td>
-      </tr>
-      {expandido && (
-        <tr className="bg-slate-900/50 shadow-inner">
-          <td colSpan={8} className="p-4 border-b border-slate-800">
-            {carregando ? (
-              <div className="text-xs text-indigo-400 flex items-center gap-2 font-bold"><RefreshCw className="w-4 h-4 animate-spin"/> Mapeando Clientes...</div>
-            ) : clientes.length === 0 ? (
-              <div className="text-xs text-slate-500 italic">Sem volume carteirado.</div>
-            ) : (
-              <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                <div className="bg-slate-950 p-3 rounded-lg border border-rose-900/50">
-                  <h4 className="text-[10px] font-black uppercase tracking-widest text-rose-400 mb-2 flex items-center gap-2"><TrendingDown className="w-3 h-3"/> Alerta: Inadimplência de Meta</h4>
-                  <div className="max-h-48 overflow-y-auto pr-2 space-y-1 custom-scrollbar">
-                    {clientes.filter(c => c.gap_humano > 0).map(c => (
-                      <div key={c.cgc} className="flex justify-between items-center bg-slate-900 p-2 rounded border border-slate-800 text-xs">
-                         <div className="truncate pr-4"><span className="font-bold text-slate-300 block truncate">{c.razaosocial}</span><span className="text-[9px] text-slate-500 font-mono block">{c.cgc}</span></div>
-                         <div className="text-right shrink-0">
-                            <span className="block text-slate-400 text-[10px]">Gap S&OP: <span className="font-black text-rose-400">{formatador(Math.abs(c.gap_humano))}</span></span>
-                            <span className="block text-slate-500 text-[9px]">Gap IA: {formatador(Math.abs(c.gap_ia))}</span>
-                         </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <div className="bg-slate-950 p-3 rounded-lg border border-emerald-900/50">
-                  <h4 className="text-[10px] font-black uppercase tracking-widest text-emerald-400 mb-2 flex items-center gap-2"><AlertTriangle className="w-3 h-3"/> Alerta: Over-Forecast</h4>
-                  <div className="max-h-48 overflow-y-auto pr-2 space-y-1 custom-scrollbar">
-                    {clientes.filter(c => c.gap_humano < 0).map(c => (
-                      <div key={c.cgc} className="flex justify-between items-center bg-slate-900 p-2 rounded border border-slate-800 text-xs">
-                         <div className="truncate pr-4"><span className="font-bold text-slate-300 block truncate">{c.razaosocial}</span><span className="text-[9px] text-slate-500 font-mono block">{c.cgc}</span></div>
-                         <div className="text-right shrink-0">
-                            <span className="block text-slate-400 text-[10px]">Over S&OP: <span className="font-black text-emerald-400">+{formatador(Math.abs(c.gap_humano))}</span></span>
-                            <span className="block text-slate-500 text-[9px]">Over IA: +{formatador(Math.abs(c.gap_ia))}</span>
-                         </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
-          </td>
-        </tr>
-      )}
-    </React.Fragment>
+    <div className="space-y-6">
+      {/* EVOLUÇÃO TEMPORAL */}
+      <div className="bg-white rounded-[28px] shadow-sm border border-slate-100 p-6">
+        <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-1 flex items-center gap-2">
+          <Activity className="w-4 h-4 text-indigo-600" /> Estamos aprendendo a acertar?
+        </h3>
+        <p className="text-xs text-slate-400 font-medium mb-4">Acurácia da empresa mês a mês, com a linha do Nexus Bot como referência.</p>
+        <div className="h-72">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={evolucao} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+              <XAxis dataKey="mes" tick={{ fill: '#64748b', fontSize: 12, fontWeight: 700 }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} unit="%" domain={[0, 100]} />
+              <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12, border: '1px solid #e2e8f0' }} formatter={(v: any) => `${v}%`} />
+              <Legend wrapperStyle={{ fontSize: 12, fontWeight: 700, paddingTop: 10 }} iconType="circle" />
+              <Line dataKey="acuracia" name="Empresa" stroke="#6366f1" strokeWidth={3} dot={{ r: 4 }} />
+              <Line dataKey="acuracia_bot" name="Nexus Bot" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" dot={{ r: 3 }} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* CONCENTRAÇÃO: categoria e regional */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <BarrasDiag titulo="Acurácia por categoria" dados={diag.por_categoria} />
+        <BarrasDiag titulo="Acurácia por regional" dados={diag.por_regional} />
+      </div>
+
+      {/* MAPA VOLUME x ERRO */}
+      <div className="bg-white rounded-[28px] shadow-sm border border-slate-100 p-6">
+        <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-1 flex items-center gap-2">
+          <Target className="w-4 h-4 text-rose-500" /> Onde o erro dói no bolso
+        </h3>
+        <p className="text-xs text-slate-400 font-medium mb-4">Cada ponto é um SKU. Canto superior direito = muito volume + muito erro = prioridade máxima.</p>
+        <div className="h-80">
+          <ResponsiveContainer width="100%" height="100%">
+            <ScatterChart margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+              <XAxis type="number" dataKey="volume" name="Volume" tick={{ fill: '#94a3b8', fontSize: 11 }}
+                tickFormatter={(v) => new Intl.NumberFormat('pt-BR', { notation: 'compact' }).format(v)}
+                label={{ value: 'Volume realizado', position: 'insideBottom', offset: -10, fontSize: 11, fill: '#94a3b8' }} />
+              <YAxis type="number" dataKey="erro_pct" name="Erro %" unit="%" tick={{ fill: '#94a3b8', fontSize: 11 }}
+                label={{ value: 'Erro (WMAPE %)', angle: -90, position: 'insideLeft', fontSize: 11, fill: '#94a3b8' }} />
+              <ZAxis range={[60, 60]} />
+              <Tooltip cursor={{ strokeDasharray: '3 3' }} contentStyle={{ borderRadius: 12, fontSize: 12 }}
+                formatter={(v: any, n: any) => n === 'Erro %' ? `${v}%` : fmtNum(v, visao)}
+                labelFormatter={() => ''} content={({ payload }: any) => {
+                  if (!payload || !payload.length) return null;
+                  const d = payload[0].payload;
+                  return (
+                    <div className="bg-slate-900 text-white p-2 rounded-lg text-[11px]">
+                      <div className="font-black">{d.sku}</div>
+                      <div className="text-slate-300">{d.categoria}</div>
+                      <div>Vol: {fmtNum(d.volume, visao)} · Erro: {d.erro_pct}%</div>
+                    </div>
+                  );
+                }} />
+              <Scatter data={diag.dispersao_sku} fill="#6366f1">
+                {(diag.dispersao_sku || []).map((d: any, i: number) => (
+                  <Cell key={i} fill={d.erro_pct > 30 ? '#e11d48' : d.erro_pct > 15 ? '#d97706' : '#059669'} />
+                ))}
+              </Scatter>
+            </ScatterChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      <ExplicacaoCalculos />
+    </div>
   );
-};
+}
 
-// --- DRILL-DOWN EXCLUSIVO PARA RISCOS DE ESTOQUE ---
-const RowRiscoDrillDown = ({ row, visao, formatador, dataSnapshot }: any) => {
-  const [expandido, setExpandido] = useState(false);
-  const [clientes, setClientes] = useState<any[]>([]);
-  const [carregando, setCarregando] = useState(false);
-
-  let acao = { text: "🟢 COBERTO", cor: "text-emerald-400 bg-emerald-950/30 border border-emerald-900/50" };
-  
-  if (row.__risco_falta > 0) {
-    acao = { text: `🔴 PRODUZIR: +${formatador(row.__risco_falta)}`, cor: "text-rose-400 bg-rose-950/30 font-black animate-pulse shadow-rose-900/50 shadow-md border-rose-500/50 border" };
-  } else if (row.__sobra > row.__projecao * 0.5) { 
-    acao = { text: `🟡 R. SOBRA: ${formatador(row.__sobra)}`, cor: "text-amber-400 bg-amber-950/30 border border-amber-900/50" };
-  }
-
-  const carregarClientes = async () => {
-    setExpandido(!expandido);
-    if (!expandido && clientes.length === 0) {
-      setCarregando(true);
-      try {
-        const res = await axios.get(`/api/v1/kpis/riscos-estoque/drilldown-clientes/${row.sku}?data_snapshot=${dataSnapshot}`);
-        setClientes(res.data);
-      } catch (e) {} finally { setCarregando(false); }
-    }
-  };
-
-  const formatFinV2 = (val: number) => visao === 'caixas' ? formatVol(val) : formatFin(val * (row.pmv || 0));
-
+function BarrasDiag({ titulo, dados }: any) {
   return (
-    <React.Fragment>
-      <tr className="hover:bg-slate-800/30 transition-colors cursor-pointer group border-b border-slate-800/50" onClick={carregarClientes}>
-        <td className="px-6 py-4">
-          <div className="flex items-center gap-3">
-            <button className="text-slate-500 group-hover:text-indigo-400">{expandido ? <ChevronDown className="w-5 h-5"/> : <ChevronRight className="w-5 h-5"/>}</button>
-            <div className="flex flex-col"><span className="font-bold text-slate-200">{row.descricao}</span><span className="text-[10px] text-slate-500 font-mono">{row.sku}</span></div>
-          </div>
-        </td>
-        <td className="px-3 py-4 text-right font-black text-slate-300 bg-slate-900/40" title="Estoque Físico na Fábrica. Em Reais, é o Volume Físico x PMV.">
-          {formatador(row.__estoque)}
-        </td>
-        <td className="px-3 py-4 text-right text-indigo-400 font-bold" title="Meta S&OP Total (Conforme planejamento)">{formatador(row.__meta)}</td>
-        <td className="px-3 py-4 w-24">
-          <div className="flex flex-col gap-1 items-end" title="Atingimento: Pedido / Meta S&OP">
-             <span className={`text-[10px] font-black ${row.__atingimento > 100 ? 'text-rose-400' : 'text-slate-400'}`}>
-                {row.__meta === 0 && row.__pedido > 0 ? '100% (+)' : `${row.__atingimento.toFixed(1)}%`}
-             </span>
-             <div className="w-full bg-slate-800 h-1 rounded-full"><div className={`h-1 rounded-full ${row.__atingimento > 100 ? 'bg-rose-500' : 'bg-indigo-500'}`} style={{width: `${Math.min(row.__atingimento, 100)}%`}}></div></div>
-          </div>
-        </td>
-        <td className="px-3 py-4 text-right text-slate-200 border-l border-slate-800/50">{formatador(row.__pedido)}</td>
-        <td className="px-3 py-4 text-right text-emerald-400">{formatador(row.__faturado)}</td>
-        <td className="px-3 py-4 text-right text-rose-400">{formatador(row.__corte)}</td>
-        <td className="px-3 py-4 text-right text-amber-500 font-bold">{formatador(row.__carteira)}</td>
-        <td className="px-3 py-4 text-right text-fuchsia-400 font-bold border-l border-slate-800/50 bg-fuchsia-950/10 cursor-help" title="Fórmula: Σ MAX(0, Média(M-3 a M-1) - Realizado MTD) por Razão Social.">
-          {formatador(row.__previsao)}
-        </td>
-        <td className="px-3 py-4 text-right text-white font-black bg-slate-800/30 cursor-help" title="Fórmula: Pedido Implantado MTD + Previsão de Entrada Oculta.">
-          {formatador(row.__projecao)}
-        </td>
-        <td className={`px-3 py-4 text-right font-bold ${row.__gap > 0 ? 'text-emerald-400' : 'text-rose-400'}`} title="Fórmula: Projeção Fim do Mês - Meta S&OP.">
-          {row.__gap > 0 ? '+' : ''}{formatador(row.__gap)}
-        </td>
-        <td className="px-4 py-4 text-right border-l border-slate-800/50 cursor-help" title="Fórmula: Demanda Futura (Carteira + Previsão) - Estoque Atual.">
-          <span className={`px-2 py-1 rounded text-[10px] tracking-wider whitespace-nowrap ${acao.cor}`}>{acao.text}</span>
-        </td>
-      </tr>
-
-      {expandido && (
-        <tr className="bg-slate-950/90 shadow-inner">
-          <td colSpan={12} className="p-6 border-b border-slate-800">
-             <div className="flex flex-col gap-3">
-                <h4 className="text-[10px] font-black uppercase tracking-widest text-fuchsia-400 flex items-center gap-2"><Target className="w-4 h-4"/> Detalhamento da Demanda Oculta de Clientes Leais (Média Histórica M-3 a M-1)</h4>
-                {carregando ? (
-                   <div className="text-xs text-slate-400 flex gap-2"><RefreshCw className="w-4 h-4 animate-spin"/> Mapeando Data Lake (MTRIX & PMR)...</div>
-                ) : clientes.length === 0 ? (
-                   <div className="text-xs text-slate-600">Nenhum cliente qualificado (Frequência Mínima 4/6) com demanda pendente.</div>
-                ) : (
-                   <div className="border border-slate-800 rounded-lg">
-                      <table className="w-full text-left text-xs whitespace-nowrap">
-                         <thead className="bg-slate-900 text-[9px] text-slate-500 uppercase">
-                            <tr>
-                               <th className="px-4 py-2 border-b border-slate-800">Regional</th>
-                               <th className="px-4 py-2 border-b border-slate-800">Razão Social</th>
-                               <th className="px-4 py-2 text-right border-b border-slate-800" title="Quantidade de meses com pedidos nos últimos 6 meses">Freq. Compras (Últ 6m)</th>
-                               <th className="px-4 py-2 text-right border-b border-slate-800" title="Média de compras dos meses M-3 a M-1">Média Hist. M-3 a M-1 ({visao})</th>
-                               <th className="px-4 py-2 text-right border-b border-slate-800">Realizado MTD ({visao})</th>
-                               <th className="px-4 py-2 text-right text-fuchsia-400 border-b border-slate-800" title="Zera automaticamente se MTD bater 60% da Média Histórica">Previsão Faltante ({visao})</th>
-                               <th className="px-4 py-2 text-right text-sky-400 border-b border-slate-800" title="Estoque Físico no Distribuidor (S3)">Estoque MTRIX (Cx)</th>
-                               <th className="px-4 py-2 text-right text-purple-400 border-b border-slate-800" title="Prazo Médio de Recebimento (S3)">PMR (Dias)</th>
-                            </tr>
-                         </thead>
-                         <tbody className="divide-y divide-slate-800/50">
-                            {clientes.map((c, idx) => (
-                               <tr key={idx} className="hover:bg-slate-800/30 text-slate-300 transition-colors">
-                                  <td className="px-4 py-2 font-mono text-slate-500">{c.regional}</td>
-                                  <td className="px-4 py-2 font-bold">{c.razaosocial}</td>
-                                  <td className="px-4 py-2 text-right font-mono text-slate-400">{c.freq_meses}/6</td>
-                                  <td className="px-4 py-2 text-right text-indigo-300">{formatFinV2(c.media_vol || 0)}</td>
-                                  <td className="px-4 py-2 text-right">{formatFinV2(c.mtd_vol || 0)}</td>
-                                  <td className="px-4 py-2 text-right font-black text-fuchsia-400">
-                                     {(c.previsao_vol || 0) > 0 ? `+ ${formatFinV2(c.previsao_vol)}` : <span className="text-emerald-500">Atendido ({'>='} 60%)</span>}
-                                  </td>
-                                  {/* BLINDAGEM DA UX AQUI */}
-                                  <td className="px-4 py-2 text-right">
-                                    {c.estoque_mtrix === "sem mtrix" ? (
-                                      <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium bg-slate-800/50 text-slate-500 italic border border-slate-700/50">
-                                        Sem MTRIX
-                                      </span>
-                                    ) : (
-                                      <span className="text-sky-400 font-bold">
-                                        {formatVol(Number(c.estoque_mtrix))}
-                                      </span>
-                                    )}
-                                  </td>
-                                  <td className="px-4 py-2 text-right">
-                                    <span className={`font-bold ${c.pmr > 60 ? 'text-rose-400' : 'text-purple-400'}`}>
-                                      {c.pmr > 0 ? `${c.pmr} dias` : '--'}
-                                    </span>
-                                  </td>
-                               </tr>
-                            ))}
-                         </tbody>
-                      </table>
-                   </div>
-                )}
-             </div>
-          </td>
-        </tr>
-      )}
-    </React.Fragment>
+    <div className="bg-white rounded-[28px] shadow-sm border border-slate-100 p-6">
+      <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-4">{titulo}</h3>
+      <div className="h-64">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={(dados || []).slice(0, 8)} layout="vertical" margin={{ left: 10, right: 20 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" horizontal={false} />
+            <XAxis type="number" domain={[0, 100]} unit="%" tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} />
+            <YAxis type="category" dataKey="nome" width={110} tick={{ fill: '#64748b', fontSize: 11, fontWeight: 700 }} axisLine={false} tickLine={false} />
+            <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => `${v}%`} />
+            <Bar dataKey="acuracia" name="Acurácia" radius={[0, 6, 6, 0]}>
+              {(dados || []).slice(0, 8).map((d: any, i: number) => (
+                <Cell key={i} fill={d.acuracia >= 80 ? '#059669' : d.acuracia >= 60 ? '#d97706' : '#e11d48'} />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
   );
-};
+}
 
-// --- TELA PRINCIPAL ---
-export default function AuditoriaArena() {
-  const [lente, setLente] = useState<'kpis' | 'estoque' | 'sellout'>('kpis');
-  const [visao, setVisao] = useState<'caixas' | 'financeiro'>('financeiro');
-  
-  const [mesesDisponiveis, setMesesDisponiveis] = useState<string[]>([]);
-  const [mesesSelecionados, setMesesSelecionados] = useState<string[]>([]);
-  
-  const [categoriaSel, setCategoriaSel] = useState('Todas');
-  const [segmentoSel, setSegmentoSel] = useState('Todos');
-  const [clienteSel, setClienteSel] = useState('Todos');
-  const [buscaSku, setBuscaSku] = useState('');
-  
-  // MÁQUINA DO TEMPO EM CASCATA DIÁRIA
-  const dataHojeFC = obterDataBrasilia();
-  const [selDia, setSelDia] = useState<string>(String(dataHojeFC.getDate()).padStart(2, '0'));
-  const [selMes, setSelMês] = useState<string>(String(dataHojeFC.getMonth() + 1).padStart(2, '0'));
-  const [selAno, setSelAno] = useState<string>(String(dataHojeFC.getFullYear()));
-
-  const dataSnapshot = useMemo(() => {
-    return `${selAno}-${selMes}-${selDia}`;
-  }, [selDia, selMes, selAno]);
-
-  const listaDiasDisponiveis = useMemo(() => {
-    const numDias = new Date(Number(selAno), Number(selMes), 0).getDate();
-    return Array.from({ length: numDias }, (_, i) => String(i + 1).padStart(2, '0'));
-  }, [selMes, selAno]);
-  
-  const [paresCatSeg, setParesCatSeg] = useState<any[]>([]);
-  const [listaClientes, setListaClientes] = useState<string[]>([]);
-
-  const [graficosKpi, setGraficosKpi] = useState<any[]>([]);
-  const [skus, setSkus] = useState<any[]>([]);
-  const [kpisGerais, setKpisGerais] = useState<any>({});
-  const [carregando, setCarregando] = useState(false);
-  
-  // POLLING DO STATUS DO BACKEND
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [pipelineLog, setPipelineLog] = useState<string>('');
-  const pollInterval = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const [sortConfig, setSortConfig] = useState({ key: '__risco_falta', direction: 'desc' });
-  const formatador = visao === 'caixas' ? formatVol : formatFin;
-
-  useEffect(() => {
-    const fetchFiltros = async () => {
-      try {
-        const res = await axios.get(`/api/v1/kpis/filtros-auditoria?lente=${lente}`);
-        setParesCatSeg(res.data.pares_cat_seg || []);
-        setListaClientes(res.data.clientes || []);
-        setMesesDisponiveis(res.data.meses_disponiveis || []);
-        
-        if (res.data.meses_disponiveis?.length > 0) {
-          const mesAtualStr = `${String(new Date().getMonth() + 1).padStart(2, '0')}/${new Date().getFullYear()}`;
-          if (res.data.meses_disponiveis.includes(mesAtualStr)) {
-            setMesesSelecionados([mesAtualStr]);
-          } else {
-            setMesesSelecionados([res.data.meses_disponiveis[0]]);
-          }
-        } 
-      } catch (err) {}
-    };
-    fetchFiltros();
-  }, [lente]);
-
-  const categoriasExibidas = useMemo(() => {
-      if (segmentoSel === 'Todos') return Array.from(new Set(paresCatSeg.map(f => f.categoria))).sort();
-      return Array.from(new Set(paresCatSeg.filter(f => f.segmento === segmentoSel).map(f => f.categoria))).sort();
-  }, [paresCatSeg, segmentoSel]);
-
-  const segmentosExibidos = useMemo(() => {
-      if (categoriaSel === 'Todas') return Array.from(new Set(paresCatSeg.map(f => f.segmento))).sort();
-      return Array.from(new Set(paresCatSeg.filter(f => f.categoria === categoriaSel).map(f => f.segmento))).sort();
-  }, [paresCatSeg, categoriaSel]);
-
-  const carregarDadosCore = async () => {
-    if (lente !== 'estoque' && mesesSelecionados.length === 0) return;
-    setCarregando(true);
-    try {
-      const params = new URLSearchParams();
-      params.append('categoria', categoriaSel);
-      params.append('segmento', segmentoSel);
-      params.append('razaosocial', clienteSel);
-      params.append('data_snapshot', dataSnapshot); 
-
-      if (lente === 'kpis') {
-        params.append('visao', visao);
-        mesesSelecionados.forEach(m => params.append('meses_horizonte', m));
-        const res = await axios.get(`/api/v1/kpis/torre-controle?${params.toString()}`);
-        setGraficosKpi(res.data.graficos || []); 
-        setSkus(res.data.skus || []);
-        setKpisGerais(res.data.kpis_globais || {});
-        setSortConfig({ key: 'erro_absoluto', direction: 'desc' });
-      } 
-      else if (lente === 'estoque') {
-        const res = await axios.get(`/api/v1/kpis/riscos-estoque?${params.toString()}`);
-        setSkus(res.data.estoque_sku || []); 
-        setKpisGerais(res.data.kpis_globais || {});
-        setSortConfig({ key: '__risco_falta', direction: 'desc' });
-      }
-      else {
-        params.append('lente', lente);
-        mesesSelecionados.forEach(m => params.append('meses_horizonte', m));
-        const res = await axios.get(`/api/v1/kpis/auditoria-dinamica?${params.toString()}`);
-        setSkus(res.data.tabela_skus || []); 
-        setKpisGerais(res.data.kpis_globais || {});
-        setSortConfig({ key: 'erro_abs_comercial', direction: 'desc' });
-      }
-    } catch (err) {} finally { setCarregando(false); }
-  };
-
-  useEffect(() => { carregarDadosCore(); }, [lente, visao, categoriaSel, segmentoSel, clienteSel, mesesSelecionados, dataSnapshot]);
-
-  const monitorarPipeline = () => {
-    if (pollInterval.current) clearInterval(pollInterval.current);
-    
-    pollInterval.current = setInterval(async () => {
-      try {
-        const res = await axios.get('/api/v1/admin/pipeline/status');
-        
-        if (res.data.logs && res.data.logs.length > 0) {
-          const ultimoLog = res.data.logs[res.data.logs.length - 1];
-          setPipelineLog(ultimoLog);
-          
-          if (!res.data.is_running || ultimoLog.includes('🏁')) {
-            if (pollInterval.current) clearInterval(pollInterval.current);
-            setIsSyncing(false);
-            setPipelineLog('');
-            
-            const hojeAtual = obterDataBrasilia();
-            setSelAno(String(hojeAtual.getFullYear()));
-            setSelMês(String(hojeAtual.getMonth() + 1).padStart(2, '0'));
-            setSelDia(String(hojeAtual.getDate()).padStart(2, '0'));
-
-            setTimeout(() => carregarDadosCore(), 500);
-          }
-        }
-      } catch (e) {
-        if (pollInterval.current) clearInterval(pollInterval.current);
-        setIsSyncing(false);
-      }
-    }, 2000); 
-  };
-
-  const handleSyncAll = () => {
-    if (isSyncing) return; 
-    setIsSyncing(true);
-    setPipelineLog('Acionando Maestro Noturno...');
-    setTimeout(monitorarPipeline, 500);
-    axios.post('/api/v1/kpis/sync-all').catch(() => {
-        console.warn("Monitoramento em background ativo.");
-    });
-  };
-
-  useEffect(() => {
-    return () => { if (pollInterval.current) clearInterval(pollInterval.current); };
-  }, []);
-
-  const requestSort = (key: string) => {
-    let direction = 'desc';
-    if (sortConfig.key === key && sortConfig.direction === 'desc') direction = 'asc';
-    setSortConfig({ key, direction });
-  };
-
-  const enrichedSkus = useMemo(() => {
-    if (lente !== 'estoque') return skus;
-    return skus.map((row: any) => {
-      const meta = visao === 'caixas' ? (row.meta_mes_vol || 0) : (row.meta_mes_rs || 0);
-      const pedido = visao === 'caixas' ? (row.vendas_mtd_vol || 0) : (row.vl_pedido || 0);
-      const faturado = visao === 'caixas' ? (row.faturado_mtd_vol || 0) : (row.vl_faturado || 0);
-      const corte = visao === 'caixas' ? (row.corte_mtd_vol || 0) : (row.vl_corte || 0);
-      const estoque = visao === 'caixas' ? (row.estoque_atual || 0) : (row.estoque_rs || 0);
-      const carteira = visao === 'caixas' ? (row.carteira_aberto_vol || 0) : (row.carteira_aberto_rs || 0);
-      const previsao = visao === 'caixas' ? (row.previsao_entrada_vol || 0) : (row.previsao_entrada_rs || 0);
-      const projecao = visao === 'caixas' ? (row.projecao_fim_mes_vol || 0) : (row.projecao_fim_mes_rs || 0);
-      const gap = visao === 'caixas' ? (row.gap_meta_vol || 0) : (row.gap_meta_rs || 0);
-      
-      const atingimento = meta > 0 ? (pedido / meta) * 100 : (pedido > 0 ? 100 : 0);
-      const demanda_futura = carteira + previsao;
-      const risco_falta = demanda_futura - estoque;
-      const sobra = estoque > demanda_futura ? (estoque - demanda_futura) : 0;
-
-      return { 
-        ...row, 
-        __estoque: estoque, __meta: meta, __pedido: pedido, __faturado: faturado,
-        __corte: corte, __carteira: carteira, __previsao: previsao, __projecao: projecao,
-        __gap: gap, __atingimento: atingimento, __demanda_futura: demanda_futura,
-        __risco_falta: risco_falta, __sobra: sobra
-      };
-    });
-  }, [skus, visao, lente]);
-
-  const sortedSkus = useMemo(() => {
-    let baseData = lente === 'estoque' ? enrichedSkus : skus;
-    let sortable = [...baseData].filter(r => r.descricao?.toLowerCase().includes(buscaSku.toLowerCase()) || r.sku?.toLowerCase().includes(buscaSku.toLowerCase()));
-    
-    sortable.sort((a, b) => {
-      if (a[sortConfig.key] < b[sortConfig.key]) return sortConfig.direction === 'asc' ? -1 : 1;
-      if (a[sortConfig.key] > b[sortConfig.key]) return sortConfig.direction === 'asc' ? 1 : -1;
-      return 0;
-    });
-    return sortable;
-  }, [enrichedSkus, skus, sortConfig, buscaSku, lente]);
-
-  const handleExportCSV = () => {
-    if (!sortedSkus || sortedSkus.length === 0) return;
-
-    let headers: string[] = [];
-    let rows: any[] = [];
-
-    if (lente === 'estoque') {
-      headers = [
-        "SKU", "Descrição", "Categoria", `Estoque Fábrica (${visao})`, 
-        `Meta S&OP (${visao})`, `Pedido (${visao})`, `Faturado (${visao})`, 
-        `Corte (${visao})`, `Carteira em Aberto (${visao})`, 
-        `Previsão de Entrada (${visao})`, `Projeção Fim do Mês (${visao})`, `Gap vs Meta (${visao})`
-      ];
-      rows = sortedSkus.map((d: any) => [
-        d.sku, d.descricao, d.categoria, d.__estoque || 0, d.__meta || 0, d.__pedido || 0,
-        d.__faturado || 0, d.__corte || 0, d.__carteira || 0, d.__previsao || 0, d.__projecao || 0, d.__gap || 0
-      ]);
-    } 
-    else if (lente === 'sellout') {
-      headers = [
-        "SKU", "Descrição", "Categoria", "Segmento", 
-        "Realizado Sell-out (Cx)", "Meta IA (Cx)", "Meta S&OP (Cx)", 
-        "Estoque Canal (Cx)", "% MAPE IA", "% MAPE S&OP", "FVA (Melhoria %)"
-      ];
-      rows = sortedSkus.map((d: any) => [
-        d.sku, d.descricao, d.categoria, d.segmento,
-        d.vol_real || 0, d.vol_ia_congelado || 0, d.vol_comercial_congelado || 0,
-        d.estoque_canal || 0, d.mape_ia || 0, d.mape_comercial || 0, d.fva || 0
-      ]);
-    }
-    else if (lente === 'kpis') {
-      headers = [
-        "SKU", "Descrição", "Categoria", "Segmento", 
-        `Meta IA (${visao})`, `Meta S&OP (${visao})`, `Realizado MTD (${visao})`, 
-        `Gap IA (${visao})`, `Gap S&OP (${visao})`, "% MAPE IA", "% MAPE S&OP"
-      ];
-      rows = sortedSkus.map((d: any) => [
-        d.sku, d.descricao, d.categoria, d.segmento,
-        d.val_meta_ia || 0, d.val_meta_hum || 0, d.val_real || 0,
-        d.gap_ia || 0, d.gap_humano || 0, d.mape_ia || 0, d.mape_humano || 0
-      ]);
-    }
-
-    const csvContent = [
-      headers.join(";"),
-      ...rows.map(row => row.map((val: any) => typeof val === 'number' ? val.toString().replace('.', ',') : `"${val || ''}"`).join(";"))
-    ].join("\n");
-
-    const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = `Extracao_${lente.toUpperCase()}_${visao.toUpperCase()}_${new Date().toISOString().slice(0,10)}.csv`;
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
+// ============================================================
+// EXPLICAÇÃO DOS CÁLCULOS (transparência do jogo)
+// ============================================================
+function ExplicacaoCalculos() {
+  const [aberto, setAberto] = useState(false);
+  const metricas = [
+    { n: 'Acurácia', f: '1 − WMAPE', t: 'De cada 100 caixas vendidas, quantas o plano acertou. É a nota-base. Ponderada por volume — errar num item grande pesa mais que num pequeno.' },
+    { n: 'WMAPE', f: 'Σ|real − previsto| ÷ Σreal', t: 'Erro percentual ponderado. Soma todos os erros e divide pelo total vendido. Mais justo que o MAPE simples porque itens grandes dominam, como no negócio real.' },
+    { n: 'BIAS', f: '(Σprevisto − Σreal) ÷ Σreal', t: 'A tendência. Positivo: prevê demais (infla estoque, trava capital). Negativo: prevê de menos (gera ruptura). Perto de zero é o ideal.' },
+    { n: 'FVA', f: 'erro da IA − erro do humano', t: 'Forecast Value Added. Mede se o ajuste humano melhorou a previsão pura da máquina. Positivo: você agregou valor. Negativo: a IA sozinha teria acertado mais.' },
+    { n: 'Nota', f: 'Acurácia − 0,15·|BIAS| + 0,20·FVA', t: 'A pontuação do jogo. Premia acertar (acurácia), sem viés (penalidade leve), e melhor que o Nexus Bot (bônus). Difícil de manipular porque exige os três ao mesmo tempo.' },
+  ];
   return (
-    <div className="p-6 bg-slate-950 min-h-screen flex-1 w-full text-slate-100 font-sans">
-      
-      {/* HEADER PRINCIPAL */}
-      <div className="w-full flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 bg-slate-900 p-5 rounded-2xl border border-slate-800 mb-6 shadow-xl">
-        <div>
-          <h1 className="text-2xl font-black text-white tracking-tight flex items-center gap-3">
-            <Activity className="text-indigo-500 w-7 h-7" /> Torre de Controle S&OP
-          </h1>
-          <p className="text-xs text-slate-400 mt-1 font-medium">Cockpit Executivo: Consequências Financeiras e Mapeamento de Erro</p>
-        </div>
-
-        <div className="flex flex-col md:flex-row gap-3 items-center">
-          <div className="flex items-center gap-3 bg-slate-950 p-1.5 rounded-xl border border-slate-800 shadow-inner mr-2">
-            <div className="flex flex-col items-end px-3">
-              <span className="text-[9px] font-black uppercase tracking-widest text-slate-500 mb-1">Última Atualização</span>
-              <div className="flex items-center gap-1.5 text-xs font-mono text-emerald-400">
-                <Clock className="w-3 h-3" />
-                {kpisGerais.ultima_atualizacao || 'Ao Vivo'}
+    <div className="bg-white rounded-[28px] shadow-sm border border-slate-100 mt-6 overflow-hidden">
+      <button onClick={() => setAberto(!aberto)} className="w-full flex items-center justify-between px-6 py-4 hover:bg-slate-50/50">
+        <span className="text-sm font-black text-slate-700 flex items-center gap-2"><HelpCircle className="w-4 h-4 text-indigo-600" /> Como as notas são calculadas</span>
+        {aberto ? <ChevronDown className="w-5 h-5 text-slate-400" /> : <ChevronRight className="w-5 h-5 text-slate-400" />}
+      </button>
+      {aberto && (
+        <div className="px-6 pb-6 grid grid-cols-1 md:grid-cols-2 gap-3">
+          {metricas.map(m => (
+            <div key={m.n} className="bg-slate-50 rounded-2xl p-4 border border-slate-100">
+              <div className="flex items-baseline gap-2 mb-1">
+                <span className="font-black text-slate-800">{m.n}</span>
+                <code className="text-[11px] font-mono text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded">{m.f}</code>
               </div>
+              <p className="text-xs text-slate-500 font-medium leading-relaxed">{m.t}</p>
             </div>
-            <div className="h-6 w-px bg-slate-800"></div>
-            {isSyncing ? (
-               <div className="flex items-center px-4 py-2 bg-slate-900 text-amber-400 rounded-lg font-black tracking-wider text-[10px] uppercase h-full border border-amber-900/30">
-                  <RefreshCw className="w-3.5 h-3.5 mr-2 animate-spin" />
-                  <span className="max-w-[180px] truncate font-mono" title={pipelineLog}>{pipelineLog || 'Processando...'}</span>
-               </div>
-            ) : (
-               <button onClick={handleSyncAll} className="flex items-center px-4 py-2 bg-slate-800 hover:bg-slate-700 text-sky-400 rounded-lg font-black tracking-wider transition-all text-[10px] uppercase h-full">
-                 <Terminal className="w-3.5 h-3.5 mr-2" /> Atualizar Dados
-               </button>
-            )}
-          </div>
-
-          <button onClick={handleExportCSV} className="flex items-center px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-black tracking-wider transition-all shadow-lg shadow-emerald-900/20 text-[10px] uppercase">
-            <Download className="w-4 h-4 mr-2" /> Extrair CSV
-          </button>
-
-          <div className="flex bg-slate-950 p-1.5 rounded-xl border border-slate-800 shadow-inner">
-            <button onClick={() => setVisao('caixas')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg flex items-center gap-2 ${visao === 'caixas' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}><Package className="w-4 h-4"/> Caixas</button>
-            <button onClick={() => setVisao('financeiro')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg flex items-center gap-2 ${visao === 'financeiro' ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}><DollarSign className="w-4 h-4"/> Reais</button>
-          </div>
-          
-          <div className="flex bg-slate-950 p-1.5 rounded-xl border border-slate-800 shadow-inner">
-            <button onClick={() => setLente('kpis')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg flex items-center gap-2 ${lente === 'kpis' ? 'bg-rose-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}><Target className="w-4 h-4" /> Desvios MTD</button>
-            <button onClick={() => setLente('estoque')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg flex items-center gap-2 ${lente === 'estoque' ? 'bg-amber-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}><Factory className="w-4 h-4" /> Riscos Estoque</button>
-            <button onClick={() => setLente('sellout')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg flex items-center gap-2 ${lente === 'sellout' ? 'bg-teal-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}><ShoppingCart className="w-4 h-4" /> MTRIX</button>
-          </div>
+          ))}
         </div>
-      </div>
-
-      {/* FILTROS GLOBAIS */}
-      <div className="w-full grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
-        
-        {lente === 'estoque' ? (
-          <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
-            <label className="text-[10px] font-black uppercase tracking-widest text-emerald-500 mb-2 flex items-center gap-2">
-              <Calendar className="w-3 h-3"/> Posição (Snapshot)
-            </label>
-            <div className="flex gap-1.5">
-              <select value={selDia} onChange={(e) => setSelDia(e.target.value)} className="w-1/3 bg-slate-950 border border-slate-800 p-2 text-xs font-mono rounded text-emerald-400 focus:outline-none">
-                {listaDiasDisponiveis.map(d => <option key={d} value={d}>{d}</option>)}
-              </select>
-              <select value={selMes} onChange={(e) => setSelMês(e.target.value)} className="w-1/3 bg-slate-950 border border-slate-800 p-2 text-xs font-mono rounded text-emerald-400 focus:outline-none">
-                {['01','02','03','04','05','06','07','08','09','10','11','12'].map(m => <option key={m} value={m}>{m}</option>)}
-              </select>
-              <select value={selAno} onChange={(e) => setSelAno(e.target.value)} className="w-1/3 bg-slate-950 border border-slate-800 p-2 text-xs font-mono rounded text-emerald-400 focus:outline-none">
-                {['2025', '2026', '2027'].map(a => <option key={a} value={a}>{a}</option>)}
-              </select>
-            </div>
-          </div>
-        ) : (
-          <div className="lg:col-span-1"><ExcelTreeDropdown titulo="Horizonte S&OP" options={mesesDisponiveis} selected={mesesSelecionados} onChange={setMesesSelecionados} /></div>
-        )}
-        
-        <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
-          <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2 flex items-center gap-2"><Users className="w-3 h-3"/> Razão Social (Cliente)</label>
-          <select value={clienteSel} onChange={(e) => setClienteSel(e.target.value)} className="w-full bg-slate-950 border border-slate-800 text-sm p-2 rounded-lg text-slate-300 focus:outline-none"><option value="Todos">Todos os Clientes</option>{listaClientes.map((c:any) => <option key={c} value={c}>{c}</option>)}</select>
-        </div>
-
-        <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
-          <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2 block">Categoria</label>
-          <select value={categoriaSel} onChange={(e) => setCategoriaSel(e.target.value)} className="w-full bg-slate-950 border border-slate-800 text-sm p-2 rounded-lg text-slate-300 focus:outline-none"><option value="Todas">Todas as Categorias</option>{categoriasExibidas.map((c:any) => <option key={c} value={c}>{c}</option>)}</select>
-        </div>
-
-        <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
-          <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2 block">Segmento</label>
-          <select value={segmentoSel} onChange={(e) => setSegmentoSel(e.target.value)} className="w-full bg-slate-950 border border-slate-800 text-sm p-2 rounded-lg text-slate-300 focus:outline-none"><option value="Todos">Todos os Segmentos</option>{segmentosExibidos.map((s:any) => <option key={s} value={s}>{s}</option>)}</select>
-        </div>
-
-        <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
-          <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2 flex justify-between">Pesquisar SKU <span className="text-indigo-400 font-bold">{sortedSkus.length} Itens</span></label>
-          <div className="relative"><Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-500" /><input type="text" value={buscaSku} onChange={(e) => setBuscaSku(e.target.value)} placeholder="Código ou nome..." className="w-full bg-slate-950 border border-slate-800 text-sm py-2 pl-9 pr-3 rounded-lg text-slate-300 focus:outline-none" /></div>
-        </div>
-      </div>
-
-      {/* GRÁFICOS */}
-      {lente === 'kpis' || lente === 'sellout' ? (
-        <div className="w-full grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-indigo-500 shadow-md"><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">% WMAPE IA</div><div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_ia || 0)}</div></div>
-          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 border-l-4 border-l-sky-500 shadow-md"><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2">{lente === 'kpis' ? '% WMAPE S&OP' : 'Erro Escoamento'}</div><div className="text-3xl font-black text-rose-400">{formatPct(kpisGerais.wmape_comercial || 0)}</div></div>
-          <div className={`bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md border-l-4 ${(kpisGerais.fva || 0) >= 0 ? 'border-l-emerald-500' : 'border-l-rose-500'}`}><div className="text-xs font-black uppercase text-slate-400 tracking-wider mb-2 flex justify-between">FVA (Melhoria) {(kpisGerais.fva || 0) >= 0 ? <TrendingUp className="w-4 h-4 text-emerald-500"/> : <TrendingDown className="w-4 h-4 text-rose-500"/>}</div><div className={`text-3xl font-black ${(kpisGerais.fva || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.fva || 0)}</div></div>
-          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md">
-            <div className="text-[10px] font-black uppercase text-slate-400 tracking-wider mb-2 flex justify-between border-b border-slate-700 pb-1">
-              <span>{lente === 'sellout' ? 'BIAS Canal' : 'BIAS S&OP'}</span><span>{lente === 'sellout' ? 'Dias Cob.' : 'BIAS IA'}</span>
-            </div>
-            <div className="flex justify-between items-center mt-2">
-              <span className={`text-xl font-black ${(kpisGerais.bias_humano || 0) > 0 ? 'text-amber-400' : 'text-rose-400'}`}>{formatPct(kpisGerais.bias_humano || 0)}</span>
-              <span className={`text-xl font-black ${(kpisGerais.bias_ia || 0) > 0 ? 'text-amber-400' : 'text-rose-400'}`}>{lente === 'sellout' ? `${kpisGerais.cobertura_media_canal || 0} D` : formatPct(kpisGerais.bias_ia || 0)}</span>
-            </div>
-          </div>
-        </div>
-      ) : null}
-      
-      {lente === 'kpis' ? (
-        <div className="w-full grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
-          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md">
-            <h3 className="text-sm font-black text-white uppercase tracking-widest mb-4 flex items-center gap-2">% WMAPE Temporal (IA vs S&OP)</h3>
-            <div className="h-[220px] w-full">
-              <ResponsiveContainer>
-                <ComposedChart data={graficosKpi} margin={{ top: 10, right: 10, bottom: 0, left: -20 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
-                  <XAxis dataKey="mes" stroke="#64748b" tick={{fontSize: 10}} />
-                  <YAxis stroke="#64748b" tickFormatter={(v) => `${(v*100).toFixed(0)}%`} tick={{fontSize: 10}} />
-                  <RechartsTooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155' }} formatter={(v:any) => formatPct(v)} />
-                  <Legend verticalAlign="top" height={36} wrapperStyle={{ fontSize: '10px', fontWeight: 'bold' }}/>
-                  <Bar dataKey="wmape_ia" name="WMAPE IA" fill="#a855f7" radius={[4,4,0,0]} barSize={20} />
-                  <Bar dataKey="wmape_humano" name="WMAPE S&OP" fill="#f59e0b" radius={[4,4,0,0]} barSize={20} />
-                </ComposedChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-md">
-            <h3 className="text-sm font-black text-white uppercase tracking-widest mb-4 flex items-center gap-2">Bias Temporal (Interferência Humana vs IA)</h3>
-            <div className="h-[220px] w-full">
-              <ResponsiveContainer>
-                <LineChart data={graficosKpi} margin={{ top: 10, right: 10, bottom: 0, left: -20 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
-                  <XAxis dataKey="mes" stroke="#64748b" tick={{fontSize: 10}} />
-                  <YAxis stroke="#64748b" tickFormatter={(v) => `${(v*100).toFixed(0)}%`} tick={{fontSize: 10}} />
-                  <RechartsTooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155' }} formatter={(v:any) => formatPct(v)} />
-                  <Legend verticalAlign="top" height={36} wrapperStyle={{ fontSize: '10px', fontWeight: 'bold' }}/>
-                  <ReferenceLine y={0} stroke="#94a3b8" strokeWidth={2} />
-                  <Line type="monotone" dataKey="bias_ia" name="Viés (BIAS) IA" stroke="#a855f7" strokeWidth={2} strokeDasharray="5 5" dot={{ r: 4 }} />
-                  <Line type="monotone" dataKey="bias_humano" name="Viés (BIAS) S&OP" stroke="#f59e0b" strokeWidth={3} dot={{ r: 5 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-        </div>
-      ) : lente === 'estoque' ? (
-        <div className="w-full grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-          <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-rose-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><TrendingDown className="w-4 h-4 text-rose-500"/> Risco Produtivo (Projeção)</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_ruptura_rs || 0) : formatVol(kpisGerais.total_ruptura_vol || 0) + ' Cx'}</p></div>
-          <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 border-l-4 border-l-amber-500 shadow-md relative overflow-hidden"><h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2"><Package className="w-4 h-4 text-amber-500"/> Capital Imobilizado (Projeção)</h3><p className="text-3xl font-black text-white z-10 relative">{visao === 'financeiro' ? formatFin(kpisGerais.total_sobra_rs || 0) : formatVol(kpisGerais.total_sobra_vol || 0) + ' Cx'}</p></div>
-        </div>
-      ) : null}
-
-      {/* TABELAS - LIVRE DE BARRA DE SCROLL DE CONTAINERS */}
-      <div className="w-full bg-slate-900 rounded-2xl border border-slate-800 shadow-2xl flex flex-col mb-10">
-        {carregando ? (
-          <div className="p-20 flex justify-center items-center gap-3 text-indigo-400 font-bold uppercase text-xs"><RefreshCw className="w-6 h-6 animate-spin" /> Processando Tabelas...</div>
-        ) : lente === 'estoque' ? (
-          
-          <table className="w-full text-left whitespace-nowrap table-auto">
-            <thead className="bg-slate-950">
-              <tr className="bg-slate-900 border-b border-slate-800">
-                <th colSpan={4} className="px-6 py-2 text-center text-[10px] font-black tracking-widest text-slate-500 uppercase border-r border-slate-800/50">📦 Planejamento & Fábrica</th>
-                <th colSpan={4} className="px-6 py-2 text-center text-[10px] font-black tracking-widest text-emerald-500/70 uppercase border-r border-slate-800/50">🤝 Realidade Comercial (MTD)</th>
-                <th colSpan={4} className="px-6 py-2 text-center text-[10px] font-black tracking-widest text-fuchsia-400/80 uppercase">🔮 Projeção Bottom-Up & Ação</th>
-              </tr>
-              <tr className="bg-slate-950 text-slate-400 text-[10px] font-black uppercase tracking-widest border-b border-slate-800">
-                <SortableHeader field="descricao" label="Produto" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
-                <SortableHeader field="__estoque" label={`Estoque Fáb. (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-slate-300 text-right bg-slate-900/40" />
-                <SortableHeader field="__meta" label={`Meta S&OP (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-indigo-400 text-right" />
-                <SortableHeader field="__atingimento" label="Atingido %" currentSort={sortConfig} requestSort={requestSort} className="text-right" />
-                
-                <SortableHeader field="__pedido" label={`Pedido (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-white text-right border-l border-slate-800/50" />
-                <SortableHeader field="__faturado" label={`Faturado (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-emerald-400 text-right" />
-                <SortableHeader field="__corte" label={`Corte (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-rose-400 text-right" />
-                <SortableHeader field="__carteira" label={`Carteira Aberto (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-amber-500 text-right" />
-                
-                <SortableHeader field="__previsao" label={`Prev. Entrada (${visao})`} currentSort={sortConfig} requestSort={requestSort} className="text-fuchsia-400 text-right border-l border-slate-800/50 bg-fuchsia-950/10" />
-                <SortableHeader field="__projecao" label={`Projeção Fim do Mês`} currentSort={sortConfig} requestSort={requestSort} className="text-white text-right bg-slate-800/30" />
-                <SortableHeader field="__gap" label={`Gap vs Meta`} currentSort={sortConfig} requestSort={requestSort} className="text-slate-300 text-right" />
-                <SortableHeader field="__risco_falta" label="Alerta de Supply" currentSort={sortConfig} requestSort={requestSort} className="text-right border-l border-slate-800/50" />
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/60 text-xs">
-              {sortedSkus.map((row) => <RowRiscoDrillDown key={row.sku} row={row} visao={visao} formatador={formatador} dataSnapshot={dataSnapshot} />)}
-            </tbody>
-            <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
-              <tr>
-                <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Totais da Visão ({visao})</td>
-                <td className="px-3 py-4 text-right bg-slate-900/40">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__estoque || 0), 0))}</td>
-                <td className="px-3 py-4 text-right text-indigo-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__meta || 0), 0))}</td>
-                <td className="px-3 py-4 text-right text-slate-500">-</td>
-                
-                <td className="px-3 py-4 text-right border-l border-slate-800/50">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__pedido || 0), 0))}</td>
-                <td className="px-3 py-4 text-right text-emerald-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__faturado || 0), 0))}</td>
-                <td className="px-3 py-4 text-right text-rose-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__corte || 0), 0))}</td>
-                <td className="px-3 py-4 text-right text-amber-500">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__carteira || 0), 0))}</td>
-                
-                <td className="px-3 py-4 text-right text-fuchsia-400 border-l border-slate-800/50 bg-fuchsia-950/10">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__previsao || 0), 0))}</td>
-                <td className="px-3 py-4 text-right bg-slate-800/30">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__projecao || 0), 0))}</td>
-                <td className="px-3 py-4 text-right text-slate-300">{formatador(sortedSkus.reduce((sum, r) => sum + (r.__gap || 0), 0))}</td>
-                <td className="px-4 py-4 text-right border-l border-slate-800/50 text-slate-500">-</td>
-              </tr>
-            </tfoot>
-          </table>
-
-        ) : lente === 'sellout' ? (
-           <table className="w-full text-left whitespace-nowrap table-auto">
-             <thead className="bg-slate-950">
-               <tr className="text-slate-400 border-b border-slate-800 text-[10px] font-black uppercase tracking-widest">
-                 <SortableHeader field="descricao" label="Produto" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
-                 <SortableHeader field="vol_real" label="Realizado (Sell-out)" currentSort={sortConfig} requestSort={requestSort} />
-                 <SortableHeader field="vol_ia_congelado" label="Meta IA" currentSort={sortConfig} requestSort={requestSort} />
-                 <SortableHeader field="vol_comercial_congelado" label="Meta S&OP" currentSort={sortConfig} requestSort={requestSort} />
-                 <SortableHeader field="estoque_canal" label="Estoque Canal" currentSort={sortConfig} requestSort={requestSort} />
-                 <SortableHeader field="mape_ia" label="% MAPE IA" currentSort={sortConfig} requestSort={requestSort} className="border-l border-slate-800 bg-slate-950/40 text-rose-400 text-right" />
-                 <SortableHeader field="mape_comercial" label="% MAPE S&OP" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/40 text-rose-400 text-right" />
-               </tr>
-             </thead>
-             <tbody className="divide-y divide-slate-800/60 text-xs">
-               {sortedSkus.map(row => (
-                 <tr key={row.sku} className="hover:bg-slate-800/30">
-                   <td className="px-6 py-3.5"><div className="flex flex-col"><span className="font-bold text-slate-200">{row.descricao}</span><span className="text-[10px] text-slate-500 font-mono mt-0.5">{row.sku}</span></div></td>
-                   <td className="px-4 py-3.5 text-right font-black text-white">{formatVol(row.vol_real || 0)}</td>
-                   <td className="px-4 py-3.5 text-right font-semibold text-indigo-400 bg-indigo-950/10">{formatVol(row.vol_ia_congelado || 0)}</td>
-                   <td className="px-4 py-3.5 text-right font-semibold text-sky-400 bg-sky-950/10">{formatVol(row.vol_comercial_congelado || 0)}</td>
-                   <td className="px-4 py-3.5 text-right font-semibold text-amber-400">{formatVol(row.estoque_canal || 0)}</td>
-                   <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 border-l border-slate-800 bg-slate-950/40">{formatPct(row.mape_ia || 0)}</td>
-                   <td className="px-4 py-3.5 text-right font-mono font-bold text-rose-400 bg-slate-950/40">{formatPct(row.mape_comercial || 0)}</td>
-                 </tr>
-               ))}
-             </tbody>
-             <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
-              <tr>
-                <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Somas do Portfólio</td>
-                <td className="px-4 py-4 text-right">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_real || 0), 0))}</td>
-                <td className="px-4 py-4 text-right text-indigo-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_ia_congelado || 0), 0))}</td>
-                <td className="px-4 py-4 text-right text-sky-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.vol_comercial_congelado || 0), 0))}</td>
-                <td className="px-4 py-4 text-right text-amber-400">{formatVol(sortedSkus.reduce((sum, r) => sum + (r.estoque_canal || 0), 0))}</td>
-                <td colSpan={2} className="px-4 py-4 bg-slate-950/40 text-right text-slate-500 text-[10px]">Médias Ponderadas nos Cards Topo</td>
-              </tr>
-             </tfoot>
-            </table>
-        ) : (
-           <table className="w-full text-left whitespace-nowrap table-auto">
-             <thead className="bg-slate-950">
-               <tr className="text-slate-400 border-b border-slate-800 text-[10px] font-black uppercase tracking-widest">
-                 <SortableHeader field="descricao" label="Produto (Clique p/ Clientes)" currentSort={sortConfig} requestSort={requestSort} className="px-6 text-left" />
-                 <SortableHeader field="val_meta_ia" label="Meta IA" currentSort={sortConfig} requestSort={requestSort} className="text-indigo-400 text-right" />
-                 <SortableHeader field="val_meta_hum" label="Meta S&OP" currentSort={sortConfig} requestSort={requestSort} className="text-sky-400 text-right" />
-                 <SortableHeader field="val_real" label="Realizado MTD" currentSort={sortConfig} requestSort={requestSort} className="text-white text-right" />
-                 <SortableHeader field="gap_ia" label="Gap IA" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/20 text-right" />
-                 <SortableHeader field="gap_humano" label="Gap S&OP" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/20 text-right" />
-                 <SortableHeader field="mape_ia" label="% MAPE IA" currentSort={sortConfig} requestSort={requestSort} className="border-l border-slate-800 bg-slate-950/40 text-rose-400 text-right" />
-                 <SortableHeader field="mape_humano" label="% MAPE S&OP" currentSort={sortConfig} requestSort={requestSort} className="bg-slate-950/40 text-rose-400 text-right" />
-               </tr>
-             </thead>
-             <tbody className="divide-y divide-slate-800/60 text-xs">
-               {sortedSkus.map((row) => <RowSKUDrillDown key={row.sku} row={row} visao={visao} mesesSelecionados={mesesSelecionados} formatador={formatador} dataSnapshot={dataSnapshot} />)}
-             </tbody>
-             <tfoot className="bg-slate-950 font-black text-white border-t-2 border-slate-700 text-xs">
-              <tr>
-                <td className="px-6 py-4 uppercase tracking-widest text-indigo-400">Acumulado MTD</td>
-                <td className="px-3 py-4 text-right text-indigo-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.val_meta_ia || 0), 0))}</td>
-                <td className="px-3 py-4 text-right text-sky-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.val_meta_hum || 0), 0))}</td>
-                <td className="px-3 py-4 text-right">{formatador(sortedSkus.reduce((sum, r) => sum + (r.val_real || 0), 0))}</td>
-                <td className="px-3 py-4 text-right bg-slate-950/20 text-slate-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.gap_ia || 0), 0))}</td>
-                <td className="px-3 py-4 text-right bg-slate-950/20 text-slate-400">{formatador(sortedSkus.reduce((sum, r) => sum + (r.gap_humano || 0), 0))}</td>
-                <td colSpan={2} className="px-3 py-4 bg-slate-950/40 text-right text-slate-500 text-[10px]">Gap Consolidado</td>
-              </tr>
-             </tfoot>
-            </table>
-        )}
-      </div>
+      )}
     </div>
   );
 }
