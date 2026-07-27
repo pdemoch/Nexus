@@ -130,46 +130,14 @@ def _montar_base(db: Session, meses: List[str], visao: str, filtros: dict = None
         if df_real.empty:
             df_real = pd.DataFrame(columns=["cgc","sku","real_cx","real_rs"])
 
-        df = pd.merge(df_prev, df_real, on=["cgc","sku"], how="outer")
+        # =============================================================
+        # A FATO_IBP E O PAI DA AUDITORIA: left join do PREVISTO com o
+        # realizado. So se audita o que estava no plano; venda de par nao
+        # planejado fica FORA dos indicadores (a fato_vendas permanece
+        # completa como registro — o escopo e da auditoria, nao do dado).
+        # =============================================================
+        df = pd.merge(df_prev, df_real, on=["cgc","sku"], how="left")
         df["mes_ano"] = mes
-
-        # Linhas so-realizado (vendeu sem previsao): enriquece em LOTE.
-        # (Antes era 1 query POR PAR — com as vendas completas, milhares de
-        # pares ECOMMERCE sem previsao matariam o endpoint. Agora sao 2 queries.)
-        faltantes = df["razaosocial"].isna()
-        if faltantes.any():
-            cgcs = [str(x) for x in df.loc[faltantes, "cgc"].dropna().unique().tolist()]
-            skus = [str(x) for x in df.loc[faltantes, "sku"].dropna().unique().tolist()]
-
-            mapa_cli = {}
-            if cgcs:
-                rows = db.execute(text("""
-                    SELECT cgc, COALESCE(razaosocial,'SEM CLIENTE') AS razaosocial,
-                           COALESCE(regional,'N/A') AS regional,
-                           COALESCE(vendedor_nome,'SEM VENDEDOR') AS vendedor_nome,
-                           COALESCE(supervisor_nome,'SEM COORDENADOR') AS supervisor_nome
-                    FROM dim_clientes WHERE cgc = ANY(:lst)
-                """), {"lst": cgcs}).fetchall()
-                mapa_cli = {r.cgc: r for r in rows}
-
-            mapa_prod = {}
-            if skus:
-                rows = db.execute(text("""
-                    SELECT sku, COALESCE(categoria,'SEM CATEGORIA') AS categoria,
-                           COALESCE(segmento,'SEM SEGMENTO') AS segmento,
-                           COALESCE(descricao, sku) AS descricao
-                    FROM dim_produtos WHERE sku = ANY(:lst)
-                """), {"lst": skus}).fetchall()
-                mapa_prod = {r.sku: r for r in rows}
-
-            idx = df.index[faltantes]
-            df.loc[idx, "razaosocial"] = df.loc[idx, "cgc"].map(lambda c: getattr(mapa_cli.get(str(c)), "razaosocial", "SEM CLIENTE"))
-            df.loc[idx, "regional"] = df.loc[idx, "cgc"].map(lambda c: getattr(mapa_cli.get(str(c)), "regional", "N/A"))
-            df.loc[idx, "vendedor_nome"] = df.loc[idx, "cgc"].map(lambda c: getattr(mapa_cli.get(str(c)), "vendedor_nome", "SEM VENDEDOR"))
-            df.loc[idx, "supervisor_nome"] = df.loc[idx, "cgc"].map(lambda c: getattr(mapa_cli.get(str(c)), "supervisor_nome", "SEM COORDENADOR"))
-            df.loc[idx, "categoria"] = df.loc[idx, "sku"].map(lambda s: getattr(mapa_prod.get(str(s)), "categoria", "SEM CATEGORIA"))
-            df.loc[idx, "segmento"] = df.loc[idx, "sku"].map(lambda s: getattr(mapa_prod.get(str(s)), "segmento", "SEM SEGMENTO"))
-            df.loc[idx, "descricao"] = df.loc[idx, "sku"].map(lambda s: getattr(mapa_prod.get(str(s)), "descricao", str(s)))
         frames.append(df)
 
     if not frames:
@@ -221,12 +189,8 @@ def _metricas_agregadas(grupo: pd.DataFrame) -> dict:
     elif bias_final > 0: vies = "prevê demais"
     else: vies = "prevê de menos"
 
-    # COBERTURA DO PLANO: quanto do realizado estava no radar do planejamento
-    # (tinha previsao > 0). O que fica de fora e a "demanda fora do radar" —
-    # vendas que ocorrem sem plano e que a gestao deve puxar para dentro do S&OP.
-    real_com_plano = float(grupo.loc[grupo["previsto_final"] > 0, "realizado"].sum())
-    cobertura = (real_com_plano / soma_real) if soma_real > 0 else 1.0
-    sem_plano = soma_real - real_com_plano
+    # COBERTURA nao se aplica mais: com a fato_ibp como pai da auditoria,
+    # todo o realizado auditado e, por definicao, o dos pares planejados.
 
     return {
         "previsto_final": round(soma_final,2), "previsto_ia": round(soma_ia,2),
@@ -235,7 +199,6 @@ def _metricas_agregadas(grupo: pd.DataFrame) -> dict:
         "acuracia": round(acuracia,4), "acuracia_ia": round(acuracia_ia,4),
         "bias": round(bias_final,4), "bias_ia": round(bias_ia,4),
         "vies_label": vies, "fva": round(fva,4), "nota": round(nota,1),
-        "cobertura": round(cobertura,4), "realizado_sem_plano": round(sem_plano,2),
         "linhas": int(len(grupo)),
     }
 
@@ -366,61 +329,55 @@ async def resumo(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/sem-plano")
-async def vendas_sem_plano(
+
+
+@router.get("/tabela")
+async def tabela_drill(
     visao: str = Query("caixas"),
     meses: List[str] = Query(None),
-    agrupar: str = Query("sku"),
-    categoria: Optional[str] = None, segmento: Optional[str] = None, sku: Optional[str] = None,
-    regional: Optional[str] = None, cliente: Optional[str] = None,
-    coordenador: Optional[str] = None, vendedor: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """
-    A DEMANDA FORA DO RADAR: vendas que ocorreram SEM nenhuma previsao no
-    plano congelado. E a lista acionavel que forca vendedores e gerentes a
-    puxar essa demanda para dentro do S&OP. Agrupavel por sku ou cliente.
+    A TABELA QUE COMPROVA OS GRAFICOS: drill Categoria -> SKU com os volumes
+    lado a lado (realizado, previsto humano, previsto IA) e as metricas de
+    cada item no periodo selecionado. Escopo = plano (fato_ibp pai).
     """
     try:
-        if agrupar not in ("sku", "cliente", "categoria", "regional", "coordenador", "vendedor"):
-            raise HTTPException(status_code=400, detail="agrupar deve ser: sku, cliente, categoria, regional, coordenador ou vendedor")
         todos = listar_meses_auditaveis(db)
         lista = meses if meses else [m["mes"] for m in todos]
-        filtros = _parse_filtros(categoria, segmento, sku, regional, cliente, coordenador, vendedor)
-        base = _montar_base(db, lista, visao, filtros)
+        base = _montar_base(db, lista, visao)
         if base.empty:
-            return {"itens": [], "total_sem_plano": 0, "total_realizado": 0, "cobertura": 1.0}
+            return {"visao": visao, "meses": lista, "categorias": []}
 
-        total_real = float(base["realizado"].sum())
-        fora = base[(base["previsto_final"] <= 0) & (base["realizado"] > 0)]
-        total_fora = float(fora["realizado"].sum())
-
-        gcol = COL_MAP.get(agrupar, "sku")
-        itens = []
-        for chave, grupo in fora.groupby(gcol):
-            item = {
-                "nome": str(chave),
-                "realizado": round(float(grupo["realizado"].sum()), 2),
-                "linhas": int(len(grupo)),
-            }
-            if agrupar == "sku":
-                item["descricao"] = str(grupo["descricao"].iloc[0]) if "descricao" in grupo else str(chave)
-                item["categoria"] = str(grupo["categoria"].iloc[0])
-                item["clientes"] = int(grupo["cgc"].nunique())
-            elif agrupar == "cliente":
-                item["regional"] = str(grupo["regional"].iloc[0])
-                item["skus"] = int(grupo["sku"].nunique())
-            itens.append(item)
-        itens.sort(key=lambda x: -x["realizado"])
-
-        return {
-            "visao": visao, "meses": lista, "agrupar": agrupar,
-            "total_realizado": round(total_real, 2),
-            "total_sem_plano": round(total_fora, 2),
-            "cobertura": round((total_real - total_fora) / total_real, 4) if total_real > 0 else 1.0,
-            "itens": itens[:50],
-        }
-    except HTTPException:
-        raise
+        categorias = []
+        for cat, gcat in base.groupby("categoria"):
+            mcat = _metricas_agregadas(gcat)
+            skus = []
+            for sku, gsku in gcat.groupby("sku"):
+                msku = _metricas_agregadas(gsku)
+                desc = ""
+                if "descricao" in gsku.columns and len(gsku) > 0:
+                    d = gsku["descricao"].dropna()
+                    desc = str(d.iloc[0]) if len(d) > 0 else str(sku)
+                skus.append({
+                    "nome": str(sku), "descricao": desc,
+                    "realizado": msku["realizado"],
+                    "previsto_final": msku["previsto_final"],
+                    "previsto_ia": msku["previsto_ia"],
+                    "acuracia": msku["acuracia"], "bias": msku["bias"],
+                    "fva": msku["fva"],
+                })
+            skus.sort(key=lambda x: -x["realizado"])
+            categorias.append({
+                "nome": str(cat),
+                "realizado": mcat["realizado"],
+                "previsto_final": mcat["previsto_final"],
+                "previsto_ia": mcat["previsto_ia"],
+                "acuracia": mcat["acuracia"], "bias": mcat["bias"],
+                "fva": mcat["fva"],
+                "skus": skus,
+            })
+        categorias.sort(key=lambda x: -x["realizado"])
+        return {"visao": visao, "meses": lista, "categorias": categorias}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
