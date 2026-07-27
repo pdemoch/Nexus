@@ -149,8 +149,9 @@ export default function AuditoriaArena() {
             sub={`FVA ${fmtPct((totais.fva || 0) * 100)}`} tom={(totais.fva || 0) >= 0 ? 'bom' : 'ruim'}
             icone={<Bot className="w-5 h-5" />} ajuda="FVA = erro da IA − erro do humano. Positivo: o ajuste humano melhorou a previsão da máquina." />
           <CardResumo titulo={visao === 'financeiro' ? 'Realizado (R$)' : 'Realizado (cx)'} valor={fmtNum(totais.realizado, visao)}
-            sub={`previsto: ${fmtNum(totais.previsto_final, visao)}`} tom="neutro" icone={<Activity className="w-5 h-5" />}
-            ajuda="Total realizado (vendas) vs total previsto (plano) no recorte. A base que pondera os erros." />
+            sub={`${fmtPct((totais.cobertura ?? 1) * 100)} coberto pelo plano`}
+            tom={(totais.cobertura ?? 1) >= 0.9 ? 'neutro' : 'medio'} icone={<Activity className="w-5 h-5" />}
+            ajuda="Total vendido no recorte. A cobertura mostra quanto desse total estava no radar do planejamento (tinha previsão). O restante é demanda fora do radar — detalhada abaixo." />
         </div>
 
         {temParcial && (
@@ -177,6 +178,7 @@ export default function AuditoriaArena() {
                 serie={serie} chaves={[{ k: 'fva', nome: 'FVA (humano − IA)', cor: '#7c3aed' }]}
                 ajuda="FVA (Forecast Value Added) = erro da IA − erro do humano. Positivo: o ajuste humano melhorou a previsão pura da máquina." zero />
             </div>
+            <SemPlano params={params} visao={visao} />
             <ExplicacaoCalculos />
           </>
         )}
@@ -345,6 +347,74 @@ function ExplicacaoCalculos() {
               <span className="block mt-1"><span className="font-black">Regra temporal:</span> cada mês é comparado com o plano congelado 2 meses antes (o mês 07 usa o ciclo 05). O mês corrente aparece como parcial até fechar.</span>
             </p>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// DEMANDA FORA DO RADAR — vendas sem nenhum planejamento.
+// A lista que força vendedores e gerentes a puxar essa demanda
+// para dentro do S&OP.
+// ============================================================
+function SemPlano({ params, visao }: any) {
+  const [agrupar, setAgrupar] = useState<'sku' | 'cliente'>('sku');
+  const [dados, setDados] = useState<any>({ itens: [], total_sem_plano: 0, cobertura: 1 });
+  const [carregando, setCarregando] = useState(false);
+  const [aberto, setAberto] = useState(true);
+
+  useEffect(() => {
+    setCarregando(true);
+    const p = new URLSearchParams(params);
+    p.append('agrupar', agrupar);
+    axios.get(`/api/v1/kpis/sem-plano?${p.toString()}`)
+      .then(r => setDados(r.data))
+      .catch(() => setDados({ itens: [], total_sem_plano: 0, cobertura: 1 }))
+      .finally(() => setCarregando(false));
+  }, [params, agrupar]);
+
+  const pctFora = (1 - (dados.cobertura ?? 1)) * 100;
+
+  return (
+    <div className="bg-white rounded-[28px] shadow-sm border border-slate-100 mb-6 overflow-hidden">
+      <button onClick={() => setAberto(!aberto)} className="w-full flex items-center justify-between px-6 py-4 hover:bg-slate-50/50">
+        <span className="text-sm font-black text-slate-700 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-amber-500" /> Demanda fora do radar
+          <span className="text-[11px] font-black text-amber-700 bg-amber-50 px-2.5 py-1 rounded-lg">
+            {fmtNum(dados.total_sem_plano, visao)} vendidos sem planejamento ({fmtPct(pctFora)})
+          </span>
+          <Explica titulo="Demanda fora do radar" texto="Vendas que ocorreram sem NENHUMA previsão no plano congelado. Se está vendendo, deveria estar sendo planejado — esta lista mostra onde puxar a demanda para dentro do S&OP." />
+        </span>
+        {aberto ? <ChevronDown className="w-5 h-5 text-slate-400" /> : <ChevronRight className="w-5 h-5 text-slate-400" />}
+      </button>
+      {aberto && (
+        <div className="px-6 pb-6">
+          <div className="flex items-center gap-1.5 mb-3">
+            <button onClick={() => setAgrupar('sku')} className={`px-3 py-1.5 rounded-xl text-[11px] font-black ${agrupar === 'sku' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-500'}`}>Por produto</button>
+            <button onClick={() => setAgrupar('cliente')} className={`px-3 py-1.5 rounded-xl text-[11px] font-black ${agrupar === 'cliente' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-500'}`}>Por cliente</button>
+          </div>
+          {carregando ? (
+            <div className="text-slate-400 text-xs flex items-center gap-2 py-4"><Loader2 className="w-4 h-4 animate-spin" /> carregando...</div>
+          ) : dados.itens.length === 0 ? (
+            <div className="text-emerald-600 text-xs font-bold py-4">Tudo que vendeu estava no plano — cobertura total no recorte.</div>
+          ) : (
+            <div className="space-y-1 max-h-96 overflow-auto pr-1">
+              {dados.itens.map((it: any, i: number) => (
+                <div key={i} className="flex items-center justify-between text-xs bg-slate-50 rounded-xl px-4 py-2.5 border border-slate-100">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-black text-slate-700 truncate">
+                      {agrupar === 'sku' ? `${it.nome} · ${it.descricao || ''}` : it.nome}
+                    </div>
+                    <div className="text-[10px] font-bold text-slate-400">
+                      {agrupar === 'sku' ? `${it.categoria} · ${it.clientes} cliente(s)` : `${it.regional} · ${it.skus} SKU(s)`}
+                    </div>
+                  </div>
+                  <span className="font-black text-amber-700 shrink-0 ml-3">{fmtNum(it.realizado, visao)}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
