@@ -48,8 +48,10 @@ class NexusTransformer:
 
         # 2. Tratamento do Cadastro de Clientes (188)
         # Nomes de coluna corrigidos cirurgicamente ('cod' e 'razao social')
+        # regional VEM da 188 e precisa ser selecionada aqui, senao o loader
+        # grava "N/A" no fallback (origem do bug de regional na dim_clientes).
         lf_clientes = lf_188.select([
-            "cod", "loja", "cgc", "razao social", "bloqueado", "vendedor_nome", "gerente_nome", "supervisor_nome"
+            "cod", "loja", "cgc", "razao social", "regional", "bloqueado", "vendedor_nome", "gerente_nome", "supervisor_nome"
         ]).rename({
             "razao social": "cliente_razaosocial" 
         }).with_columns([
@@ -57,6 +59,7 @@ class NexusTransformer:
             pl.col("loja").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars(),
             pl.col("cgc").cast(pl.Utf8).str.strip_chars(),
             pl.col("cliente_razaosocial").cast(pl.Utf8).str.strip_chars(),
+            pl.col("regional").cast(pl.Utf8).fill_null("N/A").str.to_uppercase().str.strip_chars(),
             pl.col("bloqueado").cast(pl.Utf8).str.to_uppercase().str.strip_chars(), 
             pl.col("vendedor_nome").cast(pl.Utf8).fill_null("SEM VENDEDOR").str.to_uppercase().str.strip_chars(),
             pl.col("gerente_nome").cast(pl.Utf8).fill_null("SEM GERENTE").str.to_uppercase().str.strip_chars(),
@@ -77,8 +80,14 @@ class NexusTransformer:
         ]).unique(subset=["cod_loja"], keep="first")
             
         # 3. Cruzamento Vendas x Clientes
+        # A 150 (vendas) JA tem 'regional' propria, usada no fluxo de vendas.
+        # A 188 (clientes) tambem tem 'regional', mas ela e destinada a DIMENSAO
+        # (lf_clientes, retornado abaixo). Para o join de vendas, removemos a
+        # regional da copia de clientes e evitamos conflito 'regional_right'.
+        # lf_clientes (retornado) preserva a regional da 188 para a dim_clientes.
+        lf_clientes_join = lf_clientes.drop("regional")
         lf_vendas = lf_vendas.join(
-            lf_clientes, left_on="cliente_loja", right_on="cod_loja", how="left"
+            lf_clientes_join, left_on="cliente_loja", right_on="cod_loja", how="left"
         ).with_columns([
             pl.col("cgc").fill_null("SEM_CGC"),
             pl.col("cliente_razaosocial").fill_null("SEM_NOME"),
