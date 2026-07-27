@@ -48,13 +48,22 @@ class NexusLoader:
             # 1. SKUs vendidos (df_silver) — o pai da dimensao.
             # ------------------------------------------------------------
             skus_vendas = set()
+            desc_reais = {}  # sku -> descricao REAL do produto (vinda da API 150)
             if df_silver is not None and not (hasattr(df_silver, "is_empty") and df_silver.is_empty()):
                 df_v = df_silver.to_pandas() if hasattr(df_silver, "to_pandas") else df_silver.copy()
                 if "sku" in df_v.columns:
+                    df_v["_sku"] = df_v["sku"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
                     skus_vendas = {
-                        s for s in df_v["sku"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip().unique()
+                        s for s in df_v["_sku"].unique()
                         if s and s.upper() not in ("NAN", "NONE", "")
                     }
+                    # A DESCRICAO REAL vem das VENDAS (API 150) — o Segmentos nao
+                    # tem descricao. Nunca usar categoria como descricao (bug que
+                    # sobrescreveu os nomes reais dos produtos nas telas).
+                    if "descricao" in df_v.columns:
+                        d = df_v.dropna(subset=["descricao"])
+                        d = d[d["descricao"].astype(str).str.strip() != ""]
+                        desc_reais = d.groupby("_sku")["descricao"].first().astype(str).str.strip().to_dict()
 
             # ------------------------------------------------------------
             # 2. Enriquecimento + status a partir do Segmentos COMPLETO.
@@ -99,7 +108,10 @@ class NexusLoader:
                 e = enrich.get(sku, {})
                 registros.append({
                     "sku": sku,
-                    "descricao": e.get("categoria") or sku,
+                    # Descricao REAL (da venda/API 150). None quando o SKU nao
+                    # vendeu na janela — e ai o UPSERT PRESERVA a descricao que
+                    # ja existe no banco (nunca rebaixa para categoria/codigo).
+                    "descricao": desc_reais.get(sku),
                     "categoria": e.get("categoria") or "SEM CATEGORIA",
                     "segmento": e.get("segmento") or "SEM SEGMENTO",
                     "bu": e.get("bu") or "SEM BU",
@@ -119,9 +131,25 @@ class NexusLoader:
                     if "sku" not in campos:
                         continue
                     cols = list(campos.keys())
-                    set_clause = ", ".join([f"{c} = EXCLUDED.{c}" for c in cols if c != "sku"])
+                    # descricao tem tratamento especial nos dois lados:
+                    #   INSERT: COALESCE(:descricao, :sku) — novo SKU sem venda
+                    #           entra com o codigo (melhor que NULL).
+                    #   UPDATE: COALESCE(:descricao, dim_produtos.descricao) —
+                    #           so troca quando chega descricao REAL; nunca
+                    #           sobrescreve a existente com nada pior.
+                    set_parts = []
+                    val_parts = []
+                    for c in cols:
+                        if c == "descricao":
+                            val_parts.append("COALESCE(:descricao, :sku)")
+                            set_parts.append("descricao = COALESCE(:descricao, dim_produtos.descricao)")
+                        else:
+                            val_parts.append(f":{c}")
+                            if c != "sku":
+                                set_parts.append(f"{c} = EXCLUDED.{c}")
+                    set_clause = ", ".join(set_parts)
                     col_names = ", ".join(cols)
-                    placeholders = ", ".join([f":{c}" for c in cols])
+                    placeholders = ", ".join(val_parts)
                     sql = f"""
                         INSERT INTO dim_produtos ({col_names})
                         VALUES ({placeholders})
