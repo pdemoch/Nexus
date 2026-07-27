@@ -97,27 +97,31 @@ class NexusTransformer:
             pl.col("vendedor_nome").fill_null("SEM VENDEDOR")
         ])
 
-        # 4. Filtro Rígido de Portfólio (Segmentos.xlsx)
+        # 4. Enriquecimento de Portfólio (Segmentos.xlsx) — SEM FILTRO.
+        # PRINCIPIO: a fato_vendas e o PAI da assertividade e contem TUDO que
+        # vendeu (inclusive DESCONTINUADO / ECOMMERCE / EXPORTACAO). O filtro de
+        # curva pertence ao PLANEJAMENTO (forecaster/rateio), nunca a carga de
+        # vendas — senao o Drop&Replace da janela apaga retroativamente as
+        # vendas de produtos recem-descontinuados (reescreve o passado).
+        # O Segmentos COMPLETO enriquece (bu/categoria/segmento/curva); venda de
+        # SKU fora do Segmentos passa com DESCONHECIDO.
         if not df_seg.is_empty():
             df_portfolio = df_seg.with_columns([
                 pl.col("produto").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars(),
                 pl.col("2026").cast(pl.Utf8).fill_null("").str.strip_chars().str.to_uppercase()
-            ]).filter(
-                (pl.col("2026").str.contains(r"^[A-Z]{1,2}$")) | 
-                (pl.col("2026") == "LANÇAMENTO")
-            ).unique(subset=["produto"], keep="first")
+            ]).unique(subset=["produto"], keep="first")
 
             lf_silver = lf_vendas.join(
                 df_portfolio.lazy().select(["produto", "bu", "categoria", "segmento", "2026"]),
                 on="produto",
-                how="inner"
+                how="left"
             )
             
             lf_silver = lf_silver.with_columns([
                 pl.col("bu").fill_null("DESCONHECIDO"),
                 pl.col("categoria").fill_null("DESCONHECIDO"),
                 pl.col("segmento").fill_null("DESCONHECIDO"),
-                pl.col("2026").fill_null("ATIVO")
+                pl.col("2026").fill_null("SEM_CURVA")
             ])
         else:
             return None, None, None

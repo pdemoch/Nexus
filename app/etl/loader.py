@@ -15,6 +15,145 @@ class NexusLoader:
     def __init__(self):
         pass
 
+    def executar_carga_produtos(self, df_silver, df_seg, log_callback=print):
+        """
+        Sincroniza dim_produtos: UNIAO dos SKUs vendidos (fato_vendas manda) com
+        os SKUs do Segmentos (portfolio), enriquecidos e MARCADOS por status.
+
+        PRINCIPIOS:
+          1. A dimensao e IMORTAL: nunca DELETE. SKU que ja foi vendido ou
+             planejado permanece para sempre (FK de fato_vendas e fato_ibp).
+          2. O que muda e o STATUS (coluna ativo):
+               ativo = TRUE  -> curva valida no Segmentos (ABC 1-2 letras ou
+                                LANCAMENTO). E o que o S&OP PLANEJA.
+               ativo = FALSE -> DESCONTINUADO / ECOMMERCE / EXPORTACAO / sem
+                                curva / fora do Segmentos. Existe para o
+                                historico e a auditoria, mas nao entra no plano.
+          3. A cada pipeline o Segmentos e a "lista de chamada": quem tem curva
+             valida LIGA; todos os demais DESLIGAM. Descontinuar no Excel
+             desliga aqui sozinho no proximo pipeline.
+        """
+        log_callback("⏳ [LOAD] Sincronizando Dimensão de Produtos (vendas ∪ Segmentos + status ativo)...")
+        try:
+            import re as _re
+
+            # ------------------------------------------------------------
+            # 0. AUTO-MIGRACAO: garante a coluna ativo (idempotente).
+            # ------------------------------------------------------------
+            with SessionLocal() as db:
+                db.execute(text("ALTER TABLE dim_produtos ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT TRUE"))
+                db.commit()
+
+            # ------------------------------------------------------------
+            # 1. SKUs vendidos (df_silver) — o pai da dimensao.
+            # ------------------------------------------------------------
+            skus_vendas = set()
+            if df_silver is not None and not (hasattr(df_silver, "is_empty") and df_silver.is_empty()):
+                df_v = df_silver.to_pandas() if hasattr(df_silver, "to_pandas") else df_silver.copy()
+                if "sku" in df_v.columns:
+                    skus_vendas = {
+                        s for s in df_v["sku"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip().unique()
+                        if s and s.upper() not in ("NAN", "NONE", "")
+                    }
+
+            # ------------------------------------------------------------
+            # 2. Enriquecimento + status a partir do Segmentos COMPLETO.
+            # ------------------------------------------------------------
+            def _curva_ativa(v: str) -> bool:
+                v = (v or "").strip().upper()
+                return bool(_re.match(r"^[A-Z]{1,2}$", v)) or v in ("LANÇAMENTO", "LANCAMENTO")
+
+            enrich = {}
+            skus_ativos = set()
+            if df_seg is not None and not (hasattr(df_seg, "is_empty") and df_seg.is_empty()):
+                seg_pd = df_seg.to_pandas() if hasattr(df_seg, "to_pandas") else df_seg.copy()
+                col_prod = next((c for c in seg_pd.columns if str(c).lower() == "produto"), None)
+                if col_prod:
+                    def _col(nome):
+                        return next((c for c in seg_pd.columns if str(c).lower() == nome), None)
+                    c_bu, c_cat, c_seg, c_curva = _col("bu"), _col("categoria"), _col("segmento"), _col("2026")
+                    seg_pd["_sku"] = seg_pd[col_prod].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
+                    for _, r in seg_pd.iterrows():
+                        sku = str(r["_sku"]).strip()
+                        if not sku or sku.upper() in ("NAN", "NONE", ""):
+                            continue
+                        curva = (str(r[c_curva]).strip().upper() if c_curva and pd.notna(r[c_curva]) else "")
+                        enrich[sku] = {
+                            "bu": (str(r[c_bu]).strip() if c_bu and pd.notna(r[c_bu]) else None),
+                            "categoria": (str(r[c_cat]).strip() if c_cat and pd.notna(r[c_cat]) else None),
+                            "segmento": (str(r[c_seg]).strip() if c_seg and pd.notna(r[c_seg]) else None),
+                            "curva": curva or None,
+                        }
+                        if _curva_ativa(curva):
+                            skus_ativos.add(sku)
+
+            # UNIAO: vendas + Segmentos (LANCAMENTO pode nunca ter vendido e
+            # precisa existir para a FK do fato_ibp quando for planejado).
+            todos_skus = skus_vendas | set(enrich.keys())
+            if not todos_skus:
+                log_callback("⚠️ [LOAD] Nenhum SKU para sincronizar.")
+                return
+
+            registros = []
+            for sku in todos_skus:
+                e = enrich.get(sku, {})
+                registros.append({
+                    "sku": sku,
+                    "descricao": e.get("categoria") or sku,
+                    "categoria": e.get("categoria") or "SEM CATEGORIA",
+                    "segmento": e.get("segmento") or "SEM SEGMENTO",
+                    "bu": e.get("bu") or "SEM BU",
+                    "curva": e.get("curva") or "SEM_CURVA",
+                    "ativo": sku in skus_ativos,
+                })
+
+            with SessionLocal() as db:
+                cols_existentes = {row[0] for row in db.execute(text("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 'dim_produtos'
+                """)).fetchall()}
+
+                novos = 0
+                for reg in registros:
+                    campos = {k: v for k, v in reg.items() if k in cols_existentes}
+                    if "sku" not in campos:
+                        continue
+                    cols = list(campos.keys())
+                    set_clause = ", ".join([f"{c} = EXCLUDED.{c}" for c in cols if c != "sku"])
+                    col_names = ", ".join(cols)
+                    placeholders = ", ".join([f":{c}" for c in cols])
+                    sql = f"""
+                        INSERT INTO dim_produtos ({col_names})
+                        VALUES ({placeholders})
+                        ON CONFLICT (sku) DO UPDATE SET {set_clause}
+                    """ if set_clause else f"""
+                        INSERT INTO dim_produtos ({col_names})
+                        VALUES ({placeholders})
+                        ON CONFLICT (sku) DO NOTHING
+                    """
+                    db.execute(text(sql), campos)
+                    novos += 1
+
+                # ----------------------------------------------------
+                # 3. LISTA DE CHAMADA: desliga quem NAO tem curva valida
+                # no Segmentos atual (descontinuados, ecommerce, exportacao,
+                # sem curva, fora do Segmentos). Liga quem tem.
+                # Nunca remove ninguem — so muda o status.
+                # ----------------------------------------------------
+                if "ativo" in cols_existentes or True:  # coluna garantida pela auto-migracao
+                    lista_ativos = list(skus_ativos) if skus_ativos else ["__nenhum__"]
+                    db.execute(text("UPDATE dim_produtos SET ativo = (sku = ANY(:lst))"),
+                               {"lst": lista_ativos})
+                db.commit()
+
+            log_callback(
+                f"✅ [LOAD] Dimensão de Produtos: {novos} SKU(s) sincronizados "
+                f"({len(skus_ativos)} ativos no portfólio, {novos - len([s for s in todos_skus if s in skus_ativos])} inativos/históricos)."
+            )
+        except Exception as e:
+            log_callback(f"⚠️ [LOAD] Erro ao sincronizar dim_produtos: {e}")
+            # Defensivo: nao derruba o pipeline. O filtro no loader de vendas protege a FK.
+
     def executar_carga_silver(self, df_silver: pl.DataFrame, data_inicio: date, log_callback=print):
         log_callback(f"⏳ [LOAD] Apagando vendas a partir de {data_inicio} e substituindo pelos dados extraídos...")
         try:
@@ -26,6 +165,30 @@ class NexusLoader:
                 return
 
             with SessionLocal() as db:
+                # ============================================================
+                # BLINDAGEM DE FK: descarta vendas cujo SKU nao existe na
+                # dim_produtos. O filtro de portfolio (Segmentos.xlsx) pode
+                # deixar passar SKUs que nao estao na dim_produtos (fontes
+                # distintas), e a FK fato_vendas_sku_fkey barraria a carga
+                # inteira. Descartar essas linhas orfas mantem a carga viva;
+                # elas nao pertencem ao portfolio oficial de qualquer forma.
+                # ============================================================
+                skus_validos = {r[0] for r in db.execute(text("SELECT sku FROM dim_produtos")).fetchall()}
+                total_antes = len(df_vendas)
+                df_vendas_ok = [v for v in df_vendas if v["sku"] in skus_validos]
+                descartadas = total_antes - len(df_vendas_ok)
+                if descartadas > 0:
+                    orfaos = sorted({v["sku"] for v in df_vendas if v["sku"] not in skus_validos})
+                    amostra = ", ".join(orfaos[:10])
+                    log_callback(
+                        f"⚠️ [LOAD] {descartadas} venda(s) de {len(orfaos)} SKU(s) fora da dim_produtos "
+                        f"foram descartadas (nao pertencem ao portfolio). SKUs: {amostra}"
+                    )
+                df_vendas = df_vendas_ok
+                if not df_vendas:
+                    log_callback("⚠️ [LOAD] Apos filtro de portfolio, nenhuma venda restou para carga.")
+                    return
+
                 # 1. Deleção massiva do período exato que foi extraído
                 db.execute(text("DELETE FROM fato_vendas WHERE data_pedido >= :dt"), {"dt": data_inicio})
 
@@ -36,7 +199,7 @@ class NexusLoader:
                     db.bulk_insert_mappings(FatoVendas, lote)
 
                 db.commit()
-            log_callback("✅ [LOAD] Histórico recente recarregado (Drop & Replace) com sucesso.")
+            log_callback(f"✅ [LOAD] Histórico recente recarregado (Drop & Replace) — {len(df_vendas)} vendas.")
         except Exception as e:
             log_callback(f"❌ [LOAD] Erro na carga de histórico: {e}")
             raise e
