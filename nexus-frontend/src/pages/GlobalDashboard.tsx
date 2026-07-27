@@ -272,22 +272,33 @@ export default function GlobalDashboard() {
 
   const stats = useMemo(() => {
     let t_ia = 0, t_td = 0, t_bu = 0, t_sp = 0, t_final = 0, r_ia = 0, r_td = 0, r_bu = 0, r_sp = 0, r_final = 0, r_orc = 0;
-    
+
     arvoreDados.forEach((cat: any) => {
-      cat.meses.forEach((m: any) => { 
-          t_ia += (m.vol_ia || 0); t_td += (m.vol_td || 0); t_bu += (m.vol_bu || 0); t_sp += (m.vol_sp || 0); 
+      cat.meses.forEach((m: any) => {
+          t_ia += (m.vol_ia || 0); t_td += (m.vol_td || 0); t_bu += (m.vol_bu || 0); t_sp += (m.vol_sp || 0);
           r_orc += (m.rec_orc || 0);
-          const pmvSeguro = getPmvSeguro(m);
-          r_ia += (m.vol_ia || 0) * pmvSeguro; 
-          r_td += (m.vol_td || 0) * pmvSeguro; 
-          r_bu += (m.vol_bu || 0) * pmvSeguro; 
-          r_sp += (m.vol_sp || 0) * pmvSeguro; 
+          // Receita MICRO vinda do backend (Σ vol×pmv linha a linha). NAO
+          // recalcular como vol_agregado × pmv_medio — isso reintroduz a
+          // distorcao de mix e diverge do Excel/Supply/Carteira.
+          r_ia += (m.rec_ia || 0);
+          r_td += (m.rec_td || 0);
+          r_bu += (m.rec_bu || 0);
+          r_sp += (m.rec_sp || 0);
       });
       cat.subRows.forEach((sku: any) => {
         sku.meses.forEach((m: any) => {
             const liveVol = getDynamicRowVol(sku, m.mes_banco);
-            const pmv = getPmvSeguro(m);
-            t_final += liveVol; r_final += (liveVol * pmv);
+            t_final += liveVol;
+            // Final tambem e micro: usa rec_final do backend. Se houve edicao,
+            // escala proporcionalmente (o rateio preserva o mix, entao a receita
+            // escala na mesma razao volNovo/volOriginal).
+            const volBase = (m.vol_final && m.vol_final > 0) ? m.vol_final : (m.vol_sp || 0);
+            const recBase = (m.rec_final && m.rec_final > 0) ? m.rec_final : (m.rec_sp || 0);
+            if (volBase > 0 && liveVol !== volBase) {
+              r_final += recBase * (liveVol / volBase);
+            } else {
+              r_final += recBase;
+            }
         });
       });
     });
@@ -314,10 +325,12 @@ export default function GlobalDashboard() {
     arvoreDados.forEach((cat: any) => {
       cat.subRows.forEach((sku: any) => {
         sku.meses.forEach((m: any) => {
-          const pmv = getPmvSeguro(m);
-          unmetBrl += Math.max(0, (m.vol_bu || 0) - (m.vol_sp || 0)) * pmv;
+          // Demanda nao atendida em R$: usa as receitas MICRO do backend
+          // (rec_bu e rec_sp ja sao Σ vol×pmv). A diferenca e o valor da
+          // demanda comercial que a fabrica nao entregou.
+          unmetBrl += Math.max(0, (m.rec_bu || 0) - (m.rec_sp || 0));
           volAnterior += (m.vol_anterior || 0);
-          rBu += (m.vol_bu || 0) * pmv;
+          rBu += (m.rec_bu || 0);
         });
       });
     });
@@ -331,8 +344,11 @@ export default function GlobalDashboard() {
       let catFinal = 0, catOrc = 0;
       cat.subRows.forEach((sku: any) => {
         sku.meses.forEach((m: any) => {
-          const pmv = getPmvSeguro(m);
-          catFinal += getDynamicRowVol(sku, m.mes_banco) * pmv;
+          // Receita final MICRO do backend, escalada se houve edicao ao vivo.
+          const liveVol = getDynamicRowVol(sku, m.mes_banco);
+          const volBase = (m.vol_final && m.vol_final > 0) ? m.vol_final : (m.vol_sp || 0);
+          const recBase = (m.rec_final && m.rec_final > 0) ? m.rec_final : (m.rec_sp || 0);
+          catFinal += (volBase > 0 && liveVol !== volBase) ? recBase * (liveVol / volBase) : recBase;
           catOrc += (m.rec_orc || 0);
         });
       });
@@ -366,13 +382,15 @@ export default function GlobalDashboard() {
           const m = sku.meses.find((rm: any) => rm.mes_banco === mesBanco);
           if (m) {
             const liveVol = getDynamicRowVol(sku, mesBanco);
-            const pmv = getPmvSeguro(m);
-            
+
             ia += m.vol_ia || 0; topdown += m.vol_td || 0; comercial += m.vol_bu || 0; supply += m.vol_sp || 0;
             final += liveVol;
 
-            r_ia += (m.vol_ia || 0) * pmv; r_td += (m.vol_td || 0) * pmv; r_com += (m.vol_bu || 0) * pmv; r_sup += (m.vol_sp || 0) * pmv;
-            r_fin += liveVol * pmv;
+            // Receitas MICRO do backend (Σ vol×pmv). Final escala se editado.
+            r_ia += (m.rec_ia || 0); r_td += (m.rec_td || 0); r_com += (m.rec_bu || 0); r_sup += (m.rec_sp || 0);
+            const volBase = (m.vol_final && m.vol_final > 0) ? m.vol_final : (m.vol_sp || 0);
+            const recBase = (m.rec_final && m.rec_final > 0) ? m.rec_final : (m.rec_sp || 0);
+            r_fin += (volBase > 0 && liveVol !== volBase) ? recBase * (liveVol / volBase) : recBase;
           }
         });
       });
@@ -463,8 +481,11 @@ export default function GlobalDashboard() {
           const row = info.row.original;
           const dadosMes = row.meses.find((rm: any) => rm.mes_banco === mBanco);
           const valorInteiro = getDynamicRowVol(row, mBanco);
-          const pmv = getPmvSeguro(dadosMes);
-          const receitaExibida = valorInteiro * pmv;
+          // Receita MICRO escalada: usa rec_final do backend, ajustado se editado.
+          // Consistente com os totais (nao usa vol × pmv_medio macro).
+          const volBase = dadosMes ? ((dadosMes.vol_final && dadosMes.vol_final > 0) ? dadosMes.vol_final : (dadosMes.vol_sp || 0)) : 0;
+          const recBase = dadosMes ? ((dadosMes.rec_final && dadosMes.rec_final > 0) ? dadosMes.rec_final : (dadosMes.rec_sp || 0)) : 0;
+          const receitaExibida = (volBase > 0 && valorInteiro !== volBase) ? recBase * (valorInteiro / volBase) : recBase;
 
           return (
             <div className="flex flex-col items-center justify-center min-w-[140px]">
