@@ -263,3 +263,53 @@ def registrar_log_auditoria(db: Session, ciclo: str, origem: str, usuario: str, 
         vol_novo=v_novo
     )
     db.add(novo_log)
+
+# =====================================================================
+# RATEIO CANÔNICO (FONTE ÚNICA) — o número manual é a base absoluta.
+# =====================================================================
+def ratear_maior_resto(total: int, pesos: List[float]) -> List[int]:
+    """
+    Distribui um TOTAL inteiro entre N posições conforme 'pesos', com duas
+    garantias inegociáveis:
+
+      1. A SOMA das partes é EXATAMENTE 'total'. O número digitado manualmente
+         (agregado) é a base absoluta e é sempre respeitado — inclusive 0, 1, 2.
+         Zerar é zerar; um total de 1 gera exatamente 1 caixa no conjunto.
+
+      2. A sobra fracionária vai para os MAIORES PESOS primeiro (maior
+         consumidor), não para o de maior fração decimal nem para o último id.
+         Assim "total = 1" cai no maior cliente e zera os demais; "total = 3"
+         nos três maiores; e assim por diante.
+
+    Casos de borda:
+      • total <= 0        -> todos recebem 0 (zerar é zerar).
+      • soma(pesos) <= 0  -> distribui igualitário (ninguém tem histórico;
+                             o maior resto vai para as primeiras posições).
+      • n == 0            -> [].
+    """
+    n = len(pesos)
+    if n == 0:
+        return []
+    if total <= 0:
+        return [0] * n
+
+    soma = sum(pesos)
+    if soma <= 0:
+        base = total // n
+        resto = total - base * n
+        partes = [base] * n
+        for i in range(resto):
+            partes[i] += 1
+        return partes
+
+    # Distribuição proporcional, piso por floor.
+    dist = [(p / soma) * total for p in pesos]
+    piso = [int(x) for x in dist]  # floor (pesos não-negativos)
+    sobra = total - sum(piso)
+
+    # A sobra vai para os MAIORES PESOS primeiro (desempate: maior fração).
+    # Ordena índices por (peso, fração) decrescente — o maior consumidor lidera.
+    ordem = sorted(range(n), key=lambda i: (pesos[i], dist[i] - piso[i]), reverse=True)
+    for k in range(sobra):
+        piso[ordem[k]] += 1
+    return piso

@@ -15,7 +15,7 @@ from app.api.routers.router_auth import get_current_user
 
 from app.api.routers.shared_ibp import (
     get_current_cycle, get_previous_cycle, get_projection_window, 
-    get_truth_query, parse_date_safe, registrar_log_auditoria
+    get_truth_query, parse_date_safe, registrar_log_auditoria, ratear_maior_resto
 )
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["S&OP Global Dashboard"])
@@ -222,20 +222,20 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
             if not linhas: continue
 
             total_base_antigo = sum([float(l.vol_final or 0) for l in linhas])
-            total_base_meta = sum([float(l.vol_meta or 0) for l in linhas])
-            
-            soma_dist, volume_alvo, total_clientes = 0, int(ajuste.novo_volume), len(linhas)
-            
-            for i, l in enumerate(linhas):
-                if i == total_clientes - 1: 
-                    rateado = volume_alvo - soma_dist 
-                else:
-                    vol_referencia = float(l.vol_meta or 0)
-                    peso = vol_referencia / total_base_meta if total_base_meta > 0 else 1.0 / total_clientes
-                    rateado = int(round(volume_alvo * peso))
-                    soma_dist += rateado
-                
-                l.vol_final = rateado
+
+            # RATEIO CANONICO: o numero digitado (volume_alvo) e a base absoluta
+            # e a soma das partes e EXATAMENTE ele — inclusive 0, 1, 2. A sobra
+            # vai para o MAIOR CONSUMIDOR (nao para o ultimo id). Peso = a
+            # distribuicao vigente (vol_final atual); se estiver toda zerada,
+            # cai no vol_meta como referencia; se ambos zerados, igualitario.
+            volume_alvo = int(ajuste.novo_volume)
+            pesos = [float(l.vol_final or 0) for l in linhas]
+            if sum(pesos) <= 0:
+                pesos = [float(l.vol_meta or 0) for l in linhas]
+            partes = ratear_maior_resto(volume_alvo, pesos)
+
+            for l, parte in zip(linhas, partes):
+                l.vol_final = int(parte)
 
             nome_user = usuario.get('nome', usuario.get('email', 'Desconhecido'))
             registrar_log_auditoria(db=db, ciclo=ciclo, origem="S&OP Global (Dashboard Final)", usuario=nome_user, sku=sku, cliente="TODOS_OS_CLIENTES", mes=data_alvo, v_antigo=int(total_base_antigo), v_novo=volume_alvo)

@@ -8,7 +8,7 @@ from sqlalchemy import text
 
 from app.core.database import get_db, engine
 from app.api.routers.router_auth import get_current_user
-from app.api.routers.shared_ibp import get_current_cycle, get_projection_window
+from app.api.routers.shared_ibp import get_current_cycle, get_projection_window, ratear_maior_resto
 
 router = APIRouter(prefix="/api/v1/consensus/supply", tags=["Supply"])
 
@@ -58,28 +58,6 @@ def _supply_congelado(db: Session, ciclo: str) -> bool:
         SELECT status FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'Supply'
     """), {"c": ciclo}).scalar()
     return st == 'CONGELADO'
-
-
-def _maior_resto(total: int, pesos: List[float]) -> List[int]:
-    n = len(pesos)
-    if n == 0:
-        return []
-    soma = sum(pesos)
-    if soma <= 0:
-        base = total // n
-        resto = total - base * n
-        p = [base] * n
-        for i in range(resto):
-            p[i] += 1
-        return p
-    dist = [(p / soma) * total for p in pesos]
-    piso = [int(x) for x in dist]
-    frac = [dist[i] - piso[i] for i in range(n)]
-    sobra = total - sum(piso)
-    ordem = sorted(range(n), key=lambda i: frac[i], reverse=True)
-    for k in range(sobra):
-        piso[ordem[k]] += 1
-    return piso
 
 
 @router.get("/status")
@@ -141,12 +119,14 @@ def listar_supply(db: Session = Depends(get_db), usuario: dict = Depends(require
         for mc in meses_cols:
             r = sub[sub["mes"] == pd.to_datetime(mc["mes_banco"])]
             vol_meta = int(r["vol_meta"].sum())
-            # Se o Supply ainda não interveio (vol_supply==0 e existe meta),
-            # a fábrica enxerga a Meta como alvo inicial.
-            vol_sup_raw = int(r["vol_supply"].sum())
-            vol_supply = vol_sup_raw if vol_sup_raw > 0 else vol_meta
+            # vol_supply e SEMPRE o valor real da coluna. A cascata (Metas ->
+            # Supply) ja preencheu vol_supply com a meta quando Metas congelou,
+            # entao aqui nunca ha "vazio": ou e o valor propagado, ou o que a
+            # fabrica editou (incluindo ZERO intencional). Nao se substitui 0
+            # por meta — zerar e zerar.
+            vol_supply = int(r["vol_supply"].sum())
             fat_meta = float(r["fat_meta"].sum())
-            fat_supply = float(r["fat_supply"].sum()) if vol_sup_raw > 0 else fat_meta
+            fat_supply = float(r["fat_supply"].sum())
             motivo = None
             justif = None
             if not r.empty:
@@ -199,7 +179,7 @@ def _aplicar_ajustes(db: Session, ciclo: str, ajustes: List[AjusteSupply]):
             continue
 
         pesos = [float(l.vol_meta) for l in linhas]
-        partes = _maior_resto(int(aj.novo_volume), pesos)
+        partes = ratear_maior_resto(int(aj.novo_volume), pesos)
 
         for l, parte in zip(linhas, partes):
             db.execute(text("""
@@ -244,13 +224,11 @@ def congelar_supply(payload: PayloadSalvar, db: Session = Depends(get_db), usuar
         if payload.ajustes:
             _aplicar_ajustes(db, ciclo, payload.ajustes)
 
-        # Onde o Supply não interveio (vol_supply == 0), assume a Meta como
-        # entrega (a fábrica aceitou o número comercial).
-        db.execute(text("""
-            UPDATE fato_ibp_granular
-            SET vol_supply = vol_meta
-            WHERE ciclo_sop = :c AND (vol_supply IS NULL OR vol_supply = 0)
-        """), {"c": ciclo})
+        # NAO se sobrescreve vol_supply=0 por vol_meta. A cascata (Metas ->
+        # Supply, no congelamento de Metas) ja preencheu vol_supply com a meta
+        # em TODOS os itens. Portanto, um vol_supply=0 aqui so existe se a
+        # fabrica ZEROU de proposito — e zerar e zerar. O numero manual e a
+        # base absoluta e nunca e revertido.
 
         # Propaga vol_supply -> vol_final (partida da última etapa).
         db.execute(text("""
