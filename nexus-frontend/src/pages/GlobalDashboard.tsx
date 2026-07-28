@@ -246,8 +246,12 @@ export default function GlobalDashboard() {
       if (rowOriginal.tipo === 'produto') {
           const editado = celulasEditadas[rowOriginal.produto]?.[mesBanco];
           const mesData = rowOriginal.meses.find((m:any) => m.mes_banco === mesBanco);
+          // O dashboard SEMPRE mostra o vol_final. Zero e um valor publicado
+          // valido (o gestor zerou de proposito), NAO "vazio". So cai no
+          // vol_supply se o vol_final for realmente ausente (null/undefined),
+          // nunca quando e zero — senao zerar um item mostra o supply antigo.
           const dbValue = mesData?.vol_final;
-          const baseFinal = (dbValue !== undefined && dbValue !== null && dbValue > 0) ? dbValue : (mesData?.vol_sp || 0);
+          const baseFinal = (dbValue !== undefined && dbValue !== null) ? dbValue : (mesData?.vol_sp || 0);
           return editado !== undefined ? Number(editado) : baseFinal;
       }
       if (rowOriginal.tipo === 'cliente') {
@@ -258,7 +262,8 @@ export default function GlobalDashboard() {
           const totalMeta = skuReferencias.totaisMeta.get(skuId)?.[mesBanco] || 1;
           const baseSupply = skuReferencias.basesSupply.get(skuId)?.[mesBanco] || 0;
           let dbFinal = skuReferencias.basesFinal.get(skuId)?.[mesBanco];
-          const baseFinal = dbFinal > 0 ? dbFinal : baseSupply;
+          // Mesma regra: vol_final zero e valido; so usa supply se ausente.
+          const baseFinal = (dbFinal !== undefined && dbFinal !== null) ? dbFinal : baseSupply;
           
           const volAtualSku = editadoSku !== undefined ? Number(editadoSku) : baseFinal;
           const peso = (mesCliente?.vol_meta || 0) / totalMeta;
@@ -292,7 +297,7 @@ export default function GlobalDashboard() {
             // Final tambem e micro: usa rec_final do backend. Se houve edicao,
             // escala proporcionalmente (o rateio preserva o mix, entao a receita
             // escala na mesma razao volNovo/volOriginal).
-            const volBase = (m.vol_final && m.vol_final > 0) ? m.vol_final : (m.vol_sp || 0);
+            const volBase = (m.vol_final !== undefined && m.vol_final !== null) ? m.vol_final : (m.vol_sp || 0);
             const recBase = (m.rec_final && m.rec_final > 0) ? m.rec_final : (m.rec_sp || 0);
             if (volBase > 0 && liveVol !== volBase) {
               r_final += recBase * (liveVol / volBase);
@@ -346,7 +351,7 @@ export default function GlobalDashboard() {
         sku.meses.forEach((m: any) => {
           // Receita final MICRO do backend, escalada se houve edicao ao vivo.
           const liveVol = getDynamicRowVol(sku, m.mes_banco);
-          const volBase = (m.vol_final && m.vol_final > 0) ? m.vol_final : (m.vol_sp || 0);
+          const volBase = (m.vol_final !== undefined && m.vol_final !== null) ? m.vol_final : (m.vol_sp || 0);
           const recBase = (m.rec_final && m.rec_final > 0) ? m.rec_final : (m.rec_sp || 0);
           catFinal += (volBase > 0 && liveVol !== volBase) ? recBase * (liveVol / volBase) : recBase;
           catOrc += (m.rec_orc || 0);
@@ -388,7 +393,7 @@ export default function GlobalDashboard() {
 
             // Receitas MICRO do backend (Σ vol×pmv). Final escala se editado.
             r_ia += (m.rec_ia || 0); r_td += (m.rec_td || 0); r_com += (m.rec_bu || 0); r_sup += (m.rec_sp || 0);
-            const volBase = (m.vol_final && m.vol_final > 0) ? m.vol_final : (m.vol_sp || 0);
+            const volBase = (m.vol_final !== undefined && m.vol_final !== null) ? m.vol_final : (m.vol_sp || 0);
             const recBase = (m.rec_final && m.rec_final > 0) ? m.rec_final : (m.rec_sp || 0);
             r_fin += (volBase > 0 && liveVol !== volBase) ? recBase * (liveVol / volBase) : recBase;
           }
@@ -483,7 +488,7 @@ export default function GlobalDashboard() {
           const valorInteiro = getDynamicRowVol(row, mBanco);
           // Receita MICRO escalada: usa rec_final do backend, ajustado se editado.
           // Consistente com os totais (nao usa vol × pmv_medio macro).
-          const volBase = dadosMes ? ((dadosMes.vol_final && dadosMes.vol_final > 0) ? dadosMes.vol_final : (dadosMes.vol_sp || 0)) : 0;
+          const volBase = dadosMes ? ((dadosMes.vol_final !== undefined && dadosMes.vol_final !== null) ? dadosMes.vol_final : (dadosMes.vol_sp || 0)) : 0;
           const recBase = dadosMes ? ((dadosMes.rec_final && dadosMes.rec_final > 0) ? dadosMes.rec_final : (dadosMes.rec_sp || 0)) : 0;
           const receitaExibida = (volBase > 0 && valorInteiro !== volBase) ? recBase * (valorInteiro / volBase) : recBase;
 
