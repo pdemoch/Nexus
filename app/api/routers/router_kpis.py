@@ -334,49 +334,81 @@ async def resumo(
 async def tabela_drill(
     visao: str = Query("caixas"),
     meses: List[str] = Query(None),
+    categoria: Optional[str] = None,
+    segmento: Optional[str] = None,
+    sku: Optional[str] = None,
+    regional: Optional[str] = None,
+    cliente: Optional[str] = None,
+    coordenador: Optional[str] = None,
+    vendedor: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """
     A TABELA QUE COMPROVA OS GRAFICOS: drill Categoria -> SKU com os volumes
     lado a lado (realizado, previsto humano, previsto IA) e as metricas de
     cada item no periodo selecionado. Escopo = plano (fato_ibp pai).
+
+    Devolve ACURACIA_IA junto da acuracia humana em cada nivel. As duas ja
+    eram calculadas por _metricas_agregadas; a IA so nao era exposta, o que
+    impedia ver que o FVA e negativo em varios itens (a IA sozinha acertaria
+    mais que o plano humano).
+
+    Passa a aceitar os filtros de recorte. Antes a assinatura so tinha 'visao'
+    e 'meses', e o FastAPI descartava silenciosamente os demais parametros que
+    o front ja enviava — a tabela mostrava a base inteira enquanto os graficos
+    acima mostravam o recorte filtrado.
     """
     try:
         todos = listar_meses_auditaveis(db)
         lista = meses if meses else [m["mes"] for m in todos]
-        base = _montar_base(db, lista, visao)
+        filtros = _parse_filtros(categoria, segmento, sku, regional, cliente, coordenador, vendedor)
+        base = _montar_base(db, lista, visao, filtros)
         if base.empty:
-            return {"visao": visao, "meses": lista, "categorias": []}
+            return {"visao": visao, "meses": lista, "filtros": filtros, "categorias": []}
 
         categorias = []
         for cat, gcat in base.groupby("categoria"):
             mcat = _metricas_agregadas(gcat)
+
+            # Acuracia no GRAO SKU (par-a-par). O numero agregado da categoria
+            # cancela erros entre SKUs: SUCRALOSE marca 99,4% no total enquanto
+            # itens dentro dela erram 40-60%. Este campo expoe a diferenca.
+            fino = _metricas_par_a_par(
+                gcat.groupby("sku")[["realizado", "previsto_final"]].sum()
+            )
+
             skus = []
-            for sku, gsku in gcat.groupby("sku"):
+            for s, gsku in gcat.groupby("sku"):
                 msku = _metricas_agregadas(gsku)
                 desc = ""
                 if "descricao" in gsku.columns and len(gsku) > 0:
                     d = gsku["descricao"].dropna()
-                    desc = str(d.iloc[0]) if len(d) > 0 else str(sku)
+                    desc = str(d.iloc[0]) if len(d) > 0 else str(s)
                 skus.append({
-                    "nome": str(sku), "descricao": desc,
+                    "nome": str(s), "descricao": desc,
                     "realizado": msku["realizado"],
                     "previsto_final": msku["previsto_final"],
                     "previsto_ia": msku["previsto_ia"],
-                    "acuracia": msku["acuracia"], "bias": msku["bias"],
+                    "acuracia": msku["acuracia"],
+                    "acuracia_ia": msku["acuracia_ia"],
+                    "bias": msku["bias"],
                     "fva": msku["fva"],
                 })
             skus.sort(key=lambda x: -x["realizado"])
+
             categorias.append({
                 "nome": str(cat),
                 "realizado": mcat["realizado"],
                 "previsto_final": mcat["previsto_final"],
                 "previsto_ia": mcat["previsto_ia"],
-                "acuracia": mcat["acuracia"], "bias": mcat["bias"],
+                "acuracia": mcat["acuracia"],
+                "acuracia_ia": mcat["acuracia_ia"],
+                "acuracia_fina": fino["acuracia_fina"],
+                "bias": mcat["bias"],
                 "fva": mcat["fva"],
                 "skus": skus,
             })
         categorias.sort(key=lambda x: -x["realizado"])
-        return {"visao": visao, "meses": lista, "categorias": categorias}
+        return {"visao": visao, "meses": lista, "filtros": filtros, "categorias": categorias}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

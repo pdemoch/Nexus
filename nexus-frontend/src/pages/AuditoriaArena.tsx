@@ -216,17 +216,18 @@ function TabelaDrill({ params, visao, abrirDossie }: any) {
       <div className="px-6 py-4 border-b border-slate-100">
         <h3 className="text-sm font-black text-slate-800 tracking-tight flex items-center gap-2">
           <Filter className="w-4 h-4 text-indigo-600" /> Os números que comprovam
-          <Explica titulo="Tabela de comprovação" texto="Volumes lado a lado — realizado, previsto pelo humano, previsto pela IA — por categoria e SKU, no período selecionado. Clique na categoria para abrir os SKUs; o botão de gráfico abre o dossiê do item." />
+          <Explica titulo="Tabela de comprovação" texto="Volumes lado a lado — realizado, previsto pelo humano, previsto pela IA — por categoria e SKU, no período selecionado. As duas colunas de acurácia mostram quanto o plano publicado acertou e quanto a IA teria acertado sozinha; o triângulo vermelho marca os itens onde a IA seria melhor. Clique na categoria para abrir os SKUs; o botão de gráfico abre o dossiê do item." />
         </h3>
       </div>
 
-      {/* Cabeçalho */}
+      {/* Cabeçalho — 3 + 2 + 2 + 2 + 1 + 1 + 1 = 12 */}
       <div className="grid grid-cols-12 gap-2 px-6 py-2.5 bg-slate-50/60 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-        <div className="col-span-4">Categoria / SKU</div>
+        <div className="col-span-3">Categoria / SKU</div>
         <div className="col-span-2 text-right">Realizado</div>
         <div className="col-span-2 text-right">Prev. Humano</div>
         <div className="col-span-2 text-right">Prev. IA</div>
-        <div className="col-span-1 text-center">Acurácia</div>
+        <div className="col-span-1 text-center">Acur. Humano</div>
+        <div className="col-span-1 text-center">Acur. IA</div>
         <div className="col-span-1 text-center">Dossiê</div>
       </div>
 
@@ -238,19 +239,33 @@ function TabelaDrill({ params, visao, abrirDossie }: any) {
         <div className="divide-y divide-slate-50">
           {dados.map((cat: any) => {
             const aberta = abertas.has(cat.nome);
+            const ilusao = (cat.acuracia ?? 0) - (cat.acuracia_fina ?? 0);
             return (
               <div key={cat.nome}>
                 {/* LINHA DA CATEGORIA */}
                 <div className="grid grid-cols-12 gap-2 px-6 py-3 items-center hover:bg-slate-50/50 cursor-pointer transition-colors" onClick={() => toggle(cat.nome)}>
-                  <div className="col-span-4 flex items-center gap-2 min-w-0">
+                  <div className="col-span-3 flex items-center gap-2 min-w-0">
                     {aberta ? <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" /> : <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />}
                     <span className="font-black text-slate-800 truncate">{cat.nome}</span>
                     <span className="text-[9px] font-black text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded-md shrink-0">{cat.skus.length} SKU</span>
+                    {ilusao > 0.15 && (
+                      <span
+                        title={`No grão SKU a acurácia é ${fmtPct((cat.acuracia_fina ?? 0) * 100)}. O número da categoria é maior porque erros de SKUs diferentes se cancelam na soma.`}
+                        className="text-[9px] font-black text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded-md shrink-0 cursor-help">
+                        SKU {fmtPct((cat.acuracia_fina ?? 0) * 100)}
+                      </span>
+                    )}
                   </div>
                   <div className="col-span-2 text-right font-black text-slate-700">{fmtNum(cat.realizado, visao)}</div>
                   <div className="col-span-2 text-right font-bold text-indigo-600">{fmtNum(cat.previsto_final, visao)}</div>
                   <div className="col-span-2 text-right font-bold text-slate-400">{fmtNum(cat.previsto_ia, visao)}</div>
                   <div className={`col-span-1 text-center font-black ${corAcuracia(cat.acuracia)}`}>{fmtPct(cat.acuracia * 100)}</div>
+                  <div className={`col-span-1 text-center font-black ${corAcuracia(cat.acuracia_ia ?? 0)}`}>
+                    {fmtPct((cat.acuracia_ia ?? 0) * 100)}
+                    {(cat.fva ?? 0) < 0 && (
+                      <span className="ml-1 text-[9px] text-rose-500" title="A IA sozinha teria acertado mais que o plano publicado nesta categoria.">▲</span>
+                    )}
+                  </div>
                   <div className="col-span-1 text-center">
                     <button onClick={(e) => { e.stopPropagation(); abrirDossie({ tipo: 'categoria', nome: cat.nome }); }}
                       className="p-1.5 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors">
@@ -262,7 +277,7 @@ function TabelaDrill({ params, visao, abrirDossie }: any) {
                 {/* SKUs DA CATEGORIA */}
                 {aberta && cat.skus.map((s: any) => (
                   <div key={s.nome} className="grid grid-cols-12 gap-2 px-6 py-2 items-center bg-slate-50/40 border-t border-slate-50">
-                    <div className="col-span-4 min-w-0 pl-7">
+                    <div className="col-span-3 min-w-0 pl-7">
                       <div className="font-bold text-slate-700 text-xs truncate">{s.descricao || s.nome}</div>
                       <div className="text-[10px] font-bold text-slate-400">{s.nome}</div>
                     </div>
@@ -270,6 +285,12 @@ function TabelaDrill({ params, visao, abrirDossie }: any) {
                     <div className="col-span-2 text-right font-bold text-indigo-500 text-xs">{fmtNum(s.previsto_final, visao)}</div>
                     <div className="col-span-2 text-right font-bold text-slate-400 text-xs">{fmtNum(s.previsto_ia, visao)}</div>
                     <div className={`col-span-1 text-center font-black text-xs ${corAcuracia(s.acuracia)}`}>{fmtPct(s.acuracia * 100)}</div>
+                    <div className={`col-span-1 text-center font-black text-xs ${corAcuracia(s.acuracia_ia ?? 0)}`}>
+                      {fmtPct((s.acuracia_ia ?? 0) * 100)}
+                      {(s.fva ?? 0) < 0 && (
+                        <span className="ml-1 text-[9px] text-rose-500" title="A IA sozinha teria acertado mais que o plano publicado neste SKU.">▲</span>
+                      )}
+                    </div>
                     <div className="col-span-1 text-center">
                       <button onClick={() => abrirDossie({ tipo: 'sku', nome: s.nome, descricao: s.descricao })}
                         className="p-1.5 rounded-lg bg-slate-100 text-slate-500 hover:bg-indigo-50 hover:text-indigo-600 transition-colors">
