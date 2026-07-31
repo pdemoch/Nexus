@@ -15,7 +15,9 @@ from app.api.routers.router_auth import get_current_user
 
 from app.api.routers.shared_ibp import (
     get_current_cycle, get_previous_cycle, get_projection_window, 
-    get_truth_query, parse_date_safe, registrar_log_auditoria, ratear_maior_resto
+    get_truth_query, parse_date_safe, registrar_log_auditoria,
+    escrever_volume_rateado,
+    ETAPA_SUPPLY, ETAPA_FINAL, STATUS_CONGELADO
 )
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["S&OP Global Dashboard"])
@@ -39,10 +41,7 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
     try:
         ciclo_atual = get_current_cycle(db)
         ciclo_anterior = get_previous_cycle(db)
-        
-        # CORREÇÃO 1: Adaptação para a nova inteligência da janela de projeção
-        meses_proj = get_projection_window(db, ciclo_atual)
-        m2_str, m4_str = meses_proj[0], meses_proj[-1] 
+        m2_str, m4_str = get_projection_window(db)
         m2_date = parse_date_safe(m2_str)
         
         # 1. ORÇAMENTO FINANCEIRO
@@ -75,7 +74,8 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
         prev_map = {f"{p.sku}|{p.cgc}|{str(p.mes_projetado)}": float(p.vol_final or 0) for p in prev_query}
 
         # 4. CONSULTA ATUAL S&OP GLOBAL - AJUSTADA CIRURGICAMENTE
-        query = get_truth_query(db, ciclo_atual, m2_date, parse_date_safe(m4_str)).with_entities(
+        # Removemos joins complexos e queries pesadas. Lemos diretamente f.pmv_aplicado da fato
+        query = get_truth_query(db, ciclo_atual, m2_str, m4_str).with_entities(
             DimProduto.categoria, FatoIbpGranular.sku, DimProduto.descricao, DimCliente.razaosocial, DimCliente.cgc,
             FatoIbpGranular.mes_projetado, FatoIbpGranular.vol_ia, FatoIbpGranular.vol_topdown, 
             FatoIbpGranular.vol_bottomup, FatoIbpGranular.vol_supply, FatoIbpGranular.vol_final, 
@@ -105,14 +105,21 @@ async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logad
                 "var_pmv_pct": 0.0
             })
         
-        # CORREÇÃO 2: Bypass do ORM substituído por raw SQL para evitar erros de UndefinedTable
-        reg_status = db.execute(text("SELECT status FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'Final'"), {"c": ciclo_atual}).scalar()
-        is_locked = (reg_status == 'CONGELADO')
-        
-        reg_sp_status = db.execute(text("SELECT status FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'Supply'"), {"c": ciclo_atual}).scalar()
-        
-        if not is_locked and (reg_sp_status != 'CONGELADO'):
-            return {"status": "success", "is_locked": True, "lock_message": "Aguardando o Supply passar o bastao (etapa anterior)", "dados": dados_enriquecidos, "orcamento": orc_dict}
+        # Nomes/status alinhados ao banco (Final/Supply/CONGELADO). Antes
+        # procurava 'S&OP-Final'/'Fechado' e o is_locked NUNCA reconhecia a
+        # publicacao real (banco: origem='Final', status='CONGELADO').
+        reg = db.query(ControleCiclo).filter(
+            ControleCiclo.ciclo_sop == ciclo_atual,
+            func.upper(func.trim(ControleCiclo.origem)) == ETAPA_FINAL.upper()
+        ).first()
+        is_locked = str(reg.status).strip().upper() == STATUS_CONGELADO if reg else False
+        reg_sp = db.query(ControleCiclo).filter(
+            ControleCiclo.ciclo_sop == ciclo_atual,
+            func.upper(func.trim(ControleCiclo.origem)) == ETAPA_SUPPLY.upper()
+        ).first()
+
+        if not is_locked and (not reg_sp or str(reg_sp.status).strip().upper() != STATUS_CONGELADO):
+            return {"status": "success", "is_locked": True, "lock_message": "Aguardando encerramento do Supply Review (Fase 3)", "dados": dados_enriquecidos, "orcamento": orc_dict}
 
         return {"status": "success", "is_locked": is_locked, "lock_message": "Demanda Irrestrita Publicada" if is_locked else "Plano Aberto para Approvação Final", "dados": dados_enriquecidos, "orcamento": orc_dict}
     except Exception as e:
@@ -131,15 +138,11 @@ async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria',
             categoria = partes[0]
             if len(partes) > 1: sku = partes[1]
 
-        ciclo_atual = get_current_cycle(db)
-        ciclo_ant = get_previous_cycle(db)
-        
-        meses_proj = get_projection_window(db, ciclo_atual)
-        m2_str = meses_proj[0]
+        m2_str, _ = get_projection_window(db)
         m2_date = parse_date_safe(m2_str)
-        
         hoje = datetime.date.today()
         mes_atual_inicio = hoje.replace(day=1)
+        ciclo_ant, ciclo_atual = get_previous_cycle(db), get_current_cycle(db)
 
         inicio_hist = hoje - relativedelta(years=2)
 
@@ -211,44 +214,56 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
 
     try:
         ciclo = get_current_cycle(db)
-        
+        nome_user = usuario.get('nome', usuario.get('email', 'Desconhecido'))
+
         for ajuste in payload.ajustes:
             data_alvo = parse_date_safe(ajuste.mes_projetado)
-            sku = ajuste.chave 
-            
-            query = get_truth_query(db, ciclo, data_alvo, data_alvo).filter(FatoIbpGranular.sku == sku)
+            sku = ajuste.chave
 
-            linhas = query.all()
-            if not linhas: continue
+            # Volume anterior sobre o ESCOPO COMPLETO, para a trilha bater.
+            total_base_antigo = db.execute(text("""
+                SELECT COALESCE(SUM(vol_final), 0) FROM fato_ibp_granular
+                WHERE ciclo_sop = :c AND sku = :s AND mes_projetado = :m
+            """), {"c": ciclo, "s": sku, "m": data_alvo}).scalar()
 
-            total_base_antigo = sum([float(l.vol_final or 0) for l in linhas])
-
-            # RATEIO CANONICO: o numero digitado (volume_alvo) e a base absoluta
-            # e a soma das partes e EXATAMENTE ele — inclusive 0, 1, 2. A sobra
-            # vai para o MAIOR CONSUMIDOR (nao para o ultimo id). Peso = a
-            # distribuicao vigente (vol_final atual); se estiver toda zerada,
-            # cai no vol_meta como referencia; se ambos zerados, igualitario.
             volume_alvo = int(ajuste.novo_volume)
-            pesos = [float(l.vol_final or 0) for l in linhas]
-            if sum(pesos) <= 0:
-                pesos = [float(l.vol_meta or 0) for l in linhas]
-            partes = ratear_maior_resto(volume_alvo, pesos)
 
-            for l, parte in zip(linhas, partes):
-                l.vol_final = int(parte)
+            # Rateio canonico: escopo completo (sem filtrar cadastro atual) +
+            # trava de balanco (soma == digitado, ou aborta) + zero explicito +
+            # imutabilidade de mes realizado (tudo dentro do escritor). Peso:
+            # vol_meta (a venda comercial); na falta, vol_supply, depois vol_ia.
+            # Substitui o rateio manual que jogava a sobra no ultimo cliente e o
+            # 'l.vol_final = rateado' que, sobre escopo filtrado, deixava a linha
+            # do cliente inativo orfa (vazamento do Padrao A: 16.000 -> 16.333).
+            escrever_volume_rateado(
+                db=db, ciclo=ciclo, sku=sku, mes=data_alvo,
+                volume_alvo=volume_alvo, campo_destino="vol_final",
+                campos_peso=["vol_meta", "vol_supply", "vol_ia"],
+            )
 
-            nome_user = usuario.get('nome', usuario.get('email', 'Desconhecido'))
-            registrar_log_auditoria(db=db, ciclo=ciclo, origem="S&OP Global (Dashboard Final)", usuario=nome_user, sku=sku, cliente="TODOS_OS_CLIENTES", mes=data_alvo, v_antigo=int(total_base_antigo), v_novo=volume_alvo)
+            # Trilha: razaosocial_afetada='TODOS_OS_CLIENTES' e a marca que o
+            # reparo de dados usa para reconstruir o valor digitado. Preservada.
+            registrar_log_auditoria(
+                db=db, ciclo=ciclo, origem="S&OP Global (Dashboard Final)",
+                usuario=nome_user, sku=sku, cliente="TODOS_OS_CLIENTES",
+                mes=data_alvo, v_antigo=int(total_base_antigo or 0), v_novo=volume_alvo)
 
-        # CORREÇÃO 3: Proteção ao atualizar tabela de controle de ciclos no banco (Aprovação)
-        id_controle = db.execute(text("SELECT id FROM controle_ciclos WHERE ciclo_sop = :c AND origem = 'Final'"), {"c": ciclo}).scalar()
-        if id_controle:
-            db.execute(text("UPDATE controle_ciclos SET status = 'CONGELADO' WHERE id = :id"), {"id": id_controle})
+        # Congela a etapa Final com nome/status do banco (antes 'S&OP-Final'/
+        # 'Fechado', divergente — por isso o is_locked nunca reconhecia).
+        registro = db.query(ControleCiclo).filter(
+            ControleCiclo.ciclo_sop == ciclo,
+            func.upper(func.trim(ControleCiclo.origem)) == ETAPA_FINAL.upper()
+        ).first()
+        if not registro:
+            db.add(ControleCiclo(ciclo_sop=ciclo, origem=ETAPA_FINAL, status=STATUS_CONGELADO))
         else:
-            db.execute(text("INSERT INTO controle_ciclos (ciclo_sop, origem, status) VALUES (:c, 'Final', 'CONGELADO')"), {"c": ciclo})
+            registro.status = STATUS_CONGELADO
 
         db.commit()
         return {"status": "success", "message": "S&OP Consolidado e Metas travadas com sucesso!"}
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(500, repr(e))
@@ -257,11 +272,7 @@ async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(ge
 async def exportar_oficial(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
     try:
         ciclo = get_current_cycle(db)
-        
-        # CORREÇÃO 4: Aplicação da nova chamada da Janela para o Excel
-        meses_proj = get_projection_window(db, ciclo)
-        m2 = parse_date_safe(meses_proj[0])
-        m4 = parse_date_safe(meses_proj[-1])
+        m2, m4 = get_projection_window(db)
         
         resultados = get_truth_query(db, ciclo, m2, m4).with_entities(
             DimProduto.categoria, FatoIbpGranular.sku, DimProduto.descricao, DimCliente.razaosocial, 
