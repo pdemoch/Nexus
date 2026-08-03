@@ -316,7 +316,12 @@ def comparativo_plurianual(db: Session, sku: str, mes_referencia=None,
         """), {"sku": sku, "ciclo": ciclo_ativo}).fetchone()
         no_plano = r is not None
 
-    # Série anual completa (só anos com venda real).
+    # Série anual — MESMO PERÍODO (YTD comparável). Corta todos os anos no mesmo
+    # dia-do-ano de hoje, senão o ano corrente (parcial) parece que despencou
+    # frente aos anos cheios. Ex.: hoje 03/ago -> compara jan..03-ago de cada ano.
+    hoje_real = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
+    doy_corte = hoje_real.timetuple().tm_yday  # dia do ano (1..366)
+
     linhas = db.execute(text("""
         SELECT EXTRACT(YEAR FROM v.data_pedido)::int AS ano,
                COUNT(DISTINCT c.razaosocial)          AS razoes_sociais,
@@ -327,9 +332,10 @@ def comparativo_plurianual(db: Session, sku: str, mes_referencia=None,
         FROM fato_vendas v
         LEFT JOIN dim_clientes c ON c.cgc = v.cgc
         WHERE v.sku = :sku
+          AND EXTRACT(DOY FROM v.data_pedido) <= :doy_corte
         GROUP BY EXTRACT(YEAR FROM v.data_pedido)
         ORDER BY ano
-    """), {"sku": sku}).fetchall()
+    """), {"sku": sku, "doy_corte": doy_corte}).fetchall()
 
     anos = []
     for r in linhas:
@@ -386,10 +392,14 @@ def comparativo_plurianual(db: Session, sku: str, mes_referencia=None,
                 "pmv": round(vrs / vcx, 2) if vcx > 0 else 0.0,
             })
 
+    meses_pt = ['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez']
+    label_periodo = f"jan–{hoje_real.day:02d}/{meses_pt[hoje_real.month-1]}"
+    ano_parcial = (hoje_real.month < 12 or hoje_real.day < 31)
+
     return {
         "sku": sku,
         "no_plano_ciclo_ativo": no_plano,
-        "anos": anos,                       # série completa; front destaca os 2 últimos + atual
+        "anos": anos,                       # série YTD comparável; front destaca os 2 últimos + atual
         "anos_existentes": anos_existentes,
         "primeiro_ano": primeiro_ano,
         "eh_lancamento": eh_lancamento,
@@ -397,6 +407,10 @@ def comparativo_plurianual(db: Session, sku: str, mes_referencia=None,
         "tendencia_volume": tend_vol,
         "tendencia_pmv": tend_pmv,
         "mes_equivalente": mes_equiv,       # sazonalidade (se mes_referencia dado)
+        # Marcação de período: os anos são comparados NO MESMO PERÍODO (YTD).
+        "periodo_comparavel": True,
+        "periodo_label": label_periodo,     # ex.: "jan–03/ago"
+        "ano_corrente_parcial": ano_parcial,
     }
 
 
@@ -465,6 +479,37 @@ def fva_sku(db: Session, sku: str, mes) -> Dict[str, Any]:
         if cand:
             vencedor = max(cand, key=lambda x: x[1])[0]
 
+    # Baixo volume: acurácia percentual importa menos (impacto financeiro pequeno).
+    LIMIAR_BAIXO_VOLUME = 200  # cx/mês
+    baixo_volume = (vend_cx > 0 and vend_cx < LIMIAR_BAIXO_VOLUME)
+
+    # Frase de leitura — evita que um % solto engane. Diz o que os volumes contam.
+    insight_fva = None
+    if vend_cx <= 0:
+        insight_fva = "Sem venda no mês auditado — sem base para avaliar acurácia."
+    else:
+        v = int(round(vend_cx))
+        if vencedor == "ANO PASSADO":
+            # o caso do print: humano e IA superestimaram, o naive acertou
+            over_h = ((humano_cx - vend_cx) / vend_cx) if vend_cx > 0 else 0
+            direcao = "acima" if over_h > 0 else "abaixo"
+            insight_fva = (
+                f"Repetir o ano passado ({int(round(naive_cx))} cx) teria batido humano "
+                f"({int(round(humano_cx))}) e IA ({int(round(ia_cx))}) — vendeu {v} cx. "
+                f"O plano ficou {abs(over_h)*100:.0f}% {direcao} da venda. "
+                + ("SKU de baixo volume e estável: candidato a previsão simplificada."
+                   if baixo_volume else
+                   "Reveja o modelo deste SKU.")
+            )
+        elif vencedor == "IA":
+            insight_fva = (f"A IA ({int(round(ia_cx))} cx) previu melhor que o humano "
+                           f"({int(round(humano_cx))}) — vendeu {v} cx. Considere confiar mais na IA aqui.")
+        elif vencedor == "HUMANO":
+            insight_fva = (f"O humano ({int(round(humano_cx))} cx) previu melhor que a IA "
+                           f"({int(round(ia_cx))}) — vendeu {v} cx.")
+        if baixo_volume and vencedor != "ANO PASSADO":
+            insight_fva = (insight_fva or "") + " (Baixo volume: impacto financeiro pequeno.)"
+
     return {
         "sku": sku,
         "mes": mes_d.strftime("%Y-%m-%d"),
@@ -479,6 +524,8 @@ def fva_sku(db: Session, sku: str, mes) -> Dict[str, Any]:
         "fva_ia": round(fva_ia, 4) if fva_ia is not None else None,
         "vencedor": vencedor,
         "ia_teria_batido_humano": (fva_ia is not None and fva_ia < 0),
+        "baixo_volume": baixo_volume,
+        "insight_fva": insight_fva,
     }
 
 

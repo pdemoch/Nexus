@@ -348,24 +348,37 @@ function GavetaDossie({ sku, fechar }: { sku: string; fechar: () => void }) {
           <div className="p-16 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin" /></div>
         ) : (
           <div className="p-5 space-y-6">
-            {d?.fva && (
+                        {d?.fva && (
               <div>
-                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Quem acertou mais · último mês fechado</div>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Quem acertou mais · último mês fechado</div>
+                  {d.fva.baixo_volume && (
+                    <span className="text-[9px] font-black uppercase tracking-wider text-slate-400 bg-slate-100 rounded px-1.5 py-0.5">baixo volume</span>
+                  )}
+                </div>
                 <div className="grid grid-cols-3 gap-2">
                   {[
-                    { label: 'Humano', val: d.fva.aderencia_humano, key: 'HUMANO' },
-                    { label: 'IA', val: d.fva.aderencia_ia, key: 'IA' },
-                    { label: 'Ano passado', val: d.fva.aderencia_naive, key: 'ANO PASSADO' },
+                    { label: 'Humano', val: d.fva.aderencia_humano, vol: d.fva.humano_cx, key: 'HUMANO' },
+                    { label: 'IA', val: d.fva.aderencia_ia, vol: d.fva.ia_cx, key: 'IA' },
+                    { label: 'Ano passado', val: d.fva.aderencia_naive, vol: d.fva.naive_cx, key: 'ANO PASSADO' },
                   ].map((x) => {
                     const venceu = d.fva.vencedor === x.key;
                     return (
                       <div key={x.key} className={`rounded-xl px-3 py-2 border ${venceu ? 'border-emerald-300 bg-emerald-50' : 'border-slate-100 bg-slate-50'}`}>
                         <div className="text-[10px] font-bold text-slate-400">{x.label}</div>
                         <div className={`text-lg font-black ${venceu ? 'text-emerald-700' : 'text-slate-500'}`}>{x.val != null ? fmtPct(x.val) : '—'}</div>
+                        <div className="text-[9px] font-bold text-slate-400">previu {x.vol != null ? fmtCx(x.vol) : '—'} cx</div>
                       </div>
                     );
                   })}
                 </div>
+                <div className="mt-1 text-[10px] font-bold text-slate-400 text-right">vendeu {fmtCx(d.fva.vendido_cx)} cx no mês</div>
+                {d.fva.insight_fva && (
+                  <div className="mt-2 flex items-start gap-2 text-[11px] font-bold text-slate-600 bg-slate-50 rounded-lg px-3 py-2">
+                    <Bot className="w-4 h-4 shrink-0 mt-0.5 text-indigo-500" />
+                    {d.fva.insight_fva}
+                  </div>
+                )}
               </div>
             )}
             <div>
