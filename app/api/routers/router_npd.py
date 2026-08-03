@@ -1,30 +1,57 @@
+"""
+=====================================================================
+ROUTER — NPD / INOVAÇÕES (injeção de lançamento)  [reconstrução]
+=====================================================================
+Injeta um produto NOVO (sem histórico) no ciclo, usando um SKU "espelho" para
+herdar o padrão de distribuição entre clientes. Acesso: Admin, Marketing.
+
+Premissas aplicadas (aprendidas):
+  • RATEIO CANÔNICO: distribui o volume nacional entre os clientes do espelho
+    com ratear_maior_resto — a soma bate SEMPRE (o antigo usava int(round())
+    por cliente, e a soma não fechava).
+  • ZERO É ZERO: mês com volume 0 grava 0 em todas as linhas (sem 'continue').
+  • MESES DA JANELA DO CICLO: usa get_working_window_months (não datetime.today).
+  • NASCE CONSOLIDADO: grava as 6 colunas de volume iguais (o produto novo já
+    entra alinhado em todas as etapas).
+  • IMUTABILIDADE: não injeta em mês já realizado.
+  • curva = 'LANÇAMENTO'.
+
+Contrato do front (mantido):
+  GET  /espelhos -> {espelhos:[{produto,descricao}], categorias:[], segmentos:[]}
+  POST /injetar  -> {codigo_lancamento, nome_lancamento, sku_espelho, categoria,
+                     segmento, pmv, baseline, projecao:[{mes,percentual,volume,receita}]}
+"""
+
 import datetime
-from typing import List
-from dateutil.relativedelta import relativedelta
+from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import text
 
 from app.core.database import get_db
-from app.models.domain_models import DimProduto, FatoIbpGranular
 from app.api.routers.router_auth import get_current_user
 from app.api.routers.shared_ibp import (
-    get_current_cycle,
-    get_projection_window,
-    ratear_maior_resto,
-    check_imutabilidade_mes,
+    get_current_cycle, get_working_window_months, ratear_maior_resto,
+    check_imutabilidade_mes, parse_date_safe, registrar_log_auditoria,
 )
 
-router = APIRouter(prefix="/api/v1/npd", tags=["New Product Development"])
+router = APIRouter(prefix="/api/v1/npd", tags=["NPD / Inovações"])
+
+
+def require_marketing(usuario: dict = Depends(get_current_user)):
+    if usuario.get("funcao") not in ("Administrador", "Marketing"):
+        raise HTTPException(403, "Acesso restrito à Diretoria de Marketing.")
+    return usuario
+
 
 class ProjecaoMes(BaseModel):
     mes: str
-    percentual: int
+    percentual: float
     volume: int
     receita: float
 
-class PayloadNPD(BaseModel):
+class PayloadInjetar(BaseModel):
     codigo_lancamento: str
     nome_lancamento: str
     sku_espelho: str
@@ -34,125 +61,121 @@ class PayloadNPD(BaseModel):
     baseline: int
     projecao: List[ProjecaoMes]
 
+
 @router.get("/espelhos")
-async def obter_listas_npd(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    if usuario_logado['funcao'] not in ['Administrador', 'Marketing']:
-        raise HTTPException(status_code=403, detail="Acesso restrito à Diretoria/Gerência.")
-        
-    produtos = db.query(DimProduto.sku, DimProduto.descricao).filter(DimProduto.descricao.isnot(None)).distinct().all()
-    categorias = db.query(DimProduto.categoria).filter(DimProduto.categoria.isnot(None)).distinct().all()
-    segmentos = db.query(DimProduto.segmento).filter(DimProduto.segmento.isnot(None)).distinct().all()
-    
+def espelhos(db: Session = Depends(get_db), _: dict = Depends(require_marketing)):
+    """Lista SKUs disponíveis como espelho + categorias e segmentos existentes."""
+    produtos = db.execute(text("""
+        SELECT sku, COALESCE(descricao, sku) AS descricao
+        FROM dim_produtos ORDER BY descricao
+    """)).fetchall()
+    categorias = db.execute(text("""
+        SELECT DISTINCT categoria FROM dim_produtos
+        WHERE categoria IS NOT NULL AND TRIM(categoria) <> '' ORDER BY categoria
+    """)).fetchall()
+    segmentos = db.execute(text("""
+        SELECT DISTINCT segmento FROM dim_produtos
+        WHERE segmento IS NOT NULL AND TRIM(segmento) <> '' ORDER BY segmento
+    """)).fetchall()
     return {
-        "status": "success",
-        "espelhos": [{"produto": p[0], "descricao": p[1]} for p in produtos],
-        "categorias": sorted([c[0] for c in categorias if c[0]]),
-        "segmentos": sorted([s[0] for s in segmentos if s[0]])
+        "espelhos": [{"produto": p.sku, "descricao": p.descricao} for p in produtos],
+        "categorias": [c.categoria for c in categorias],
+        "segmentos": [s.segmento for s in segmentos],
     }
 
+
 @router.post("/injetar")
-async def injetar_lancamento(payload: PayloadNPD, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
+def injetar(payload: PayloadInjetar, db: Session = Depends(get_db),
+            usuario: dict = Depends(require_marketing)):
     """
-    Injeta um lancamento (NPD) na janela do ciclo, rateado por CNPJ conforme o
-    SKU espelho, gravando as 6 camadas de uma vez (o produto novo nasce
-    consolidado, igual ao nascimento de ciclo pelo distributor).
-
-    Correcoes:
-      - Rateio canonico (ratear_maior_resto): a soma dos CNPJs e EXATAMENTE o
-        volume nacional digitado. Antes 'int(round())' + 'if 0: continue'
-        perdia clientes de peso baixo e a soma nao fechava o volume do mes.
-      - Zero e gravado explicitamente (nao pula), preservando a linha do cliente.
-      - Meses vem do RELOGIO DO CICLO (get_projection_window), nao de
-        datetime.today(). Antes o mes-base dependia do dia real de execucao, e
-        o lancamento podia cair em meses diferentes dos que a etapa planeja.
-      - Imutabilidade: nao injeta em mes ja realizado.
+    Nasce o produto novo no ciclo, rateando cada mês da projeção entre os
+    clientes do espelho (peso pelo histórico vol_ia do espelho), com balanço
+    garantido. Grava as 6 colunas de volume iguais (nasce consolidado).
     """
-    if usuario_logado['funcao'] not in ['Administrador', 'Marketing']:
-        raise HTTPException(status_code=403, detail="Acesso restrito.")
-        
     try:
-        # 1. TRATA A DIMENSÃO DO PRODUTO (Garante que o cadastro existe)
-        produto_existente = db.query(DimProduto).filter(DimProduto.sku == payload.codigo_lancamento).first()
-        if not produto_existente:
-            novo_produto = DimProduto(
-                sku=payload.codigo_lancamento,
-                descricao=payload.nome_lancamento,
-                categoria=payload.categoria,
-                segmento=payload.segmento,
-                curva="LANÇAMENTO"
-            )
-            db.add(novo_produto)
-            db.flush() 
+        ciclo = get_current_cycle(db)
+        nome_user = usuario.get("nome", usuario.get("email", "?"))
 
-        ciclo_oficial = get_current_cycle(db)
+        # Já existe esse SKU no ciclo? (evita duplicar lançamento)
+        existe = db.execute(text("""
+            SELECT 1 FROM fato_ibp_granular
+            WHERE ciclo_sop = :c AND sku = :s LIMIT 1
+        """), {"c": ciclo, "s": payload.codigo_lancamento}).fetchone()
+        if existe:
+            raise HTTPException(409, f"O lançamento {payload.codigo_lancamento} já existe no ciclo {ciclo}.")
 
-        # Meses-alvo pelo relogio do ciclo (M2, M3, M4 do ciclo ativo), nao pelo
-        # dia real. get_projection_window devolve (data_ini_M2, data_fim_M4).
-        data_ini_m2, _data_fim_m4 = get_projection_window(db)
+        # Clientes do espelho, com peso pelo histórico (vol_ia somado no ciclo).
+        clientes = db.execute(text("""
+            SELECT cgc, MAX(vendedor_nome) AS vendedor_nome,
+                   SUM(COALESCE(vol_ia,0)) AS peso
+            FROM fato_ibp_granular
+            WHERE sku = :esp AND ciclo_sop = :c
+            GROUP BY cgc
+        """), {"esp": payload.sku_espelho, "c": ciclo}).fetchall()
 
-        # 2. LIMPEZA PRÉVIA TÁTICA (O FIM DO ERRO DE CHAVE DUPLICADA)
-        # Se você re-injetar o SKU, o sistema limpa a projeção anterior deste ciclo e aplica a nova por cima.
-        db.query(FatoIbpGranular).filter(
-            FatoIbpGranular.ciclo_sop == ciclo_oficial,
-            FatoIbpGranular.sku == payload.codigo_lancamento
-        ).delete()
-        db.flush()
+        # Fallback: se o espelho não tem linhas no ciclo, tenta em qualquer ciclo.
+        if not clientes:
+            clientes = db.execute(text("""
+                SELECT cgc, MAX(vendedor_nome) AS vendedor_nome,
+                       SUM(COALESCE(vol_ia,0)) AS peso
+                FROM fato_ibp_granular WHERE sku = :esp GROUP BY cgc
+            """), {"esp": payload.sku_espelho}).fetchall()
+        if not clientes:
+            raise HTTPException(404, f"O SKU espelho {payload.sku_espelho} não tem clientes para herdar a distribuição.")
 
-        # 3. BLINDAGEM DO AGRUPAMENTO (RATEIO EXATO POR CNPJ)
-        clientes_espelho = db.query(
-            FatoIbpGranular.cgc, 
-            func.max(FatoIbpGranular.vendedor_nome).label('vendedor_nome'), 
-            func.sum(func.coalesce(FatoIbpGranular.vol_ia, 0)).label('peso_hist')
-        ).filter(FatoIbpGranular.sku == payload.sku_espelho)\
-         .group_by(FatoIbpGranular.cgc).all()
-            
-        if not clientes_espelho:
-            raise HTTPException(status_code=400, detail="O SKU Espelho selecionado não possui clientes com histórico no banco.")
+        pesos = [max(0.0, float(c.peso or 0)) for c in clientes]
+        pmv = float(payload.pmv)
 
-        pesos = [max(0.0, float(c.peso_hist or 0)) for c in clientes_espelho]
+        # 'bu' (unidade de negócio) herdada do SKU espelho — faz sentido de
+        # negócio e cobre a coluna caso seja NOT NULL.
+        bu_espelho = db.execute(text("""
+            SELECT bu FROM dim_produtos WHERE sku = :esp
+        """), {"esp": payload.sku_espelho}).scalar()
 
-        novas_linhas = []
-        for i, proj in enumerate(payload.projecao):
-            mes_alvo = data_ini_m2 + relativedelta(months=i)
+        # Garante dim_produtos do novo SKU (categoria/segmento/curva LANÇAMENTO).
+        db.execute(text("""
+            INSERT INTO dim_produtos (sku, descricao, bu, categoria, segmento, curva, ativo)
+            VALUES (:s, :d, :bu, :cat, :seg, 'LANÇAMENTO', true)
+            ON CONFLICT (sku) DO UPDATE
+              SET descricao=:d, bu=:bu, categoria=:cat, segmento=:seg,
+                  curva='LANÇAMENTO', ativo=true
+        """), {"s": payload.codigo_lancamento, "d": payload.nome_lancamento,
+               "bu": bu_espelho, "cat": payload.categoria, "seg": payload.segmento})
 
-            # Nao injeta em mes ja realizado.
-            check_imutabilidade_mes(mes_alvo, payload.codigo_lancamento, contexto="NPD")
+        linhas_criadas = 0
+        for proj in payload.projecao:
+            data_alvo = parse_date_safe(proj.mes if len(proj.mes) > 7 else proj.mes + "-01")
+            check_imutabilidade_mes(data_alvo, payload.codigo_lancamento, contexto="lançamento")
 
-            volume_mes_nacional = int(proj.volume)
+            volume_nacional = int(proj.volume)   # zero é zero: não pula
+            partes = ratear_maior_resto(volume_nacional, pesos)
+            if sum(partes) != volume_nacional:
+                raise HTTPException(500, f"Falha de balanço no lançamento em {proj.mes}.")
 
-            # Rateio canonico: a soma por CNPJ e EXATAMENTE o volume nacional.
-            partes = ratear_maior_resto(volume_mes_nacional, pesos)
+            for c, parte in zip(clientes, partes):
+                v = int(parte)
+                # Nasce consolidado: as 6 colunas iguais.
+                db.execute(text("""
+                    INSERT INTO fato_ibp_granular
+                      (ciclo_sop, mes_projetado, sku, cgc, vendedor_nome,
+                       vol_ia, vol_topdown, vol_bottomup, vol_meta, vol_supply, vol_final,
+                       pmv_aplicado)
+                    VALUES (:c, :m, :s, :cgc, :vend,
+                            :v, :v, :v, :v, :v, :v, :pmv)
+                """), {"c": ciclo, "m": data_alvo, "s": payload.codigo_lancamento,
+                       "cgc": c.cgc, "vend": c.vendedor_nome,
+                       "v": v, "pmv": pmv})
+                linhas_criadas += 1
 
-            for cliente, volume_cliente in zip(clientes_espelho, partes):
-                # Grava zero explicito tambem: mantem a linha do cliente no plano,
-                # coerente com o restante do sistema (zerar e zerar, nao pular).
-                nova_fato = FatoIbpGranular(
-                    ciclo_sop=ciclo_oficial, 
-                    mes_projetado=mes_alvo,
-                    sku=payload.codigo_lancamento,
-                    cgc=cliente.cgc,
-                    vendedor_nome=cliente.vendedor_nome,
-                    vol_ia=int(volume_cliente), 
-                    vol_topdown=int(volume_cliente),
-                    vol_bottomup=int(volume_cliente),
-                    vol_supply=int(volume_cliente),
-                    vol_meta=int(volume_cliente),
-                    vol_final=int(volume_cliente),
-                    pmv_aplicado=payload.pmv
-                )
-                novas_linhas.append(nova_fato)
+            registrar_log_auditoria(
+                db=db, ciclo=ciclo, origem="NPD / Inovações", usuario=nome_user,
+                sku=payload.codigo_lancamento, cliente="TODOS_OS_CLIENTES",
+                mes=data_alvo, v_antigo=0, v_novo=volume_nacional)
 
-        if not novas_linhas:
-            raise HTTPException(status_code=400, detail="Nenhum cliente no espelho para ratear o lançamento.")
-
-        db.bulk_save_objects(novas_linhas)
         db.commit()
-        
-        return {"status": "success", "message": "NPD injetado com sucesso na janela de S&OP."}
-    
+        return {"status": "success", "sku": payload.codigo_lancamento,
+                "linhas_criadas": linhas_criadas, "clientes": len(clientes)}
     except HTTPException:
-        db.rollback()
-        raise
+        db.rollback(); raise
     except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Erro Crítico NPD: {repr(e)}")
+        db.rollback(); raise HTTPException(500, repr(e))

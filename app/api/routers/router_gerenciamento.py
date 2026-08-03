@@ -1,394 +1,261 @@
+"""
+=====================================================================
+ROUTER — DEMANDA COMERCIAL (Bottom-Up)  [reconstrução]
+=====================================================================
+Segunda etapa do bastão. A Gerência Comercial revê o número do Top-Down
+cliente a cliente, trazendo a visão de baixo pra cima. Acesso: Administrador,
+Gerente (via Sidebar).
+
+Proposta específica desta tela (aprendida com a versão anterior):
+  • Mostra o TopDown HERDADO ao lado do Bottom-Up editável — o gerente vê de
+    onde partiu (a decisão da Diretoria) e ajusta sobre ela.
+  • Semáforo sinaliza divergência do TOPDOWN (montante) além da IA.
+  • Orçamento (rec_orcada) como âncora financeira.
+
+Grava vol_bottomup. Peso de rateio: vol_topdown (cascata p/ ia). Congelamento
+é ação do ADMIN. Requer que o TopDown esteja congelado (bastão recebido).
+"""
+
 import datetime
-import math
-from typing import List
 from dateutil.relativedelta import relativedelta
+from typing import List
 from collections import defaultdict
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import func, text
+from sqlalchemy import text
 
 from app.core.database import get_db
-from app.models.domain_models import DimProduto, FatoIbpGranular, ControleCiclo, FatoVendas
 from app.api.routers.router_auth import get_current_user
-
 from app.api.routers.shared_ibp import (
-    get_current_cycle,
-    get_previous_cycle,
-    get_truth_query,
-    check_global_lock,
-    parse_date_safe,
-    ratear_maior_resto,
-    propagar_para_jusante,
-    check_imutabilidade_mes,
-    ETAPA_TOPDOWN, ETAPA_BOTTOMUP, STATUS_CONGELADO
+    get_current_cycle, get_working_window_months,
+    escrever_volume_rateado, propagar_para_jusante, congelar_etapa,
+    reabrir_etapa, etapa_congelada, registrar_log_auditoria, parse_date_safe,
+    ETAPA_TOPDOWN, ETAPA_BOTTOMUP,
 )
 
-router = APIRouter(prefix="/api/v1/consensus/gerenciamento", tags=["Consenso Gerenciamento"])
+router = APIRouter(prefix="/api/v1/gerenciamento", tags=["Demanda Comercial (Bottom-Up)"])
 
-class AjusteGerente(BaseModel):
-    chave: str
+
+def require_gerente(usuario: dict = Depends(get_current_user)):
+    if usuario.get("funcao") not in ("Administrador", "Gerente"):
+        raise HTTPException(403, "Acesso restrito à Gerência Comercial.")
+    return usuario
+
+def require_admin(usuario: dict = Depends(get_current_user)):
+    if usuario.get("funcao") != "Administrador":
+        raise HTTPException(403, "Somente o Administrador congela etapas.")
+    return usuario
+
+
+class AjusteBottomUp(BaseModel):
+    sku: str
     mes_projetado: str
     novo_volume: int
 
-class PayloadAprovarGerente(BaseModel):
-    origem_ajuste: str
-    ajustes: List[AjusteGerente]
+class PayloadSalvar(BaseModel):
+    ajustes: List[AjusteBottomUp]
 
-def require_manager_or_admin(usuario: dict = Depends(get_current_user)):
-    if usuario['funcao'] not in ['Administrador', 'Gerente']:
-        raise HTTPException(status_code=403, detail="Acesso restrito à Gerência Comercial.")
-    return usuario
-
-def check_topdown_lock(db: Session, ciclo: str):
-    # A etapa anterior (TopDown) precisa estar CONGELADA para liberar o Bottom-Up.
-    # Antes procurava origem='Top-Down Arena' e status='Fechado' — nomes que o
-    # banco nao usa (banco: 'TopDown'/'CONGELADO'). O resultado era que o
-    # check NUNCA encontrava o lock e bloqueava o Bottom-Up permanentemente.
-    td = db.query(ControleCiclo).filter(
-        ControleCiclo.ciclo_sop == ciclo,
-        func.upper(func.trim(ControleCiclo.origem)) == ETAPA_TOPDOWN.upper()
-    ).first()
-    if not td or str(td.status).strip().upper() != STATUS_CONGELADO:
-        raise HTTPException(
-            status_code=403, 
-            detail="Fase Comercial Bloqueada: A Diretoria ainda não liberou o ciclo para a modelagem Bottom-Up comercial."
-        )
-
-def check_demand_lock(db: Session, ciclo: str):
-    # A propria etapa Bottom-Up (banco: 'BottomUP'/'CONGELADO').
-    dr = db.query(ControleCiclo).filter(
-        ControleCiclo.ciclo_sop == ciclo,
-        func.upper(func.trim(ControleCiclo.origem)) == ETAPA_BOTTOMUP.upper()
-    ).first()
-    if dr and str(dr.status).strip().upper() == STATUS_CONGELADO:
-        raise HTTPException(
-            status_code=403, 
-            detail="Ciclo Fechado: O portfólio Bottom-Up já foi congelado e enviado para a etapa de Supply."
-        )
 
 @router.get("/status")
-async def obter_status_gerenciamento(db: Session = Depends(get_db)):
+def status(db: Session = Depends(get_db), _: dict = Depends(require_gerente)):
+    ciclo = get_current_cycle(db)
+    return {
+        "ciclo": ciclo,
+        "congelada": etapa_congelada(db, ciclo, ETAPA_BOTTOMUP),
+        "topdown_liberado": etapa_congelada(db, ciclo, ETAPA_TOPDOWN),
+    }
+
+
+@router.get("/tabela")
+def tabela(db: Session = Depends(get_db), _: dict = Depends(require_gerente)):
+    """
+    Matriz categoria->segmento->SKU. Cada célula traz: IA, TopDown herdado
+    (referência de montante), Bottom-Up (editável), orçamento, PMV e receita.
+    Totalizadores de volume e faturamento previstos.
+    """
+    ciclo = get_current_cycle(db)
+    meses = get_working_window_months(db)
+    meses_iso = [m.strftime("%Y-%m-%d") for m in meses]
+    congelada = etapa_congelada(db, ciclo, ETAPA_BOTTOMUP)
+    topdown_liberado = etapa_congelada(db, ciclo, ETAPA_TOPDOWN)
+
+    plano = db.execute(text("""
+        SELECT f.sku,
+               COALESCE(p.descricao,'SEM DESCRICAO')  AS descricao,
+               COALESCE(p.categoria,'SEM CATEGORIA')  AS categoria,
+               COALESCE(p.segmento,'SEM SEGMENTO')    AS segmento,
+               TO_CHAR(f.mes_projetado,'YYYY-MM-DD')  AS mes,
+               SUM(f.vol_ia)        AS ia,
+               SUM(f.vol_topdown)   AS topdown,
+               SUM(f.vol_bottomup)  AS bottomup,
+               AVG(f.pmv_aplicado)  AS pmv
+        FROM fato_ibp_granular f
+        LEFT JOIN dim_produtos p ON p.sku = f.sku
+        WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)
+        GROUP BY f.sku, p.descricao, p.categoria, p.segmento, f.mes_projetado
+    """), {"c": ciclo, "meses": meses}).fetchall()
+
+    # Orçamento por SKU x mês (âncora financeira)
+    orc = defaultdict(dict)
+    orc_rows = db.execute(text("""
+        SELECT sku, TO_CHAR(mes_projetado,'YYYY-MM-DD') AS mes, SUM(receita_orcamento) AS rec
+        FROM fato_orcamento
+        WHERE mes_projetado = ANY(:meses)
+        GROUP BY sku, mes_projetado
+    """), {"meses": meses}).fetchall()
+    for r in orc_rows:
+        orc[r.sku][r.mes] = float(r.rec or 0)
+
+    tree: dict = {}
+    tot_vol = {mi: 0 for mi in meses_iso}
+    tot_rs = {mi: 0.0 for mi in meses_iso}
+    tot_orc = {mi: 0.0 for mi in meses_iso}
+
+    for r in plano:
+        cat = tree.setdefault(r.categoria, {"nome": r.categoria, "segmentos": {}})
+        seg = cat["segmentos"].setdefault(r.segmento, {"nome": r.segmento, "skus": {}})
+        sk = seg["skus"].setdefault(r.sku, {"sku": r.sku, "descricao": r.descricao, "meses": {}})
+        bu = int(r.bottomup or 0); td = int(r.topdown or 0); ia = int(r.ia or 0)
+        pmv = float(r.pmv or 0)
+        rec_orc = orc.get(r.sku, {}).get(r.mes, 0.0)
+        sk["meses"][r.mes] = {
+            "ia": ia, "topdown": td, "bottomup": bu, "pmv": round(pmv, 2),
+            "receita": round(bu * pmv, 2), "rec_orcada": round(rec_orc, 2),
+        }
+        tot_vol[r.mes] += bu
+        tot_rs[r.mes] += bu * pmv
+        tot_orc[r.mes] += rec_orc
+
+    categorias = []
+    for cat in sorted(tree.values(), key=lambda c: c["nome"]):
+        segs = []
+        for seg in sorted(cat["segmentos"].values(), key=lambda s: s["nome"]):
+            skus = sorted(seg["skus"].values(), key=lambda s: s["descricao"])
+            segs.append({"nome": seg["nome"], "skus": skus})
+        categorias.append({"nome": cat["nome"], "segmentos": segs})
+
+    return {
+        "ciclo": ciclo, "congelada": congelada, "topdown_liberado": topdown_liberado,
+        "meses": meses_iso, "categorias": categorias,
+        "totais": {
+            "volume": {mi: tot_vol[mi] for mi in meses_iso},
+            "faturamento": {mi: round(tot_rs[mi], 2) for mi in meses_iso},
+            "orcamento": {mi: round(tot_orc[mi], 2) for mi in meses_iso},
+        },
+    }
+
+
+@router.get("/dossie")
+def dossie(sku: str, db: Session = Depends(get_db), _: dict = Depends(require_gerente)):
+    """Dossiê do SKU: histórico 24m, plurianual, FVA. Mesmo padrão do TopDown."""
     try:
+        from app.api.routers.perfil_sku import comparativo_plurianual, fva_sku
         ciclo = get_current_cycle(db)
-        tranca_ger = db.query(ControleCiclo).filter(
-            ControleCiclo.ciclo_sop == ciclo,
-            func.upper(func.trim(ControleCiclo.origem)) == ETAPA_BOTTOMUP.upper()
-        ).first()
-        is_fechado = str(tranca_ger.status).strip().upper() == STATUS_CONGELADO if tranca_ger else False
-        return {"status": "success", "fechado": is_fechado}
+        hoje = datetime.date.today().replace(day=1)
+        mes_fechado = (hoje - relativedelta(months=1)).strftime("%Y-%m-%d")
+
+        plurianual = comparativo_plurianual(db, sku, mes_referencia=mes_fechado, ciclo_ativo=ciclo)
+        fva = fva_sku(db, sku, mes_fechado)
+        hist = db.execute(text("""
+            SELECT TO_CHAR(data_pedido,'YYYY-MM') AS mes,
+                   SUM(qt_pedido) AS vendido, SUM(qtfatura) AS faturado
+            FROM fato_vendas
+            WHERE sku = :sku AND data_pedido >= (CURRENT_DATE - INTERVAL '24 months')
+            GROUP BY 1 ORDER BY 1
+        """), {"sku": sku}).fetchall()
+        serie = [{"mes": r.mes, "vendido": int(r.vendido or 0), "faturado": int(r.faturado or 0)} for r in hist]
+        desc = db.execute(text("SELECT descricao FROM dim_produtos WHERE sku=:s"), {"s": sku}).scalar()
+        return {"sku": sku, "descricao": desc or sku, "grafico": serie, "plurianual": plurianual, "fva": fva}
     except Exception as e:
         raise HTTPException(500, repr(e))
-
-
-@router.get("")
-async def listar_gerenciamento(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
-    try:
-        ciclo = get_current_cycle(db)
-
-        td_reg = db.query(ControleCiclo).filter(
-            ControleCiclo.ciclo_sop == ciclo,
-            func.upper(func.trim(ControleCiclo.origem)) == ETAPA_TOPDOWN.upper()
-        ).first()
-        is_topdown_fechado = True if (td_reg and str(td_reg.status).strip().upper() == STATUS_CONGELADO) else False
-
-        dr_reg = db.query(ControleCiclo).filter(
-            ControleCiclo.ciclo_sop == ciclo,
-            func.upper(func.trim(ControleCiclo.origem)) == ETAPA_BOTTOMUP.upper()
-        ).first()
-        is_demand_fechado = True if (dr_reg and str(dr_reg.status).strip().upper() == STATUS_CONGELADO) else False
-
-        _mes_str, _ano_str = ciclo.split('/')
-        hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
-        data_ini = hoje + relativedelta(months=2)
-        data_fim = hoje + relativedelta(months=4)
-        meses_alvo = [(hoje + relativedelta(months=i)).strftime("%Y-%m-%d") for i in range(2, 5)]
-
-        data_hist_inicio = hoje - relativedelta(months=4)
-        q_peso = db.query(FatoVendas.sku, func.sum(FatoVendas.qt_pedido).label('v')).filter(FatoVendas.data_pedido >= data_hist_inicio).group_by(FatoVendas.sku).all()
-        peso_hist_dict = {str(r.sku).strip(): int(r.v or 0) for r in q_peso}
-
-        orc_query = db.execute(text("""
-            SELECT sku, mes_projetado, receita_orcamento 
-            FROM fato_orcamento 
-            WHERE mes_projetado >= :m2 AND mes_projetado <= :m4
-        """), {"m2": data_ini, "m4": data_fim}).fetchall()
-        
-        orc_dict = {}
-        for o in orc_query:
-            orc_dict[f"{o.sku}|{o.mes_projetado}"] = float(o.receita_orcamento or 0)
-
-        q_port = get_truth_query(db, ciclo, data_ini, data_fim)
-        
-        # 🔥 BLINDAGEM PMV (SSOT): A Receita é calculada pelo banco lendo ESTRITAMENTE o pmv_aplicado cravado pelo Pipeline
-        resultados_port = q_port.with_entities(
-            DimProduto.categoria.label('cat'), DimProduto.segmento.label('seg'),
-            FatoIbpGranular.sku, DimProduto.descricao.label('prod_desc'),
-            FatoIbpGranular.mes_projetado,
-            func.sum(FatoIbpGranular.vol_ia).label('v_ia'),
-            func.sum(FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('rec_ia'),
-            func.sum(FatoIbpGranular.vol_topdown).label('v_td'),  
-            func.sum(FatoIbpGranular.vol_topdown * FatoIbpGranular.pmv_aplicado).label('rec_td'),
-            func.sum(FatoIbpGranular.vol_bottomup).label('v_bu'),
-            func.sum(FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('rec_bu'),
-            func.avg(FatoIbpGranular.pmv_aplicado).label('pmv_avg')
-        ).group_by(DimProduto.categoria, DimProduto.segmento, FatoIbpGranular.sku, DimProduto.descricao, FatoIbpGranular.mes_projetado).all()
-
-        def criar_meses():
-            return {"vol_td":0, "receita_td":0, "vol_bu":0, "receita_bu":0, "vol_ia":0, "receita_ia":0, "receita_meta":0, "pmv":0.0}
-
-        arvore_port = {}
-        for p in db.query(DimProduto).all():
-            cat, seg, sk, de = p.categoria or 'SEM CATEGORIA', p.segmento or 'SEM SEGMENTO', p.sku, p.descricao or 'SEM NOME'
-            if cat not in arvore_port:
-                arvore_port[cat] = {"nome": cat, "tipo": "categoria", "meses": {m: criar_meses() for m in meses_alvo}, "segmentos": {}}
-            if seg not in arvore_port[cat]["segmentos"]:
-                arvore_port[cat]["segmentos"][seg] = {"nome": seg, "tipo": "segmento", "meses": {m: criar_meses() for m in meses_alvo}, "produtos": {}}
-            if sk not in arvore_port[cat]["segmentos"][seg]["produtos"]:
-                arvore_port[cat]["segmentos"][seg]["produtos"][sk] = {"id": sk, "nome": de, "produto": sk, "tipo": "produto", "meses": {m: criar_meses() for m in meses_alvo}, "peso_hist": peso_hist_dict.get(sk, 0)}
-
-        for r in resultados_port:
-            cat, seg, sk, ms = r.cat or 'SEM CATEGORIA', r.seg or 'SEM SEGMENTO', r.sku, str(r.mes_projetado)
-            if ms in meses_alvo:
-                v_td, r_td = int(r.v_td or 0), float(r.rec_td or 0)
-                v_bu, r_bu = int(r.v_bu or 0), float(r.rec_bu or 0)
-                v_ia, r_ia = int(r.v_ia or 0), float(r.rec_ia or 0)
-                pmv_avg = float(r.pmv_avg or 0)
-                
-                v_orc_rec = orc_dict.get(f"{sk}|{ms}", 0.0)
-
-                for nivel in [arvore_port[cat]["meses"][ms], arvore_port[cat]["segmentos"][seg]["meses"][ms], arvore_port[cat]["segmentos"][seg]["produtos"][sk]["meses"][ms]]:
-                    nivel["vol_td"] += v_td
-                    nivel["receita_td"] += r_td
-                    nivel["vol_bu"] += v_bu
-                    nivel["receita_bu"] += r_bu
-                    nivel["vol_ia"] += v_ia
-                    nivel["receita_ia"] += r_ia
-                    nivel["receita_meta"] += v_orc_rec
-                    
-                    # Agregação Visual do Preço Médio Ponderado para as Categorias/Segmentos
-                    if nivel["vol_bu"] > 0:
-                        nivel["pmv"] = nivel["receita_bu"] / nivel["vol_bu"]
-                    elif nivel["vol_td"] > 0:
-                        nivel["pmv"] = nivel["receita_td"] / nivel["vol_td"]
-                    else:
-                        nivel["pmv"] = pmv_avg
-
-        final_portfolio = []
-        meses_nomes = {'01':'Jan', '02':'Fev', '03':'Mar', '04':'Abr', '05':'Mai', '06':'Jun', '07':'Jul', '08':'Ago', '09':'Set', '10':'Out', '11':'Nov', '12':'Dez'}
-        
-        for cat_k, cat_v in arvore_port.items():
-            segs = []
-            for seg_k, seg_v in cat_v["segmentos"].items():
-                prods = [{"id": p["id"], "nome": p["nome"], "produto": p["produto"], "tipo": "produto", "peso_hist": p["peso_hist"], "meses": [{"mes_banco": k, "mes_str": f"{meses_nomes.get(k.split('-')[1], k.split('-')[1])}/{k.split('-')[0][2:]}", **v} for k,v in p["meses"].items()]} for p in seg_v["produtos"].values()]
-                segs.append({"id": f"{cat_k}|{seg_k}", "nome": seg_k, "tipo": "segmento", "meses": [{"mes_banco": k, "mes_str": f"{meses_nomes.get(k.split('-')[1], k.split('-')[1])}/{k.split('-')[0][2:]}", **v} for k,v in seg_v["meses"].items()], "subRows": sorted(prods, key=lambda x: x["nome"])})
-            final_portfolio.append({"id": cat_k, "nome": cat_k, "tipo": "categoria", "meses": [{"mes_banco": k, "mes_str": f"{meses_nomes.get(k.split('-')[1], k.split('-')[1])}/{k.split('-')[0][2:]}", **v} for k,v in cat_v["meses"].items()], "subRows": sorted(segs, key=lambda x: x["nome"])})
-
-        return {
-            "status": "success", 
-            "is_topdown_fechado": is_topdown_fechado, 
-            "is_demand_fechado": is_demand_fechado, 
-            "dados": {"portfolio": sorted(final_portfolio, key=lambda x: x["nome"])}
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=repr(e))
 
 
 @router.post("/salvar")
-async def salvar_rascunho_gerencia(payload: PayloadAprovarGerente, db: Session = Depends(get_db), usuario: dict = Depends(require_manager_or_admin)):
-    """
-    Ajusta vol_bottomup por categoria / segmento / SKU e, ao PUBLICAR, propaga
-    para as etapas de jusante nao congeladas.
-
-    Correcoes:
-      - Rateio canonico (ratear_maior_resto): a soma gravada e EXATAMENTE o
-        volume digitado, garantido por assertiva que aborta a transacao. Zero
-        digitado zera todas as linhas do grupo (antes o round acumulado jogava
-        a sobra no ultimo cliente e o zero podia nao zerar).
-      - Imutabilidade: mes ja realizado nao aceita ajuste.
-      - Nomes de lock alinhados ao banco (TopDown/BottomUP/CONGELADO).
-      - Propagacao segura ao publicar (antes o Bottom-Up nao propagava nada).
-    """
+def salvar(payload: PayloadSalvar, db: Session = Depends(get_db),
+           usuario: dict = Depends(require_gerente)):
     try:
         ciclo = get_current_cycle(db)
-        check_global_lock(db, ciclo)
-        check_topdown_lock(db, ciclo)
-        check_demand_lock(db, ciclo)
+        if etapa_congelada(db, ciclo, ETAPA_BOTTOMUP):
+            raise HTTPException(423, "Etapa já congelada pelo Administrador.")
+        if not etapa_congelada(db, ciclo, ETAPA_TOPDOWN):
+            raise HTTPException(423, "Aguardando a Diretoria liberar o Top-Down.")
 
-        hoje = datetime.date.today()
-        data_hist = hoje - relativedelta(months=4)
+        nome_user = usuario.get("nome", usuario.get("email", "?"))
+        total = 0
+        for aj in payload.ajustes:
+            data_alvo = parse_date_safe(
+                aj.mes_projetado if len(aj.mes_projetado) > 7 else aj.mes_projetado + "-01")
+            antigo = db.execute(text("""
+                SELECT COALESCE(SUM(vol_bottomup),0) FROM fato_ibp_granular
+                WHERE ciclo_sop=:c AND sku=:s AND mes_projetado=:m
+            """), {"c": ciclo, "s": aj.sku, "m": data_alvo}).scalar()
 
-        if not payload.ajustes:
-            return {"status": "success", "message": "Nenhuma alteração enviada."}
-
-        q_vendas = db.query(FatoVendas.sku, FatoVendas.cgc, func.sum(FatoVendas.qt_pedido).label('v')).filter(FatoVendas.data_pedido >= data_hist).group_by(FatoVendas.sku, FatoVendas.cgc).all()
-        peso_hist = {(r.sku, r.cgc): int(r.v or 0) for r in q_vendas}
-
-        for ajuste in payload.ajustes:
-            data_alvo = parse_date_safe(ajuste.mes_projetado)
-
-            # Passado e imutavel — nem publicacao reescreve mes fechado.
-            check_imutabilidade_mes(data_alvo, ajuste.chave, contexto="Bottom-Up")
-
-            partes = ajuste.chave.split('|')
-            q = get_truth_query(db, ciclo, data_alvo, data_alvo)
-            
-            if len(partes) == 1:
-                q = q.filter(DimProduto.categoria == partes[0])
-            elif len(partes) == 2:
-                q = q.filter(DimProduto.categoria == partes[0], DimProduto.segmento == partes[1])
-            else:
-                q = q.filter(FatoIbpGranular.sku == ajuste.chave)
-                
-            linhas = q.all()
-            if not linhas: continue
-
-            vol_alvo = int(ajuste.novo_volume)
-
-            # Peso: primeiro vol_topdown (etapa anterior); na falta, historico de
-            # venda; por ultimo, igualitario. ratear_maior_resto faz o resto.
-            pesos_td = [max(0.0, float(l.vol_topdown or 0)) for l in linhas]
-            if sum(pesos_td) > 0:
-                pesos = pesos_td
-            else:
-                pesos_h = [float(peso_hist.get((l.sku, l.cgc), 0)) for l in linhas]
-                pesos = pesos_h if sum(pesos_h) > 0 else [1.0] * len(linhas)
-
-            partes_vol = ratear_maior_resto(vol_alvo, pesos)
-
-            if sum(partes_vol) != vol_alvo:
-                raise HTTPException(
-                    status_code=500,
-                    detail=(f"Falha de balanço no Bottom-Up da chave {ajuste.chave} "
-                            f"em {data_alvo.strftime('%m/%Y')}: digitado {vol_alvo}, "
-                            f"rateado {sum(partes_vol)}.")
-                )
-
-            # 🔥 BLINDAGEM PMV (SSOT): grava APENAS O VOLUME (vol_bottomup). Zero
-            # e gravado explicitamente (nao pulado). O PMV jamais e tocado.
-            for l, parte in zip(linhas, partes_vol):
-                l.vol_bottomup = int(parte)
-
-        if payload.origem_ajuste == 'PUBLICAR':
-            registro = db.query(ControleCiclo).filter(
-                ControleCiclo.ciclo_sop == ciclo,
-                func.upper(func.trim(ControleCiclo.origem)) == ETAPA_BOTTOMUP.upper()
-            ).first()
-            if not registro:
-                db.add(ControleCiclo(ciclo_sop=ciclo, origem=ETAPA_BOTTOMUP, status=STATUS_CONGELADO))
-            else:
-                registro.status = STATUS_CONGELADO
-
-            db.flush()
-            # Entrega o Bottom-Up as etapas de jusante que ainda nao publicaram.
-            propagar_para_jusante(db, ciclo, ETAPA_BOTTOMUP, "vol_bottomup")
+            total += escrever_volume_rateado(
+                db=db, ciclo=ciclo, sku=aj.sku, mes=data_alvo,
+                volume_alvo=int(aj.novo_volume), etapa=ETAPA_BOTTOMUP)
+            registrar_log_auditoria(
+                db=db, ciclo=ciclo, origem="Demanda Comercial (Bottom-Up)",
+                usuario=nome_user, sku=aj.sku, cliente="TODOS_OS_CLIENTES",
+                mes=data_alvo, v_antigo=int(antigo or 0), v_novo=int(aj.novo_volume))
 
         db.commit()
-        return {"status": "success", "message": "Proposta S&OP Bottom-Up salva com sucesso!"}
+        return {"status": "success", "linhas": total}
     except HTTPException:
-        db.rollback()
-        raise
+        db.rollback(); raise
     except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=repr(e))
+        db.rollback(); raise HTTPException(500, repr(e))
 
 
-@router.get("/grafico")
-async def grafico_gerenciamento(produto_id: str, db: Session = Depends(get_db)):
+@router.post("/congelar")
+def congelar(db: Session = Depends(get_db), _: dict = Depends(require_admin)):
     try:
-        ciclo_atual = get_current_cycle(db)
-        ciclo_anterior = get_previous_cycle(db)
-        _mes_str, _ano_str = ciclo_atual.split('/')
-        hoje = datetime.date(int(_ano_str), int(_mes_str), 1)
-        
-        inicio_projeto = datetime.date(2026, 4, 1)
-        inicio_hist = hoje - relativedelta(months=24)
-        m2_comercial = hoje + relativedelta(months=2)
-
-        calendario = {}
-        curr = inicio_hist
-        while curr <= hoje + relativedelta(months=4):
-            mes_str = curr.strftime('%Y-%m')
-            calendario[mes_str] = {"Realizado": None, "IA": None, "CicloAnterior": None, "Comercial": None, "Topdown": None}
-            curr += relativedelta(months=1)
-
-        q_hist = db.query(
-            func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'),
-            func.sum(FatoVendas.qt_pedido).label('realizado')
-        ).filter(FatoVendas.data_pedido >= inicio_hist, FatoVendas.sku == produto_id)
-
-        for row in q_hist.group_by('mes_ano').all():
-            if row.mes_ano in calendario:
-                calendario[row.mes_ano]["Realizado"] = int(row.realizado or 0)
-
-        q_proj = db.query(
-            func.to_char(FatoIbpGranular.mes_projetado, 'YYYY-MM').label('mes_ano'),
-            FatoIbpGranular.ciclo_sop,
-            func.sum(FatoIbpGranular.vol_ia).label('ia'),
-            func.sum(FatoIbpGranular.vol_bottomup).label('bu'),
-            func.sum(FatoIbpGranular.vol_topdown).label('td'),
-            func.sum(FatoIbpGranular.vol_final).label('final')
-        ).filter(FatoIbpGranular.sku == produto_id)
-
-        proj_por_mes = defaultdict(dict)
-        for row in q_proj.group_by('mes_ano', FatoIbpGranular.ciclo_sop).all():
-            proj_por_mes[row.mes_ano][row.ciclo_sop] = {
-                "ia": int(row.ia or 0), 
-                "bu": int(row.bu or 0),
-                "td": int(row.td or 0),
-                "final": int(row.final or 0)
-            }
-
-        ciclo_base_zero = datetime.datetime.strptime('04/2026', '%m/%Y').date()
-        ciclo_atual_dt = datetime.datetime.strptime(ciclo_atual, '%m/%Y').date()
-
-        for ms in calendario.keys():
-            mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
-            if ms not in proj_por_mes: continue
-
-            if mes_dt >= m2_comercial:
-                if ciclo_atual in proj_por_mes[ms]:
-                    calendario[ms]["IA"] = proj_por_mes[ms][ciclo_atual]["ia"]
-                    calendario[ms]["Topdown"] = proj_por_mes[ms][ciclo_atual]["td"]
-                    calendario[ms]["Comercial"] = proj_por_mes[ms][ciclo_atual]["bu"]
-                
-                if ciclo_anterior in proj_por_mes[ms]:
-                    calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_anterior]["final"]
-            else:
-                if mes_dt >= inicio_projeto:
-                    alvo_ia_dt = mes_dt - relativedelta(months=2)
-                    if alvo_ia_dt >= inicio_projeto:
-                        ciclo_ia_str = f"{alvo_ia_dt.month:02d}/{alvo_ia_dt.year}"
-                        
-                        if ciclo_ia_str in proj_por_mes[ms]:
-                            calendario[ms]["IA"] = proj_por_mes[ms][ciclo_ia_str]["ia"]
-                            calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_ia_str]["final"]
-                    else:
-                        ciclo_origem_dt = inicio_projeto
-                        ciclo_origem_str = f"{ciclo_origem_dt.month:02d}/{ciclo_origem_dt.year}"
-                        
-                        if ciclo_origem_str in proj_por_mes[ms]:
-                            calendario[ms]["IA"] = proj_por_mes[ms][ciclo_origem_str]["ia"]
-                            calendario[ms]["CicloAnterior"] = proj_por_mes[ms][ciclo_origem_str]["final"]
-
-        meses_pt = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
-        timeline = []
-        for ms, v in sorted(calendario.items()):
-            mes_dt = datetime.datetime.strptime(ms, '%Y-%m').date()
-            mostrar_ia_lag = mes_dt >= inicio_projeto
-            
-            nome_formatado = f"{meses_pt[mes_dt.month - 1]}/{mes_dt.strftime('%y')}"
-            
-            timeline.append({
-                "name": nome_formatado,
-                "data_iso": f"{ms}-01",
-                "Realizado": None if mes_dt >= hoje else (v["Realizado"] or 0),
-                "IA": v["IA"] if mostrar_ia_lag else None,
-                "CicloAnterior": v["CicloAnterior"] if mostrar_ia_lag else None,
-                "Topdown": v["Topdown"] if mes_dt >= m2_comercial else None,
-                "Comercial": v["Comercial"] if mes_dt >= m2_comercial else None
-            })
-
-        return {"status": "success", "dados": timeline}
+        ciclo = get_current_cycle(db)
+        congelar_etapa(db, ciclo, ETAPA_BOTTOMUP)
+        res = propagar_para_jusante(db, ciclo, ETAPA_BOTTOMUP)
+        db.commit()
+        return {"status": "success", "propagou": res["propagou"], "preservou": res["preservou"]}
     except Exception as e:
-        raise HTTPException(500, repr(e))
+        db.rollback(); raise HTTPException(500, repr(e))
+
+
+@router.post("/reabrir")
+def reabrir(db: Session = Depends(get_db), _: dict = Depends(require_admin)):
+    try:
+        ciclo = get_current_cycle(db)
+        reabrir_etapa(db, ciclo, ETAPA_BOTTOMUP)
+        db.commit()
+        return {"status": "success"}
+    except Exception as e:
+        db.rollback(); raise HTTPException(500, repr(e))
+
+
+@router.get("/exportar")
+def exportar(db: Session = Depends(get_db), _: dict = Depends(require_gerente)):
+    import io
+    from fastapi.responses import StreamingResponse
+    ciclo = get_current_cycle(db)
+    meses = get_working_window_months(db)
+    rows = db.execute(text("""
+        SELECT f.sku, COALESCE(p.descricao,'') AS descricao,
+               COALESCE(p.categoria,'') AS categoria, COALESCE(p.segmento,'') AS segmento,
+               TO_CHAR(f.mes_projetado,'MM/YYYY') AS mes,
+               SUM(f.vol_ia) AS ia, SUM(f.vol_topdown) AS td, SUM(f.vol_bottomup) AS bu,
+               AVG(f.pmv_aplicado) AS pmv
+        FROM fato_ibp_granular f
+        LEFT JOIN dim_produtos p ON p.sku = f.sku
+        WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)
+        GROUP BY f.sku, p.descricao, p.categoria, p.segmento, f.mes_projetado
+        ORDER BY p.categoria, p.segmento, p.descricao, f.mes_projetado
+    """), {"c": ciclo, "meses": meses}).fetchall()
+
+    def _num(v): return f"{float(v or 0):.2f}".replace(".", ",")
+    linhas = ["Categoria;Segmento;SKU;Descricao;Mes;IA (cx);TopDown (cx);BottomUp (cx);PMV;Receita (R$)"]
+    for r in rows:
+        bu = int(r.bu or 0); pmv = float(r.pmv or 0)
+        linhas.append(";".join([r.categoria, r.segmento, r.sku, r.descricao, r.mes,
+            str(int(r.ia or 0)), str(int(r.td or 0)), str(bu), _num(pmv), _num(bu*pmv)]))
+    buffer = io.StringIO("\r\n".join(linhas))
+    resp = StreamingResponse(iter([buffer.getvalue()]), media_type="text/csv")
+    resp.headers["Content-Disposition"] = f'attachment; filename="demanda_comercial_{ciclo.replace("/","_")}.csv"'
+    return resp

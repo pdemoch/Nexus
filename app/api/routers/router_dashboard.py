@@ -1,308 +1,330 @@
-from fastapi import APIRouter, HTTPException, Depends
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from typing import List
-from sqlalchemy.orm import Session
-from sqlalchemy import func, text
+"""
+=====================================================================
+ROUTER — DEMANDA FINAL / DASHBOARD S&OP  [reconstrução]
+=====================================================================
+A sala de guerra do C-Level. Consolida o plano de todas as etapas e publica o
+número final (vol_final). Acesso amplo (Admin, Gerente, Supply, Marketing,
+C-Level via Sidebar), mas só o ADMIN congela/publica.
+
+Capacidades exclusivas desta tela:
+  • Comparador de cenários por SKU: as 5 camadas (IA/TopDown/BottomUP/Meta/
+    Supply) lado a lado; o CEO adota qualquer uma como Final ou digita a sua.
+  • Toggles: caixas<->R$, vs Orçamento, vs Ciclo Anterior.
+  • Abertura micro: categoria -> segmento -> SKU -> razão social.
+  • Dossiê enriquecido (via /dossie): plurianual + PMV + FVA + dispersão.
+
+Grava vol_final. Rateia sobre vol_meta (decisão comercial). Publicar = congelar
+a etapa Final (só Admin).
+"""
+
 import datetime
 from dateutil.relativedelta import relativedelta
-import io
-import pandas as pd
+from typing import List, Optional
+from collections import defaultdict
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from app.core.database import get_db
-from app.models.domain_models import DimProduto, DimCliente, FatoIbpGranular, ControleCiclo, FatoVendas
 from app.api.routers.router_auth import get_current_user
-
 from app.api.routers.shared_ibp import (
-    get_current_cycle, get_previous_cycle, get_projection_window, 
-    get_truth_query, parse_date_safe, registrar_log_auditoria,
-    escrever_volume_rateado,
-    ETAPA_SUPPLY, ETAPA_FINAL, STATUS_CONGELADO
+    get_current_cycle, get_previous_cycle, get_working_window_months,
+    escrever_volume_rateado, congelar_etapa, reabrir_etapa, etapa_congelada,
+    registrar_log_auditoria, parse_date_safe, ETAPA_FINAL,
+    CAMPO_DA_ETAPA, ETAPA_TOPDOWN, ETAPA_BOTTOMUP, ETAPA_METAS, ETAPA_SUPPLY,
 )
 
-router = APIRouter(prefix="/api/v1/dashboard", tags=["S&OP Global Dashboard"])
+router = APIRouter(prefix="/api/v1/dashboard", tags=["Demanda Final (Dashboard)"])
 
-class AjusteGlobal(BaseModel):
-    nivel: str
-    chave: str
+
+def require_admin(usuario: dict = Depends(get_current_user)):
+    if usuario.get("funcao") != "Administrador":
+        raise HTTPException(403, "Somente o Administrador publica o S&OP.")
+    return usuario
+
+
+class AjusteFinal(BaseModel):
+    sku: str
     mes_projetado: str
     novo_volume: int
 
-class PayloadAprovarGlobal(BaseModel):
-    ajustes: List[AjusteGlobal]
+class PayloadSalvar(BaseModel):
+    ajustes: List[AjusteFinal]
 
 
-@router.get("/global")
-async def carregar_dashboard_global(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
-    perfis_permitidos = ['Administrador', 'Gerente', 'Supply Chain', 'Marketing', 'C-Level', 'Diretoria']
-    if usuario_logado.get('funcao') not in perfis_permitidos:
-        raise HTTPException(status_code=403, detail="Acesso restrito à Diretoria, Gerência ou Supply Chain.")
-        
+@router.get("/status")
+def status(db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
+    ciclo = get_current_cycle(db)
+    return {"ciclo": ciclo, "publicado": etapa_congelada(db, ciclo, ETAPA_FINAL)}
+
+
+@router.get("/tabela")
+def tabela(db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
+    """
+    Consolidação categoria->segmento->SKU. Cada célula traz as 5 camadas +
+    final + PMV, orçamento e o final do ciclo anterior (para o toggle de
+    comparação). Totalizadores por mês (volume, faturamento, orçamento, anterior).
+    """
+    ciclo = get_current_cycle(db)
+    ciclo_ant = get_previous_cycle(db)
+    meses = get_working_window_months(db)
+    meses_iso = [m.strftime("%Y-%m-%d") for m in meses]
+    publicado = etapa_congelada(db, ciclo, ETAPA_FINAL)
+
+    plano = db.execute(text("""
+        SELECT f.sku,
+               COALESCE(p.descricao,'SEM DESCRICAO')  AS descricao,
+               COALESCE(p.categoria,'SEM CATEGORIA')  AS categoria,
+               COALESCE(p.segmento,'SEM SEGMENTO')    AS segmento,
+               TO_CHAR(f.mes_projetado,'YYYY-MM-DD')  AS mes,
+               SUM(f.vol_ia)        AS ia,
+               SUM(f.vol_topdown)   AS topdown,
+               SUM(f.vol_bottomup)  AS bottomup,
+               SUM(f.vol_meta)      AS meta,
+               SUM(f.vol_supply)    AS supply,
+               SUM(f.vol_final)     AS final,
+               AVG(f.pmv_aplicado)  AS pmv
+        FROM fato_ibp_granular f
+        LEFT JOIN dim_produtos p ON p.sku = f.sku
+        WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)
+        GROUP BY f.sku, p.descricao, p.categoria, p.segmento, f.mes_projetado
+    """), {"c": ciclo, "meses": meses}).fetchall()
+
+    # Ciclo anterior (mesmo mês projetado, ciclo -1) — para o toggle "vs anterior"
+    ant = defaultdict(dict)
+    ant_rows = db.execute(text("""
+        SELECT sku, TO_CHAR(mes_projetado,'YYYY-MM-DD') AS mes, SUM(vol_final) AS final
+        FROM fato_ibp_granular
+        WHERE ciclo_sop = :ca AND mes_projetado = ANY(:meses)
+        GROUP BY sku, mes_projetado
+    """), {"ca": ciclo_ant, "meses": meses}).fetchall()
+    for r in ant_rows:
+        ant[r.sku][r.mes] = int(r.final or 0)
+
+    # Orçamento
+    orc = defaultdict(dict)
+    orc_rows = db.execute(text("""
+        SELECT sku, TO_CHAR(mes_projetado,'YYYY-MM-DD') AS mes, SUM(receita_orcamento) AS rec
+        FROM fato_orcamento WHERE mes_projetado = ANY(:meses)
+        GROUP BY sku, mes_projetado
+    """), {"meses": meses}).fetchall()
+    for r in orc_rows:
+        orc[r.sku][r.mes] = float(r.rec or 0)
+
+    tree: dict = {}
+    tot = {mi: {"vol": 0, "fat": 0.0, "orc": 0.0, "ant": 0} for mi in meses_iso}
+
+    for r in plano:
+        cat = tree.setdefault(r.categoria, {"nome": r.categoria, "segmentos": {}})
+        seg = cat["segmentos"].setdefault(r.segmento, {"nome": r.segmento, "skus": {}})
+        sk = seg["skus"].setdefault(r.sku, {"sku": r.sku, "descricao": r.descricao, "meses": {}})
+        fin = int(r.final or 0); pmv = float(r.pmv or 0)
+        sk["meses"][r.mes] = {
+            "ia": int(r.ia or 0), "topdown": int(r.topdown or 0),
+            "bottomup": int(r.bottomup or 0), "meta": int(r.meta or 0),
+            "supply": int(r.supply or 0), "final": fin,
+            "pmv": round(pmv, 2), "receita": round(fin * pmv, 2),
+            "orcamento": round(orc.get(r.sku, {}).get(r.mes, 0.0), 2),
+            "final_anterior": ant.get(r.sku, {}).get(r.mes, None),
+        }
+        tot[r.mes]["vol"] += fin
+        tot[r.mes]["fat"] += fin * pmv
+        tot[r.mes]["orc"] += orc.get(r.sku, {}).get(r.mes, 0.0)
+        tot[r.mes]["ant"] += ant.get(r.sku, {}).get(r.mes, 0) or 0
+
+    categorias = []
+    for cat in sorted(tree.values(), key=lambda c: c["nome"]):
+        segs = []
+        for seg in sorted(cat["segmentos"].values(), key=lambda s: s["nome"]):
+            skus = sorted(seg["skus"].values(), key=lambda s: s["descricao"])
+            segs.append({"nome": seg["nome"], "skus": skus})
+        categorias.append({"nome": cat["nome"], "segmentos": segs})
+
+    return {
+        "ciclo": ciclo, "ciclo_anterior": ciclo_ant, "publicado": publicado,
+        "meses": meses_iso, "categorias": categorias,
+        "totais": {
+            "volume": {mi: tot[mi]["vol"] for mi in meses_iso},
+            "faturamento": {mi: round(tot[mi]["fat"], 2) for mi in meses_iso},
+            "orcamento": {mi: round(tot[mi]["orc"], 2) for mi in meses_iso},
+            "anterior": {mi: tot[mi]["ant"] for mi in meses_iso},
+        },
+    }
+
+
+@router.get("/dossie")
+def dossie(sku: str, db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
+    """
+    Dossiê enriquecido do Dashboard: dossiê padrão (plurianual+FVA+24m) +
+    comparador de cenários (as 5 camadas por mês) + dispersão entre camadas.
+    """
     try:
-        ciclo_atual = get_current_cycle(db)
-        ciclo_anterior = get_previous_cycle(db)
-        m2_str, m4_str = get_projection_window(db)
-        m2_date = parse_date_safe(m2_str)
-        
-        # 1. ORÇAMENTO FINANCEIRO
-        orc_query = db.execute(text("""
-            SELECT sku, mes_projetado, receita_orcamento 
-            FROM fato_orcamento 
-            WHERE mes_projetado >= :m2 AND mes_projetado <= :m4
-        """), {"m2": m2_date, "m4": parse_date_safe(m4_str)}).fetchall()
-        
-        orc_dict = {}
-        for o in orc_query:
-            sku = o.sku
-            mes_str = str(o.mes_projetado)
-            if sku not in orc_dict: orc_dict[sku] = {}
-            orc_dict[sku][mes_str] = float(o.receita_orcamento or 0)
+        from app.api.routers.perfil_sku import comparativo_plurianual, fva_sku
+        ciclo = get_current_cycle(db)
+        meses = get_working_window_months(db)
+        hoje = datetime.date.today().replace(day=1)
+        mes_fechado = (hoje - relativedelta(months=1)).strftime("%Y-%m-%d")
 
-        # 2. JANELA DE ASSERTIVIDADE (M-1)
-        mes_passado = m2_date - relativedelta(months=1)
-        ia_m1_query = db.query(FatoIbpGranular.sku, FatoIbpGranular.cgc, func.sum(FatoIbpGranular.vol_ia).label('vol_ia_m1')).filter(FatoIbpGranular.ciclo_sop == ciclo_anterior, FatoIbpGranular.mes_projetado == mes_passado).group_by(FatoIbpGranular.sku, FatoIbpGranular.cgc).all()
-        vendas_m1_query = db.query(FatoVendas.sku, FatoVendas.cgc, func.sum(FatoVendas.qt_pedido).label('vol_real_m1')).filter(FatoVendas.data_pedido >= mes_passado, FatoVendas.data_pedido < m2_date).group_by(FatoVendas.sku, FatoVendas.cgc).all()
+        plurianual = comparativo_plurianual(db, sku, mes_referencia=mes_fechado, ciclo_ativo=ciclo)
+        fva = fva_sku(db, sku, mes_fechado)
 
-        assertividade_map = {}
-        vendas_m1_dict = {f"{v.sku}|{v.cgc}": float(v.vol_real_m1 or 0) for v in vendas_m1_query}
-        for ia in ia_m1_query:
-            chave, v_real, v_ia = f"{ia.sku}|{ia.cgc}", vendas_m1_dict.get(f"{ia.sku}|{ia.cgc}", 0), float(ia.vol_ia_m1 or 0)
-            assertividade_map[chave] = max(0, 100 - ((abs(v_ia - v_real) / v_real) * 100)) if v_real > 0 and v_ia > 0 else (0 if v_real > 0 else 100 if v_ia == 0 else 0)
+        hist = db.execute(text("""
+            SELECT TO_CHAR(data_pedido,'YYYY-MM') AS mes,
+                   SUM(qt_pedido) AS vendido, SUM(qtfatura) AS faturado
+            FROM fato_vendas
+            WHERE sku = :sku AND data_pedido >= (CURRENT_DATE - INTERVAL '24 months')
+            GROUP BY 1 ORDER BY 1
+        """), {"sku": sku}).fetchall()
+        serie = [{"mes": r.mes, "vendido": int(r.vendido or 0), "faturado": int(r.faturado or 0)} for r in hist]
 
-        # 3. COMPARAÇÃO COM CICLO ANTERIOR
-        prev_query = db.query(FatoIbpGranular.sku, FatoIbpGranular.cgc, FatoIbpGranular.mes_projetado, FatoIbpGranular.vol_final).filter(FatoIbpGranular.ciclo_sop == ciclo_anterior, FatoIbpGranular.mes_projetado >= m2_date, FatoIbpGranular.mes_projetado <= parse_date_safe(m4_str)).all()
-        prev_map = {f"{p.sku}|{p.cgc}|{str(p.mes_projetado)}": float(p.vol_final or 0) for p in prev_query}
+        # Comparador de cenários: as 5 camadas por mês da janela
+        camadas = db.execute(text("""
+            SELECT TO_CHAR(mes_projetado,'YYYY-MM-DD') AS mes,
+                   SUM(vol_ia) AS ia, SUM(vol_topdown) AS topdown,
+                   SUM(vol_bottomup) AS bottomup, SUM(vol_meta) AS meta,
+                   SUM(vol_supply) AS supply, SUM(vol_final) AS final
+            FROM fato_ibp_granular
+            WHERE sku = :sku AND ciclo_sop = :c AND mes_projetado = ANY(:meses)
+            GROUP BY mes_projetado ORDER BY mes_projetado
+        """), {"sku": sku, "c": ciclo, "meses": meses}).fetchall()
 
-        # 4. CONSULTA ATUAL S&OP GLOBAL - AJUSTADA CIRURGICAMENTE
-        # Removemos joins complexos e queries pesadas. Lemos diretamente f.pmv_aplicado da fato
-        query = get_truth_query(db, ciclo_atual, m2_str, m4_str).with_entities(
-            DimProduto.categoria, FatoIbpGranular.sku, DimProduto.descricao, DimCliente.razaosocial, DimCliente.cgc,
-            FatoIbpGranular.mes_projetado, FatoIbpGranular.vol_ia, FatoIbpGranular.vol_topdown, 
-            FatoIbpGranular.vol_bottomup, FatoIbpGranular.vol_supply, FatoIbpGranular.vol_final, 
-            FatoIbpGranular.vol_meta, FatoIbpGranular.pmv_aplicado, FatoIbpGranular.justificativa_supply,
-            (FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('rec_ia'),
-            (FatoIbpGranular.vol_topdown * FatoIbpGranular.pmv_aplicado).label('rec_td'),
-            (FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('rec_bu'),
-            (FatoIbpGranular.vol_supply * FatoIbpGranular.pmv_aplicado).label('rec_supply'),
-            (FatoIbpGranular.vol_final * FatoIbpGranular.pmv_aplicado).label('rec_final')
-        )
+        cenarios = []
+        for r in camadas:
+            vals = {"ia": int(r.ia or 0), "topdown": int(r.topdown or 0),
+                    "bottomup": int(r.bottomup or 0), "meta": int(r.meta or 0),
+                    "supply": int(r.supply or 0), "final": int(r.final or 0)}
+            # dispersão: amplitude relativa entre as camadas de plano
+            plan_layers = [vals["topdown"], vals["bottomup"], vals["meta"], vals["supply"]]
+            positivos = [v for v in plan_layers if v > 0]
+            disp = 0.0
+            if positivos:
+                disp = (max(positivos) - min(positivos)) / max(positivos)
+            cenarios.append({"mes": r.mes, **vals, "dispersao": round(disp, 3)})
 
-        dados_enriquecidos = []
-        for r in query.all():
-            cgc, sku, mes_str = r.cgc, r.sku, str(r.mes_projetado)
-            chave_hist, chave_prev = f"{sku}|{cgc}", f"{sku}|{cgc}|{mes_str}"
-
-            vol_ia, vol_final, vol_bu, vol_sp, pmv_atual = float(r.vol_ia or 0), float(r.vol_final or 0), float(r.vol_bottomup or 0), float(r.vol_supply or 0), float(r.pmv_aplicado or 0)
-            vol_anterior = prev_map.get(chave_prev, vol_final)
-            
-            dados_enriquecidos.append({
-                "categoria": r.categoria, "sku": sku, "descricao": r.descricao, "cgc": cgc, "razaosocial": r.razaosocial, "mes_projetado": mes_str,
-                "vol_ia": int(vol_ia), "vol_topdown": int(r.vol_topdown or 0), "vol_bottomup": int(vol_bu), "vol_supply": int(vol_sp), "vol_final": int(vol_final), "vol_meta": int(r.vol_meta or 0),
-                "pmv_aplicado": pmv_atual, "rec_ia": float(r.rec_ia or 0), "rec_td": float(r.rec_td or 0), "rec_bu": float(r.rec_bu or 0), "rec_supply": float(r.rec_supply or 0), "rec_final": float(r.rec_final or 0),
-                "justificativa_supply": getattr(r, 'justificativa_supply', '') or "", "delta_ia_comercial_vol": int(vol_ia - vol_bu), "impacto_financeiro_ia_brl": round((vol_ia - vol_bu) * pmv_atual, 2),
-                "vol_hist_media": 0.0, "pmv_hist_media": 0.0, "crescimento_hist_pct": 0.0, "assertividade_ia": round(assertividade_map.get(chave_hist, 0.0), 1),
-                "vol_anterior": int(vol_anterior), "delta_ciclo_vol": int(vol_final - vol_anterior), "corte_supply_vol": int(max(0, vol_bu - vol_sp)), "unmet_demand_brl": round(max(0, vol_bu - vol_sp) * pmv_atual, 2),
-                "var_pmv_pct": 0.0
-            })
-        
-        # Nomes/status alinhados ao banco (Final/Supply/CONGELADO). Antes
-        # procurava 'S&OP-Final'/'Fechado' e o is_locked NUNCA reconhecia a
-        # publicacao real (banco: origem='Final', status='CONGELADO').
-        reg = db.query(ControleCiclo).filter(
-            ControleCiclo.ciclo_sop == ciclo_atual,
-            func.upper(func.trim(ControleCiclo.origem)) == ETAPA_FINAL.upper()
-        ).first()
-        is_locked = str(reg.status).strip().upper() == STATUS_CONGELADO if reg else False
-        reg_sp = db.query(ControleCiclo).filter(
-            ControleCiclo.ciclo_sop == ciclo_atual,
-            func.upper(func.trim(ControleCiclo.origem)) == ETAPA_SUPPLY.upper()
-        ).first()
-
-        if not is_locked and (not reg_sp or str(reg_sp.status).strip().upper() != STATUS_CONGELADO):
-            return {"status": "success", "is_locked": True, "lock_message": "Aguardando encerramento do Supply Review (Fase 3)", "dados": dados_enriquecidos, "orcamento": orc_dict}
-
-        return {"status": "success", "is_locked": is_locked, "lock_message": "Demanda Irrestrita Publicada" if is_locked else "Plano Aberto para Approvação Final", "dados": dados_enriquecidos, "orcamento": orc_dict}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/grafico")
-async def grafico_global(chave_matriz: str, nivel_hierarquia: str = 'categoria', db: Session = Depends(get_db)):
-    try:
-        partes = chave_matriz.split('|')
-        categoria, sku, cliente = None, None, None
-        
-        if nivel_hierarquia == 'cliente':
-            cliente = partes[0]
-            if len(partes) > 1: sku = partes[1]
-        else:
-            categoria = partes[0]
-            if len(partes) > 1: sku = partes[1]
-
-        m2_str, _ = get_projection_window(db)
-        m2_date = parse_date_safe(m2_str)
-        hoje = datetime.date.today()
-        mes_atual_inicio = hoje.replace(day=1)
-        ciclo_ant, ciclo_atual = get_previous_cycle(db), get_current_cycle(db)
-
-        inicio_hist = hoje - relativedelta(years=2)
-
-        orc_graf_query = db.execute(text("""
-            SELECT o.mes_projetado, SUM(o.receita_orcamento) as rec
-            FROM fato_orcamento o
-            JOIN dim_produtos p ON o.sku = p.sku
-            WHERE o.mes_projetado >= :inicio
-            AND (:categoria IS NULL OR p.categoria = :categoria)
-            AND (:sku IS NULL OR o.sku = :sku)
-            GROUP BY o.mes_projetado
-        """), {"inicio": inicio_hist, "categoria": categoria, "sku": sku}).fetchall()
-        
-        orc_graf_map = {str(o.mes_projetado): float(o.rec) for o in orc_graf_query}
-
-        q_hist = db.query(func.to_char(FatoVendas.data_pedido, 'YYYY-MM').label('mes_ano'), func.sum(FatoVendas.qt_pedido).label('vol')).join(DimProduto, FatoVendas.sku == DimProduto.sku).join(DimCliente, FatoVendas.cgc == DimCliente.cgc).filter(FatoVendas.data_pedido >= inicio_hist)
-        q_all_ibp = db.query(FatoIbpGranular.ciclo_sop, FatoIbpGranular.mes_projetado, func.sum(FatoIbpGranular.vol_ia).label('ia'), func.sum(FatoIbpGranular.vol_bottomup).label('bu'), func.sum(FatoIbpGranular.vol_supply).label('sp'), func.sum(FatoIbpGranular.vol_final).label('final')).join(DimProduto, FatoIbpGranular.sku == DimProduto.sku).join(DimCliente, FatoIbpGranular.cgc == DimCliente.cgc)
-
-        if cliente:
-            q_hist = q_hist.filter(func.upper(func.trim(DimCliente.razaosocial)) == cliente.strip().upper())
-            q_all_ibp = q_all_ibp.filter(func.upper(func.trim(DimCliente.razaosocial)) == cliente.strip().upper())
-        elif categoria:
-            q_hist = q_hist.filter(DimProduto.categoria == categoria.strip())
-            q_all_ibp = q_all_ibp.filter(DimProduto.categoria == categoria.strip())
-            
-        if sku:
-            q_hist = q_hist.filter(FatoVendas.sku == sku.strip())
-            q_all_ibp = q_all_ibp.filter(FatoIbpGranular.sku == sku.strip())
-
-        hist_dict = {h.mes_ano: int(h.vol or 0) for h in q_hist.group_by('mes_ano').all()}
-        all_ibp_res = q_all_ibp.group_by(FatoIbpGranular.ciclo_sop, FatoIbpGranular.mes_projetado).all()
-
-        ibp_map = {}
-        for r in all_ibp_res:
-            d_iso = str(r.mes_projetado)
-            if d_iso not in ibp_map: ibp_map[d_iso] = {}
-            ibp_map[d_iso][r.ciclo_sop] = {'ia': int(r.ia or 0), 'bu': int(r.bu or 0), 'sp': int(r.sp or 0), 'final': int(r.final or 0)}
-
-        timeline = []
-        meses_pt = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
-
-        for i in range(12, 0, -1):
-            dt = mes_atual_inicio - relativedelta(months=i)
-            mes_str, dt_iso = dt.strftime('%Y-%m'), dt.strftime('%Y-%m-%d')
-            ciclo_do_mes, ciclo_mes_passado = dt.strftime('%m/%Y'), (dt - relativedelta(months=1)).strftime('%m/%Y')
-            
-            dados_mes, dados_lag1 = ibp_map.get(dt_iso, {}).get(ciclo_do_mes, {}), ibp_map.get(dt_iso, {}).get(ciclo_mes_passado, {})
-            timeline.append({"name": f"{meses_pt[dt.month - 1]}/{dt.strftime('%y')}", "data_iso": dt_iso, "Realizado": hist_dict.get(mes_str, 0), "IA": dados_mes.get('ia', None), "Comercial": None, "Supply": None, "Final": None, "CicloAnterior": dados_lag1.get('final', None), "Orcamento": orc_graf_map.get(dt_iso, None)})
-
-        curr_iso = mes_atual_inicio.strftime('%Y-%m-%d')
-        dados_atual_m0 = ibp_map.get(curr_iso, {}).get(ciclo_atual, {})
-        timeline.append({"name": f"{meses_pt[mes_atual_inicio.month - 1]}/{mes_atual_inicio.strftime('%y')} (S&OE)", "data_iso": curr_iso, "Realizado": hist_dict.get(hoje.strftime('%Y-%m'), 0), "IA": dados_atual_m0.get('ia', None), "Comercial": None, "Supply": None, "Final": None, "CicloAnterior": ibp_map.get(curr_iso, {}).get(ciclo_ant, {}).get('final', None), "Orcamento": orc_graf_map.get(curr_iso, None)})
-
-        for i in range(1, 6):
-            dt = mes_atual_inicio + relativedelta(months=i)
-            p_iso = dt.strftime('%Y-%m-%d')
-            dados_futuro, dados_futuro_ant = ibp_map.get(p_iso, {}).get(ciclo_atual, {}), ibp_map.get(p_iso, {}).get(ciclo_ant, {})
-            is_projection = dt >= m2_date
-            timeline.append({"name": f"{meses_pt[dt.month - 1]}/{dt.strftime('%y')}", "data_iso": p_iso, "Realizado": None, "IA": dados_futuro.get('ia', None), "Comercial": dados_futuro.get('bu', None) if is_projection else None, "Supply": dados_futuro.get('sp', None) if is_projection else None, "Final": dados_futuro.get('final', None) if is_projection else None, "CicloAnterior": dados_futuro_ant.get('final', None), "Orcamento": orc_graf_map.get(p_iso, None)})
-
-        return {"status": "success", "dados": timeline}
+        desc = db.execute(text("SELECT descricao FROM dim_produtos WHERE sku=:s"), {"s": sku}).scalar()
+        return {
+            "sku": sku, "descricao": desc or sku, "grafico": serie,
+            "plurianual": plurianual, "fva": fva, "cenarios": cenarios,
+        }
     except Exception as e:
         raise HTTPException(500, repr(e))
 
-@router.post("/aprovar")
-async def aprovar_global(payload: PayloadAprovarGlobal, db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
-    if usuario.get('funcao') not in ['Administrador', 'Diretoria', 'C-Level']:
-        raise HTTPException(status_code=403, detail="Apenas Administradores e C-Level podem publicar o Plano Final.")
 
+@router.post("/adotar-cenario")
+def adotar_cenario(sku: str, mes: str, camada: str,
+                   db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
+    """
+    Copia o volume de uma camada (topdown/bottomup/meta/supply/ia) para o Final
+    de um SKU/mês. É o 'adotar cenário' da gaveta. Rateia por vol_meta.
+    """
+    mapa = {"ia": "vol_ia", "topdown": "vol_topdown", "bottomup": "vol_bottomup",
+            "meta": "vol_meta", "supply": "vol_supply"}
+    if camada not in mapa:
+        raise HTTPException(400, f"Camada inválida: {camada}")
     try:
         ciclo = get_current_cycle(db)
-        nome_user = usuario.get('nome', usuario.get('email', 'Desconhecido'))
-
-        for ajuste in payload.ajustes:
-            data_alvo = parse_date_safe(ajuste.mes_projetado)
-            sku = ajuste.chave
-
-            # Volume anterior sobre o ESCOPO COMPLETO, para a trilha bater.
-            total_base_antigo = db.execute(text("""
-                SELECT COALESCE(SUM(vol_final), 0) FROM fato_ibp_granular
-                WHERE ciclo_sop = :c AND sku = :s AND mes_projetado = :m
-            """), {"c": ciclo, "s": sku, "m": data_alvo}).scalar()
-
-            volume_alvo = int(ajuste.novo_volume)
-
-            # Rateio canonico: escopo completo (sem filtrar cadastro atual) +
-            # trava de balanco (soma == digitado, ou aborta) + zero explicito +
-            # imutabilidade de mes realizado (tudo dentro do escritor). Peso:
-            # vol_meta (a venda comercial); na falta, vol_supply, depois vol_ia.
-            # Substitui o rateio manual que jogava a sobra no ultimo cliente e o
-            # 'l.vol_final = rateado' que, sobre escopo filtrado, deixava a linha
-            # do cliente inativo orfa (vazamento do Padrao A: 16.000 -> 16.333).
-            escrever_volume_rateado(
-                db=db, ciclo=ciclo, sku=sku, mes=data_alvo,
-                volume_alvo=volume_alvo, campo_destino="vol_final",
-                campos_peso=["vol_meta", "vol_supply", "vol_ia"],
-            )
-
-            # Trilha: razaosocial_afetada='TODOS_OS_CLIENTES' e a marca que o
-            # reparo de dados usa para reconstruir o valor digitado. Preservada.
-            registrar_log_auditoria(
-                db=db, ciclo=ciclo, origem="S&OP Global (Dashboard Final)",
-                usuario=nome_user, sku=sku, cliente="TODOS_OS_CLIENTES",
-                mes=data_alvo, v_antigo=int(total_base_antigo or 0), v_novo=volume_alvo)
-
-        # Congela a etapa Final com nome/status do banco (antes 'S&OP-Final'/
-        # 'Fechado', divergente — por isso o is_locked nunca reconhecia).
-        registro = db.query(ControleCiclo).filter(
-            ControleCiclo.ciclo_sop == ciclo,
-            func.upper(func.trim(ControleCiclo.origem)) == ETAPA_FINAL.upper()
-        ).first()
-        if not registro:
-            db.add(ControleCiclo(ciclo_sop=ciclo, origem=ETAPA_FINAL, status=STATUS_CONGELADO))
-        else:
-            registro.status = STATUS_CONGELADO
-
+        if etapa_congelada(db, ciclo, ETAPA_FINAL):
+            raise HTTPException(423, "S&OP já publicado. Reabra para editar.")
+        data_alvo = parse_date_safe(mes if len(mes) > 7 else mes + "-01")
+        campo = mapa[camada]
+        total = db.execute(text(f"""
+            SELECT COALESCE(SUM({campo}),0) FROM fato_ibp_granular
+            WHERE ciclo_sop=:c AND sku=:s AND mes_projetado=:m
+        """), {"c": ciclo, "s": sku, "m": data_alvo}).scalar()
+        escrever_volume_rateado(db=db, ciclo=ciclo, sku=sku, mes=data_alvo,
+                                volume_alvo=int(total or 0), etapa=ETAPA_FINAL)
         db.commit()
-        return {"status": "success", "message": "S&OP Consolidado e Metas travadas com sucesso!"}
+        return {"status": "success", "sku": sku, "mes": mes, "adotou": camada, "volume": int(total or 0)}
     except HTTPException:
-        db.rollback()
-        raise
+        db.rollback(); raise
     except Exception as e:
-        db.rollback()
-        raise HTTPException(500, repr(e))
+        db.rollback(); raise HTTPException(500, repr(e))
 
-@router.get("/export")
-async def exportar_oficial(db: Session = Depends(get_db), usuario: dict = Depends(get_current_user)):
+
+@router.post("/salvar")
+def salvar(payload: PayloadSalvar, db: Session = Depends(get_db),
+           usuario: dict = Depends(get_current_user)):
+    """Edição direta do Final pelo C-Level. Trava de balanço, peso vol_meta."""
     try:
         ciclo = get_current_cycle(db)
-        m2, m4 = get_projection_window(db)
-        
-        resultados = get_truth_query(db, ciclo, m2, m4).with_entities(
-            DimProduto.categoria, FatoIbpGranular.sku, DimProduto.descricao, DimCliente.razaosocial, 
-            FatoIbpGranular.mes_projetado, FatoIbpGranular.vol_ia, FatoIbpGranular.vol_topdown, 
-            FatoIbpGranular.vol_bottomup, FatoIbpGranular.vol_supply, FatoIbpGranular.vol_final, 
-            FatoIbpGranular.vol_meta, FatoIbpGranular.pmv_aplicado,
-            (FatoIbpGranular.vol_ia * FatoIbpGranular.pmv_aplicado).label('rec_ia'),
-            (FatoIbpGranular.vol_topdown * FatoIbpGranular.pmv_aplicado).label('rec_td'),
-            (FatoIbpGranular.vol_bottomup * FatoIbpGranular.pmv_aplicado).label('rec_bu'),
-            (FatoIbpGranular.vol_supply * FatoIbpGranular.pmv_aplicado).label('rec_supply'),
-            (FatoIbpGranular.vol_final * FatoIbpGranular.pmv_aplicado).label('rec_final')
-        ).all()
-
-        if not resultados: raise HTTPException(404, detail="Sem dados para exportar.")
-
-        dados = [
-            {
-                "Categoria": r.categoria, "SKU": r.sku, "Produto": r.descricao, "Cliente": r.razaosocial,
-                "Mês": r.mes_projetado.strftime("%m/%Y") if isinstance(r.mes_projetado, datetime.date) else str(r.mes_projetado), 
-                "Sinal IA": int(r.vol_ia or 0), "Meta Gerencial": int(r.vol_topdown or 0),
-                "Proposta Comercial": int(r.vol_bottomup or 0), "Capacidade Fábrica": int(r.vol_supply or 0),
-                "Demanda Irrestrita": int(r.vol_final or 0), "Meta Oficial": int(r.vol_meta or 0),
-                "Receita Prevista (R$)": float(r.rec_final or 0)
-            } for r in resultados
-        ]
-
-        df = pd.DataFrame(dados)
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df.to_excel(writer, index=False, sheet_name='SOP_Nexus_Oficial')
-        buffer.seek(0)
-        return StreamingResponse(buffer, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=Nexus_Plano_Oficial_{ciclo.replace('/','_')}.xlsx"})
+        if etapa_congelada(db, ciclo, ETAPA_FINAL):
+            raise HTTPException(423, "S&OP já publicado. Reabra para editar.")
+        nome_user = usuario.get("nome", usuario.get("email", "?"))
+        total = 0
+        for aj in payload.ajustes:
+            data_alvo = parse_date_safe(
+                aj.mes_projetado if len(aj.mes_projetado) > 7 else aj.mes_projetado + "-01")
+            antigo = db.execute(text("""
+                SELECT COALESCE(SUM(vol_final),0) FROM fato_ibp_granular
+                WHERE ciclo_sop=:c AND sku=:s AND mes_projetado=:m
+            """), {"c": ciclo, "s": aj.sku, "m": data_alvo}).scalar()
+            total += escrever_volume_rateado(
+                db=db, ciclo=ciclo, sku=aj.sku, mes=data_alvo,
+                volume_alvo=int(aj.novo_volume), etapa=ETAPA_FINAL)
+            registrar_log_auditoria(
+                db=db, ciclo=ciclo, origem="Demanda Final (S&OP Global)",
+                usuario=nome_user, sku=aj.sku, cliente="TODOS_OS_CLIENTES",
+                mes=data_alvo, v_antigo=int(antigo or 0), v_novo=int(aj.novo_volume))
+        db.commit()
+        return {"status": "success", "linhas": total}
+    except HTTPException:
+        db.rollback(); raise
     except Exception as e:
-        raise HTTPException(500, repr(e))
+        db.rollback(); raise HTTPException(500, repr(e))
+
+
+@router.post("/publicar")
+def publicar(db: Session = Depends(get_db), _: dict = Depends(require_admin)):
+    """Publica o S&OP: congela a etapa Final. Só Admin."""
+    try:
+        ciclo = get_current_cycle(db)
+        congelar_etapa(db, ciclo, ETAPA_FINAL)
+        db.commit()
+        return {"status": "success", "mensagem": "S&OP publicado."}
+    except Exception as e:
+        db.rollback(); raise HTTPException(500, repr(e))
+
+
+@router.post("/reabrir")
+def reabrir(db: Session = Depends(get_db), _: dict = Depends(require_admin)):
+    try:
+        ciclo = get_current_cycle(db)
+        reabrir_etapa(db, ciclo, ETAPA_FINAL)
+        db.commit()
+        return {"status": "success"}
+    except Exception as e:
+        db.rollback(); raise HTTPException(500, repr(e))
+
+
+@router.get("/exportar")
+def exportar(db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
+    import io
+    from fastapi.responses import StreamingResponse
+    ciclo = get_current_cycle(db)
+    meses = get_working_window_months(db)
+    rows = db.execute(text("""
+        SELECT f.sku, COALESCE(p.descricao,'') AS descricao,
+               COALESCE(p.categoria,'') AS categoria, COALESCE(p.segmento,'') AS segmento,
+               TO_CHAR(f.mes_projetado,'MM/YYYY') AS mes,
+               SUM(f.vol_ia) AS ia, SUM(f.vol_topdown) AS td, SUM(f.vol_bottomup) AS bu,
+               SUM(f.vol_meta) AS meta, SUM(f.vol_supply) AS sup, SUM(f.vol_final) AS fin,
+               AVG(f.pmv_aplicado) AS pmv
+        FROM fato_ibp_granular f
+        LEFT JOIN dim_produtos p ON p.sku = f.sku
+        WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)
+        GROUP BY f.sku, p.descricao, p.categoria, p.segmento, f.mes_projetado
+        ORDER BY p.categoria, p.segmento, p.descricao, f.mes_projetado
+    """), {"c": ciclo, "meses": meses}).fetchall()
+
+    def _num(v): return f"{float(v or 0):.2f}".replace(".", ",")
+    linhas = ["Categoria;Segmento;SKU;Descricao;Mes;IA;TopDown;BottomUp;Meta;Supply;Final;PMV;Receita Final (R$)"]
+    for r in rows:
+        fin = int(r.fin or 0); pmv = float(r.pmv or 0)
+        linhas.append(";".join([r.categoria, r.segmento, r.sku, r.descricao, r.mes,
+            str(int(r.ia or 0)), str(int(r.td or 0)), str(int(r.bu or 0)),
+            str(int(r.meta or 0)), str(int(r.sup or 0)), str(fin), _num(pmv), _num(fin*pmv)]))
+    buffer = io.StringIO("\r\n".join(linhas))
+    resp = StreamingResponse(iter([buffer.getvalue()]), media_type="text/csv")
+    resp.headers["Content-Disposition"] = f'attachment; filename="demanda_final_{ciclo.replace("/","_")}.csv"'
+    return resp
