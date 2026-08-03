@@ -100,7 +100,8 @@ def tabela(db: Session = Depends(get_db), usuario: dict = Depends(get_current_us
             TO_CHAR(f.mes_projetado,'YYYY-MM-DD')                     AS mes,
             SUM(f.vol_bottomup)                                       AS bottomup,
             SUM(f.vol_meta)                                           AS meta,
-            AVG(f.pmv_aplicado)                                       AS pmv
+            AVG(f.pmv_aplicado)                                       AS pmv,
+            SUM(f.vol_meta * f.pmv_aplicado)                          AS receita_meta
         FROM fato_ibp_granular f
         JOIN dim_clientes c ON f.cgc = c.cgc
         LEFT JOIN dim_produtos p ON p.sku = f.sku
@@ -120,10 +121,12 @@ def tabela(db: Session = Depends(get_db), usuario: dict = Depends(get_current_us
         v = c["filhos"].setdefault(r.vendedor, {"nome": r.vendedor, "tipo": "vendedor", "filhos": {}})
         rz = v["filhos"].setdefault(r.razao_social, {"nome": r.razao_social, "tipo": "cliente", "filhos": {}})
         sk = rz["filhos"].setdefault(r.sku, {"sku": r.sku, "descricao": r.descricao, "tipo": "produto", "meses": {}})
-        meta = int(r.meta or 0); bu = int(r.bottomup or 0); pmv = float(r.pmv or 0)
-        sk["meses"][r.mes] = {"bottomup": bu, "meta": meta, "pmv": round(pmv, 2), "receita": round(meta * pmv, 2)}
+        meta = int(r.meta or 0); bu = int(r.bottomup or 0)
+        receita = float(r.receita_meta or 0)
+        pmv = (receita / meta) if meta > 0 else float(r.pmv or 0)
+        sk["meses"][r.mes] = {"bottomup": bu, "meta": meta, "pmv": round(pmv, 2), "receita": round(receita, 2)}
         tot_vol[r.mes] += meta
-        tot_rs[r.mes] += meta * pmv
+        tot_rs[r.mes] += receita
 
     def serial(node):
         if node.get("tipo") == "produto":
@@ -327,7 +330,8 @@ def exportar(db: Session = Depends(get_db), usuario: dict = Depends(get_current_
         SELECT c.gerente_nome, c.supervisor_nome, f.vendedor_nome, c.razaosocial,
                f.sku, COALESCE(p.descricao,'') AS descricao,
                TO_CHAR(f.mes_projetado,'MM/YYYY') AS mes,
-               SUM(f.vol_meta) AS meta, AVG(f.pmv_aplicado) AS pmv
+               SUM(f.vol_meta) AS meta, AVG(f.pmv_aplicado) AS pmv,
+               SUM(f.vol_meta * f.pmv_aplicado) AS receita_meta
         FROM fato_ibp_granular f
         JOIN dim_clientes c ON f.cgc = c.cgc
         LEFT JOIN dim_produtos p ON p.sku = f.sku
@@ -340,9 +344,10 @@ def exportar(db: Session = Depends(get_db), usuario: dict = Depends(get_current_
     def _num(v): return f"{float(v or 0):.2f}".replace(".", ",")
     linhas = ["Gerente;Coordenador;Vendedor;Razao Social;SKU;Descricao;Mes;Meta (cx);PMV;Receita (R$)"]
     for r in rows:
-        meta = int(r.meta or 0); pmv = float(r.pmv or 0)
+        meta = int(r.meta or 0); receita = float(r.receita_meta or 0)
+        pmv = (receita / meta) if meta > 0 else 0.0
         linhas.append(";".join([r.gerente_nome or "", r.supervisor_nome or "", r.vendedor_nome or "",
-            r.razaosocial or "", r.sku, r.descricao, r.mes, str(meta), _num(pmv), _num(meta * pmv)]))
+            r.razaosocial or "", r.sku, r.descricao, r.mes, str(meta), _num(pmv), _num(receita)]))
     buffer = io.StringIO("\r\n".join(linhas))
     resp = StreamingResponse(iter([buffer.getvalue()]), media_type="text/csv")
     resp.headers["Content-Disposition"] = f'attachment; filename="metas_comercial_{ciclo.replace("/","_")}.csv"'

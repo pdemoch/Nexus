@@ -89,7 +89,8 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(require_gerente)):
                SUM(f.vol_ia)        AS ia,
                SUM(f.vol_topdown)   AS topdown,
                SUM(f.vol_bottomup)  AS bottomup,
-               AVG(f.pmv_aplicado)  AS pmv
+               AVG(f.pmv_aplicado)  AS pmv,
+               SUM(f.vol_bottomup * f.pmv_aplicado) AS receita_bu
         FROM fato_ibp_granular f
         LEFT JOIN dim_produtos p ON p.sku = f.sku
         WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)
@@ -117,14 +118,15 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(require_gerente)):
         seg = cat["segmentos"].setdefault(r.segmento, {"nome": r.segmento, "skus": {}})
         sk = seg["skus"].setdefault(r.sku, {"sku": r.sku, "descricao": r.descricao, "meses": {}})
         bu = int(r.bottomup or 0); td = int(r.topdown or 0); ia = int(r.ia or 0)
-        pmv = float(r.pmv or 0)
+        receita = float(r.receita_bu or 0)
+        pmv = (receita / bu) if bu > 0 else float(r.pmv or 0)
         rec_orc = orc.get(r.sku, {}).get(r.mes, 0.0)
         sk["meses"][r.mes] = {
             "ia": ia, "topdown": td, "bottomup": bu, "pmv": round(pmv, 2),
-            "receita": round(bu * pmv, 2), "rec_orcada": round(rec_orc, 2),
+            "receita": round(receita, 2), "rec_orcada": round(rec_orc, 2),
         }
         tot_vol[r.mes] += bu
-        tot_rs[r.mes] += bu * pmv
+        tot_rs[r.mes] += receita
         tot_orc[r.mes] += rec_orc
 
     categorias = []
@@ -241,7 +243,7 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_gerente)):
                COALESCE(p.categoria,'') AS categoria, COALESCE(p.segmento,'') AS segmento,
                TO_CHAR(f.mes_projetado,'MM/YYYY') AS mes,
                SUM(f.vol_ia) AS ia, SUM(f.vol_topdown) AS td, SUM(f.vol_bottomup) AS bu,
-               AVG(f.pmv_aplicado) AS pmv
+               SUM(f.vol_bottomup * f.pmv_aplicado) AS receita_bu
         FROM fato_ibp_granular f
         LEFT JOIN dim_produtos p ON p.sku = f.sku
         WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)
@@ -252,9 +254,10 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_gerente)):
     def _num(v): return f"{float(v or 0):.2f}".replace(".", ",")
     linhas = ["Categoria;Segmento;SKU;Descricao;Mes;IA (cx);TopDown (cx);BottomUp (cx);PMV;Receita (R$)"]
     for r in rows:
-        bu = int(r.bu or 0); pmv = float(r.pmv or 0)
+        bu = int(r.bu or 0); receita = float(r.receita_bu or 0)
+        pmv = (receita / bu) if bu > 0 else 0.0
         linhas.append(";".join([r.categoria, r.segmento, r.sku, r.descricao, r.mes,
-            str(int(r.ia or 0)), str(int(r.td or 0)), str(bu), _num(pmv), _num(bu*pmv)]))
+            str(int(r.ia or 0)), str(int(r.td or 0)), str(bu), _num(pmv), _num(receita)]))
     buffer = io.StringIO("\r\n".join(linhas))
     resp = StreamingResponse(iter([buffer.getvalue()]), media_type="text/csv")
     resp.headers["Content-Disposition"] = f'attachment; filename="demanda_comercial_{ciclo.replace("/","_")}.csv"'

@@ -84,7 +84,7 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
                SUM(f.vol_meta)      AS meta,
                SUM(f.vol_supply)    AS supply,
                SUM(f.vol_final)     AS final,
-               AVG(f.pmv_aplicado)  AS pmv
+               SUM(f.vol_final * f.pmv_aplicado) AS receita_final
         FROM fato_ibp_granular f
         LEFT JOIN dim_produtos p ON p.sku = f.sku
         WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)
@@ -119,17 +119,21 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
         cat = tree.setdefault(r.categoria, {"nome": r.categoria, "segmentos": {}})
         seg = cat["segmentos"].setdefault(r.segmento, {"nome": r.segmento, "skus": {}})
         sk = seg["skus"].setdefault(r.sku, {"sku": r.sku, "descricao": r.descricao, "meses": {}})
-        fin = int(r.final or 0); pmv = float(r.pmv or 0)
+        fin = int(r.final or 0)
+        receita = float(r.receita_final or 0)
+        # PMV exibido = ponderado por volume (receita_grao / volume). Coerente:
+        # pmv_ponderado × volume == receita, sempre. Nunca média simples.
+        pmv = (receita / fin) if fin > 0 else 0.0
         sk["meses"][r.mes] = {
             "ia": int(r.ia or 0), "topdown": int(r.topdown or 0),
             "bottomup": int(r.bottomup or 0), "meta": int(r.meta or 0),
             "supply": int(r.supply or 0), "final": fin,
-            "pmv": round(pmv, 2), "receita": round(fin * pmv, 2),
+            "pmv": round(pmv, 2), "receita": round(receita, 2),
             "orcamento": round(orc.get(r.sku, {}).get(r.mes, 0.0), 2),
             "final_anterior": ant.get(r.sku, {}).get(r.mes, None),
         }
         tot[r.mes]["vol"] += fin
-        tot[r.mes]["fat"] += fin * pmv
+        tot[r.mes]["fat"] += receita   # soma do faturamento no grão (= Excel = fato)
         tot[r.mes]["orc"] += orc.get(r.sku, {}).get(r.mes, 0.0)
         tot[r.mes]["ant"] += ant.get(r.sku, {}).get(r.mes, 0) or 0
 
@@ -309,7 +313,7 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(get_current_user))
                TO_CHAR(f.mes_projetado,'MM/YYYY') AS mes,
                SUM(f.vol_ia) AS ia, SUM(f.vol_topdown) AS td, SUM(f.vol_bottomup) AS bu,
                SUM(f.vol_meta) AS meta, SUM(f.vol_supply) AS sup, SUM(f.vol_final) AS fin,
-               AVG(f.pmv_aplicado) AS pmv
+               SUM(f.vol_final * f.pmv_aplicado) AS receita_final
         FROM fato_ibp_granular f
         LEFT JOIN dim_produtos p ON p.sku = f.sku
         WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)
@@ -320,10 +324,11 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(get_current_user))
     def _num(v): return f"{float(v or 0):.2f}".replace(".", ",")
     linhas = ["Categoria;Segmento;SKU;Descricao;Mes;IA;TopDown;BottomUp;Meta;Supply;Final;PMV;Receita Final (R$)"]
     for r in rows:
-        fin = int(r.fin or 0); pmv = float(r.pmv or 0)
+        fin = int(r.fin or 0); receita = float(r.receita_final or 0)
+        pmv = (receita / fin) if fin > 0 else 0.0
         linhas.append(";".join([r.categoria, r.segmento, r.sku, r.descricao, r.mes,
             str(int(r.ia or 0)), str(int(r.td or 0)), str(int(r.bu or 0)),
-            str(int(r.meta or 0)), str(int(r.sup or 0)), str(fin), _num(pmv), _num(fin*pmv)]))
+            str(int(r.meta or 0)), str(int(r.sup or 0)), str(fin), _num(pmv), _num(receita)]))
     buffer = io.StringIO("\r\n".join(linhas))
     resp = StreamingResponse(iter([buffer.getvalue()]), media_type="text/csv")
     resp.headers["Content-Disposition"] = f'attachment; filename="demanda_final_{ciclo.replace("/","_")}.csv"'

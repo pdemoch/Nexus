@@ -99,7 +99,8 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(require_marketing)):
                TO_CHAR(f.mes_projetado,'YYYY-MM-DD')   AS mes,
                SUM(f.vol_ia)                            AS ia,
                SUM(f.vol_topdown)                       AS topdown,
-               AVG(f.pmv_aplicado)                      AS pmv
+               AVG(f.pmv_aplicado)                      AS pmv,
+               SUM(f.vol_topdown * f.pmv_aplicado)      AS receita_td
         FROM fato_ibp_granular f
         LEFT JOIN dim_produtos p ON p.sku = f.sku
         WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)
@@ -131,14 +132,18 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(require_marketing)):
         sk = seg["skus"].setdefault(r.sku, {
             "sku": r.sku, "descricao": r.descricao, "meses": {}
         })
-        td = int(r.topdown or 0); ia = int(r.ia or 0); pmv = float(r.pmv or 0)
+        td = int(r.topdown or 0); ia = int(r.ia or 0)
+        receita = float(r.receita_td or 0)
+        # PMV exibido = ponderado (receita_grao / volume). Se vol=0, cai no PMV
+        # de referência (média simples) só para exibição, sem afetar totalizador.
+        pmv = (receita / td) if td > 0 else float(r.pmv or 0)
         sk["meses"][r.mes] = {
             "ia": ia, "topdown": td, "pmv": round(pmv, 2),
-            "receita": round(td * pmv, 2),
+            "receita": round(receita, 2),
             "realizado_ap": realizado_ap.get(r.sku, {}).get(r.mes, None),
         }
         tot_vol[r.mes] += td
-        tot_rs[r.mes] += td * pmv
+        tot_rs[r.mes] += receita   # soma do faturamento no grão
         tot_ia[r.mes] += ia
 
     # Serializa (dicts -> listas ordenadas)
@@ -186,7 +191,7 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_marketing)
                TO_CHAR(f.mes_projetado,'MM/YYYY') AS mes,
                SUM(f.vol_ia)             AS ia,
                SUM(f.vol_topdown)        AS topdown,
-               AVG(f.pmv_aplicado)       AS pmv
+               SUM(f.vol_topdown * f.pmv_aplicado) AS receita_td
         FROM fato_ibp_granular f
         LEFT JOIN dim_produtos p ON p.sku = f.sku
         WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)
@@ -199,10 +204,11 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_marketing)
 
     linhas = ["Categoria;Segmento;SKU;Descricao;Mes;IA (cx);TopDown (cx);PMV;Receita Prevista (R$)"]
     for r in rows:
-        td = int(r.topdown or 0); pmv = float(r.pmv or 0)
+        td = int(r.topdown or 0); receita = float(r.receita_td or 0)
+        pmv = (receita / td) if td > 0 else 0.0
         linhas.append(";".join([
             r.categoria, r.segmento, r.sku, r.descricao, r.mes,
-            str(int(r.ia or 0)), str(td), _num(pmv), _num(td * pmv),
+            str(int(r.ia or 0)), str(td), _num(pmv), _num(receita),
         ]))
 
     conteudo = "\r\n".join(linhas)
