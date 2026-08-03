@@ -4,23 +4,20 @@ import { Cpu, Lock, Loader2 } from 'lucide-react';
 
 import Sidebar from './pages/Sidebar';
 import AdminPanel from './pages/AdminPanel';
-import LoginArena from './pages/LoginArena'; 
-import TopDownArena from './pages/TopDownArena';
-import SupplyReviewArena from './pages/SupplyReviewArena'; 
-import ConsensoArena from './pages/ConsensoArena';
-import GlobalDashboard from './pages/GlobalDashboard';
+import LoginArena from './pages/LoginArena';
+// Telas de consenso (mantidos os NOMES de arquivo antigos; conteúdo reconstruído).
+import TopDownArena from './pages/TopDownArena';            // -> Demanda Marketing
+import GerenciamentoArena from './pages/GerenciamentoArena'; // -> Demanda Comercial
+import ConsensoArena from './pages/ConsensoArena';           // -> Metas Comercial
+import SupplyReviewArena from './pages/SupplyReviewArena';   // -> Supply Review
+import GlobalDashboard from './pages/GlobalDashboard';       // -> Demanda Final
 import NPDArena from './pages/NPDArena';
-import GerenciamentoArena from './pages/GerenciamentoArena';
-import SoeDashboard from './pages/SoeDashboard';
-import InboundArena from './pages/InboundArena';
-import AuditoriaArena from './pages/AuditoriaArena';
-import DataLakeArena from './pages/DataLakeArena';
-import CockpitCCC from './pages/CockpitCCC'; // 1. IMPORTAÇÃO INJETADA AQUI
+import AuditoriaArena from './pages/AuditoriaArena';         // KPIs
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
   const [currentRoute, setCurrentRoute] = useState('admin');
-  
+
   const [isSystemLocked, setIsSystemLocked] = useState(false);
   const [latestLog, setLatestLog] = useState('');
 
@@ -33,7 +30,7 @@ export default function App() {
     enviarPulso();
   }, [user]);
 
-  // RADAR DO SISTEMA
+  // RADAR DO SISTEMA — bloqueia a UI enquanto o pipeline/IA roda
   useEffect(() => {
     if (!user) return;
     const checkSystemStatus = async () => {
@@ -45,10 +42,8 @@ export default function App() {
         }
       } catch (error) { console.error("Falha ao verificar status do sistema."); }
     };
-    
     checkSystemStatus();
-    // 2. CORREÇÃO: O Loop que mantém o radar a varrer de 3 em 3 segundos
-    const intervalId = setInterval(checkSystemStatus, 3000); 
+    const intervalId = setInterval(checkSystemStatus, 3000);
     return () => clearInterval(intervalId);
   }, [user]);
 
@@ -59,17 +54,17 @@ export default function App() {
     if (token && savedUser) {
       const parsedUser = JSON.parse(savedUser);
       setUser(parsedUser);
-      // REGRAS DE ROTA INICIAL POR CARGO
+      // Rota inicial por cargo
       if (parsedUser.funcao === 'Coordenador') setCurrentRoute('consenso');
-      else setCurrentRoute('dashboard'); 
+      else setCurrentRoute('dashboard');
     }
   }, []);
 
   const handleLoginSuccess = (userData: any) => {
     setUser(userData);
-    localStorage.setItem('nexus_user', JSON.stringify(userData)); 
+    localStorage.setItem('nexus_user', JSON.stringify(userData));
     if (userData.funcao === 'Coordenador') setCurrentRoute('consenso');
-    else setCurrentRoute('dashboard'); 
+    else setCurrentRoute('dashboard');
   };
 
   const handleLogout = () => {
@@ -84,31 +79,20 @@ export default function App() {
     switch (currentRoute) {
       case 'dashboard': return <GlobalDashboard />;
       case 'topdown': return <TopDownArena />;
-      case 'supply': return <SupplyReviewArena />; 
+      case 'gerenciamento': return <GerenciamentoArena />;
+      case 'consenso': return <ConsensoArena />;
+      case 'supply': return <SupplyReviewArena />;
       case 'npd': return <NPDArena />;
-      case 'consenso': return <ConsensoArena usuarioSessao={user} />;
-      case 'gerenciamento': return <GerenciamentoArena usuarioSessao={user} />;
-      case 'admin': return <AdminPanel />;
-      
-      // ROTAS DO NOVO MÓDULO S&OE E DATA LAKE
-      case 'soe-radar': return <SoeDashboard />;
-      case 'inbound': return <InboundArena />;
-      case 'datalake': return <DataLakeArena />; 
-
-      // ROTA DO NOSSO NOVO MÓDULO DE AUDITORIA DE IA
       case 'auditoria': return <AuditoriaArena />;
-      
-      // 3. ROTA DO COCKPIT CCC INJETADA AQUI
-      case 'ccc': return <CockpitCCC user={user} />;
-
+      case 'admin': return <AdminPanel />;
       default: return <AdminPanel />;
     }
   };
 
   return (
     <div className="flex h-screen w-full bg-[#f8fafc] font-sans overflow-hidden">
-      
-      {/* TELA DE BLOQUEIO GLOBAL */}
+
+      {/* TELA DE BLOQUEIO GLOBAL — enquanto o pipeline/IA está em execução */}
       {isSystemLocked && user?.funcao !== 'Administrador' && (
         <div className="fixed inset-0 z-[9999] bg-slate-950/90 backdrop-blur-xl flex flex-col items-center justify-center p-6 animate-in fade-in duration-500">
             <div className="max-w-2xl w-full flex flex-col items-center text-center">
@@ -141,7 +125,6 @@ export default function App() {
         </div>
       )}
 
-      {/* 4. CORREÇÃO DA SIDEBAR: A "div w-64" fixa que impedia a expansão/contração foi removida */}
       <Sidebar
         currentRoute={currentRoute}
         setCurrentRoute={setCurrentRoute}
@@ -149,7 +132,6 @@ export default function App() {
         onLogout={handleLogout}
       />
 
-      {/* CONTEÚDO PRINCIPAL (Adicionado min-w-0 para as tabelas não vazarem em telas flex) */}
       <main className="flex-1 min-w-0 h-full overflow-y-auto relative z-10 bg-[#f8fafc]">
         {renderContent()}
       </main>

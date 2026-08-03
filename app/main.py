@@ -2,39 +2,31 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # =========================================================================
-# ROTAS — Nexus IBP (reconstrução do motor de S&OP)
-# As 5 telas de consenso + NPD foram reconstruídas sobre o novo shared_ibp.
-# A Auditoria (KPIs) usa perfil_sku + auditoria_agg + router_kpis.
+# ROTAS — Nexus IBP 3.0 (núcleo reconstruído, enxuto)
+# Só o que foi reconstruído e validado. Os módulos de apoio antigos (SOE,
+# MTRIX, AI, Agent SQL, DataLake, CCC) foram removidos e serão refeitos na
+# fase seguinte (pipeline Parquet/S3). Menos superfície = boot confiável.
 # =========================================================================
 from app.api.routers import (
-    router_auth,
-    router_admin,
-    router_dashboard,       # Demanda Final (S&OP Global) — reconstruído
-    router_npd,             # NPD / Inovações — reconstruído
-    router_topdown,         # Demanda Marketing (Top-Down) — reconstruído
-    router_carteira,        # Metas Comercial — reconstruído (RLS + cadeados)
-    router_gerenciamento,   # Demanda Comercial (Bottom-Up) — reconstruído
-    router_supply,          # Supply Review — reconstruído
-    router_kpis,            # Auditoria / KPIs — reconstruído
-    # --- módulos de apoio que permanecem ---
-    router_soe,
-    router_mtrix,
-    router_ai,
-    router_agent_sql,
-    router_datalake,
-    router_ccc,
+    router_auth,            # login / JWT (essencial)
+    router_admin,           # pipeline / ciclo (essencial)
+    router_topdown,         # Demanda Marketing (Top-Down)
+    router_gerenciamento,   # Demanda Comercial (Bottom-Up)
+    router_carteira,        # Metas Comercial (RLS + cadeados)
+    router_supply,          # Supply Review
+    router_dashboard,       # Demanda Final (S&OP Global)
+    router_npd,             # NPD / Inovações
+    router_kpis,            # Auditoria / KPIs
 )
 from app.core.config import settings
 from app.models.domain_models import Base
 from app.core.database import engine
 
-# Cria tabelas que ainda não existam (inclui controle_metas_responsavel se
-# modelada; senão é criada on-demand por garantir_tabela_cadeados).
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title="Nexus IBP 3.0 API",
-    description="Motor de S&OP, Machine Learning e Rateio Atômico",
+    description="Motor de S&OP com Rateio Atômico, Governança de Bastão e Auditoria de Três Eixos",
     version="3.0.0",
 )
 
@@ -57,25 +49,18 @@ app.add_middleware(
 
 # =========================================================================
 # INJEÇÃO DAS ROTAS
-# Cada router já carrega seu próprio prefixo interno:
-#   /api/v1/topdown, /api/v1/gerenciamento, /api/v1/metas,
-#   /api/v1/supply, /api/v1/dashboard, /api/v1/npd, /api/v1/kpis
+# Prefixos internos: /api/v1/{auth,admin,topdown,gerenciamento,metas,
+#                     supply,dashboard,npd,kpis}
 # =========================================================================
 app.include_router(router_auth.router)
 app.include_router(router_admin.router)
+app.include_router(router_topdown.router)
+app.include_router(router_gerenciamento.router)
+app.include_router(router_carteira.router)
+app.include_router(router_supply.router)
 app.include_router(router_dashboard.router)
 app.include_router(router_npd.router)
-app.include_router(router_topdown.router)
-app.include_router(router_carteira.router)
-app.include_router(router_gerenciamento.router)
-app.include_router(router_supply.router)
-app.include_router(router_soe.router)
 app.include_router(router_kpis.router)
-app.include_router(router_mtrix.router)
-app.include_router(router_ai.router)
-app.include_router(router_agent_sql.router)
-app.include_router(router_datalake.router)
-app.include_router(router_ccc.router)
 
 
 @app.get("/", tags=["Health Check"])
@@ -83,5 +68,5 @@ async def root():
     return {
         "status": "online",
         "sistema": "Nexus IBP 3.0",
-        "mensagem": "Servidor rodando em Arquitetura Modular com PostgreSQL!",
+        "mensagem": "Motor de S&OP rodando — núcleo reconstruído.",
     }

@@ -11,8 +11,6 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
 
   const allNavItems = [
     { id: 'dashboard', label: 'Demanda Final', icon: LayoutDashboard, roles: ['Administrador', 'Gerente', 'Supply Chain', 'Marketing', 'C-Level'] },
-    { id: 'soe-radar', label: 'S&OE (construção)', icon: Activity, roles: ['Administrador'] },
-    { id: 'inbound', label: 'Mapa Produtivo (construção)', icon: Factory, roles: ['Administrador'] },
     { id: 'auditoria', label: 'KPIs (construção)', icon: Crosshair, roles: ['Administrador'] },
     { id: 'topdown', label: 'Demanda Marketing', icon: BarChart3, roles: ['Administrador', 'Marketing'] },
     { id: 'npd', label: 'Inovações', icon: Rocket, roles: ['Administrador', 'Marketing'] },
@@ -20,7 +18,6 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
     { id: 'consenso', label: 'Metas Comercial', icon: Users, roles: ['Administrador', 'Gerente'] },
     { id: 'gerenciamento', label: 'Demanda Comercial', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },
     { id: 'admin', label: 'Painel Admin', icon: Settings, roles: ['Administrador'] },
-    { id: 'ccc', label: 'Engenharia de Caixa (construção)', icon: Landmark, roles: ['Administrador'] },
   ];
 
   // Filtra os itens baseado no papel do usuário

@@ -397,6 +397,29 @@ def parse_date_safe(date_input) -> datetime.date:
 
 
 # =====================================================================
+# COMPATIBILIDADE — aliases para os routers de apoio que permaneceram
+# (router_admin, soe, mtrix, etc.) e importam nomes antigos do shared_ibp.
+# Mantêm o boot funcionando sem editar esses routers. Podem ser removidos
+# quando esses routers forem reconstruídos.
+# =====================================================================
+def get_projection_window_dates(db: Session):
+    """Alias legado: (M2, M4) do ciclo ativo (== get_projection_window)."""
+    return get_projection_window(db)
+
+
+def check_global_lock(db: Session, ciclo: str = None) -> bool:
+    """Alias legado: no modelo novo o lock é por etapa; retorna se Final está congelada."""
+    if ciclo is None:
+        ciclo = get_current_cycle(db)
+    return etapa_congelada(db, ciclo, ETAPA_FINAL)
+
+
+def check_origin_lock(db: Session, ciclo: str, origem: str) -> bool:
+    """Alias legado: se uma etapa/origem está congelada."""
+    return etapa_congelada(db, ciclo, origem)
+
+
+# =====================================================================
 # TESTE ISOLADO — não toca produção; valida rateio, N-2 e balanço
 # =====================================================================
 if __name__ == "__main__":
