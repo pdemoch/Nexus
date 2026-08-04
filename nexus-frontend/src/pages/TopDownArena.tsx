@@ -4,7 +4,7 @@ import {
   ChevronRight, ChevronDown, Save, Lock, Unlock, Download,
   Loader2, LineChart as LineIcon,
 } from 'lucide-react';
-import DossieInferior from './DossieInferior';
+import DossieInferior from './Dossieinferior';
 
 /* =====================================================================
    DEMANDA MARKETING (Top-Down) — mesa de trabalho do planejador
