@@ -590,8 +590,16 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None) ->
     """), {"sku": sku}).fetchall()
     # indexa por (ciclo, mes)
     prev_idx = {(p.ciclo_sop, p.mes): p for p in prev_rows}
+    # Primeiro mês com previsão M-2 LEGÍTIMA: o ciclo-piso (04/2026) só congela
+    # com 2 meses de antecedência o mês 06/2026. Antes disso, o "ciclo fonte"
+    # seria anterior ao piso (inexistente) e cairia forçado no piso — o que
+    # compararia o plano quase consigo mesmo. Então só exibimos forecast a
+    # partir de 06/2026 (M-2 real), mantendo a linha de previsão honesta.
+    primeiro_mes_forecast = CICLO_PISO + relativedelta(months=DEFASAGEM_MESES)
     for key, linha in mapa.items():
         md = datetime.datetime.strptime(key, "%Y-%m-%d").date()
+        if md < primeiro_mes_forecast:
+            continue  # abril/maio: sem M-2 real, mostra só realizado
         cf = ciclo_fonte_do_mes(md)
         p = prev_idx.get((cf, key))
         if p and (p.ia is not None or p.final is not None):
