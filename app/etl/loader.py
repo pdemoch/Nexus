@@ -349,58 +349,109 @@ class NexusLoader:
 
     def executar_precificacao_ciclo(self, ciclo_alvo: str, log_callback=print):
         """
-        BASE DE PRECIFICAÇÃO GLOBAL. Roda uma única vez após o nascimento do
-        ciclo. Preenche pmv_aplicado; NENHUM router recalcula preço a partir daqui.
+        BASE DE PRECIFICAÇÃO DO CICLO ATIVO. Preenche pmv_aplicado com o preço
+        mais representativo da realidade recente, em CASCATA de 4 níveis.
 
-        Passo 1 — par exato cgc×sku: PMV da ÚLTIMA venda válida (SUM(vl)/SUM(qt)
-                  da data mais recente), sem limite temporal.
-        Passo 2 — fallback: linhas que sobraram sem preço (par nunca vendeu)
-                  recebem o PMV da última venda do SKU em QUALQUER cliente.
+        Roda SOMENTE no ciclo_alvo (o ciclo ativo selecionado no Admin). Ciclos
+        passados são imutáveis e nunca são tocados aqui (o WHERE fixa o ciclo).
+
+        Janela: últimos 3 meses de venda (preço atual, não histórico velho).
+        Todos os níveis usam MÉDIA PONDERADA POR VOLUME = SUM(vl)/SUM(qt), que
+        dá peso natural a quem compra mais (o preço efetivo do SKU), nunca a
+        média simples de PMVs (que superestima onde há dispersão de preço).
+
+        Cascata (cada nível só preenche o que o anterior deixou em pmv=0):
+          1. CNPJ×SKU (3m)      — o preço do próprio cliente para o próprio SKU.
+          2. REGIONAL×SKU (3m)  — preço médio ponderado da regional do cliente.
+          3. SKU geral (3m)     — preço médio ponderado do SKU (todas regionais).
+          4. Última venda do SKU (qualquer data) — rede de segurança final.
 
         'Venda válida' = qt_pedido > 0 E vl_pedido > 0 (exclui bonificação e
-        devolução, que não são sinal de preço). Idempotente: pode reprecificar.
-        SKU de NPD (sem venda em lugar nenhum) fica intocado — preserva o preço
-        que o Marketing definiu na injeção.
+        devolução). SKU de NPD sem venda alguma fica intocado (preserva o preço
+        que o Marketing definiu na injeção). Idempotente.
         """
-        log_callback(f"⏳ [PMV] Precificando ciclo {ciclo_alvo} pela última venda...")
+        log_callback(f"⏳ [PMV] Precificando ciclo {ciclo_alvo} (cascata 4 níveis, janela 3m)...")
         try:
             with SessionLocal() as db:
-                # PASSO 1 — última venda válida do par cgc×sku
+                # ----------------------------------------------------------------
+                # NÍVEL 1 — CNPJ×SKU, últimos 3 meses (ponderado por volume).
+                # Sobrescreve tudo do ciclo: é o preço mais específico e recente.
+                # ----------------------------------------------------------------
                 r1 = db.execute(text("""
-                    WITH ultima_data AS (
-                        SELECT cgc, sku, MAX(data_pedido) AS data_ult
+                    WITH pmv_cliente AS (
+                        SELECT cgc, sku,
+                               SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv
                         FROM fato_vendas
                         WHERE qt_pedido > 0 AND vl_pedido > 0
+                          AND data_pedido >= (CURRENT_DATE - INTERVAL '3 months')
                         GROUP BY cgc, sku
-                    ),
-                    pmv_par AS (
-                        SELECT v.cgc, v.sku,
-                               SUM(v.vl_pedido) / NULLIF(SUM(v.qt_pedido), 0) AS pmv
-                        FROM fato_vendas v
-                        JOIN ultima_data u
-                          ON u.cgc = v.cgc AND u.sku = v.sku
-                         AND u.data_ult = v.data_pedido
-                        WHERE v.qt_pedido > 0 AND v.vl_pedido > 0
-                        GROUP BY v.cgc, v.sku
                     )
                     UPDATE fato_ibp_granular f
                     SET pmv_aplicado = ROUND(p.pmv::numeric, 2)
-                    FROM pmv_par p
+                    FROM pmv_cliente p
                     WHERE f.ciclo_sop = :ciclo
                       AND f.cgc = p.cgc
                       AND f.sku = p.sku
                 """), {"ciclo": ciclo_alvo})
 
-                # PASSO 2 — fallback: última venda do SKU em qualquer cliente,
-                # só para linhas que continuaram sem preço (pmv = 0).
+                # ----------------------------------------------------------------
+                # NÍVEL 2 — REGIONAL×SKU, últimos 3 meses (ponderado).
+                # Para linhas sem preço próprio: usa o preço médio ponderado da
+                # regional do cliente (via dim_clientes) para aquele SKU.
+                # ----------------------------------------------------------------
                 r2 = db.execute(text("""
+                    WITH pmv_regional AS (
+                        SELECT c.regional, v.sku,
+                               SUM(v.vl_pedido) / NULLIF(SUM(v.qt_pedido), 0) AS pmv
+                        FROM fato_vendas v
+                        JOIN dim_clientes c ON c.cgc = v.cgc
+                        WHERE v.qt_pedido > 0 AND v.vl_pedido > 0
+                          AND v.data_pedido >= (CURRENT_DATE - INTERVAL '3 months')
+                        GROUP BY c.regional, v.sku
+                    )
+                    UPDATE fato_ibp_granular f
+                    SET pmv_aplicado = ROUND(p.pmv::numeric, 2)
+                    FROM dim_clientes fc, pmv_regional p
+                    WHERE f.ciclo_sop = :ciclo
+                      AND fc.cgc = f.cgc
+                      AND p.regional = fc.regional
+                      AND p.sku = f.sku
+                      AND COALESCE(f.pmv_aplicado, 0) = 0
+                """), {"ciclo": ciclo_alvo})
+
+                # ----------------------------------------------------------------
+                # NÍVEL 3 — SKU geral, últimos 3 meses (ponderado, todas regionais).
+                # ----------------------------------------------------------------
+                r3 = db.execute(text("""
+                    WITH pmv_sku AS (
+                        SELECT sku,
+                               SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv
+                        FROM fato_vendas
+                        WHERE qt_pedido > 0 AND vl_pedido > 0
+                          AND data_pedido >= (CURRENT_DATE - INTERVAL '3 months')
+                        GROUP BY sku
+                    )
+                    UPDATE fato_ibp_granular f
+                    SET pmv_aplicado = ROUND(p.pmv::numeric, 2)
+                    FROM pmv_sku p
+                    WHERE f.ciclo_sop = :ciclo
+                      AND f.sku = p.sku
+                      AND COALESCE(f.pmv_aplicado, 0) = 0
+                """), {"ciclo": ciclo_alvo})
+
+                # ----------------------------------------------------------------
+                # NÍVEL 4 — última venda conhecida do SKU (qualquer data).
+                # Rede de segurança: SKU que não vendeu nos últimos 3 meses mas
+                # tem histórico. Evita receita zero silenciosa.
+                # ----------------------------------------------------------------
+                r4 = db.execute(text("""
                     WITH ultima_data_sku AS (
                         SELECT sku, MAX(data_pedido) AS data_ult
                         FROM fato_vendas
                         WHERE qt_pedido > 0 AND vl_pedido > 0
                         GROUP BY sku
                     ),
-                    pmv_sku AS (
+                    pmv_ultima AS (
                         SELECT v.sku,
                                SUM(v.vl_pedido) / NULLIF(SUM(v.qt_pedido), 0) AS pmv
                         FROM fato_vendas v
@@ -411,7 +462,7 @@ class NexusLoader:
                     )
                     UPDATE fato_ibp_granular f
                     SET pmv_aplicado = ROUND(p.pmv::numeric, 2)
-                    FROM pmv_sku p
+                    FROM pmv_ultima p
                     WHERE f.ciclo_sop = :ciclo
                       AND f.sku = p.sku
                       AND COALESCE(f.pmv_aplicado, 0) = 0
@@ -419,8 +470,9 @@ class NexusLoader:
 
                 db.commit()
                 log_callback(
-                    f"✅ [PMV] Passo 1 (par cgc×sku): {r1.rowcount} linhas | "
-                    f"Passo 2 (fallback SKU): {r2.rowcount} linhas."
+                    f"✅ [PMV] Cascata concluída no ciclo {ciclo_alvo}: "
+                    f"N1 cliente(3m)={r1.rowcount} | N2 regional(3m)={r2.rowcount} | "
+                    f"N3 SKU(3m)={r3.rowcount} | N4 última venda={r4.rowcount} linhas."
                 )
         except Exception as e:
             log_callback(f"❌ [PMV] Erro na precificação do ciclo: {e}")
