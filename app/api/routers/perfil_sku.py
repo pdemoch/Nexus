@@ -559,6 +559,7 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None) ->
     def _novo(mes_key):
         return {"mes": mes_key, "vendido_cx": None, "faturado_cx": None,
                 "vendido_rs": None, "faturado_rs": None, "ia_cx": None, "final_cx": None,
+                "ia_rs": None, "final_rs": None,
                 "orcamento_rs": None, "ano_ant_cx": None, "ano_ant_rs": None,
                 "eh_futuro": False}
 
@@ -583,7 +584,9 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None) ->
     #    de todos os ciclos, e depois filtra por mês pegando o ciclo M-2 de cada.
     prev_rows = db.execute(text("""
         SELECT ciclo_sop, TO_CHAR(mes_projetado,'YYYY-MM-01') AS mes,
-               SUM(vol_ia) AS ia, SUM(vol_final) AS final
+               SUM(vol_ia) AS ia, SUM(vol_final) AS final,
+               SUM(vol_ia * pmv_aplicado) AS ia_rs,
+               SUM(vol_final * pmv_aplicado) AS final_rs
         FROM fato_ibp_granular
         WHERE sku = :sku
         GROUP BY ciclo_sop, mes_projetado
@@ -605,6 +608,8 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None) ->
         if p and (p.ia is not None or p.final is not None):
             linha["ia_cx"] = int(p.ia or 0)
             linha["final_cx"] = int(p.final or 0)
+            linha["ia_rs"] = round(float(p.ia_rs or 0), 2)
+            linha["final_rs"] = round(float(p.final_rs or 0), 2)
             linha["ciclo_fonte"] = cf
 
     # 4) Orçamento — todo de uma vez.
@@ -644,35 +649,123 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None) ->
 
 
 
-    # Uso: python perfil_sku.py   (com a app no path e o banco acessivel)
-    from app.core.database import SessionLocal
-    db = SessionLocal()
-    SKU = "410025614"
+def get_previous_cycle_str(ciclo: str) -> str:
+    """'MM/YYYY' do ciclo imediatamente anterior."""
+    mm, yy = ciclo.split("/")
+    d = datetime.date(int(yy), int(mm), 1) - relativedelta(months=1)
+    return d.strftime("%m/%Y")
+
+
+def _fmt_cx(n):
     try:
-        d = diagnostico_sku_mes(db, SKU, "2026-06-01")
-        print(f"\n=== DIAGNOSTICO {SKU} / junho-2026 (ciclo fonte: {d['ciclo_fonte']}) ===")
-        for k, v in d.items():
-            print(f"  {k:32s} = {v}")
-        print("\n=== INSIGHT ===")
-        print(" ", gerar_insight(d))
+        return f"{int(round(float(n))):,}".replace(",", ".")
+    except Exception:
+        return "\u2014"
 
-        pl = comparativo_plurianual(db, SKU, mes_referencia="2026-06-01", ciclo_ativo="07/2026")
-        print(f"\n=== PLURIANUAL {SKU}  (no plano 07/2026: {pl['no_plano_ciclo_ativo']}) ===")
-        print(f"  primeiro_ano={pl['primeiro_ano']}  lancamento={pl['eh_lancamento']}  "
-              f"tend_volume={pl['tendencia_volume']}  tend_pmv={pl['tendencia_pmv']}")
-        if pl['alerta_historico']:
-            print(f"  ALERTA: {pl['alerta_historico']}")
-        for a in pl["anos"]:
-            print(f"   {a['ano']}: {int(a['vendido_cx']):>8} cx | PMV {a['pmv']:>6} | "
-                  f"{a['razoes_sociais']:>3} razoes | fill {a['fill_rate_cx']}")
+def _fmt_rs(n):
+    try:
+        return "R$ " + f"{float(n):,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return "\u2014"
 
-        fva = fva_sku(db, SKU, "2026-06-01")
-        print(f"\n=== FVA {SKU} / junho-2026 ===")
-        print(f"  vendido={int(fva['vendido_cx'])}  humano={int(fva['humano_cx'])}  "
-              f"ia={int(fva['ia_cx'])}  naive={int(fva['naive_cx'])}")
-        print(f"  aderencia: humano={fva['aderencia_humano']}  ia={fva['aderencia_ia']}  "
-              f"naive={fva['aderencia_naive']}")
-        print(f"  FVA_ia={fva['fva_ia']}  vencedor={fva['vencedor']}  "
-              f"IA_teria_batido={fva['ia_teria_batido_humano']}")
-    finally:
-        db.close()
+def _pct(x):
+    return f"{x*100:+.0f}%"
+
+
+def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
+                  descricao: str = None) -> Dict[str, Any]:
+    """
+    Empacota o dossie COMPLETO de um SKU: serie do grafico + plurianual + FVA +
+    comparacoes do mes-foco + insights em texto. Consumido pelos 5 routers.
+
+    Mes-foco = primeiro mes da janela do ciclo ativo (dinamico). Ciclo 07 -> set;
+    quando abrir o 08 -> out, sem alterar codigo.
+    """
+    mes_foco = meses_janela[0] if meses_janela else None
+    serie = serie_dossie(db, sku, ciclo_ativo, meses_futuros=meses_janela)
+    hoje = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
+    mes_fechado = (hoje.replace(day=1) - relativedelta(months=1))
+
+    plur = comparativo_plurianual(db, sku, mes_referencia=mes_fechado.strftime("%Y-%m-%d"),
+                                  ciclo_ativo=ciclo_ativo)
+    fva = fva_sku(db, sku, mes_fechado.strftime("%Y-%m-%d"))
+
+    comparacoes = None
+    insights = []
+    if mes_foco is not None:
+        ciclo_ant = get_previous_cycle_str(ciclo_ativo)
+
+        plano = db.execute(text("""
+            SELECT COALESCE(SUM(vol_final),0) AS cx,
+                   COALESCE(SUM(vol_final * pmv_aplicado),0) AS rs
+            FROM fato_ibp_granular
+            WHERE sku=:s AND ciclo_sop=:c AND mes_projetado=:m
+        """), {"s": sku, "c": ciclo_ativo, "m": mes_foco}).fetchone()
+
+        orc = db.execute(text("""
+            SELECT COALESCE(SUM(receita_orcamento),0) FROM fato_orcamento
+            WHERE sku=:s AND mes_projetado=:m
+        """), {"s": sku, "m": mes_foco}).scalar()
+
+        cant = db.execute(text("""
+            SELECT COALESCE(SUM(vol_final),0) AS cx,
+                   COALESCE(SUM(vol_final * pmv_aplicado),0) AS rs
+            FROM fato_ibp_granular
+            WHERE sku=:s AND ciclo_sop=:ca AND mes_projetado=:m
+        """), {"s": sku, "ca": ciclo_ant, "m": mes_foco}).fetchone()
+
+        mes_ano_ant = (mes_foco - relativedelta(years=1)).strftime("%Y-%m")
+        aant = db.execute(text("""
+            SELECT COALESCE(SUM(qt_pedido),0) AS cx, COALESCE(SUM(vl_pedido),0) AS rs
+            FROM fato_vendas
+            WHERE sku=:s AND TO_CHAR(data_pedido,'YYYY-MM')=:ym
+        """), {"s": sku, "ym": mes_ano_ant}).fetchone()
+
+        plano_cx = int(plano.cx or 0); plano_rs = float(plano.rs or 0)
+        comparacoes = {
+            "mes_foco": mes_foco.strftime("%Y-%m-%d"),
+            "mes_label": mes_foco.strftime("%m/%Y"),
+            "final_cx": plano_cx, "final_rs": round(plano_rs, 2),
+            "orcamento_rs": round(float(orc or 0), 2),
+            "ciclo_ant_cx": int(cant.cx or 0), "ciclo_ant_rs": round(float(cant.rs or 0), 2),
+            "ano_ant_cx": int(aant.cx or 0), "ano_ant_rs": round(float(aant.rs or 0), 2),
+            "ciclo_anterior": ciclo_ant,
+        }
+
+        ml = mes_foco.strftime("%m/%Y")
+        if orc and float(orc) > 0:
+            dd = (plano_rs - float(orc)) / float(orc)
+            if abs(dd) >= 0.03:
+                direc = "acima" if dd > 0 else "abaixo"
+                insights.append(f"O plano de {ml} ({_fmt_rs(plano_rs)}) esta {_pct(dd)} {direc} do orcamento ({_fmt_rs(orc)}).")
+        if cant and cant.cx and int(cant.cx) > 0:
+            dv = (plano_cx - int(cant.cx)) / int(cant.cx)
+            if abs(dv) >= 0.05:
+                direc = "elevou" if dv > 0 else "reduziu"
+                insights.append(f"Do ciclo {ciclo_ant} para {ciclo_ativo}, o plano de {ml} {direc} {_pct(dv)} em volume ({_fmt_cx(cant.cx)} -> {_fmt_cx(plano_cx)} cx).")
+        if aant and aant.cx and int(aant.cx) > 0:
+            da = (plano_cx - int(aant.cx)) / int(aant.cx)
+            direc = "acima" if da > 0 else "abaixo"
+            insights.append(f"O plano de {ml} esta {_pct(da)} {direc} do vendido no mesmo mes do ano passado ({_fmt_cx(aant.cx)} cx).")
+
+    if plur and plur.get("tendencia_volume") and plur.get("tendencia_pmv"):
+        tv, tp = plur["tendencia_volume"], plur["tendencia_pmv"]
+        if tv == "DECLINIO" and tp == "CRESCIMENTO":
+            insights.append("Volume em queda e preco subindo ao longo dos anos: produto em maturidade - margem sustenta, giro encolhe.")
+        elif tv == "CRESCIMENTO" and tp == "CRESCIMENTO":
+            insights.append("Volume e preco crescendo: SKU em expansao saudavel.")
+        elif tv == "CRESCIMENTO" and tp == "DECLINIO":
+            insights.append("Volume cresce mas preco cai: ganho de share via preco - vigie a margem.")
+
+    return {
+        "sku": sku,
+        "descricao": descricao or sku,
+        "tipo": "sku",
+        "serie": serie["serie"],
+        "marco_hoje": serie["marco_hoje"],
+        "forecast_inicio": serie["forecast_inicio"],
+        "comparacoes": comparacoes,
+        "insights": insights,
+        "plurianual": plur,
+        "fva": fva,
+    }
