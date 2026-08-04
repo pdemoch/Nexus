@@ -91,6 +91,8 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(require_supply)):
                SUM(f.vol_meta)      AS meta,
                SUM(f.vol_supply)    AS supply,
                AVG(f.pmv_aplicado)  AS pmv,
+               SUM(f.vol_supply * f.pmv_aplicado) AS receita_sup,
+               SUM(f.vol_meta * f.pmv_aplicado)   AS receita_meta,
                MAX(f.motivo_supply)        AS motivo,
                MAX(f.justificativa_supply) AS justificativa
         FROM fato_ibp_granular f
@@ -109,9 +111,11 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(require_supply)):
         seg = cat["segmentos"].setdefault(r.segmento, {"nome": r.segmento, "skus": {}})
         sk = seg["skus"].setdefault(r.sku, {"sku": r.sku, "descricao": r.descricao, "meses": {}})
         meta = int(r.meta or 0); sup = int(r.supply or 0); ia = int(r.ia or 0)
-        pmv = float(r.pmv or 0)
         # Se supply ainda não interveio, exibe a meta como ponto de partida.
         sup_exib = sup if sup > 0 else meta
+        # Receita no grão coerente com o volume exibido.
+        receita = float(r.receita_sup or 0) if sup > 0 else float(r.receita_meta or 0)
+        pmv = (receita / sup_exib) if sup_exib > 0 else float(r.pmv or 0)
         sk["meses"][r.mes] = {
             "ia": ia, "meta": meta, "supply": sup_exib,
             "gap": sup_exib - meta, "pmv": round(pmv, 2),
@@ -119,7 +123,7 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(require_supply)):
         }
         tot_meta[r.mes] += meta
         tot_sup[r.mes] += sup_exib
-        tot_rs[r.mes] += sup_exib * pmv
+        tot_rs[r.mes] += receita
 
     categorias = []
     for cat in sorted(tree.values(), key=lambda c: c["nome"]):

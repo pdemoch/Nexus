@@ -374,8 +374,22 @@ class NexusLoader:
         try:
             with SessionLocal() as db:
                 # ----------------------------------------------------------------
+                # RESET — Opção A (recalcular tudo). Zera o PMV do ciclo ativo
+                # ANTES da cascata. Sem isto, numa REPRECIFICAÇÃO as linhas já têm
+                # preço antigo (pmv>0), e os níveis de fallback (que preenchem só
+                # onde pmv=0) nunca rodam — deixando clientes sem venda recente com
+                # preço velho em vez do fallback regional/SKU. O reset garante que
+                # a cascata recalcula do zero, cada nível cobrindo o que o anterior
+                # não alcançou. Só toca o ciclo ativo; passados são imutáveis.
+                r0 = db.execute(text("""
+                    UPDATE fato_ibp_granular
+                    SET pmv_aplicado = 0
+                    WHERE ciclo_sop = :ciclo
+                """), {"ciclo": ciclo_alvo})
+                log_callback(f"   [PMV] Reset: {r0.rowcount} linhas do ciclo zeradas para recálculo.")
+
+                # ----------------------------------------------------------------
                 # NÍVEL 1 — CNPJ×SKU, últimos 3 meses (ponderado por volume).
-                # Sobrescreve tudo do ciclo: é o preço mais específico e recente.
                 # ----------------------------------------------------------------
                 r1 = db.execute(text("""
                     WITH pmv_cliente AS (
