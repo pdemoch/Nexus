@@ -532,7 +532,110 @@ def fva_sku(db: Session, sku: str, mes) -> Dict[str, Any]:
 # =====================================================================
 # TESTE MANUAL — roda contra um SKU conhecido
 # =====================================================================
-if __name__ == "__main__":
+def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None) -> Dict[str, Any]:
+    """
+    Série unificada do gráfico do dossiê: realizado (vendido/faturado, 24 meses)
+    SOBREPOSTO ao previsto (vol_ia e vol_final), onde cada mês de previsão vem do
+    ciclo M-2 que o congelou (regra ciclo_fonte_do_mes). Mais orçamento e ano
+    anterior por mês. Otimizada: poucas queries agregadas (não uma por mês).
+
+    Estrutura por mês: mes, vendido_cx, faturado_cx, vendido_rs, faturado_rs,
+    ia_cx, final_cx, orcamento_rs, ano_ant_cx, ano_ant_rs, eh_futuro.
+    """
+    hoje = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
+    mes_atual = hoje.replace(day=1)
+
+    # 1) Realizado — 24 meses (vendido/faturado).
+    realizado = db.execute(text("""
+        SELECT TO_CHAR(data_pedido,'YYYY-MM-01') AS mes,
+               SUM(qt_pedido) AS vendido_cx, SUM(qtfatura) AS faturado_cx,
+               SUM(vl_pedido) AS vendido_rs, SUM(vlfatura) AS faturado_rs
+        FROM fato_vendas
+        WHERE sku = :sku AND data_pedido >= (CURRENT_DATE - INTERVAL '24 months')
+        GROUP BY 1
+    """), {"sku": sku}).fetchall()
+
+    mapa: Dict[str, Any] = {}
+    def _novo(mes_key):
+        return {"mes": mes_key, "vendido_cx": None, "faturado_cx": None,
+                "vendido_rs": None, "faturado_rs": None, "ia_cx": None, "final_cx": None,
+                "orcamento_rs": None, "ano_ant_cx": None, "ano_ant_rs": None,
+                "eh_futuro": False}
+
+    for r in realizado:
+        linha = _novo(r.mes)
+        linha.update({
+            "vendido_cx": int(r.vendido_cx or 0), "faturado_cx": int(r.faturado_cx or 0),
+            "vendido_rs": round(float(r.vendido_rs or 0), 2),
+            "faturado_rs": round(float(r.faturado_rs or 0), 2),
+        })
+        mapa[r.mes] = linha
+
+    # 2) Meses futuros do ciclo ativo (só previsão).
+    if meses_futuros:
+        for md in meses_futuros:
+            key = md.strftime("%Y-%m-01")
+            if key not in mapa:
+                mapa[key] = _novo(key)
+                mapa[key]["eh_futuro"] = md >= mes_atual
+
+    # 3) Previsão — TODO o forecast relevante numa query. Traz vol_ia/vol_final
+    #    de todos os ciclos, e depois filtra por mês pegando o ciclo M-2 de cada.
+    prev_rows = db.execute(text("""
+        SELECT ciclo_sop, TO_CHAR(mes_projetado,'YYYY-MM-01') AS mes,
+               SUM(vol_ia) AS ia, SUM(vol_final) AS final
+        FROM fato_ibp_granular
+        WHERE sku = :sku
+        GROUP BY ciclo_sop, mes_projetado
+    """), {"sku": sku}).fetchall()
+    # indexa por (ciclo, mes)
+    prev_idx = {(p.ciclo_sop, p.mes): p for p in prev_rows}
+    for key, linha in mapa.items():
+        md = datetime.datetime.strptime(key, "%Y-%m-%d").date()
+        cf = ciclo_fonte_do_mes(md)
+        p = prev_idx.get((cf, key))
+        if p and (p.ia is not None or p.final is not None):
+            linha["ia_cx"] = int(p.ia or 0)
+            linha["final_cx"] = int(p.final or 0)
+            linha["ciclo_fonte"] = cf
+
+    # 4) Orçamento — todo de uma vez.
+    orc_rows = db.execute(text("""
+        SELECT TO_CHAR(mes_projetado,'YYYY-MM-01') AS mes, SUM(receita_orcamento) AS rec
+        FROM fato_orcamento WHERE sku = :sku GROUP BY 1
+    """), {"sku": sku}).fetchall()
+    orc_idx = {o.mes: float(o.rec or 0) for o in orc_rows}
+    for key, linha in mapa.items():
+        if key in orc_idx:
+            linha["orcamento_rs"] = round(orc_idx[key], 2)
+
+    # 5) Ano anterior — todo de uma vez (desloca +1 ano na indexação).
+    ant_rows = db.execute(text("""
+        SELECT TO_CHAR(data_pedido,'YYYY-MM-01') AS mes,
+               SUM(qt_pedido) AS cx, SUM(vl_pedido) AS rs
+        FROM fato_vendas
+        WHERE sku = :sku AND data_pedido >= (CURRENT_DATE - INTERVAL '36 months')
+        GROUP BY 1
+    """), {"sku": sku}).fetchall()
+    ant_idx = {a.mes: a for a in ant_rows}
+    for key, linha in mapa.items():
+        md = datetime.datetime.strptime(key, "%Y-%m-%d").date()
+        key_ant = (md - relativedelta(years=1)).strftime("%Y-%m-01")
+        a = ant_idx.get(key_ant)
+        if a and a.cx:
+            linha["ano_ant_cx"] = int(a.cx or 0)
+            linha["ano_ant_rs"] = round(float(a.rs or 0), 2)
+
+    serie = sorted(mapa.values(), key=lambda x: x["mes"])
+    return {
+        "sku": sku,
+        "serie": serie,
+        "marco_hoje": mes_atual.strftime("%Y-%m-01"),
+        "forecast_inicio": (CICLO_PISO + relativedelta(months=DEFASAGEM_MESES)).strftime("%Y-%m-01"),
+    }
+
+
+
     # Uso: python perfil_sku.py   (com a app no path e o banco acessivel)
     from app.core.database import SessionLocal
     db = SessionLocal()
