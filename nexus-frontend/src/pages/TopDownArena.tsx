@@ -1,12 +1,10 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import axios from 'axios';
 import {
-  ChevronRight, ChevronDown, Save, Lock, Unlock, Download, X,
-  TrendingUp, TrendingDown, Minus, Bot, AlertTriangle, Loader2, LineChart as LineIcon,
+  ChevronRight, ChevronDown, Save, Lock, Unlock, Download,
+  Loader2, LineChart as LineIcon,
 } from 'lucide-react';
-import {
-  LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine,
-} from 'recharts';
+import DossieInferior from './DossieInferior';
 
 /* =====================================================================
    DEMANDA MARKETING (Top-Down) — mesa de trabalho do planejador
@@ -38,7 +36,7 @@ export default function DemandaMarketing() {
   const [salvando, setSalvando] = useState(false);
   const [abertas, setAbertas] = useState<Set<string>>(new Set());
   const [edits, setEdits] = useState<Record<string, number>>({}); // `${sku}|${mes}` -> valor
-  const [dossieSku, setDossieSku] = useState<string | null>(null);
+  const [dossie, setDossie] = useState<{ sku: string; descricao: string } | null>(null);
 
   const carregar = useCallback(async () => {
     setLoading(true);
@@ -117,7 +115,9 @@ export default function DemandaMarketing() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50" style={{ fontVariantNumeric: 'tabular-nums' }}>
+    <div className="h-screen flex flex-col bg-slate-50" style={{ fontVariantNumeric: 'tabular-nums' }}>
+      {/* AREA DA TABELA — rolável, encolhe quando o dossiê abre */}
+      <div className="flex-1 min-h-0 overflow-y-auto">
       {/* ---------- CABEÇALHO + TOTALIZADORES VIVOS ---------- */}
       <div className="sticky top-0 z-20 bg-white border-b border-slate-200">
         <div className="px-6 pt-5 pb-3 flex items-center justify-between">
@@ -171,7 +171,7 @@ export default function DemandaMarketing() {
       </div>
 
       {/* ---------- CORPO ---------- */}
-      <div className="px-6 pb-24">
+      <div className="px-6 pb-6">
         {dados?.categorias?.map((cat: any) => {
           const catAberta = abertas.has(cat.nome);
           return (
@@ -234,8 +234,8 @@ export default function DemandaMarketing() {
                           );
                         })}
                         <button
-                          onClick={() => setDossieSku(s.sku)}
-                          className="justify-self-center p-1.5 rounded-lg text-slate-300 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
+                          onClick={() => setDossie({ sku: s.sku, descricao: s.descricao })}
+                          className={`justify-self-center p-1.5 rounded-lg transition-colors ${dossie?.sku === s.sku ? 'bg-indigo-100 text-indigo-600' : 'text-slate-300 hover:bg-indigo-50 hover:text-indigo-600'}`}
                           title="Ver dossiê do SKU"
                         >
                           <LineIcon className="w-4 h-4" />
@@ -249,144 +249,18 @@ export default function DemandaMarketing() {
           );
         })}
       </div>
-
-      {/* ---------- GAVETA DE DOSSIÊ (o signature) ---------- */}
-      {dossieSku && <GavetaDossie sku={dossieSku} fechar={() => setDossieSku(null)} />}
-    </div>
-  );
-}
-
-/* =====================================================================
-   GAVETA LATERAL — o dossiê do SKU, carregado sob demanda
-   ===================================================================== */
-function GavetaDossie({ sku, fechar }: { sku: string; fechar: () => void }) {
-  const [d, setD] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    setLoading(true);
-    axios.get(`/api/v1/topdown/dossie?sku=${encodeURIComponent(sku)}`)
-      .then((r) => setD(r.data))
-      .finally(() => setLoading(false));
-  }, [sku]);
-
-  const tendIcon = (t: string) =>
-    t === 'CRESCIMENTO' ? <TrendingUp className="w-4 h-4 text-emerald-600" /> :
-    t === 'DECLINIO' ? <TrendingDown className="w-4 h-4 text-rose-600" /> :
-    <Minus className="w-4 h-4 text-slate-400" />;
-
-  return (
-    <>
-      <div className="fixed inset-0 bg-slate-900/20 z-30" onClick={fechar} />
-      <div className="fixed right-0 top-0 bottom-0 w-full max-w-md bg-white z-40 shadow-2xl overflow-y-auto"
-           style={{ fontVariantNumeric: 'tabular-nums' }}>
-        <div className="sticky top-0 bg-white border-b border-slate-100 px-5 py-4 flex items-start justify-between">
-          <div className="min-w-0">
-            <div className="text-[10px] font-black uppercase tracking-widest text-indigo-500">Dossiê do SKU</div>
-            <div className="text-sm font-black text-slate-900 truncate">{d?.descricao || sku}</div>
-            <div className="text-[10px] font-bold text-slate-300">{sku}</div>
-          </div>
-          <button onClick={fechar} className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100"><X className="w-4 h-4" /></button>
-        </div>
-
-        {loading ? (
-          <div className="p-16 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin" /></div>
-        ) : (
-          <div className="p-5 space-y-6">
-            {/* PLACAR HUMANO vs IA (FVA) */}
-                        {d?.fva && (
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
-                    Quem acertou mais · último mês fechado
-                  </div>
-                  {d.fva.baixo_volume && (
-                    <span className="text-[9px] font-black uppercase tracking-wider text-slate-400 bg-slate-100 rounded px-1.5 py-0.5">baixo volume</span>
-                  )}
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  {[
-                    { label: 'Humano', val: d.fva.aderencia_humano, vol: d.fva.humano_cx, key: 'HUMANO' },
-                    { label: 'IA', val: d.fva.aderencia_ia, vol: d.fva.ia_cx, key: 'IA' },
-                    { label: 'Ano passado', val: d.fva.aderencia_naive, vol: d.fva.naive_cx, key: 'ANO PASSADO' },
-                  ].map((x) => {
-                    const venceu = d.fva.vencedor === x.key;
-                    return (
-                      <div key={x.key} className={`rounded-xl px-3 py-2 border ${venceu ? 'border-emerald-300 bg-emerald-50' : 'border-slate-100 bg-slate-50'}`}>
-                        <div className="text-[10px] font-bold text-slate-400">{x.label}</div>
-                        <div className={`text-lg font-black ${venceu ? 'text-emerald-700' : 'text-slate-500'}`}>
-                          {x.val != null ? fmtPct(x.val) : '—'}
-                        </div>
-                        <div className="text-[9px] font-bold text-slate-400">
-                          previu {x.vol != null ? fmtCx(x.vol) : '—'} cx
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-                <div className="mt-1 text-[10px] font-bold text-slate-400 text-right">
-                  vendeu {fmtCx(d.fva.vendido_cx)} cx no mês
-                </div>
-                {d.fva.insight_fva && (
-                  <div className="mt-2 flex items-start gap-2 text-[11px] font-bold text-slate-600 bg-slate-50 rounded-lg px-3 py-2">
-                    <Bot className="w-4 h-4 shrink-0 mt-0.5 text-indigo-500" />
-                    {d.fva.insight_fva}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* GRÁFICO 24 MESES */}
-            <div>
-              <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Histórico · 24 meses</div>
-              <div className="h-40">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={d?.grafico || []} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                    <XAxis dataKey="mes" tick={{ fontSize: 9, fill: '#94a3b8' }} interval={3} />
-                    <YAxis tick={{ fontSize: 9, fill: '#94a3b8' }} />
-                    <Tooltip contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #e2e8f0' }} />
-                    <Line type="monotone" dataKey="vendido" stroke="#4f46e5" strokeWidth={2} dot={false} name="Vendido" />
-                    <Line type="monotone" dataKey="faturado" stroke="#94a3b8" strokeWidth={1.5} dot={false} name="Faturado" />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-
-            {/* COMPARATIVO PLURIANUAL */}
-            {d?.plurianual && (
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Trajetória plurianual</div>
-                  <div className="flex items-center gap-3 text-[10px] font-bold">
-                    <span className="flex items-center gap-1 text-slate-500">Vol {tendIcon(d.plurianual.tendencia_volume)}</span>
-                    <span className="flex items-center gap-1 text-slate-500">PMV {tendIcon(d.plurianual.tendencia_pmv)}</span>
-                  </div>
-                </div>
-                {d.plurianual.alerta_historico && (
-                  <div className="mb-2 flex items-center gap-2 text-[11px] font-bold text-amber-600 bg-amber-50 rounded-lg px-3 py-1.5">
-                    <AlertTriangle className="w-3.5 h-3.5" /> {d.plurianual.alerta_historico}
-                  </div>
-                )}
-                <div className="space-y-1">
-                  {(d.plurianual.anos || []).map((a: any, i: number) => {
-                    const ehRecente = i >= (d.plurianual.anos.length - 3);
-                    return (
-                      <div key={a.ano} className={`grid grid-cols-4 gap-2 px-3 py-1.5 rounded-lg text-xs ${ehRecente ? 'bg-slate-50 font-bold' : 'opacity-50'}`}>
-                        <div className="text-slate-500">{a.ano}</div>
-                        <div className="text-right text-slate-700">{fmtCx(a.vendido_cx)} cx</div>
-                        <div className="text-right text-slate-700">R$ {a.pmv.toFixed(2)}</div>
-                        <div className="text-right text-slate-400">{a.razoes_sociais} cli</div>
-                      </div>
-                    );
-                  })}
-                </div>
-                <div className="mt-1 text-[10px] text-slate-300 px-3">últimos 3 anos em destaque · anteriores como contexto</div>
-              </div>
-            )}
-          </div>
-        )}
+      {/* fim do corpo da tabela */}
       </div>
-    </>
+      {/* ---------- DOSSIÊ INFERIOR (split-screen) ---------- */}
+      {dossie && (
+        <DossieInferior
+          prefixoApi="/api/v1/topdown"
+          tipo="sku"
+          id={dossie.sku}
+          titulo={dossie.descricao}
+          onFechar={() => setDossie(null)}
+        />
+      )}
+    </div>
   );
 }

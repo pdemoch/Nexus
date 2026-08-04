@@ -224,48 +224,18 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_marketing)
 @router.get("/dossie")
 def dossie(sku: str, db: Session = Depends(get_db), _: dict = Depends(require_marketing)):
     """
-    Perfil completo do SKU para a gaveta lateral: histórico 2 anos, comparativo
-    plurianual (volume/PMV/tendência) e o placar humano-vs-IA (FVA) do último
-    mês fechado. Carrega SÓ no clique — mantém a tabela leve.
-
-    Consome o módulo de análise perfil_sku (pilar separado). Importado aqui
-    localmente para não acoplar a fundação de escrita à de análise.
+    Dossiê completo do SKU para o painel inferior (split-screen): gráfico
+    unificado realizado+previsto, comparações do mês-foco (orçamento, ciclo
+    anterior, ano anterior), insights em texto, plurianual e placar FVA.
+    Empacotado pelo perfil_sku.montar_dossie (fonte única).
     """
     try:
-        from app.api.routers.perfil_sku import (
-            comparativo_plurianual, fva_sku, ciclo_fonte_do_mes,
-        )
+        from app.api.routers.perfil_sku import montar_dossie
         ciclo = get_current_cycle(db)
-
-        # Mês fechado mais recente para o placar de acurácia (o mês corrente − 1).
-        hoje = datetime.date.today().replace(day=1)
-        mes_fechado = (hoje - relativedelta(months=1)).strftime("%Y-%m-%d")
-
-        plurianual = comparativo_plurianual(
-            db, sku, mes_referencia=mes_fechado, ciclo_ativo=ciclo)
-        fva = fva_sku(db, sku, mes_fechado)
-
-        # Histórico de 24 meses + camadas do plano (para o gráfico).
-        hist = db.execute(text("""
-            SELECT TO_CHAR(data_pedido,'YYYY-MM') AS mes,
-                   SUM(qt_pedido) AS vendido, SUM(qtfatura) AS faturado
-            FROM fato_vendas
-            WHERE sku = :sku AND data_pedido >= (CURRENT_DATE - INTERVAL '24 months')
-            GROUP BY 1 ORDER BY 1
-        """), {"sku": sku}).fetchall()
-
-        serie = [{"mes": r.mes, "vendido": int(r.vendido or 0),
-                  "faturado": int(r.faturado or 0)} for r in hist]
-
+        meses = get_working_window_months(db)
         desc = db.execute(text(
             "SELECT descricao FROM dim_produtos WHERE sku=:s"), {"s": sku}).scalar()
-
-        return {
-            "sku": sku, "descricao": desc or sku,
-            "grafico": serie,
-            "plurianual": plurianual,
-            "fva": fva,
-        }
+        return montar_dossie(db, sku, ciclo, meses, descricao=desc)
     except Exception as e:
         raise HTTPException(500, repr(e))
 
