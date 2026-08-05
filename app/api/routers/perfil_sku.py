@@ -560,6 +560,7 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None) ->
         return {"mes": mes_key, "vendido_cx": None, "faturado_cx": None,
                 "vendido_rs": None, "faturado_rs": None, "ia_cx": None, "final_cx": None,
                 "ia_rs": None, "final_rs": None,
+                "final_ciclo_ant_cx": None, "final_ciclo_ant_rs": None,
                 "orcamento_rs": None, "ano_ant_cx": None, "ano_ant_rs": None,
                 "eh_futuro": False}
 
@@ -580,8 +581,7 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None) ->
                 mapa[key] = _novo(key)
                 mapa[key]["eh_futuro"] = md >= mes_atual
 
-    # 3) Previsão — TODO o forecast relevante numa query. Traz vol_ia/vol_final
-    #    de todos os ciclos, e depois filtra por mês pegando o ciclo M-2 de cada.
+    # 3) Previsão — TODO o forecast relevante numa query (todos os ciclos).
     prev_rows = db.execute(text("""
         SELECT ciclo_sop, TO_CHAR(mes_projetado,'YYYY-MM-01') AS mes,
                SUM(vol_ia) AS ia, SUM(vol_final) AS final,
@@ -591,26 +591,48 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None) ->
         WHERE sku = :sku
         GROUP BY ciclo_sop, mes_projetado
     """), {"sku": sku}).fetchall()
-    # indexa por (ciclo, mes)
     prev_idx = {(p.ciclo_sop, p.mes): p for p in prev_rows}
-    # Primeiro mês com previsão M-2 LEGÍTIMA: o ciclo-piso (04/2026) só congela
-    # com 2 meses de antecedência o mês 06/2026. Antes disso, o "ciclo fonte"
-    # seria anterior ao piso (inexistente) e cairia forçado no piso — o que
-    # compararia o plano quase consigo mesmo. Então só exibimos forecast a
-    # partir de 06/2026 (M-2 real), mantendo a linha de previsão honesta.
-    primeiro_mes_forecast = CICLO_PISO + relativedelta(months=DEFASAGEM_MESES)
+
+    # Ciclo anterior (para a linha de referência histórica).
+    mm, yy = ciclo_ativo.split("/")
+    ciclo_ant_data = datetime.date(int(yy), int(mm), 1) - relativedelta(months=1)
+    ciclo_anterior = ciclo_ant_data.strftime("%m/%Y")
+
+    primeiro_mes_forecast = CICLO_PISO + relativedelta(months=DEFASAGEM_MESES)  # 06/2026
     for key, linha in mapa.items():
         md = datetime.datetime.strptime(key, "%Y-%m-%d").date()
         if md < primeiro_mes_forecast:
-            continue  # abril/maio: sem M-2 real, mostra só realizado
-        cf = ciclo_fonte_do_mes(md)
-        p = prev_idx.get((cf, key))
-        if p and (p.ia is not None or p.final is not None):
-            linha["ia_cx"] = int(p.ia or 0)
-            linha["final_cx"] = int(p.final or 0)
-            linha["ia_rs"] = round(float(p.ia_rs or 0), 2)
-            linha["final_rs"] = round(float(p.final_rs or 0), 2)
-            linha["ciclo_fonte"] = cf
+            continue  # antes do primeiro ciclo: sem forecast M-2 real
+
+        # LINHA A — plano do ciclo ATIVO (dinâmico). Cobre toda a janela do
+        # ciclo corrente (inclusive meses futuros ainda não vendidos).
+        p_ativo = prev_idx.get((ciclo_ativo, key))
+        if p_ativo and (p_ativo.ia is not None or p_ativo.final is not None):
+            linha["ia_cx"] = int(p_ativo.ia or 0)
+            linha["final_cx"] = int(p_ativo.final or 0)
+            linha["ia_rs"] = round(float(p_ativo.ia_rs or 0), 2)
+            linha["final_rs"] = round(float(p_ativo.final_rs or 0), 2)
+        else:
+            # fora da janela do ciclo ativo: usa o M-2 histórico (o que foi
+            # prometido com antecedência real, para meses já passados).
+            cf = ciclo_fonte_do_mes(md)
+            if cf != ciclo_ativo:
+                p_hist = prev_idx.get((cf, key))
+                if p_hist and (p_hist.ia is not None or p_hist.final is not None):
+                    linha["ia_cx"] = int(p_hist.ia or 0)
+                    linha["final_cx"] = int(p_hist.final or 0)
+                    linha["ia_rs"] = round(float(p_hist.ia_rs or 0), 2)
+                    linha["final_rs"] = round(float(p_hist.final_rs or 0), 2)
+                    linha["ciclo_fonte"] = cf
+
+        # LINHA B — plano do ciclo ANTERIOR, como referência ("antes vs agora").
+        # Só aparece nos meses que o ciclo anterior efetivamente cobriu.
+        p_ant = prev_idx.get((ciclo_anterior, key))
+        if p_ant and p_ant.final is not None:
+            linha["final_ciclo_ant_cx"] = int(p_ant.final or 0)
+            linha["final_ciclo_ant_rs"] = round(float(p_ant.final_rs or 0), 2)
+
+
 
     # 4) Orçamento — todo de uma vez.
     orc_rows = db.execute(text("""
@@ -846,15 +868,43 @@ def resumo_marketing(db: Session, ciclo_ativo: str) -> Dict[str, Any]:
     for r in vol_rows:
         vol_por_sku.setdefault(r.sku, {})[int(r.ano)] = (int(r.vol_cx or 0), float(r.vol_rs or 0))
 
-    def _tendencia_e_variacao(series_por_ano: Dict[int, float]):
-        """Últimos 2 anos com dado -> (tendencia, variacao_pct)."""
-        anos_ok = sorted([a for a, v in series_por_ano.items() if v and v > 0])
+    # NASCIMENTO REAL — a primeira venda de QUALQUER 1 caixa, em qualquer mês,
+    # olhando TODO o histórico (não só a janela YTD usada para a tendência).
+    # Decouplado do corte por dia-do-ano: se o item nasceu em novembro, o
+    # nascimento é 'aquele ano', mesmo que novembro fique fora da janela YTD
+    # (que vai só até o dia-do-ano de hoje). Sem isto, um item lançado depois
+    # do corte YTD do próprio ano de lançamento "nasceria" só no ano seguinte.
+    nascimento_rows = db.execute(text("""
+        SELECT sku, MIN(data_pedido) AS primeira_venda
+        FROM fato_vendas
+        WHERE sku = ANY(:skus) AND qt_pedido > 0
+        GROUP BY sku
+    """), {"skus": skus_ciclo}).fetchall()
+    sku_ano_nascimento: Dict[str, int] = {r.sku: r.primeira_venda.year for r in nascimento_rows}
+
+    # Piso mínimo de volume no ano-base para calcular variação percentual.
+    # Sem isto, um item novo que vendeu 1cx no ano anterior e 900cx agora
+    # mostra +89.900% — ruído estatístico de item nascente, não tendência.
+    # O NASCIMENTO em si não usa este piso: 1 caixa já conta como "nasceu".
+    PISO_VOLUME_BASE_CX = 50
+
+    def _tendencia_e_variacao(series_por_ano: Dict[int, float], ano_nascimento: Optional[int]):
+        """
+        Últimos 2 anos com dado, CORTANDO antes do nascimento real do item
+        (1ª venda de qualquer volume, em qualquer mês — não precisa de 50cx
+        para 'existir'). O piso de 50cx só decide se o ANO-BASE da comparação
+        é robusto o bastante para um percentual confiável; abaixo disso,
+        SEM_BASE em vez de um número explosivo.
+        """
+        if ano_nascimento is None:
+            return "SEM_DADO", None
+        anos_ok = sorted([a for a in series_por_ano.keys() if a >= ano_nascimento])
         if len(anos_ok) < 2:
-            return "ESTAVEL", 0.0
+            return "SEM_BASE", None  # item nasceu recente — sem 2 anos pra comparar ainda
         a_ant, a_rec = anos_ok[-2], anos_ok[-1]
-        v_ant, v_rec = series_por_ano[a_ant], series_por_ano[a_rec]
-        if v_ant <= 0:
-            return "ESTAVEL", 0.0
+        v_ant, v_rec = series_por_ano.get(a_ant, 0), series_por_ano[a_rec]
+        if v_ant < PISO_VOLUME_BASE_CX:
+            return "SEM_BASE", None  # ano-base pequeno demais — percentual não é confiável
         var = (v_rec - v_ant) / v_ant
         if var >= 0.05:
             return "CRESCIMENTO", var
@@ -865,57 +915,74 @@ def resumo_marketing(db: Session, ciclo_ativo: str) -> Dict[str, Any]:
     tendencia_volume_sku = []
     for sku, anos in vol_por_sku.items():
         serie_cx = {a: v[0] for a, v in anos.items()}
-        tend, var = _tendencia_e_variacao(serie_cx)
+        tend, var = _tendencia_e_variacao(serie_cx, sku_ano_nascimento.get(sku))
         anos_ordenados = sorted(anos.keys())
         tendencia_volume_sku.append({
             "sku": sku, "descricao": sku_desc.get(sku, sku), "categoria": sku_cat.get(sku, "?"),
-            "tendencia": tend, "variacao_pct": round(var, 4),
+            "tendencia": tend, "variacao_pct": round(var, 4) if var is not None else None,
             "vol_cx_atual": anos[anos_ordenados[-1]][0] if anos_ordenados else 0,
             "vol_rs_atual": round(anos[anos_ordenados[-1]][1], 2) if anos_ordenados else 0.0,
             "anos": [{"ano": a, "vol_cx": anos[a][0], "vol_rs": round(anos[a][1], 2)} for a in anos_ordenados],
         })
 
-    # agrega por categoria (soma dos SKUs, ano a ano)
+    # agrega por categoria (soma dos SKUs, ano a ano). Nascimento da categoria
+    # = nascimento do SKU mais antigo dela (a categoria "existe" desde que o
+    # primeiro item nela vendeu 1 caixa).
     cat_vol: Dict[str, Dict[int, list]] = {}
+    cat_ano_nascimento: Dict[str, int] = {}
     for sku, anos in vol_por_sku.items():
         cat = sku_cat.get(sku, "?")
         for ano, (cx, rs) in anos.items():
             slot = cat_vol.setdefault(cat, {}).setdefault(ano, [0, 0.0])
             slot[0] += cx
             slot[1] += rs
+        nasc_sku = sku_ano_nascimento.get(sku)
+        if nasc_sku is not None:
+            cat_ano_nascimento[cat] = min(nasc_sku, cat_ano_nascimento.get(cat, nasc_sku))
     tendencia_volume_categoria = []
     for cat, anos in cat_vol.items():
         serie_cx = {a: v[0] for a, v in anos.items()}
-        tend, var = _tendencia_e_variacao(serie_cx)
+        tend, var = _tendencia_e_variacao(serie_cx, cat_ano_nascimento.get(cat))
         anos_ordenados = sorted(anos.keys())
         tendencia_volume_categoria.append({
-            "categoria": cat, "tendencia": tend, "variacao_pct": round(var, 4),
+            "categoria": cat, "tendencia": tend, "variacao_pct": round(var, 4) if var is not None else None,
             "vol_cx_atual": anos[anos_ordenados[-1]][0] if anos_ordenados else 0,
             "vol_rs_atual": round(anos[anos_ordenados[-1]][1], 2) if anos_ordenados else 0.0,
             "anos": [{"ano": a, "vol_cx": anos[a][0], "vol_rs": round(anos[a][1], 2)} for a in anos_ordenados],
         })
 
     # -----------------------------------------------------------------
-    # 2) TENDÊNCIA DE PMV (ponderado: SUM(vl)/SUM(qt)) — YTD comparável
+    # 2) TENDÊNCIA DE PMV — SEMPRE por agrupamento (SUM(vl)/SUM(qt) do ano),
+    #    nunca média de PMVs. Mesmo corte de nascimento real e piso de volume.
     # -----------------------------------------------------------------
     pmv_por_sku: Dict[str, Dict[int, float]] = {}
     for sku, anos in vol_por_sku.items():
         for ano, (cx, rs) in anos.items():
             if cx > 0:
-                pmv_por_sku.setdefault(sku, {})[ano] = rs / cx
+                pmv_por_sku.setdefault(sku, {})[ano] = rs / cx  # agrupado, não média
 
     tendencia_pmv_sku = []
     for sku, anos in pmv_por_sku.items():
-        tend, var = _tendencia_e_variacao(anos)
+        vol_serie = {a: vol_por_sku[sku][a][0] for a in anos if a in vol_por_sku.get(sku, {})}
+        nasceu = sku_ano_nascimento.get(sku)
+        anos_ok = sorted([a for a in anos.keys() if nasceu and a >= nasceu])
+        if nasceu is None or len(anos_ok) < 2 or vol_serie.get(anos_ok[-2], 0) < PISO_VOLUME_BASE_CX:
+            tend, var = "SEM_BASE", None
+        else:
+            v_ant, v_rec = anos[anos_ok[-2]], anos[anos_ok[-1]]
+            var = (v_rec - v_ant) / v_ant if v_ant > 0 else None
+            tend = "CRESCIMENTO" if (var or 0) >= 0.05 else "DECLINIO" if (var or 0) <= -0.05 else "ESTAVEL"
         anos_ordenados = sorted(anos.keys())
         tendencia_pmv_sku.append({
             "sku": sku, "descricao": sku_desc.get(sku, sku), "categoria": sku_cat.get(sku, "?"),
-            "tendencia": tend, "variacao_pct": round(var, 4),
+            "tendencia": tend, "variacao_pct": round(var, 4) if var is not None else None,
             "pmv_atual": round(anos[anos_ordenados[-1]], 2) if anos_ordenados else 0.0,
             "anos": [{"ano": a, "pmv": round(anos[a], 2)} for a in anos_ordenados],
         })
 
-    # PMV de categoria = ponderado agregando os SKUs (não média de médias)
+    # PMV de categoria = SEMPRE agrupado: soma vl_pedido da categoria / soma
+    # qt_pedido da categoria, ano a ano. Nunca média dos PMVs dos SKUs (isso
+    # daria peso igual a um SKU de 10cx e um de 10.000cx).
     cat_pmv_base: Dict[str, Dict[int, list]] = {}
     for sku, anos in vol_por_sku.items():
         cat = sku_cat.get(sku, "?")
@@ -926,10 +993,18 @@ def resumo_marketing(db: Session, ciclo_ativo: str) -> Dict[str, Any]:
     tendencia_pmv_categoria = []
     for cat, anos in cat_pmv_base.items():
         serie_pmv = {a: (v[1] / v[0]) for a, v in anos.items() if v[0] > 0}
-        tend, var = _tendencia_e_variacao(serie_pmv)
+        serie_vol = {a: v[0] for a, v in anos.items()}
+        nasceu = cat_ano_nascimento.get(cat)
+        anos_ok = sorted([a for a in serie_pmv.keys() if nasceu and a >= nasceu])
+        if nasceu is None or len(anos_ok) < 2 or serie_vol.get(anos_ok[-2], 0) < PISO_VOLUME_BASE_CX:
+            tend, var = "SEM_BASE", None
+        else:
+            v_ant, v_rec = serie_pmv[anos_ok[-2]], serie_pmv[anos_ok[-1]]
+            var = (v_rec - v_ant) / v_ant if v_ant > 0 else None
+            tend = "CRESCIMENTO" if (var or 0) >= 0.05 else "DECLINIO" if (var or 0) <= -0.05 else "ESTAVEL"
         anos_ordenados = sorted(serie_pmv.keys())
         tendencia_pmv_categoria.append({
-            "categoria": cat, "tendencia": tend, "variacao_pct": round(var, 4),
+            "categoria": cat, "tendencia": tend, "variacao_pct": round(var, 4) if var is not None else None,
             "pmv_atual": round(serie_pmv[anos_ordenados[-1]], 2) if anos_ordenados else 0.0,
             "anos": [{"ano": a, "pmv": round(serie_pmv[a], 2)} for a in anos_ordenados],
         })

@@ -64,7 +64,7 @@ function PreenchimentoMarketing() {
   const [salvando, setSalvando] = useState(false);
   const [abertas, setAbertas] = useState<Set<string>>(new Set());
   const [edits, setEdits] = useState<Record<string, number>>({}); // `${sku}|${mes}` -> valor
-  const [dossie, setDossie] = useState<{ sku: string; descricao: string } | null>(null);
+  const [dossiesAbertos, setDossiesAbertos] = useState<Set<string>>(new Set()); // múltiplos SKUs
 
   const carregar = useCallback(async () => {
     setLoading(true);
@@ -232,8 +232,10 @@ function PreenchimentoMarketing() {
                       return d === 'alta' ? 'alta' : (d === 'media' && acc !== 'alta' ? 'media' : acc);
                     }, null);
                     const barra = div === 'alta' ? 'bg-rose-400' : div === 'media' ? 'bg-amber-400' : 'bg-transparent';
+                    const aberto = dossiesAbertos.has(s.sku);
                     return (
-                      <div key={s.sku}
+                      <React.Fragment key={s.sku}>
+                      <div
                         className="grid gap-2 px-3 py-1.5 items-center hover:bg-white rounded-lg group relative"
                         style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(120px, 1fr)) 40px` }}>
                         <div className={`absolute left-0 top-1 bottom-1 w-0.5 rounded ${barra}`} />
@@ -262,13 +264,31 @@ function PreenchimentoMarketing() {
                           );
                         })}
                         <button
-                          onClick={() => setDossie({ sku: s.sku, descricao: s.descricao })}
-                          className={`justify-self-center p-1.5 rounded-lg transition-colors ${dossie?.sku === s.sku ? 'bg-indigo-100 text-indigo-600' : 'text-slate-300 hover:bg-indigo-50 hover:text-indigo-600'}`}
+                          onClick={() => setDossiesAbertos((prev) => {
+                            const novo = new Set(prev);
+                            novo.has(s.sku) ? novo.delete(s.sku) : novo.add(s.sku);
+                            return novo;
+                          })}
+                          className={`justify-self-center p-1.5 rounded-lg transition-colors ${aberto ? 'bg-indigo-100 text-indigo-600' : 'text-slate-300 hover:bg-indigo-50 hover:text-indigo-600'}`}
                           title="Ver dossiê do SKU"
                         >
                           <LineIcon className="w-4 h-4" />
                         </button>
                       </div>
+                      {aberto && (
+                        <DossieInferior
+                          prefixoApi="/api/v1/topdown"
+                          tipo="sku"
+                          id={s.sku}
+                          titulo={s.descricao}
+                          onFechar={() => setDossiesAbertos((prev) => {
+                            const novo = new Set(prev);
+                            novo.delete(s.sku);
+                            return novo;
+                          })}
+                        />
+                      )}
+                      </React.Fragment>
                     );
                   })}
                 </div>
@@ -279,16 +299,6 @@ function PreenchimentoMarketing() {
       </div>
       {/* fim do corpo da tabela */}
       </div>
-      {/* ---------- DOSSIÊ INFERIOR (split-screen) ---------- */}
-      {dossie && (
-        <DossieInferior
-          prefixoApi="/api/v1/topdown"
-          tipo="sku"
-          id={dossie.sku}
-          titulo={dossie.descricao}
-          onFechar={() => setDossie(null)}
-        />
-      )}
     </div>
   );
 }
