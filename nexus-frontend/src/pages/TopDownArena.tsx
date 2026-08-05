@@ -2,14 +2,15 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import axios from 'axios';
 import {
   ChevronRight, ChevronDown, Save, Lock, Unlock, Download,
-  Loader2, LineChart as LineIcon,
+  Loader2, LineChart as LineIcon, LayoutGrid, ClipboardList,
 } from 'lucide-react';
 import DossieInferior from './Dossieinferior';
+import VisaoGeralMarketing from './VisaoGeralMarketing';
 
 /* =====================================================================
-   DEMANDA MARKETING (Top-Down) — mesa de trabalho do planejador
-   Partido: tabela densa + coluna editável indigo + semáforo por linha +
-   totalizadores vivos + gaveta lateral de dossiê (o signature).
+   DEMANDA MARKETING (Top-Down) — duas abas:
+   1) Visão Geral: quem cresce/cai (volume, PMV) e quem mais acerta.
+   2) Preenchimento: a mesa de trabalho SKU a SKU, com dossiê split-screen.
    ===================================================================== */
 
 const fmtCx = (n: number) => new Intl.NumberFormat('pt-BR').format(Math.round(n || 0));
@@ -31,6 +32,33 @@ function divergenciaIA(ia: number, td: number): 'alta' | 'media' | null {
 }
 
 export default function DemandaMarketing() {
+  const [aba, setAba] = useState<'geral' | 'preenchimento'>('geral');
+  return (
+    <div className="h-screen flex flex-col bg-slate-50">
+      <div className="shrink-0 bg-white border-b border-slate-200 px-6 pt-3">
+        <div className="flex items-center gap-1">
+          <button onClick={() => setAba('geral')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-xs font-black rounded-t-lg border-b-2 transition-colors ${aba === 'geral' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>
+            <LayoutGrid className="w-4 h-4" /> Visão Geral
+          </button>
+          <button onClick={() => setAba('preenchimento')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-xs font-black rounded-t-lg border-b-2 transition-colors ${aba === 'preenchimento' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>
+            <ClipboardList className="w-4 h-4" /> Preenchimento
+          </button>
+        </div>
+      </div>
+      <div className="flex-1 min-h-0">
+        {aba === 'geral' ? (
+          <VisaoGeralMarketing prefixoApi="/api/v1/topdown" />
+        ) : (
+          <PreenchimentoMarketing />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PreenchimentoMarketing() {
   const [dados, setDados] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [salvando, setSalvando] = useState(false);
@@ -115,7 +143,7 @@ export default function DemandaMarketing() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-slate-50" style={{ fontVariantNumeric: 'tabular-nums' }}>
+    <div className="h-full flex flex-col bg-slate-50" style={{ fontVariantNumeric: 'tabular-nums' }}>
       {/* AREA DA TABELA — rolável, encolhe quando o dossiê abre */}
       <div className="flex-1 min-h-0 overflow-y-auto">
       {/* ---------- CABEÇALHO + TOTALIZADORES VIVOS ---------- */}

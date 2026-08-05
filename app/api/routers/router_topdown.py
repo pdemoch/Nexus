@@ -75,6 +75,25 @@ def status(db: Session = Depends(get_db), _: dict = Depends(require_marketing)):
 
 
 # ---------------------------------------------------------------------
+# GET /resumo — Aba "Visão Geral": tendências de volume/PMV + assertividade
+# ---------------------------------------------------------------------
+@router.get("/resumo")
+def resumo(db: Session = Depends(get_db), _: dict = Depends(require_marketing)):
+    """
+    Pacote da primeira tela que o planejador vê: quem cresce/cai em volume
+    (vl_pedido, YTD comparável), quem cresce/cai em PMV, e a assertividade
+    Humano/IA/Ano-passado dos últimos meses fechados (janela dinâmica, piso
+    06/2026). Por SKU e por categoria, sem corte — o front classifica.
+    """
+    try:
+        from app.api.routers.perfil_sku import resumo_marketing
+        ciclo = get_current_cycle(db)
+        return resumo_marketing(db, ciclo)
+    except Exception as e:
+        raise HTTPException(500, repr(e))
+
+
+# ---------------------------------------------------------------------
 # GET /tabela  — a mesa de trabalho
 # ---------------------------------------------------------------------
 @router.get("/tabela")
