@@ -262,7 +262,7 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
       <div className="bg-white rounded-2xl border border-slate-100 p-4 mb-6">
         <div className="flex items-center justify-between mb-2">
           <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
-            Tendência de volume pedido (mesmo período · YTD, a partir do 1º ano com venda)
+            Tendência de volume pedido (mesmo período · YTD) OP 50 e Ativos no Portfolio
           </div>
           <div className="inline-flex rounded-lg border border-slate-200 p-0.5">
             <button onClick={() => setMetricaVol('cx')}
@@ -298,7 +298,7 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
       {/* TABELA — TENDÊNCIA DE PMV */}
       <div className="bg-white rounded-2xl border border-slate-100 p-4 mb-6">
         <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
-          Tendência de PMV (agrupado: Σ valor pedido ÷ Σ volume pedido do período — não é média de preços)
+          Tendência de PMV (agrupado: Σ valor pedido ÷ Σ volume pedido do período)
         </div>
         <div className="grid gap-2 px-1 py-2 border-b border-slate-100" style={{ gridTemplateColumns: '1.3fr 100px 110px 110px 1fr' }}>
           <ThOrdenavel label={nivel === 'categoria' ? 'Categoria' : 'SKU'} k={nivel === 'categoria' ? 'categoria' : 'descricao'} sortKey={pmvSort.sortKey} sortDir={pmvSort.sortDir} onClick={pmvSort.toggle} align="left" />
