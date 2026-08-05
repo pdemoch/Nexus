@@ -275,10 +275,10 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
         </div>
         <div className="max-h-96 overflow-y-auto">
           {volSort.sorted.map((row: any) => (
-            <div key={row.categoria || row.sku} className="grid gap-2 px-1 py-2 items-center border-b border-slate-50 hover:bg-slate-50/50 text-xs"
+            <div key={nivel === 'categoria' ? row.categoria : row.sku} className="grid gap-2 px-1 py-2 items-center border-b border-slate-50 hover:bg-slate-50/50 text-xs"
               style={{ gridTemplateColumns: '1.3fr 100px 110px 110px 1fr' }}>
               <div className="min-w-0">
-                <div className="font-bold text-slate-700 truncate">{row.categoria || row.descricao}</div>
+                <div className="font-bold text-slate-700 truncate">{nivel === 'categoria' ? row.categoria : row.descricao}</div>
                 {nivel === 'sku' && <div className="text-[10px] font-bold text-slate-300">{row.sku} · {row.categoria}</div>}
               </div>
               <div className="flex items-center gap-1"><TendIcon t={row.tendencia} /><LabelTendencia t={row.tendencia} /></div>
@@ -304,10 +304,10 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
         </div>
         <div className="max-h-96 overflow-y-auto">
           {pmvSort.sorted.map((row: any) => (
-            <div key={row.categoria || row.sku} className="grid gap-2 px-1 py-2 items-center border-b border-slate-50 hover:bg-slate-50/50 text-xs"
+            <div key={nivel === 'categoria' ? row.categoria : row.sku} className="grid gap-2 px-1 py-2 items-center border-b border-slate-50 hover:bg-slate-50/50 text-xs"
               style={{ gridTemplateColumns: '1.3fr 100px 110px 110px 1fr' }}>
               <div className="min-w-0">
-                <div className="font-bold text-slate-700 truncate">{row.categoria || row.descricao}</div>
+                <div className="font-bold text-slate-700 truncate">{nivel === 'categoria' ? row.categoria : row.descricao}</div>
                 {nivel === 'sku' && <div className="text-[10px] font-bold text-slate-300">{row.sku} · {row.categoria}</div>}
               </div>
               <div className="flex items-center gap-1"><TendIcon t={row.tendencia} /><LabelTendencia t={row.tendencia} /></div>
@@ -335,10 +335,10 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
         </div>
         <div className="max-h-[32rem] overflow-y-auto">
           {assSort.sorted.map((row: any) => (
-            <div key={row.categoria || row.sku} className="grid gap-2 px-1 py-2.5 items-center border-b border-slate-50 hover:bg-slate-50/50 text-xs"
+            <div key={nivel === 'categoria' ? row.categoria : row.sku} className="grid gap-2 px-1 py-2.5 items-center border-b border-slate-50 hover:bg-slate-50/50 text-xs"
               style={{ gridTemplateColumns: '1.2fr 110px 110px 110px 110px 110px 100px' }}>
               <div className="min-w-0">
-                <div className="font-bold text-slate-700 truncate">{row.categoria || row.descricao}</div>
+                <div className="font-bold text-slate-700 truncate">{nivel === 'categoria' ? row.categoria : row.descricao}</div>
                 {nivel === 'sku' && <div className="text-[10px] font-bold text-slate-300">{row.sku} · {row.categoria}</div>}
               </div>
               <div className="text-right font-black text-slate-800">{fmtCx(row.vendido_cx)} cx</div>
