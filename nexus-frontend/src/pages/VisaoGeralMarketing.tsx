@@ -12,7 +12,7 @@ import {
 /* =====================================================================
    VISÃO GERAL — primeira tela do planejador. Categorias/SKUs em
    crescimento ou queda (volume pedido e PMV), e quem mais acerta
-   (Humano/IA/Ano passado) nos últimos meses fechados. Tudo classificável.
+   (Humano/IA) nos últimos meses fechados. Tudo classificável.
 
    Vocabulário: NUNCA "faturamento". É "valor pedido" (vl_pedido, R$) e
    "volume pedido" (qt_pedido, caixas). Sem qtfatura/vlfatura nesta tela.
@@ -82,7 +82,6 @@ function BadgeVencedor({ v }: { v: string | null }) {
   const map: Record<string, { label: string; cls: string }> = {
     HUMANO: { label: 'Humano', cls: 'bg-indigo-50 text-indigo-700 border-indigo-200' },
     IA: { label: 'IA', cls: 'bg-violet-50 text-violet-700 border-violet-200' },
-    'ANO PASSADO': { label: 'Ano passado', cls: 'bg-slate-100 text-slate-600 border-slate-200' },
   };
   const cfg = map[v] || { label: v, cls: 'bg-slate-100 text-slate-500 border-slate-200' };
   return <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${cfg.cls}`}>{cfg.label}</span>;
@@ -128,19 +127,23 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
   const topQueda = [...catsVol].filter((c) => c.tendencia_cx === 'DECLINIO').sort((a, b) => a.variacao_pct_cx - b.variacao_pct_cx).slice(0, 3);
   const catsAss = d?.assertividade_categoria || [];
   const contagemVencedor = catsAss.reduce((acc: any, c: any) => {
-    if (c.vencedor) acc[c.vencedor] = (acc[c.vencedor] || 0) + 1;
+    if (c.vencedor && c.vencedor !== 'ANO PASSADO') acc[c.vencedor] = (acc[c.vencedor] || 0) + 1;
     return acc;
   }, {});
   const maiorVencedor = Object.entries(contagemVencedor).sort((a: any, b: any) => b[1] - a[1])[0];
 
   const itensSemBase = (d?.tendencia_volume_categoria || []).filter((c: any) => c.tendencia_cx === 'SEM_BASE' || c.tendencia_cx === 'SEM_DADO').length;
 
-  const scatterData = (d?.tendencia_volume_categoria || [])
-    .filter((cv: any) => cv.tendencia !== 'SEM_BASE' && cv.tendencia !== 'SEM_DADO')
+  const scatterData = ((d?.tendencia_volume_categoria || [])
+    .filter((cv: any) => cv.tendencia_cx !== 'SEM_BASE' && cv.tendencia_cx !== 'SEM_DADO'))
     .map((cv: any) => {
       const pv = (d?.tendencia_pmv_categoria || []).find((p: any) => p.categoria === cv.categoria);
-      return { categoria: cv.categoria, volVar: (cv.variacao_pct || 0) * 100, pmvVar: (pv?.variacao_pct || 0) * 100, volAbs: cv.vol_rs_atual };
-    });
+      // Scatter usa volume cx como eixo X e PMV como eixo Y.
+      // Se PMV for SEM_BASE, plota com 0 no Y mas mantém a bolha — o volume importa.
+      const pmvVar = (pv && pv.tendencia !== 'SEM_BASE' && pv.tendencia !== 'SEM_DADO' && pv.variacao_pct != null)
+        ? pv.variacao_pct * 100 : 0;
+      return { categoria: cv.categoria, volVar: (cv.variacao_pct_cx || 0) * 100, pmvVar, volAbs: cv.vol_rs_atual };
+    }).filter(Boolean);
 
   if (loading) {
     return <div className="min-h-screen flex items-center justify-center text-slate-400">
@@ -262,7 +265,7 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
       <div className="bg-white rounded-2xl border border-slate-100 p-4 mb-6">
         <div className="flex items-center justify-between mb-2">
           <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
-            Tendência de volume pedido (mesmo período · YTD) OP 50 e Ativos no Portfolio
+            Tendência de volume pedido (mesmo período · YTD, a partir do 1º ano com venda)
           </div>
           <div className="inline-flex rounded-lg border border-slate-200 p-0.5">
             <button onClick={() => setMetricaVol('cx')}
@@ -298,7 +301,7 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
       {/* TABELA — TENDÊNCIA DE PMV */}
       <div className="bg-white rounded-2xl border border-slate-100 p-4 mb-6">
         <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
-          Tendência de PMV (agrupado: Σ valor pedido ÷ Σ volume pedido do período)
+          Tendência de PMV (agrupado: Σ valor pedido ÷ Σ volume pedido do período — não é média de preços)
         </div>
         <div className="grid gap-2 px-1 py-2 border-b border-slate-100" style={{ gridTemplateColumns: '1.3fr 100px 110px 110px 1fr' }}>
           <ThOrdenavel label={nivel === 'categoria' ? 'Categoria' : 'SKU'} k={nivel === 'categoria' ? 'categoria' : 'descricao'} sortKey={pmvSort.sortKey} sortDir={pmvSort.sortDir} onClick={pmvSort.toggle} align="left" />
@@ -327,21 +330,19 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
       {/* TABELA — ASSERTIVIDADE: Humano, IA, Ano passado vs Realizado */}
       <div className="bg-white rounded-2xl border border-slate-100 p-4 mb-6">
         <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
-          Assertividade · Humano, IA e Ano passado vs Realizado ({(d?.meses_auditados || []).length} mês(es) fechado(s))
+          Assertividade · Humano vs IA vs Realizado ({(d?.meses_auditados || []).length} mês(es) fechado(s))
         </div>
-        <div className="grid gap-2 px-1 py-2 border-b border-slate-100" style={{ gridTemplateColumns: '1.2fr 110px 110px 110px 110px 110px 100px' }}>
+        <div className="grid gap-2 px-1 py-2 border-b border-slate-100" style={{ gridTemplateColumns: '1.5fr 110px 150px 150px 110px' }}>
           <ThOrdenavel label={nivel === 'categoria' ? 'Categoria' : 'SKU'} k={nivel === 'categoria' ? 'categoria' : 'descricao'} sortKey={assSort.sortKey} sortDir={assSort.sortDir} onClick={assSort.toggle} align="left" />
           <ThOrdenavel label="Realizado" k="vendido_cx" sortKey={assSort.sortKey} sortDir={assSort.sortDir} onClick={assSort.toggle} />
           <ThOrdenavel label="Humano" k="humano_cx" sortKey={assSort.sortKey} sortDir={assSort.sortDir} onClick={assSort.toggle} />
           <ThOrdenavel label="IA" k="ia_cx" sortKey={assSort.sortKey} sortDir={assSort.sortDir} onClick={assSort.toggle} />
-          <ThOrdenavel label="Ano passado" k="naive_cx" sortKey={assSort.sortKey} sortDir={assSort.sortDir} onClick={assSort.toggle} />
-          <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 text-right">Aderência</div>
           <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 text-right">Vencedor</div>
         </div>
         <div className="max-h-[32rem] overflow-y-auto">
           {assSort.sorted.map((row: any) => (
             <div key={nivel === 'categoria' ? row.categoria : row.sku} className="grid gap-2 px-1 py-2.5 items-center border-b border-slate-50 hover:bg-slate-50/50 text-xs"
-              style={{ gridTemplateColumns: '1.2fr 110px 110px 110px 110px 110px 100px' }}>
+              style={{ gridTemplateColumns: '1.5fr 110px 150px 150px 110px' }}>
               <div className="min-w-0">
                 <div className="font-bold text-slate-700 truncate">{nivel === 'categoria' ? row.categoria : row.descricao}</div>
                 {nivel === 'sku' && <div className="text-[10px] font-bold text-slate-300">{row.sku} · {row.categoria}</div>}
@@ -355,11 +356,6 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
                 <div className={`font-bold ${row.vencedor === 'IA' ? 'text-violet-600' : 'text-slate-500'}`}>{fmtCx(row.ia_cx)} cx</div>
                 <div className="text-[10px] font-bold text-slate-400">{row.aderencia_ia != null ? fmtPct(row.aderencia_ia) : '—'}</div>
               </div>
-              <div className="text-right">
-                <div className={`font-bold ${row.vencedor === 'ANO PASSADO' ? 'text-slate-700' : 'text-slate-400'}`}>{fmtCx(row.naive_cx)} cx</div>
-                <div className="text-[10px] font-bold text-slate-400">{row.aderencia_naive != null ? fmtPct(row.aderencia_naive) : '—'}</div>
-              </div>
-              <div />
               <div className="flex justify-end"><BadgeVencedor v={row.vencedor} /></div>
             </div>
           ))}

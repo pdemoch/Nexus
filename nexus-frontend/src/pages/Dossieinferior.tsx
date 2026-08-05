@@ -54,7 +54,6 @@ export default function DossieInferior({ prefixoApi, tipo, id, titulo, onFechar 
   const dadosGrafico = (d?.serie || []).map((x: any) => ({
     mes: mesCurto(x.mes),
     vendido: rs ? x.vendido_rs : x.vendido_cx,
-    faturado: rs ? x.faturado_rs : x.faturado_cx,
     final: rs ? x.final_rs : x.final_cx,
     ia: rs ? x.ia_rs : x.ia_cx,
     finalAnt: rs ? x.final_ciclo_ant_rs : x.final_ciclo_ant_cx,
@@ -103,7 +102,6 @@ export default function DossieInferior({ prefixoApi, tipo, id, titulo, onFechar 
             </div>
             <div className="flex items-center gap-4 text-[10px] font-bold text-slate-500 flex-wrap">
               <span className="flex items-center gap-1.5"><span className="w-4 h-1 bg-indigo-600 rounded-full inline-block" /> vendido</span>
-              <span className="flex items-center gap-1.5"><span className="w-4 h-1 bg-slate-400 rounded-full inline-block" /> faturado</span>
               <span className="flex items-center gap-1.5"><span className="w-4 h-0.5 bg-emerald-600 inline-block" /> final (ciclo atual)</span>
               <span className="flex items-center gap-1.5"><span className="w-4 h-0.5 bg-violet-500 inline-block" /> IA (ciclo atual)</span>
               <span className="flex items-center gap-1.5"><span className="w-4 h-0.5 bg-amber-500 inline-block" /> final (ciclo anterior)</span>
@@ -131,7 +129,6 @@ export default function DossieInferior({ prefixoApi, tipo, id, titulo, onFechar 
                     label={{ value: 'hoje', fontSize: 9, fill: '#b45309', position: 'top' }} />
                 )}
                 <Line type="monotone" dataKey="vendido" name="Vendido" stroke="#4338ca" strokeWidth={3} dot={false} connectNulls={false} />
-                <Line type="monotone" dataKey="faturado" name="Faturado" stroke="#94a3b8" strokeWidth={2} dot={false} connectNulls={false} />
                 <Line type="monotone" dataKey="final" name="Final (ciclo atual)" stroke="#059669" strokeWidth={2.5} strokeDasharray="6 4" dot={{ r: 3, fill: '#059669' }} connectNulls={false} />
                 <Line type="monotone" dataKey="ia" name="IA (ciclo atual)" stroke="#8b5cf6" strokeWidth={1.5} strokeDasharray="3 3" dot={false} connectNulls={false} />
                 <Line type="monotone" dataKey="finalAnt" name="Final (ciclo anterior)" stroke="#d97706" strokeWidth={1.5} strokeDasharray="2 3" dot={false} connectNulls={false} />
@@ -198,11 +195,10 @@ export default function DossieInferior({ prefixoApi, tipo, id, titulo, onFechar 
                     <span className="text-[9px] font-black uppercase tracking-wider text-slate-400 bg-slate-100 rounded px-1.5 py-0.5">baixo volume</span>
                   )}
                 </div>
-                <div className="grid grid-cols-3 gap-2">
+                <div className="grid grid-cols-2 gap-2">
                   {[
                     { label: 'Humano', val: d.fva.aderencia_humano, vol: d.fva.humano_cx, key: 'HUMANO' },
                     { label: 'IA', val: d.fva.aderencia_ia, vol: d.fva.ia_cx, key: 'IA' },
-                    { label: 'Ano passado', val: d.fva.aderencia_naive, vol: d.fva.naive_cx, key: 'ANO PASSADO' },
                   ].map((x) => {
                     const venceu = d.fva.vencedor === x.key;
                     return (

@@ -463,19 +463,17 @@ def fva_sku(db: Session, sku: str, mes) -> Dict[str, Any]:
 
     ad_humano = _aderencia(humano_cx, vend_cx)
     ad_ia = _aderencia(ia_cx, vend_cx)
-    ad_naive = _aderencia(naive_cx, vend_cx) if naive_cx > 0 else None
+    ad_naive = _aderencia(naive_cx, vend_cx) if naive_cx > 0 else None  # mantido no retorno, não decide vencedor
 
     fva_ia = None
     if ad_humano is not None and ad_ia is not None:
         fva_ia = ad_humano - ad_ia
 
-    # Quem ganhou, em linguagem direta.
+    # Vencedor: SOMENTE Humano vs IA (a análise de acurácia trabalha entre os
+    # dois planejadores reais do sistema — o "ano passado" não é candidato).
     vencedor = "SEM VENDA"
     if vend_cx > 0:
-        cand = [("HUMANO", ad_humano), ("IA", ad_ia)]
-        if ad_naive is not None:
-            cand.append(("ANO PASSADO", ad_naive))
-        cand = [(n, a) for n, a in cand if a is not None]
+        cand = [(n, a) for n, a in [("HUMANO", ad_humano), ("IA", ad_ia)] if a is not None]
         if cand:
             vencedor = max(cand, key=lambda x: x[1])[0]
 
@@ -489,25 +487,13 @@ def fva_sku(db: Session, sku: str, mes) -> Dict[str, Any]:
         insight_fva = "Sem venda no mês auditado — sem base para avaliar acurácia."
     else:
         v = int(round(vend_cx))
-        if vencedor == "ANO PASSADO":
-            # o caso do print: humano e IA superestimaram, o naive acertou
-            over_h = ((humano_cx - vend_cx) / vend_cx) if vend_cx > 0 else 0
-            direcao = "acima" if over_h > 0 else "abaixo"
-            insight_fva = (
-                f"Repetir o ano passado ({int(round(naive_cx))} cx) teria batido humano "
-                f"({int(round(humano_cx))}) e IA ({int(round(ia_cx))}) — vendeu {v} cx. "
-                f"O plano ficou {abs(over_h)*100:.0f}% {direcao} da venda. "
-                + ("SKU de baixo volume e estável: candidato a previsão simplificada."
-                   if baixo_volume else
-                   "Reveja o modelo deste SKU.")
-            )
-        elif vencedor == "IA":
+        if vencedor == "IA":
             insight_fva = (f"A IA ({int(round(ia_cx))} cx) previu melhor que o humano "
                            f"({int(round(humano_cx))}) — vendeu {v} cx. Considere confiar mais na IA aqui.")
         elif vencedor == "HUMANO":
             insight_fva = (f"O humano ({int(round(humano_cx))} cx) previu melhor que a IA "
                            f"({int(round(ia_cx))}) — vendeu {v} cx.")
-        if baixo_volume and vencedor != "ANO PASSADO":
+        if baixo_volume:
             insight_fva = (insight_fva or "") + " (Baixo volume: impacto financeiro pequeno.)"
 
     return {
@@ -598,32 +584,44 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None) ->
     ciclo_ant_data = datetime.date(int(yy), int(mm), 1) - relativedelta(months=1)
     ciclo_anterior = ciclo_ant_data.strftime("%m/%Y")
 
+    # Janela de trabalho REAL do ciclo ativo (M2, M3, M4 — os meses que a tela
+    # de preenchimento efetivamente edita). O ciclo pode ter linhas em
+    # fato_ibp_granular para outros meses (ex.: o próprio mês de nascimento
+    # do ciclo, antes de M+2), que NÃO fazem parte do que está sendo
+    # trabalhado agora. Sem este filtro, a linha "final (ciclo atual)" do
+    # gráfico pegava qualquer mês que o ciclo tivesse linha — inclusive meses
+    # que não são a janela editável — e o número parecia vir "do nada".
+    chaves_janela_ativa = {m.strftime("%Y-%m-01") for m in (meses_futuros or [])}
+
     primeiro_mes_forecast = CICLO_PISO + relativedelta(months=DEFASAGEM_MESES)  # 06/2026
     for key, linha in mapa.items():
         md = datetime.datetime.strptime(key, "%Y-%m-%d").date()
         if md < primeiro_mes_forecast:
             continue  # antes do primeiro ciclo: sem forecast M-2 real
 
-        # LINHA A — plano do ciclo ATIVO (dinâmico). Cobre toda a janela do
-        # ciclo corrente (inclusive meses futuros ainda não vendidos).
-        p_ativo = prev_idx.get((ciclo_ativo, key))
-        if p_ativo and (p_ativo.ia is not None or p_ativo.final is not None):
-            linha["ia_cx"] = int(p_ativo.ia or 0)
-            linha["final_cx"] = int(p_ativo.final or 0)
-            linha["ia_rs"] = round(float(p_ativo.ia_rs or 0), 2)
-            linha["final_rs"] = round(float(p_ativo.final_rs or 0), 2)
+        # LINHA A — plano do ciclo ATIVO (dinâmico), SOMENTE nos meses da
+        # janela de trabalho (M2/M3/M4). É o que o planejador está construindo
+        # agora — não misturar com histórico de ciclos passados.
+        if key in chaves_janela_ativa:
+            p_ativo = prev_idx.get((ciclo_ativo, key))
+            if p_ativo and (p_ativo.ia is not None or p_ativo.final is not None):
+                linha["ia_cx"] = int(p_ativo.ia or 0)
+                linha["final_cx"] = int(p_ativo.final or 0)
+                linha["ia_rs"] = round(float(p_ativo.ia_rs or 0), 2)
+                linha["final_rs"] = round(float(p_ativo.final_rs or 0), 2)
         else:
-            # fora da janela do ciclo ativo: usa o M-2 histórico (o que foi
-            # prometido com antecedência real, para meses já passados).
+            # Fora da janela ativa: usa o M-2 histórico como IA/Final de referência
+            # (o que foi prometido antes de cada mês acontecer).
             cf = ciclo_fonte_do_mes(md)
-            if cf != ciclo_ativo:
-                p_hist = prev_idx.get((cf, key))
-                if p_hist and (p_hist.ia is not None or p_hist.final is not None):
-                    linha["ia_cx"] = int(p_hist.ia or 0)
-                    linha["final_cx"] = int(p_hist.final or 0)
-                    linha["ia_rs"] = round(float(p_hist.ia_rs or 0), 2)
-                    linha["final_rs"] = round(float(p_hist.final_rs or 0), 2)
-                    linha["ciclo_fonte"] = cf
+            p_hist = prev_idx.get((cf, key))
+            if p_hist and p_hist.ia is not None:
+                linha["ia_cx"] = int(p_hist.ia or 0)
+                linha["ia_rs"] = round(float(p_hist.ia_rs or 0), 2)
+                linha["ciclo_fonte"] = cf
+            # final_cx para meses passados: usa o M-2 histórico como "humano previsto"
+            if p_hist and p_hist.final is not None:
+                linha["final_cx"] = int(p_hist.final or 0)
+                linha["final_rs"] = round(float(p_hist.final_rs or 0), 2)
 
         # LINHA B — plano do ciclo ANTERIOR, como referência ("antes vs agora").
         # Só aparece nos meses que o ciclo anterior efetivamente cobriu.
@@ -1046,20 +1044,11 @@ def resumo_marketing(db: Session, ciclo_ativo: str) -> Dict[str, Any]:
         """), {"skus": skus_ciclo, "cf": ciclo_fonte, "m": mes}).fetchall()
         plano_idx = {r.sku: (float(r.humano or 0), float(r.ia or 0)) for r in plano_rows}
 
-        mes_ant = mes - relativedelta(years=1)
-        naive_rows = db.execute(text("""
-            SELECT sku, SUM(qt_pedido) AS cx FROM fato_vendas
-            WHERE sku = ANY(:skus) AND TO_CHAR(data_pedido,'YYYY-MM') = :ym
-            GROUP BY sku
-        """), {"skus": skus_ciclo, "ym": mes_ant.strftime("%Y-%m")}).fetchall()
-        naive_idx = {r.sku: float(r.cx or 0) for r in naive_rows}
-
         for sku in skus_ciclo:
             v = vendido_idx.get(sku, 0.0)
             h, ia = plano_idx.get(sku, (0.0, 0.0))
-            nv = naive_idx.get(sku, 0.0)
-            acc = assert_sku_acc.setdefault(sku, {"vendido": 0.0, "humano": 0.0, "ia": 0.0, "naive": 0.0, "meses": 0})
-            acc["vendido"] += v; acc["humano"] += h; acc["ia"] += ia; acc["naive"] += nv
+            acc = assert_sku_acc.setdefault(sku, {"vendido": 0.0, "humano": 0.0, "ia": 0.0, "meses": 0})
+            acc["vendido"] += v; acc["humano"] += h; acc["ia"] += ia
             acc["meses"] += 1
 
     def _aderencia(prev, real):
@@ -1072,17 +1061,14 @@ def resumo_marketing(db: Session, ciclo_ativo: str) -> Dict[str, Any]:
         v = acc["vendido"]
         ad_h = _aderencia(acc["humano"], v)
         ad_ia = _aderencia(acc["ia"], v)
-        ad_nv = _aderencia(acc["naive"], v)
-        cands = [("HUMANO", ad_h), ("IA", ad_ia), ("ANO PASSADO", ad_nv)]
-        cands_validos = [c for c in cands if c[1] is not None]
-        vencedor = max(cands_validos, key=lambda x: x[1])[0] if cands_validos else None
+        cands = [c for c in [("HUMANO", ad_h), ("IA", ad_ia)] if c[1] is not None]
+        vencedor = max(cands, key=lambda x: x[1])[0] if cands else None
         assertividade_sku.append({
             "sku": sku, "descricao": sku_desc.get(sku, sku), "categoria": sku_cat.get(sku, "?"),
             "vendido_cx": round(v, 0), "humano_cx": round(acc["humano"], 0),
-            "ia_cx": round(acc["ia"], 0), "naive_cx": round(acc["naive"], 0),
+            "ia_cx": round(acc["ia"], 0),
             "aderencia_humano": round(ad_h, 4) if ad_h is not None else None,
             "aderencia_ia": round(ad_ia, 4) if ad_ia is not None else None,
-            "aderencia_naive": round(ad_nv, 4) if ad_nv is not None else None,
             "vencedor": vencedor, "meses_considerados": acc["meses"],
         })
 
@@ -1090,25 +1076,22 @@ def resumo_marketing(db: Session, ciclo_ativo: str) -> Dict[str, Any]:
     cat_acc: Dict[str, Dict[str, float]] = {}
     for sku, acc in assert_sku_acc.items():
         cat = sku_cat.get(sku, "?")
-        slot = cat_acc.setdefault(cat, {"vendido": 0.0, "humano": 0.0, "ia": 0.0, "naive": 0.0})
+        slot = cat_acc.setdefault(cat, {"vendido": 0.0, "humano": 0.0, "ia": 0.0})
         slot["vendido"] += acc["vendido"]; slot["humano"] += acc["humano"]
-        slot["ia"] += acc["ia"]; slot["naive"] += acc["naive"]
+        slot["ia"] += acc["ia"]
 
     assertividade_categoria = []
     for cat, acc in cat_acc.items():
         v = acc["vendido"]
         ad_h = _aderencia(acc["humano"], v)
         ad_ia = _aderencia(acc["ia"], v)
-        ad_nv = _aderencia(acc["naive"], v)
-        cands = [("HUMANO", ad_h), ("IA", ad_ia), ("ANO PASSADO", ad_nv)]
-        cands_validos = [c for c in cands if c[1] is not None]
-        vencedor = max(cands_validos, key=lambda x: x[1])[0] if cands_validos else None
+        cands = [c for c in [("HUMANO", ad_h), ("IA", ad_ia)] if c[1] is not None]
+        vencedor = max(cands, key=lambda x: x[1])[0] if cands else None
         assertividade_categoria.append({
             "categoria": cat, "vendido_cx": round(v, 0), "humano_cx": round(acc["humano"], 0),
-            "ia_cx": round(acc["ia"], 0), "naive_cx": round(acc["naive"], 0),
+            "ia_cx": round(acc["ia"], 0),
             "aderencia_humano": round(ad_h, 4) if ad_h is not None else None,
             "aderencia_ia": round(ad_ia, 4) if ad_ia is not None else None,
-            "aderencia_naive": round(ad_nv, 4) if ad_nv is not None else None,
             "vencedor": vencedor,
         })
 

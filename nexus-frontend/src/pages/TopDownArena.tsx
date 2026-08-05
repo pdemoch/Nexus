@@ -216,7 +216,20 @@ function PreenchimentoMarketing() {
                 {meses.map((m) => {
                   const soma = cat.segmentos.reduce((acc: number, seg: any) =>
                     acc + seg.skus.reduce((a: number, s: any) => a + valorCelula(s.sku, m, s.meses[m]?.topdown || 0), 0), 0);
-                  return <div key={m} className="text-right text-sm font-bold text-slate-500">{fmtCx(soma)}</div>;
+                  const fatCat = cat.segmentos.reduce((acc: number, seg: any) =>
+                    acc + seg.skus.reduce((a: number, s: any) => {
+                      const cel = s.meses[m]; if (!cel) return a;
+                      return a + valorCelula(s.sku, m, cel.topdown) * (cel.pmv || 0);
+                    }, 0), 0);
+                  const orcCat = cat.segmentos.reduce((acc: number, seg: any) =>
+                    acc + seg.skus.reduce((a: number, s: any) => a + (s.meses[m]?.orcamento || 0), 0), 0);
+                  return (
+                    <div key={m} className="text-right">
+                      <div className="text-[10px] font-bold text-indigo-400">{fmtRs(fatCat)}</div>
+                      <div className="text-sm font-bold text-slate-500">{fmtCx(soma)} cx</div>
+                      {orcCat > 0 && <div className="text-[10px] font-bold text-amber-500">orç {fmtRs(orcCat)}</div>}
+                    </div>
+                  );
                 })}
                 <div />
               </button>
@@ -248,8 +261,14 @@ function PreenchimentoMarketing() {
                           if (!cel) return <div key={m} />;
                           const val = valorCelula(s.sku, m, cel.topdown);
                           const editado = `${s.sku}|${m}` in edits;
+                          const fatPrev = val && cel.pmv ? val * cel.pmv : null;
+                          const orcPrev = cel.orcamento ?? null;
                           return (
                             <div key={m} className="text-right">
+                              {/* faturamento previsto — dinâmico: recalcula conforme o usuário digita */}
+                              <div className="text-[9px] font-bold text-indigo-400 pr-2 mb-0.5">
+                                {fatPrev != null ? fmtRs(fatPrev) : '—'}
+                              </div>
                               <input
                                 type="number"
                                 value={val}
@@ -260,6 +279,9 @@ function PreenchimentoMarketing() {
                                   ${congelada ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
                               />
                               <div className="text-[9px] font-bold text-slate-300 pr-2">IA {fmtCx(cel.ia)}</div>
+                              {orcPrev != null && (
+                                <div className="text-[9px] font-bold text-amber-500 pr-2">orç {fmtRs(orcPrev)}</div>
+                              )}
                             </div>
                           );
                         })}
