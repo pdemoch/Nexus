@@ -769,3 +769,266 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
         "plurianual": plur,
         "fva": fva,
     }
+
+
+# =====================================================================
+# RESUMO EXECUTIVO DA MARKETING — Aba "Visão Geral"
+# =====================================================================
+def _doy_corte_hoje() -> int:
+    """Dia-do-ano de hoje (UTC-3), para cortar todos os anos no mesmo ponto (YTD)."""
+    hoje = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
+    return hoje.timetuple().tm_yday
+
+
+def _meses_auditaveis_janela() -> list:
+    """
+    Últimos até-3 meses FECHADOS, cortados no piso do sistema (o primeiro mês
+    com M-2 real = CICLO_PISO + DEFASAGEM_MESES = 06/2026). Dinâmico: hoje
+    (agosto/2026) devolve [jun, jul] (mai cai fora do piso); a partir de
+    setembro devolve 3 meses cheios.
+    """
+    hoje = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
+    mes_atual = hoje.replace(day=1)
+    piso_forecast = CICLO_PISO + relativedelta(months=DEFASAGEM_MESES)  # 06/2026
+    meses = []
+    for i in range(1, 4):  # últimos 3 meses fechados (M-1, M-2, M-3)
+        m = mes_atual - relativedelta(months=i)
+        if m >= piso_forecast:
+            meses.append(m)
+    return sorted(meses)
+
+
+def resumo_marketing(db: Session, ciclo_ativo: str) -> Dict[str, Any]:
+    """
+    Pacote da Aba "Visão Geral" da Demanda Marketing. Para TODOS os SKUs do
+    ciclo ativo (o portfólio em planejamento agora):
+      - tendencia_volume: vl_pedido por categoria/SKU, últimos anos (YTD comparável)
+      - assertividade: aderência Humano/IA/Ano-passado nos últimos meses fechados
+        (janela dinâmica, piso 06/2026), por SKU e agregado por categoria
+      - tendencia_pmv: PMV ponderado por categoria/SKU, últimos anos (YTD comparável)
+
+    Sem corte/threshold — devolve tudo; o front classifica/ordena.
+    """
+    doy = _doy_corte_hoje()
+    hoje = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
+    ano_atual = hoje.year
+
+    # Portfólio do ciclo ativo: sku -> categoria/descricao
+    portfolio = db.execute(text("""
+        SELECT DISTINCT f.sku, COALESCE(p.categoria,'SEM CATEGORIA') AS categoria,
+               COALESCE(p.descricao, f.sku) AS descricao
+        FROM fato_ibp_granular f
+        LEFT JOIN dim_produtos p ON p.sku = f.sku
+        WHERE f.ciclo_sop = :c
+    """), {"c": ciclo_ativo}).fetchall()
+    sku_cat = {r.sku: r.categoria for r in portfolio}
+    sku_desc = {r.sku: r.descricao for r in portfolio}
+    skus_ciclo = list(sku_cat.keys())
+    if not skus_ciclo:
+        return {"tendencia_volume_sku": [], "tendencia_volume_categoria": [],
+                "tendencia_pmv_sku": [], "tendencia_pmv_categoria": [],
+                "assertividade_sku": [], "assertividade_categoria": [],
+                "meses_auditados": []}
+
+    # -----------------------------------------------------------------
+    # 1) TENDÊNCIA DE VOLUME (vl_pedido/qt_pedido) — YTD comparável, por SKU
+    # -----------------------------------------------------------------
+    vol_rows = db.execute(text("""
+        SELECT sku, EXTRACT(YEAR FROM data_pedido)::int AS ano,
+               SUM(qt_pedido) AS vol_cx, SUM(vl_pedido) AS vol_rs
+        FROM fato_vendas
+        WHERE sku = ANY(:skus) AND EXTRACT(DOY FROM data_pedido) <= :doy
+        GROUP BY sku, EXTRACT(YEAR FROM data_pedido)
+    """), {"skus": skus_ciclo, "doy": doy}).fetchall()
+
+    # organiza por sku -> {ano: (vol_cx, vol_rs)}
+    vol_por_sku: Dict[str, Dict[int, tuple]] = {}
+    for r in vol_rows:
+        vol_por_sku.setdefault(r.sku, {})[int(r.ano)] = (int(r.vol_cx or 0), float(r.vol_rs or 0))
+
+    def _tendencia_e_variacao(series_por_ano: Dict[int, float]):
+        """Últimos 2 anos com dado -> (tendencia, variacao_pct)."""
+        anos_ok = sorted([a for a, v in series_por_ano.items() if v and v > 0])
+        if len(anos_ok) < 2:
+            return "ESTAVEL", 0.0
+        a_ant, a_rec = anos_ok[-2], anos_ok[-1]
+        v_ant, v_rec = series_por_ano[a_ant], series_por_ano[a_rec]
+        if v_ant <= 0:
+            return "ESTAVEL", 0.0
+        var = (v_rec - v_ant) / v_ant
+        if var >= 0.05:
+            return "CRESCIMENTO", var
+        if var <= -0.05:
+            return "DECLINIO", var
+        return "ESTAVEL", var
+
+    tendencia_volume_sku = []
+    for sku, anos in vol_por_sku.items():
+        serie_cx = {a: v[0] for a, v in anos.items()}
+        tend, var = _tendencia_e_variacao(serie_cx)
+        anos_ordenados = sorted(anos.keys())
+        tendencia_volume_sku.append({
+            "sku": sku, "descricao": sku_desc.get(sku, sku), "categoria": sku_cat.get(sku, "?"),
+            "tendencia": tend, "variacao_pct": round(var, 4),
+            "vol_cx_atual": anos[anos_ordenados[-1]][0] if anos_ordenados else 0,
+            "vol_rs_atual": round(anos[anos_ordenados[-1]][1], 2) if anos_ordenados else 0.0,
+            "anos": [{"ano": a, "vol_cx": anos[a][0], "vol_rs": round(anos[a][1], 2)} for a in anos_ordenados],
+        })
+
+    # agrega por categoria (soma dos SKUs, ano a ano)
+    cat_vol: Dict[str, Dict[int, list]] = {}
+    for sku, anos in vol_por_sku.items():
+        cat = sku_cat.get(sku, "?")
+        for ano, (cx, rs) in anos.items():
+            slot = cat_vol.setdefault(cat, {}).setdefault(ano, [0, 0.0])
+            slot[0] += cx
+            slot[1] += rs
+    tendencia_volume_categoria = []
+    for cat, anos in cat_vol.items():
+        serie_cx = {a: v[0] for a, v in anos.items()}
+        tend, var = _tendencia_e_variacao(serie_cx)
+        anos_ordenados = sorted(anos.keys())
+        tendencia_volume_categoria.append({
+            "categoria": cat, "tendencia": tend, "variacao_pct": round(var, 4),
+            "vol_cx_atual": anos[anos_ordenados[-1]][0] if anos_ordenados else 0,
+            "vol_rs_atual": round(anos[anos_ordenados[-1]][1], 2) if anos_ordenados else 0.0,
+            "anos": [{"ano": a, "vol_cx": anos[a][0], "vol_rs": round(anos[a][1], 2)} for a in anos_ordenados],
+        })
+
+    # -----------------------------------------------------------------
+    # 2) TENDÊNCIA DE PMV (ponderado: SUM(vl)/SUM(qt)) — YTD comparável
+    # -----------------------------------------------------------------
+    pmv_por_sku: Dict[str, Dict[int, float]] = {}
+    for sku, anos in vol_por_sku.items():
+        for ano, (cx, rs) in anos.items():
+            if cx > 0:
+                pmv_por_sku.setdefault(sku, {})[ano] = rs / cx
+
+    tendencia_pmv_sku = []
+    for sku, anos in pmv_por_sku.items():
+        tend, var = _tendencia_e_variacao(anos)
+        anos_ordenados = sorted(anos.keys())
+        tendencia_pmv_sku.append({
+            "sku": sku, "descricao": sku_desc.get(sku, sku), "categoria": sku_cat.get(sku, "?"),
+            "tendencia": tend, "variacao_pct": round(var, 4),
+            "pmv_atual": round(anos[anos_ordenados[-1]], 2) if anos_ordenados else 0.0,
+            "anos": [{"ano": a, "pmv": round(anos[a], 2)} for a in anos_ordenados],
+        })
+
+    # PMV de categoria = ponderado agregando os SKUs (não média de médias)
+    cat_pmv_base: Dict[str, Dict[int, list]] = {}
+    for sku, anos in vol_por_sku.items():
+        cat = sku_cat.get(sku, "?")
+        for ano, (cx, rs) in anos.items():
+            slot = cat_pmv_base.setdefault(cat, {}).setdefault(ano, [0, 0.0])
+            slot[0] += cx
+            slot[1] += rs
+    tendencia_pmv_categoria = []
+    for cat, anos in cat_pmv_base.items():
+        serie_pmv = {a: (v[1] / v[0]) for a, v in anos.items() if v[0] > 0}
+        tend, var = _tendencia_e_variacao(serie_pmv)
+        anos_ordenados = sorted(serie_pmv.keys())
+        tendencia_pmv_categoria.append({
+            "categoria": cat, "tendencia": tend, "variacao_pct": round(var, 4),
+            "pmv_atual": round(serie_pmv[anos_ordenados[-1]], 2) if anos_ordenados else 0.0,
+            "anos": [{"ano": a, "pmv": round(serie_pmv[a], 2)} for a in anos_ordenados],
+        })
+
+    # -----------------------------------------------------------------
+    # 3) ASSERTIVIDADE — janela dinâmica de meses fechados (piso 06/2026)
+    # -----------------------------------------------------------------
+    meses_janela = _meses_auditaveis_janela()
+    assert_sku_acc: Dict[str, Dict[str, float]] = {}  # sku -> {vendido, humano, ia, naive}
+    for mes in meses_janela:
+        ciclo_fonte = ciclo_fonte_do_mes(mes)
+        vendido_rows = db.execute(text("""
+            SELECT sku, SUM(qt_pedido) AS cx FROM fato_vendas
+            WHERE sku = ANY(:skus) AND TO_CHAR(data_pedido,'YYYY-MM') = :ym
+            GROUP BY sku
+        """), {"skus": skus_ciclo, "ym": mes.strftime("%Y-%m")}).fetchall()
+        vendido_idx = {r.sku: float(r.cx or 0) for r in vendido_rows}
+
+        plano_rows = db.execute(text("""
+            SELECT sku, SUM(vol_final) AS humano, SUM(vol_ia) AS ia
+            FROM fato_ibp_granular
+            WHERE sku = ANY(:skus) AND ciclo_sop = :cf AND mes_projetado = :m
+            GROUP BY sku
+        """), {"skus": skus_ciclo, "cf": ciclo_fonte, "m": mes}).fetchall()
+        plano_idx = {r.sku: (float(r.humano or 0), float(r.ia or 0)) for r in plano_rows}
+
+        mes_ant = mes - relativedelta(years=1)
+        naive_rows = db.execute(text("""
+            SELECT sku, SUM(qt_pedido) AS cx FROM fato_vendas
+            WHERE sku = ANY(:skus) AND TO_CHAR(data_pedido,'YYYY-MM') = :ym
+            GROUP BY sku
+        """), {"skus": skus_ciclo, "ym": mes_ant.strftime("%Y-%m")}).fetchall()
+        naive_idx = {r.sku: float(r.cx or 0) for r in naive_rows}
+
+        for sku in skus_ciclo:
+            v = vendido_idx.get(sku, 0.0)
+            h, ia = plano_idx.get(sku, (0.0, 0.0))
+            nv = naive_idx.get(sku, 0.0)
+            acc = assert_sku_acc.setdefault(sku, {"vendido": 0.0, "humano": 0.0, "ia": 0.0, "naive": 0.0, "meses": 0})
+            acc["vendido"] += v; acc["humano"] += h; acc["ia"] += ia; acc["naive"] += nv
+            acc["meses"] += 1
+
+    def _aderencia(prev, real):
+        if real <= 0:
+            return None
+        return max(0.0, 1 - abs(prev - real) / real)
+
+    assertividade_sku = []
+    for sku, acc in assert_sku_acc.items():
+        v = acc["vendido"]
+        ad_h = _aderencia(acc["humano"], v)
+        ad_ia = _aderencia(acc["ia"], v)
+        ad_nv = _aderencia(acc["naive"], v)
+        cands = [("HUMANO", ad_h), ("IA", ad_ia), ("ANO PASSADO", ad_nv)]
+        cands_validos = [c for c in cands if c[1] is not None]
+        vencedor = max(cands_validos, key=lambda x: x[1])[0] if cands_validos else None
+        assertividade_sku.append({
+            "sku": sku, "descricao": sku_desc.get(sku, sku), "categoria": sku_cat.get(sku, "?"),
+            "vendido_cx": round(v, 0), "humano_cx": round(acc["humano"], 0),
+            "ia_cx": round(acc["ia"], 0), "naive_cx": round(acc["naive"], 0),
+            "aderencia_humano": round(ad_h, 4) if ad_h is not None else None,
+            "aderencia_ia": round(ad_ia, 4) if ad_ia is not None else None,
+            "aderencia_naive": round(ad_nv, 4) if ad_nv is not None else None,
+            "vencedor": vencedor, "meses_considerados": acc["meses"],
+        })
+
+    # agrega assertividade por categoria (soma volumes, recalcula aderência)
+    cat_acc: Dict[str, Dict[str, float]] = {}
+    for sku, acc in assert_sku_acc.items():
+        cat = sku_cat.get(sku, "?")
+        slot = cat_acc.setdefault(cat, {"vendido": 0.0, "humano": 0.0, "ia": 0.0, "naive": 0.0})
+        slot["vendido"] += acc["vendido"]; slot["humano"] += acc["humano"]
+        slot["ia"] += acc["ia"]; slot["naive"] += acc["naive"]
+
+    assertividade_categoria = []
+    for cat, acc in cat_acc.items():
+        v = acc["vendido"]
+        ad_h = _aderencia(acc["humano"], v)
+        ad_ia = _aderencia(acc["ia"], v)
+        ad_nv = _aderencia(acc["naive"], v)
+        cands = [("HUMANO", ad_h), ("IA", ad_ia), ("ANO PASSADO", ad_nv)]
+        cands_validos = [c for c in cands if c[1] is not None]
+        vencedor = max(cands_validos, key=lambda x: x[1])[0] if cands_validos else None
+        assertividade_categoria.append({
+            "categoria": cat, "vendido_cx": round(v, 0), "humano_cx": round(acc["humano"], 0),
+            "ia_cx": round(acc["ia"], 0), "naive_cx": round(acc["naive"], 0),
+            "aderencia_humano": round(ad_h, 4) if ad_h is not None else None,
+            "aderencia_ia": round(ad_ia, 4) if ad_ia is not None else None,
+            "aderencia_naive": round(ad_nv, 4) if ad_nv is not None else None,
+            "vencedor": vencedor,
+        })
+
+    return {
+        "ciclo_ativo": ciclo_ativo,
+        "meses_auditados": [m.strftime("%Y-%m") for m in meses_janela],
+        "tendencia_volume_sku": tendencia_volume_sku,
+        "tendencia_volume_categoria": tendencia_volume_categoria,
+        "tendencia_pmv_sku": tendencia_pmv_sku,
+        "tendencia_pmv_categoria": tendencia_pmv_categoria,
+        "assertividade_sku": assertividade_sku,
+        "assertividade_categoria": assertividade_categoria,
+    }
