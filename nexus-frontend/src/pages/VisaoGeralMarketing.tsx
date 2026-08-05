@@ -28,6 +28,10 @@ type Metrica = 'cx' | 'rs';
 function useSort<T>(data: T[], defaultKey: string, defaultDir: SortDir = 'desc') {
   const [key, setKey] = useState(defaultKey);
   const [dir, setDir] = useState<SortDir>(defaultDir);
+  // Ressincroniza quando o defaultKey muda de fora (ex.: toggle Qtd./Valor
+  // troca de variacao_pct_cx para variacao_pct_rs) — sem isto a ordenação
+  // ficaria "presa" na métrica antiga até o usuário clicar num cabeçalho.
+  useEffect(() => { setKey(defaultKey); }, [defaultKey]);
   const sorted = useMemo(() => {
     const arr = [...data];
     arr.sort((a: any, b: any) => {
@@ -113,14 +117,15 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
 
   // ordena pela métrica ativa (cx ou rs)
   const volKeyOrdenacao = metricaVol === 'cx' ? 'vol_cx_atual' : 'vol_rs_atual';
-  const volSort = useSort(volData, 'variacao_pct', 'desc');
+  const volSortKey = metricaVol === 'cx' ? 'variacao_pct_cx' : 'variacao_pct_rs';
+  const volSort = useSort(volData, volSortKey, 'desc');
   const pmvSort = useSort(pmvData, 'variacao_pct', 'desc');
   const assSort = useSort(assData, 'vendido_cx', 'desc');
 
   // Cards de destaque — só considera itens com base válida (evita item novo no ranking)
-  const catsVol = (d?.tendencia_volume_categoria || []).filter((c: any) => c.tendencia !== 'SEM_BASE' && c.tendencia !== 'SEM_DADO');
-  const topCresc = [...catsVol].filter((c) => c.tendencia === 'CRESCIMENTO').sort((a, b) => b.variacao_pct - a.variacao_pct).slice(0, 3);
-  const topQueda = [...catsVol].filter((c) => c.tendencia === 'DECLINIO').sort((a, b) => a.variacao_pct - b.variacao_pct).slice(0, 3);
+  const catsVol = (d?.tendencia_volume_categoria || []).filter((c: any) => c.tendencia_cx !== 'SEM_BASE' && c.tendencia_cx !== 'SEM_DADO');
+  const topCresc = [...catsVol].filter((c) => c.tendencia_cx === 'CRESCIMENTO').sort((a, b) => b.variacao_pct_cx - a.variacao_pct_cx).slice(0, 3);
+  const topQueda = [...catsVol].filter((c) => c.tendencia_cx === 'DECLINIO').sort((a, b) => a.variacao_pct_cx - b.variacao_pct_cx).slice(0, 3);
   const catsAss = d?.assertividade_categoria || [];
   const contagemVencedor = catsAss.reduce((acc: any, c: any) => {
     if (c.vencedor) acc[c.vencedor] = (acc[c.vencedor] || 0) + 1;
@@ -128,7 +133,7 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
   }, {});
   const maiorVencedor = Object.entries(contagemVencedor).sort((a: any, b: any) => b[1] - a[1])[0];
 
-  const itensSemBase = (d?.tendencia_volume_categoria || []).filter((c: any) => c.tendencia === 'SEM_BASE' || c.tendencia === 'SEM_DADO').length;
+  const itensSemBase = (d?.tendencia_volume_categoria || []).filter((c: any) => c.tendencia_cx === 'SEM_BASE' || c.tendencia_cx === 'SEM_DADO').length;
 
   const scatterData = (d?.tendencia_volume_categoria || [])
     .filter((cv: any) => cv.tendencia !== 'SEM_BASE' && cv.tendencia !== 'SEM_DADO')
@@ -164,7 +169,7 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
             topCresc.map((c: any) => (
               <div key={c.categoria} className="flex items-center justify-between text-xs py-0.5">
                 <span className="font-bold text-slate-700 truncate">{c.categoria}</span>
-                <span className="font-black text-emerald-600 shrink-0 ml-2">{fmtPct(c.variacao_pct)}</span>
+                <span className="font-black text-emerald-600 shrink-0 ml-2">{fmtPct(c.variacao_pct_cx)}</span>
               </div>
             ))}
         </div>
@@ -176,7 +181,7 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
             topQueda.map((c: any) => (
               <div key={c.categoria} className="flex items-center justify-between text-xs py-0.5">
                 <span className="font-bold text-slate-700 truncate">{c.categoria}</span>
-                <span className="font-black text-rose-600 shrink-0 ml-2">{fmtPct(c.variacao_pct)}</span>
+                <span className="font-black text-rose-600 shrink-0 ml-2">{fmtPct(c.variacao_pct_cx)}</span>
               </div>
             ))}
         </div>
@@ -268,8 +273,8 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
         </div>
         <div className="grid gap-2 px-1 py-2 border-b border-slate-100" style={{ gridTemplateColumns: '1.3fr 100px 110px 110px 1fr' }}>
           <ThOrdenavel label={nivel === 'categoria' ? 'Categoria' : 'SKU'} k={nivel === 'categoria' ? 'categoria' : 'descricao'} sortKey={volSort.sortKey} sortDir={volSort.sortDir} onClick={volSort.toggle} align="left" />
-          <ThOrdenavel label="Tendência" k="tendencia" sortKey={volSort.sortKey} sortDir={volSort.sortDir} onClick={volSort.toggle} />
-          <ThOrdenavel label="Variação" k="variacao_pct" sortKey={volSort.sortKey} sortDir={volSort.sortDir} onClick={volSort.toggle} />
+          <ThOrdenavel label="Tendência" k={metricaVol === 'cx' ? 'tendencia_cx' : 'tendencia_rs'} sortKey={volSort.sortKey} sortDir={volSort.sortDir} onClick={volSort.toggle} />
+          <ThOrdenavel label="Variação" k={metricaVol === 'cx' ? 'variacao_pct_cx' : 'variacao_pct_rs'} sortKey={volSort.sortKey} sortDir={volSort.sortDir} onClick={volSort.toggle} />
           <ThOrdenavel label={metricaVol === 'cx' ? 'Atual (cx)' : 'Atual (R$)'} k={volKeyOrdenacao} sortKey={volSort.sortKey} sortDir={volSort.sortDir} onClick={volSort.toggle} />
           <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Últimos anos (dado absoluto)</div>
         </div>
@@ -281,8 +286,8 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
                 <div className="font-bold text-slate-700 truncate">{nivel === 'categoria' ? row.categoria : row.descricao}</div>
                 {nivel === 'sku' && <div className="text-[10px] font-bold text-slate-300">{row.sku} · {row.categoria}</div>}
               </div>
-              <div className="flex items-center gap-1"><TendIcon t={row.tendencia} /><LabelTendencia t={row.tendencia} /></div>
-              <div className={`text-right font-black ${row.variacao_pct > 0 ? 'text-emerald-600' : row.variacao_pct < 0 ? 'text-rose-500' : 'text-slate-400'}`}>{fmtPct(row.variacao_pct)}</div>
+              <div className="flex items-center gap-1"><TendIcon t={metricaVol === 'cx' ? row.tendencia_cx : row.tendencia_rs} /><LabelTendencia t={metricaVol === 'cx' ? row.tendencia_cx : row.tendencia_rs} /></div>
+              <div className={`text-right font-black ${(metricaVol === 'cx' ? row.variacao_pct_cx : row.variacao_pct_rs) > 0 ? 'text-emerald-600' : (metricaVol === 'cx' ? row.variacao_pct_cx : row.variacao_pct_rs) < 0 ? 'text-rose-500' : 'text-slate-400'}`}>{fmtPct(metricaVol === 'cx' ? row.variacao_pct_cx : row.variacao_pct_rs)}</div>
               <div className="text-right font-bold text-slate-600">{metricaVol === 'cx' ? `${fmtCx(row.vol_cx_atual)} cx` : fmtRs(row.vol_rs_atual)}</div>
               <ColunasAnos anos={row.anos} campo={metricaVol === 'cx' ? 'vol_cx' : 'vol_rs'} fmt={metricaVol === 'cx' ? fmtCx : fmtRs} />
             </div>

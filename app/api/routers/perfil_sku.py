@@ -882,19 +882,23 @@ def resumo_marketing(db: Session, ciclo_ativo: str) -> Dict[str, Any]:
     """), {"skus": skus_ciclo}).fetchall()
     sku_ano_nascimento: Dict[str, int] = {r.sku: r.primeira_venda.year for r in nascimento_rows}
 
-    # Piso mínimo de volume no ano-base para calcular variação percentual.
-    # Sem isto, um item novo que vendeu 1cx no ano anterior e 900cx agora
-    # mostra +89.900% — ruído estatístico de item nascente, não tendência.
-    # O NASCIMENTO em si não usa este piso: 1 caixa já conta como "nasceu".
+    # Piso mínimo no ano-base para calcular variação percentual — evita que
+    # itens de base minúscula gerem percentuais explosivos. Unidades distintas
+    # para volume (caixas) e valor (R$): volume e preço nem sempre andam juntos
+    # (subir preço pode reduzir volume — elasticidade), então cada tendência
+    # tem seu próprio piso na unidade certa.
     PISO_VOLUME_BASE_CX = 50
+    PISO_VALOR_BASE_RS = 5000.0
 
-    def _tendencia_e_variacao(series_por_ano: Dict[int, float], ano_nascimento: Optional[int]):
+    def _tendencia_e_variacao(series_por_ano: Dict[int, float], ano_nascimento: Optional[int],
+                              piso_base: float = PISO_VOLUME_BASE_CX):
         """
         Últimos 2 anos com dado, CORTANDO antes do nascimento real do item
-        (1ª venda de qualquer volume, em qualquer mês — não precisa de 50cx
-        para 'existir'). O piso de 50cx só decide se o ANO-BASE da comparação
-        é robusto o bastante para um percentual confiável; abaixo disso,
-        SEM_BASE em vez de um número explosivo.
+        (1ª venda de qualquer volume, em qualquer mês — não precisa do piso
+        para 'existir'). O piso só decide se o ANO-BASE da comparação é
+        robusto o bastante para um percentual confiável; abaixo disso,
+        SEM_BASE em vez de um número explosivo. 'piso_base' está na mesma
+        unidade da série recebida (caixas OU reais — nunca misturar).
         """
         if ano_nascimento is None:
             return "SEM_DADO", None
@@ -903,7 +907,7 @@ def resumo_marketing(db: Session, ciclo_ativo: str) -> Dict[str, Any]:
             return "SEM_BASE", None  # item nasceu recente — sem 2 anos pra comparar ainda
         a_ant, a_rec = anos_ok[-2], anos_ok[-1]
         v_ant, v_rec = series_por_ano.get(a_ant, 0), series_por_ano[a_rec]
-        if v_ant < PISO_VOLUME_BASE_CX:
+        if v_ant < piso_base:
             return "SEM_BASE", None  # ano-base pequeno demais — percentual não é confiável
         var = (v_rec - v_ant) / v_ant
         if var >= 0.05:
@@ -915,11 +919,17 @@ def resumo_marketing(db: Session, ciclo_ativo: str) -> Dict[str, Any]:
     tendencia_volume_sku = []
     for sku, anos in vol_por_sku.items():
         serie_cx = {a: v[0] for a, v in anos.items()}
-        tend, var = _tendencia_e_variacao(serie_cx, sku_ano_nascimento.get(sku))
+        serie_rs = {a: v[1] for a, v in anos.items()}
+        nasc = sku_ano_nascimento.get(sku)
+        # Duas tendências INDEPENDENTES — volume pode cair enquanto valor sobe
+        # (elasticidade: preço subiu, vendeu menos caixas, faturou mais por cx).
+        tend_cx, var_cx = _tendencia_e_variacao(serie_cx, nasc, PISO_VOLUME_BASE_CX)
+        tend_rs, var_rs = _tendencia_e_variacao(serie_rs, nasc, PISO_VALOR_BASE_RS)
         anos_ordenados = sorted(anos.keys())
         tendencia_volume_sku.append({
             "sku": sku, "descricao": sku_desc.get(sku, sku), "categoria": sku_cat.get(sku, "?"),
-            "tendencia": tend, "variacao_pct": round(var, 4) if var is not None else None,
+            "tendencia_cx": tend_cx, "variacao_pct_cx": round(var_cx, 4) if var_cx is not None else None,
+            "tendencia_rs": tend_rs, "variacao_pct_rs": round(var_rs, 4) if var_rs is not None else None,
             "vol_cx_atual": anos[anos_ordenados[-1]][0] if anos_ordenados else 0,
             "vol_rs_atual": round(anos[anos_ordenados[-1]][1], 2) if anos_ordenados else 0.0,
             "anos": [{"ano": a, "vol_cx": anos[a][0], "vol_rs": round(anos[a][1], 2)} for a in anos_ordenados],
@@ -942,10 +952,15 @@ def resumo_marketing(db: Session, ciclo_ativo: str) -> Dict[str, Any]:
     tendencia_volume_categoria = []
     for cat, anos in cat_vol.items():
         serie_cx = {a: v[0] for a, v in anos.items()}
-        tend, var = _tendencia_e_variacao(serie_cx, cat_ano_nascimento.get(cat))
+        serie_rs = {a: v[1] for a, v in anos.items()}
+        nasc = cat_ano_nascimento.get(cat)
+        tend_cx, var_cx = _tendencia_e_variacao(serie_cx, nasc, PISO_VOLUME_BASE_CX)
+        tend_rs, var_rs = _tendencia_e_variacao(serie_rs, nasc, PISO_VALOR_BASE_RS)
         anos_ordenados = sorted(anos.keys())
         tendencia_volume_categoria.append({
-            "categoria": cat, "tendencia": tend, "variacao_pct": round(var, 4) if var is not None else None,
+            "categoria": cat,
+            "tendencia_cx": tend_cx, "variacao_pct_cx": round(var_cx, 4) if var_cx is not None else None,
+            "tendencia_rs": tend_rs, "variacao_pct_rs": round(var_rs, 4) if var_rs is not None else None,
             "vol_cx_atual": anos[anos_ordenados[-1]][0] if anos_ordenados else 0,
             "vol_rs_atual": round(anos[anos_ordenados[-1]][1], 2) if anos_ordenados else 0.0,
             "anos": [{"ano": a, "vol_cx": anos[a][0], "vol_rs": round(anos[a][1], 2)} for a in anos_ordenados],
