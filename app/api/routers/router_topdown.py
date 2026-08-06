@@ -139,6 +139,18 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(require_marketing)):
         for r in rows:
             realizado_ap[r.sku][m.strftime("%Y-%m-%d")] = int(r.cx or 0)
 
+    # Orçamento por SKU x mês (receita em R$ para o período planejado).
+    orc_idx: dict = {}
+    orc_rows = db.execute(text("""
+        SELECT sku, TO_CHAR(mes_projetado,'YYYY-MM-DD') AS mes,
+               SUM(receita_orcamento) AS orc
+        FROM fato_orcamento
+        WHERE mes_projetado = ANY(:meses)
+        GROUP BY sku, mes_projetado
+    """), {"meses": meses}).fetchall()
+    for r in orc_rows:
+        orc_idx.setdefault(r.sku, {})[r.mes] = round(float(r.orc or 0), 2)
+
     # Monta árvore categoria -> segmento -> SKU
     tree: dict = {}
     tot_vol = {mi: 0 for mi in meses_iso}
@@ -153,16 +165,15 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(require_marketing)):
         })
         td = int(r.topdown or 0); ia = int(r.ia or 0)
         receita = float(r.receita_td or 0)
-        # PMV exibido = ponderado (receita_grao / volume). Se vol=0, cai no PMV
-        # de referência (média simples) só para exibição, sem afetar totalizador.
         pmv = (receita / td) if td > 0 else float(r.pmv or 0)
         sk["meses"][r.mes] = {
             "ia": ia, "topdown": td, "pmv": round(pmv, 2),
             "receita": round(receita, 2),
+            "orcamento": orc_idx.get(r.sku, {}).get(r.mes, None),
             "realizado_ap": realizado_ap.get(r.sku, {}).get(r.mes, None),
         }
         tot_vol[r.mes] += td
-        tot_rs[r.mes] += receita   # soma do faturamento no grão
+        tot_rs[r.mes] += receita
         tot_ia[r.mes] += ia
 
     # Serializa (dicts -> listas ordenadas)

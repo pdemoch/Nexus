@@ -265,7 +265,11 @@ function PreenchimentoMarketing() {
                           const orcPrev = cel.orcamento ?? null;
                           return (
                             <div key={m} className="text-right">
-                              {/* faturamento previsto — dinâmico: recalcula conforme o usuário digita */}
+                              {/* orçamento previsto — referência da empresa */}
+                              {orcPrev != null && orcPrev > 0 && (
+                                <div className="text-[9px] font-bold text-amber-500 pr-2">orç {fmtRs(orcPrev)}</div>
+                              )}
+                              {/* valor pedido previsto — dinâmico: volume × PMV */}
                               <div className="text-[9px] font-bold text-indigo-400 pr-2 mb-0.5">
                                 {fatPrev != null ? fmtRs(fatPrev) : '—'}
                               </div>
@@ -279,9 +283,6 @@ function PreenchimentoMarketing() {
                                   ${congelada ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
                               />
                               <div className="text-[9px] font-bold text-slate-300 pr-2">IA {fmtCx(cel.ia)}</div>
-                              {orcPrev != null && (
-                                <div className="text-[9px] font-bold text-amber-500 pr-2">orç {fmtRs(orcPrev)}</div>
-                              )}
                             </div>
                           );
                         })}
