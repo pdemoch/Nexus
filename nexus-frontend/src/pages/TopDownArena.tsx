@@ -166,12 +166,23 @@ function PreenchimentoMarketing() {
               {salvando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
               Salvar{temEdicoes ? ` (${Object.keys(edits).length})` : ''}
             </button>
-            <a
-              href="/api/v1/topdown/exportar"
+            <button
+              onClick={async () => {
+                // Se há edições pendentes, salva primeiro (com rateio) antes de exportar.
+                // Assim o CSV reflete exatamente o que o usuário digitou.
+                if (temEdicoes) await salvar();
+                // Dispara o download via link temporário (funciona com autenticação por cookie).
+                const a = document.createElement('a');
+                a.href = '/api/v1/topdown/exportar';
+                a.download = '';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+              }}
               className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-white border border-slate-200 text-slate-600 hover:bg-slate-50"
             >
               <Download className="w-4 h-4" /> CSV
-            </a>
+            </button>
           </div>
         </div>
 
