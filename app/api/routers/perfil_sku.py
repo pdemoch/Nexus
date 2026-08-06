@@ -623,12 +623,18 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None) ->
                 linha["final_cx"] = int(p_hist.final or 0)
                 linha["final_rs"] = round(float(p_hist.final_rs or 0), 2)
 
-        # LINHA B — plano do ciclo ANTERIOR, como referência ("antes vs agora").
-        # Só aparece nos meses que o ciclo anterior efetivamente cobriu.
-        p_ant = prev_idx.get((ciclo_anterior, key))
-        if p_ant and p_ant.final is not None:
-            linha["final_ciclo_ant_cx"] = int(p_ant.final or 0)
-            linha["final_ciclo_ant_rs"] = round(float(p_ant.final_rs or 0), 2)
+        # LINHA B — ciclo ANTERIOR como referência.
+        # Regra: só mostra nos meses da JANELA ATIVA do ciclo corrente
+        # (M+2 e M+3). Para o ciclo 07/2026 isso é set e out. Quando
+        # avançar para 08/2026, vira out e nov. Não aparece em meses
+        # passados nem nos já decididos por ciclos anteriores — apenas
+        # onde o planejador está decidindo agora, para ele comparar
+        # "o que o ciclo anterior previa para esses mesmos meses".
+        if key in chaves_janela_ativa:
+            p_ant = prev_idx.get((ciclo_anterior, key))
+            if p_ant and p_ant.final is not None:
+                linha["final_ciclo_ant_cx"] = int(p_ant.final or 0)
+                linha["final_ciclo_ant_rs"] = round(float(p_ant.final_rs or 0), 2)
 
 
 

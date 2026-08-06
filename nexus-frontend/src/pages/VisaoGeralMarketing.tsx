@@ -121,29 +121,50 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
   const pmvSort = useSort(pmvData, 'variacao_pct', 'desc');
   const assSort = useSort(assData, 'vendido_cx', 'desc');
 
-  // Cards de destaque — só considera itens com base válida (evita item novo no ranking)
-  const catsVol = (d?.tendencia_volume_categoria || []).filter((c: any) => c.tendencia_cx !== 'SEM_BASE' && c.tendencia_cx !== 'SEM_DADO');
-  const topCresc = [...catsVol].filter((c) => c.tendencia_cx === 'CRESCIMENTO').sort((a, b) => b.variacao_pct_cx - a.variacao_pct_cx).slice(0, 3);
-  const topQueda = [...catsVol].filter((c) => c.tendencia_cx === 'DECLINIO').sort((a, b) => a.variacao_pct_cx - b.variacao_pct_cx).slice(0, 3);
-  const catsAss = d?.assertividade_categoria || [];
-  const contagemVencedor = catsAss.reduce((acc: any, c: any) => {
-    if (c.vencedor && c.vencedor !== 'ANO PASSADO') acc[c.vencedor] = (acc[c.vencedor] || 0) + 1;
+  // Cards de destaque e scatter: reagem ao nivel E à metrica ativa.
+  // volData já depende de 'nivel'; tendKey e varKey dependem de metricaVol.
+  const tendKey = metricaVol === 'cx' ? 'tendencia_cx' : 'tendencia_rs';
+  const varKey  = metricaVol === 'cx' ? 'variacao_pct_cx' : 'variacao_pct_rs';
+  const labelNivel = nivel === 'categoria' ? 'categoria' : 'descricao';
+
+  const volDataValido = volData.filter(
+    (c: any) => c[tendKey] !== 'SEM_BASE' && c[tendKey] !== 'SEM_DADO' && c[varKey] != null
+  );
+  const topCresc = [...volDataValido]
+    .filter((c: any) => c[tendKey] === 'CRESCIMENTO')
+    .sort((a: any, b: any) => b[varKey] - a[varKey])
+    .slice(0, 3);
+  const topQueda = [...volDataValido]
+    .filter((c: any) => c[tendKey] === 'DECLINIO')
+    .sort((a: any, b: any) => a[varKey] - b[varKey])
+    .slice(0, 3);
+
+  // "Quem mais acerta" reage ao nivel (categoria ou SKU)
+  const assDataCard = assData;
+  const contagemVencedor = assDataCard.reduce((acc: any, c: any) => {
+    if (c.vencedor) acc[c.vencedor] = (acc[c.vencedor] || 0) + 1;
     return acc;
   }, {});
   const maiorVencedor = Object.entries(contagemVencedor).sort((a: any, b: any) => b[1] - a[1])[0];
 
-  const itensSemBase = (d?.tendencia_volume_categoria || []).filter((c: any) => c.tendencia_cx === 'SEM_BASE' || c.tendencia_cx === 'SEM_DADO').length;
+  const itensSemBase = volData.filter(
+    (c: any) => c[tendKey] === 'SEM_BASE' || c[tendKey] === 'SEM_DADO'
+  ).length;
 
-  const scatterData = ((d?.tendencia_volume_categoria || [])
-    .filter((cv: any) => cv.tendencia_cx !== 'SEM_BASE' && cv.tendencia_cx !== 'SEM_DADO'))
-    .map((cv: any) => {
-      const pv = (d?.tendencia_pmv_categoria || []).find((p: any) => p.categoria === cv.categoria);
-      // Scatter usa volume cx como eixo X e PMV como eixo Y.
-      // Se PMV for SEM_BASE, plota com 0 no Y mas mantém a bolha — o volume importa.
-      const pmvVar = (pv && pv.tendencia !== 'SEM_BASE' && pv.tendencia !== 'SEM_DADO' && pv.variacao_pct != null)
-        ? pv.variacao_pct * 100 : 0;
-      return { categoria: cv.categoria, volVar: (cv.variacao_pct_cx || 0) * 100, pmvVar, volAbs: cv.vol_rs_atual };
-    }).filter(Boolean);
+  // Scatter: usa volData (nivel) e metricaVol para eixo X; PMV sempre ponderado no eixo Y
+  const pmvDataNivel = nivel === 'categoria'
+    ? (d?.tendencia_pmv_categoria || [])
+    : (d?.tendencia_pmv_sku || []);
+  const scatterData = volDataValido.map((cv: any) => {
+    const chave = nivel === 'categoria' ? cv.categoria : cv.sku;
+    const pv = pmvDataNivel.find((p: any) =>
+      nivel === 'categoria' ? p.categoria === cv.categoria : p.sku === cv.sku
+    );
+    const pmvVar = (pv && pv.tendencia !== 'SEM_BASE' && pv.tendencia !== 'SEM_DADO' && pv.variacao_pct != null)
+      ? pv.variacao_pct * 100 : 0;
+    const volAbs = metricaVol === 'cx' ? cv.vol_cx_atual : cv.vol_rs_atual;
+    return { label: cv[labelNivel] || chave, volVar: (cv[varKey] || 0) * 100, pmvVar, volAbs };
+  }).filter(Boolean);
 
   if (loading) {
     return <div className="min-h-screen flex items-center justify-center text-slate-400">
@@ -157,7 +178,7 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
           <h2 className="text-base font-black text-slate-900">Visão geral do mercado</h2>
           <p className="text-xs font-medium text-slate-400">
             Ciclo {d?.ciclo_ativo} · assertividade sobre {(d?.meses_auditados || []).join(', ') || 'sem meses auditáveis ainda'}
-            {itensSemBase > 0 && <span className="ml-2 text-slate-400">· {itensSemBase} categoria(s) sem histórico suficiente (item novo)</span>}
+            {itensSemBase > 0 && <span className="ml-2 text-slate-400">· {itensSemBase} {nivel === 'categoria' ? 'categoria(s)' : 'SKU(s)'} sem histórico suficiente (item novo)</span>}
           </p>
         </div>
       </div>
@@ -168,11 +189,11 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
           <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-emerald-600 mb-2">
             <TrendingUp className="w-3.5 h-3.5" /> Em crescimento
           </div>
-          {topCresc.length === 0 ? <div className="text-xs text-slate-400">Nenhuma categoria com crescimento &gt;5% e base confiável.</div> :
+          {topCresc.length === 0 ? <div className="text-xs text-slate-400">Nenhum item com crescimento &gt;5% e base confiável.</div> :
             topCresc.map((c: any) => (
-              <div key={c.categoria} className="flex items-center justify-between text-xs py-0.5">
-                <span className="font-bold text-slate-700 truncate">{c.categoria}</span>
-                <span className="font-black text-emerald-600 shrink-0 ml-2">{fmtPct(c.variacao_pct_cx)}</span>
+              <div key={c[labelNivel] || c.sku} className="flex items-center justify-between text-xs py-0.5">
+                <span className="font-bold text-slate-700 truncate">{c[labelNivel]}</span>
+                <span className="font-black text-emerald-600 shrink-0 ml-2">{fmtPct(c[varKey])}</span>
               </div>
             ))}
         </div>
@@ -180,11 +201,11 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
           <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-rose-600 mb-2">
             <TrendingDown className="w-3.5 h-3.5" /> Em queda
           </div>
-          {topQueda.length === 0 ? <div className="text-xs text-slate-400">Nenhuma categoria com queda &gt;5% e base confiável.</div> :
+          {topQueda.length === 0 ? <div className="text-xs text-slate-400">Nenhum item com queda &gt;5% e base confiável.</div> :
             topQueda.map((c: any) => (
-              <div key={c.categoria} className="flex items-center justify-between text-xs py-0.5">
-                <span className="font-bold text-slate-700 truncate">{c.categoria}</span>
-                <span className="font-black text-rose-600 shrink-0 ml-2">{fmtPct(c.variacao_pct_cx)}</span>
+              <div key={c[labelNivel] || c.sku} className="flex items-center justify-between text-xs py-0.5">
+                <span className="font-bold text-slate-700 truncate">{c[labelNivel]}</span>
+                <span className="font-black text-rose-600 shrink-0 ml-2">{fmtPct(c[varKey])}</span>
               </div>
             ))}
         </div>
@@ -199,7 +220,7 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
                <History className="w-5 h-5 text-slate-400" />}
               <div>
                 <div className="text-sm font-black text-slate-800">{maiorVencedor[0] === 'HUMANO' ? 'Humano' : maiorVencedor[0] === 'IA' ? 'IA' : 'Ano passado'}</div>
-                <div className="text-[10px] font-bold text-slate-400">{maiorVencedor[1] as number} de {catsAss.length} categorias</div>
+                <div className="text-[10px] font-bold text-slate-400">{maiorVencedor[1] as number} de {assDataCard.length} {nivel === 'categoria' ? 'categorias' : 'SKUs'}</div>
               </div>
             </div>
           ) : <div className="text-xs text-slate-400">Sem dados de assertividade ainda.</div>}
@@ -207,7 +228,11 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
         <div className="bg-white rounded-2xl border border-slate-100 p-4">
           <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Portfólio no ciclo</div>
           <div className="text-2xl font-black text-slate-900">{(d?.tendencia_volume_sku || []).length}</div>
-          <div className="text-[10px] font-bold text-slate-400">SKUs em {(d?.tendencia_volume_categoria || []).length} categorias</div>
+          <div className="text-[10px] font-bold text-slate-400">
+            {nivel === 'categoria'
+              ? `${(d?.tendencia_volume_sku || []).length} SKUs em ${(d?.tendencia_volume_categoria || []).length} categorias`
+              : `${(d?.tendencia_volume_sku || []).length} SKUs · vendo por SKU`}
+          </div>
         </div>
       </div>
 
@@ -242,7 +267,7 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
                     const p = payload[0].payload;
                     return (
                       <div style={{ fontSize: 11, borderRadius: 8, border: '1px solid #e2e8f0', background: 'white', padding: 8 }}>
-                        <div className="font-black text-slate-700">{p.categoria}</div>
+                        <div className="font-black text-slate-700">{p.label}</div>
                         <div>Volume pedido: {p.volVar >= 0 ? '+' : ''}{p.volVar.toFixed(1)}%</div>
                         <div>PMV: {p.pmvVar >= 0 ? '+' : ''}{p.pmvVar.toFixed(1)}%</div>
                       </div>
