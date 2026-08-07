@@ -735,7 +735,6 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
       - Supply             → 'vol_supply'
       - Consenso / default → 'vol_final'
     """
-    mes_foco = meses_janela[0] if meses_janela else None
     serie = serie_dossie(db, sku, ciclo_ativo, meses_futuros=meses_janela,
                          coluna_meta=coluna_meta)
     hoje = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
@@ -745,14 +744,21 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
                                   ciclo_ativo=ciclo_ativo)
     fva = fva_sku(db, sku, mes_fechado.strftime("%Y-%m-%d"))
 
-    comparacoes = None
-    insights = []
-    if mes_foco is not None:
-        ciclo_ant = get_previous_cycle_str(ciclo_ativo)
+    ciclo_ant = get_previous_cycle_str(ciclo_ativo)
 
-        plano = db.execute(text("""
-            SELECT COALESCE(SUM(vol_final),0) AS cx,
-                   COALESCE(SUM(vol_final * pmv_aplicado),0) AS rs
+    # Comparações e insights para TODOS os meses da janela (não só o primeiro).
+    # Cada mês gera um bloco de comparação independente e seus próprios insights.
+    # coluna_meta decide qual volume usar como "Meta" (vol_topdown na Marketing,
+    # vol_bottomup no Gerenciamento, vol_supply no Supply, vol_final default).
+    col_sql = coluna_meta  # ex: 'vol_topdown'
+
+    comparacoes_por_mes = []
+    insights = []
+
+    for mes_foco in (meses_janela or []):
+        plano = db.execute(text(f"""
+            SELECT COALESCE(SUM({col_sql}),0) AS cx,
+                   COALESCE(SUM({col_sql} * pmv_aplicado),0) AS rs
             FROM fato_ibp_granular
             WHERE sku=:s AND ciclo_sop=:c AND mes_projetado=:m
         """), {"s": sku, "c": ciclo_ativo, "m": mes_foco}).fetchone()
@@ -776,33 +782,40 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
             WHERE sku=:s AND TO_CHAR(data_pedido,'YYYY-MM')=:ym
         """), {"s": sku, "ym": mes_ano_ant}).fetchone()
 
-        plano_cx = int(plano.cx or 0); plano_rs = float(plano.rs or 0)
-        comparacoes = {
-            "mes_foco": mes_foco.strftime("%Y-%m-%d"),
-            "mes_label": mes_foco.strftime("%m/%Y"),
-            "final_cx": plano_cx, "final_rs": round(plano_rs, 2),
-            "orcamento_rs": round(float(orc or 0), 2),
-            "ciclo_ant_cx": int(cant.cx or 0), "ciclo_ant_rs": round(float(cant.rs or 0), 2),
-            "ano_ant_cx": int(aant.cx or 0), "ano_ant_rs": round(float(aant.rs or 0), 2),
-            "ciclo_anterior": ciclo_ant,
-        }
-
+        plano_cx = int(plano.cx or 0)
+        plano_rs = float(plano.rs or 0)
         ml = mes_foco.strftime("%m/%Y")
+
+        comparacoes_por_mes.append({
+            "mes_foco": mes_foco.strftime("%Y-%m-%d"),
+            "mes_label": ml,
+            "final_cx": plano_cx,
+            "final_rs": round(plano_rs, 2),
+            "orcamento_rs": round(float(orc or 0), 2),
+            "ciclo_ant_cx": int(cant.cx or 0),
+            "ciclo_ant_rs": round(float(cant.rs or 0), 2),
+            "ano_ant_cx": int(aant.cx or 0),
+            "ano_ant_rs": round(float(aant.rs or 0), 2),
+            "ciclo_anterior": ciclo_ant,
+        })
+
+        # Insights por mês
         if orc and float(orc) > 0:
             dd = (plano_rs - float(orc)) / float(orc)
             if abs(dd) >= 0.03:
                 direc = "acima" if dd > 0 else "abaixo"
-                insights.append(f"O plano de {ml} ({_fmt_rs(plano_rs)}) esta {_pct(dd)} {direc} do orcamento ({_fmt_rs(orc)}).")
+                insights.append(f"{ml}: plano ({_fmt_rs(plano_rs)}) esta {_pct(dd)} {direc} do orcamento ({_fmt_rs(orc)}).")
         if cant and cant.cx and int(cant.cx) > 0:
             dv = (plano_cx - int(cant.cx)) / int(cant.cx)
             if abs(dv) >= 0.05:
                 direc = "elevou" if dv > 0 else "reduziu"
-                insights.append(f"Do ciclo {ciclo_ant} para {ciclo_ativo}, o plano de {ml} {direc} {_pct(dv)} em volume ({_fmt_cx(cant.cx)} -> {_fmt_cx(plano_cx)} cx).")
+                insights.append(f"{ml}: do ciclo {ciclo_ant} para {ciclo_ativo}, volume {direc} {_pct(dv)} ({_fmt_cx(cant.cx)} → {_fmt_cx(plano_cx)} cx).")
         if aant and aant.cx and int(aant.cx) > 0:
             da = (plano_cx - int(aant.cx)) / int(aant.cx)
             direc = "acima" if da > 0 else "abaixo"
-            insights.append(f"O plano de {ml} esta {_pct(da)} {direc} do vendido no mesmo mes do ano passado ({_fmt_cx(aant.cx)} cx).")
+            insights.append(f"{ml}: plano esta {_pct(da)} {direc} do vendido no mesmo mes do ano passado ({_fmt_cx(aant.cx)} cx).")
 
+    # Insight de tendência plurianual (uma vez, não por mês)
     if plur and plur.get("tendencia_volume") and plur.get("tendencia_pmv"):
         tv, tp = plur["tendencia_volume"], plur["tendencia_pmv"]
         if tv == "DECLINIO" and tp == "CRESCIMENTO":
@@ -812,6 +825,10 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
         elif tv == "CRESCIMENTO" and tp == "DECLINIO":
             insights.append("Volume cresce mas preco cai: ganho de share via preco - vigie a margem.")
 
+    # Retrocompatibilidade: comparacoes = primeiro mês (o front usa este campo
+    # para o bloco de comparações; comparacoes_por_mes expõe todos os meses)
+    comparacoes = comparacoes_por_mes[0] if comparacoes_por_mes else None
+
     return {
         "sku": sku,
         "descricao": descricao or sku,
@@ -819,7 +836,8 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
         "serie": serie["serie"],
         "marco_hoje": serie["marco_hoje"],
         "forecast_inicio": serie["forecast_inicio"],
-        "comparacoes": comparacoes,
+        "comparacoes": comparacoes,             # primeiro mês (retrocompat)
+        "comparacoes_por_mes": comparacoes_por_mes,  # todos os meses da janela
         "insights": insights,
         "plurianual": plur,
         "fva": fva,

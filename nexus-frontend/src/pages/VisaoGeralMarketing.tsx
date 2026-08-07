@@ -75,11 +75,29 @@ function BadgeVenc({ v }: { v: string | null }) {
 }
 
 function ColunasAnos({ anos, campo, fmt }: { anos: any[]; campo: string; fmt:(n:number)=>string }) {
+  const ultimos = (anos || []).slice(-4); // últimos 4 anos
   return (
-    <div className="flex items-center gap-3 text-[10px] font-bold text-slate-400">
-      {(anos || []).slice(-3).map((a: any) => (
-        <span key={a.ano}>{a.ano}: <span className="text-slate-600">{fmt(a[campo])}</span></span>
-      ))}
+    <div className="flex items-center gap-3 text-[10px] font-bold text-slate-400 flex-wrap">
+      {ultimos.map((a: any, i: number) => {
+        const ant = i > 0 ? ultimos[i-1][campo] : null;
+        const rec = a[campo];
+        let yoy: string | null = null;
+        if (ant != null && ant > 0 && rec != null) {
+          const v = (rec - ant) / ant;
+          yoy = `${v >= 0 ? '+' : ''}${(v * 100).toFixed(0)}%`;
+        }
+        return (
+          <span key={a.ano} className="flex flex-col items-end">
+            <span className="text-[9px] text-slate-300">{a.ano}</span>
+            <span className="text-slate-600">{fmt(rec)}</span>
+            {yoy && (
+              <span className={`text-[9px] font-black ${yoy.startsWith('+') ? 'text-emerald-500' : 'text-rose-400'}`}>
+                {yoy}
+              </span>
+            )}
+          </span>
+        );
+      })}
     </div>
   );
 }
@@ -89,16 +107,38 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
   const [loading,    setLoading]    = useState(true);
   const [nivel,      setNivel]      = useState<'categoria'|'sku'>('categoria');
   const [metricaVol, setMetricaVol] = useState<Metrica>('cx');
+  const [catsFiltro, setCatsFiltro] = useState<Set<string>>(new Set()); // vazio = todas
 
   useEffect(() => {
     setLoading(true);
     axios.get(`${prefixoApi}/resumo`).then(r => setData(r.data)).finally(() => setLoading(false));
   }, [prefixoApi]);
 
-  // Dados reativos ao nível
-  const volData = nivel === 'categoria' ? (data?.tendencia_volume_categoria || []) : (data?.tendencia_volume_sku || []);
-  const pmvData = nivel === 'categoria' ? (data?.tendencia_pmv_categoria    || []) : (data?.tendencia_pmv_sku    || []);
-  const assData = nivel === 'categoria' ? (data?.assertividade_categoria    || []) : (data?.assertividade_sku    || []);
+  // Lista de categorias disponíveis (sempre do nível categoria, independente do toggle)
+  const categoriasDisponiveis: string[] = useMemo(() =>
+    [...new Set<string>((data?.tendencia_volume_categoria || []).map((c: any) => c.categoria as string))].sort()
+  , [data]);
+
+  const toggleCat = (cat: string) => setCatsFiltro(prev => {
+    const novo = new Set(prev);
+    novo.has(cat) ? novo.delete(cat) : novo.add(cat);
+    return novo;
+  });
+  const limparFiltro = () => setCatsFiltro(new Set());
+  const temFiltro = catsFiltro.size > 0;
+
+  // Aplica filtro de categoria antes de qualquer derivação
+  const filtrarPorCat = (rows: any[]) => {
+    if (!temFiltro) return rows;
+    return rows.filter((r: any) =>
+      nivel === 'categoria' ? catsFiltro.has(r.categoria) : catsFiltro.has(r.categoria)
+    );
+  };
+
+  // Dados reativos ao nível + filtro
+  const volData = filtrarPorCat(nivel === 'categoria' ? (data?.tendencia_volume_categoria || []) : (data?.tendencia_volume_sku || []));
+  const pmvData = filtrarPorCat(nivel === 'categoria' ? (data?.tendencia_pmv_categoria    || []) : (data?.tendencia_pmv_sku    || []));
+  const assData = filtrarPorCat(nivel === 'categoria' ? (data?.assertividade_categoria    || []) : (data?.assertividade_sku    || []));
 
   // Chaves dinâmicas conforme métrica
   const tendKey    = metricaVol === 'cx' ? 'tendencia_cx'    : 'tendencia_rs';
@@ -132,7 +172,9 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
     return { label: cv[labelNivel] || cv.sku, volVar: (cv[varKey] || 0)*100, pmvVar, volAbs: cv[atualKey] };
   });
 
-  // CSV download das 3 tabelas
+  // CSV download das 3 tabelas — grade de anos ALINHADA (todos compartilham
+  // os mesmos cabeçalhos de ano; células vazias onde o item não existia ainda)
+  // + variação ano a ano para cada par consecutivo + CAGR desde o nascimento.
   const downloadCSV = () => {
     const sep = ';';
     const rows: string[] = [];
@@ -140,25 +182,69 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
     rows.push(`Visão Geral — Ciclo ${data?.ciclo_ativo || ''} — ${nivel} — ${mLabel}`);
     rows.push('');
 
-    rows.push(['VOLUME', 'Tendência', 'Variação', `Atual (${metricaVol})`,
-      ...(volSort.sorted[0]?.anos || []).map((a: any) => String(a.ano))].join(sep));
+    // --- grade de anos: todos os anos presentes em qualquer item ---
+    const todosAnosVol = new Set<number>();
+    volSort.sorted.forEach((r: any) => (r.anos||[]).forEach((a: any) => todosAnosVol.add(a.ano)));
+    const anosVol = [...todosAnosVol].sort();
+
+    const todosAnosPmv = new Set<number>();
+    pmvSort.sorted.forEach((r: any) => (r.anos||[]).forEach((a: any) => todosAnosPmv.add(a.ano)));
+    const anosPmv = [...todosAnosPmv].sort();
+
+    // cabeçalho: anos + "vs ANO-1" para cada par + CAGR
+    const cabecalhoAnos = (anos: number[]) => [
+      ...anos.map(a => String(a)),
+      ...anos.slice(1).map((a, i) => `${anos[i]}→${a}`),
+      'CAGR desde início',
+    ];
+
+    const cagr = (vi: number, vf: number, anos: number): string => {
+      if (vi <= 0 || anos <= 0) return '—';
+      const r = Math.pow(vf / vi, 1 / anos) - 1;
+      return `${r >= 0 ? '+' : ''}${(r * 100).toFixed(1)}%/a`;
+    };
+
+    const linhaAnos = (r: any, anos: number[], campo: 'vol_cx'|'vol_rs'|'pmv') => {
+      const idx: Record<number, number> = {};
+      (r.anos||[]).forEach((a: any) => { idx[a.ano] = a[campo] ?? 0; });
+      const vals = anos.map(a => idx[a] != null ? idx[a] : '');
+      // variações ano a ano — só onde ambos os anos têm dado
+      const vars = anos.slice(1).map((a, i) => {
+        const ant = idx[anos[i]], rec = idx[a];
+        if (ant == null || ant === 0 || rec == null) return '—';
+        const v = (rec - ant) / ant;
+        return `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%`;
+      });
+      // CAGR: primeiro ao último ano com dado
+      const anosComDado = anos.filter(a => idx[a] != null && idx[a] > 0);
+      const cagrStr = anosComDado.length >= 2
+        ? cagr(idx[anosComDado[0]], idx[anosComDado[anosComDado.length-1]], anosComDado.length - 1)
+        : '—';
+      return [...vals, ...vars, cagrStr];
+    };
+
+    // VOLUME
+    rows.push(['VOLUME','Tendência','Variação atual','Atual',
+      ...cabecalhoAnos(anosVol)].join(sep));
     volSort.sorted.forEach((r: any) => {
       const var_ = r[varKey] != null ? `${(r[varKey]*100).toFixed(1)}%` : 'SEM BASE';
-      const anos = (r.anos||[]).map((a:any) => metricaVol==='cx' ? a.vol_cx : a.vol_rs);
-      rows.push([r[labelNivel]||r.sku, r[tendKey]||'', var_, r[atualKey]||0, ...anos].join(sep));
+      rows.push([r[labelNivel]||r.sku, r[tendKey]||'', var_, r[atualKey]||0,
+        ...linhaAnos(r, anosVol, metricaVol==='cx'?'vol_cx':'vol_rs')].join(sep));
     });
     rows.push('');
 
-    rows.push(['PMV', 'Tendência', 'Variação', 'PMV Atual',
-      ...(pmvSort.sorted[0]?.anos || []).map((a: any) => String(a.ano))].join(sep));
+    // PMV
+    rows.push(['PMV','Tendência','Variação atual','PMV Atual',
+      ...cabecalhoAnos(anosPmv)].join(sep));
     pmvSort.sorted.forEach((r: any) => {
       const var_ = r.variacao_pct != null ? `${(r.variacao_pct*100).toFixed(1)}%` : 'SEM BASE';
-      const anos = (r.anos||[]).map((a:any) => a.pmv);
-      rows.push([r[labelNivel]||r.sku, r.tendencia||'', var_, r.pmv_atual||0, ...anos].join(sep));
+      rows.push([r[labelNivel]||r.sku, r.tendencia||'', var_, r.pmv_atual||0,
+        ...linhaAnos(r, anosPmv, 'pmv')].join(sep));
     });
     rows.push('');
 
-    rows.push(['ASSERTIVIDADE','Vendido (cx)','Humano (cx)','Ader. Humano','IA (cx)','Ader. IA','Vencedor'].join(sep));
+    // ASSERTIVIDADE
+    rows.push(['ASSERTIVIDADE','Realizado (cx)','Humano (cx)','Ader. Humano','IA (cx)','Ader. IA','Vencedor'].join(sep));
     assData.forEach((r: any) => {
       rows.push([
         r[labelNivel]||r.sku, r.vendido_cx, r.humano_cx,
@@ -259,6 +345,40 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
           </div>
         </div>
       </div>
+
+      {/* FILTRO DE CATEGORIA */}
+      {categoriasDisponiveis.length > 0 && (
+        <div className="bg-white rounded-2xl border border-slate-100 px-4 py-3 mb-4">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+              Filtrar categorias {temFiltro && <span className="text-indigo-500">· {catsFiltro.size} selecionada(s)</span>}
+            </span>
+            {temFiltro && (
+              <button onClick={limparFiltro}
+                className="text-[10px] font-black text-slate-400 hover:text-slate-700 underline underline-offset-2">
+                limpar
+              </button>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {categoriasDisponiveis.map((cat) => {
+              const ativa = temFiltro ? catsFiltro.has(cat) : true;
+              return (
+                <button key={cat} onClick={() => toggleCat(cat)}
+                  className={`px-2.5 py-1 text-[10px] font-black rounded-full border transition-colors ${
+                    catsFiltro.has(cat)
+                      ? 'bg-indigo-600 text-white border-indigo-600'
+                      : temFiltro
+                        ? 'bg-white text-slate-400 border-slate-200 hover:border-slate-400'
+                        : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-indigo-50 hover:border-indigo-300 hover:text-indigo-600'
+                  }`}>
+                  {cat}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* TOGGLE NÍVEL */}
       <div className="flex items-center justify-between mb-3">

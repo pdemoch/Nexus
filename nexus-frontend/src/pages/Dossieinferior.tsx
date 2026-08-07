@@ -189,55 +189,60 @@ export default function DossieInferior({ prefixoApi, tipo, id, titulo, onFechar 
             </div>
           )}
 
-          {/* TRÊS BLOCOS */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-
-            {/* BLOCO A — Comparações do mês foco */}
-            {d.comparacoes && (
-              <div className="rounded-xl bg-white border border-slate-100 p-3">
-                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
-                  Comparações · {d.comparacoes.mes_label || 'mês foco'}
-                </div>
-                <div className="space-y-2">
-                  {[
-                    { label: 'Meta (plano final)',  cx: d.comparacoes.final_cx,    rsv: d.comparacoes.final_rs,    base: true },
-                    { label: 'Orçamento',           cx: null,                       rsv: d.comparacoes.orcamento_rs },
-                    { label: 'Ciclo anterior',      cx: d.comparacoes.ciclo_ant_cx, rsv: d.comparacoes.ciclo_ant_rs },
-                    { label: 'Ano anterior',        cx: d.comparacoes.ano_ant_cx,   rsv: d.comparacoes.ano_ant_rs },
-                  ].map((linha) => {
-                    const val = linha.cx;
-                    const planoVal = d.comparacoes.final_cx;
-                    let delta: number | null = null;
-                    if (!linha.base && val != null && val !== 0 && planoVal != null) {
-                      const dc = (planoVal - val) / val;
-                      if (isFinite(dc)) delta = dc;
-                    }
-                    return (
-                      <div key={linha.label} className="flex items-center justify-between text-xs">
-                        <span className={`${linha.base ? 'font-black text-slate-700' : 'font-medium text-slate-500'}`}>
-                          {linha.label}
-                        </span>
-                        <div className="text-right">
-                          <span className={`font-bold ${linha.base ? 'text-slate-900' : 'text-slate-600'}`}>
-                            {val == null ? '—' : `${fmtCx(val)} cx`}
-                          </span>
-                          {linha.rsv != null && linha.rsv > 0 && (
-                            <div className="text-[10px] font-bold text-emerald-600">{fmtRs(linha.rsv)}</div>
-                          )}
-                          {delta != null && (
-                            <span className={`ml-1 text-[10px] font-bold ${delta >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
-                              {delta >= 0 ? '+' : ''}{fmtPct(delta)}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
+          {/* COMPARAÇÕES — um cartão por mês da janela ativa */}
+          {(d.comparacoes_por_mes || (d.comparacoes ? [d.comparacoes] : [])).length > 0 && (
+            <div className="mb-4">
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
+                Comparações por mês
               </div>
-            )}
+              <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${(d.comparacoes_por_mes || [d.comparacoes]).length}, 1fr)` }}>
+                {(d.comparacoes_por_mes || [d.comparacoes]).map((comp: any) => (
+                  <div key={comp.mes_foco} className="rounded-xl bg-white border border-slate-100 p-3">
+                    <div className="text-[11px] font-black text-indigo-600 mb-2">{comp.mes_label}</div>
+                    <div className="space-y-2">
+                      {[
+                        { label: 'Meta',           cx: comp.final_cx,    rsv: comp.final_rs,    base: true },
+                        { label: 'Orçamento',      cx: null,             rsv: comp.orcamento_rs },
+                        { label: 'Ciclo anterior', cx: comp.ciclo_ant_cx, rsv: comp.ciclo_ant_rs },
+                        { label: 'Ano anterior',   cx: comp.ano_ant_cx,  rsv: comp.ano_ant_rs },
+                      ].map((linha) => {
+                        const val = linha.cx;
+                        const planoVal = comp.final_cx;
+                        let delta: number | null = null;
+                        if (!linha.base && val != null && val !== 0 && planoVal != null) {
+                          const dc = (planoVal - val) / val;
+                          if (isFinite(dc)) delta = dc;
+                        }
+                        return (
+                          <div key={linha.label} className="flex items-center justify-between text-xs">
+                            <span className={`${linha.base ? 'font-black text-slate-700' : 'font-medium text-slate-500'} text-[11px]`}>
+                              {linha.label}
+                            </span>
+                            <div className="text-right">
+                              <span className={`font-bold ${linha.base ? 'text-slate-900' : 'text-slate-600'}`}>
+                                {val == null ? '—' : `${fmtCx(val)} cx`}
+                              </span>
+                              {linha.rsv != null && linha.rsv > 0 && (
+                                <div className="text-[10px] font-bold text-indigo-500">{fmtRs(linha.rsv)}</div>
+                              )}
+                              {delta != null && (
+                                <span className={`text-[10px] font-bold ${delta >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
+                                  {delta >= 0 ? '+' : ''}{fmtPct(delta)}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
-            {/* BLOCO B — FVA: Humano vs IA */}
+          {/* TRÊS BLOCOS — FVA + composição + plurianual */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             {d.fva ? (
               <div className="rounded-xl bg-white border border-slate-100 p-3">
                 <div className="flex items-center justify-between mb-2">
