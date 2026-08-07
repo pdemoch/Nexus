@@ -88,6 +88,7 @@ function PreenchimentoMetas() {
   const congeladaEtapa        = Boolean(dados?.etapa_congelada);
   const minhaCongelada        = Boolean(dados?.minha_carteira_congelada);
   const aguardandoUpstream    = Boolean(dados?.aguardando_upstream);
+  const souAdmin              = Boolean(dados?.sou_admin);
   const bloqueado             = congeladaEtapa || minhaCongelada || aguardandoUpstream;
 
   const keyOf       = (razao: string, sku: string, mes: string) => `${razao}||${sku}||${mes}`;
@@ -145,6 +146,23 @@ function PreenchimentoMetas() {
       await axios.post('/api/v1/carteira/bloquear', {});
       await carregar();
     } catch (e: any) { alert(e?.response?.data?.detail || 'Falha ao bloquear.'); }
+  };
+
+  const congelarEtapa = async () => {
+    if (!confirm('Congelar Metas Comercial? A etapa Supply será liberada.')) return;
+    try {
+      if (temEdicoes) await salvar();
+      await axios.post('/api/v1/carteira/congelar', {});
+      await carregar();
+    } catch (e: any) { alert(e?.response?.data?.detail || 'Falha ao congelar.'); }
+  };
+
+  const reabrirEtapa = async () => {
+    if (!confirm('Reabrir Metas Comercial?')) return;
+    try {
+      await axios.post('/api/v1/carteira/reabrir', {});
+      await carregar();
+    } catch (e: any) { alert(e?.response?.data?.detail || 'Falha ao reabrir.'); }
   };
 
   const toggle = (id: string) =>
@@ -234,6 +252,20 @@ function PreenchimentoMetas() {
               Salvar{temEdicoes ? ` (${Object.keys(edits).length})` : ''}
             </button>
             {/* Bloquear minha carteira */}
+            {souAdmin && (
+              congeladaEtapa ? (
+                <button onClick={reabrirEtapa}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-amber-500 text-white hover:bg-amber-600">
+                  <Unlock className="w-4 h-4" /> Reabrir etapa
+                </button>
+              ) : (
+                <button onClick={congelarEtapa} disabled={aguardandoUpstream}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black
+                    ${aguardandoUpstream ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-emerald-600 text-white hover:bg-emerald-700'}`}>
+                  <Lock className="w-4 h-4" /> Congelar etapa
+                </button>
+              )
+            )}
             {!minhaCongelada && !dados?.sou_admin && (
               <button onClick={bloquearMinha}
                 className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-emerald-600 text-white hover:bg-emerald-700">

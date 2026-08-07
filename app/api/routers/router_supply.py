@@ -34,7 +34,7 @@ from app.core.database import get_db
 from app.api.routers.router_auth import get_current_user
 from app.api.routers.shared_ibp import (
     get_current_cycle, get_working_window_months, get_projection_window,
-    escrever_volume_rateado, propagar_para_jusante, congelar_etapa,
+    escrever_volume_rateado, propagar_para_jusante, propagar_linha_jusante, congelar_etapa,
     reabrir_etapa, etapa_congelada, registrar_log_auditoria, parse_date_safe,
     ETAPA_SUPPLY,
     ETAPA_METAS,
@@ -249,7 +249,7 @@ def exportar_visao_geral(
 
 
 @router.get("/tabela")
-def tabela(db: Session = Depends(get_db), _: dict = Depends(require_supply)):
+def tabela(db: Session = Depends(get_db), u: dict = Depends(require_supply)):
     """
     Matriz categoria -> segmento -> SKU, colunas por mês (M2..M4).
     Cada célula-SKU/mês traz: IA, Supply (editável), realizado do ano passado
@@ -343,6 +343,7 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(require_supply)):
     return {
         "ciclo": ciclo,
         "congelada": congelada,
+        "sou_admin": u.get("funcao") == "Administrador",
         "congelada_propria": propria_congelada,
         "aguardando_upstream": aguardando,
         "motivo_bloqueio": ("Metas Comercial ainda nao congelou o plano." if aguardando
@@ -490,6 +491,9 @@ def salvar(payload: PayloadSalvar, db: Session = Depends(get_db),
                 db=db, ciclo=ciclo, sku=aj.sku, mes=data_alvo,
                 volume_alvo=int(aj.novo_volume), etapa=ETAPA_SUPPLY,
             )
+            # Propaga o novo valor para as etapas de jusante (menos vol_ia),
+            # para que a próxima equipe já receba o número atualizado.
+            propagar_linha_jusante(db, ciclo, aj.sku, data_alvo, ETAPA_SUPPLY)
             registrar_log_auditoria(
                 db=db, ciclo=ciclo, origem="Demanda Marketing (Top-Down)",
                 usuario=nome_user, sku=aj.sku, cliente="TODOS_OS_CLIENTES",

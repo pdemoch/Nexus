@@ -36,6 +36,7 @@ from app.api.routers.shared_ibp import (
     get_working_window_months,
     ratear_maior_resto,
     propagar_para_jusante,
+    propagar_linha_jusante,
     check_imutabilidade_mes,
     etapa_congelada,
     congelar_etapa,
@@ -44,7 +45,7 @@ from app.api.routers.shared_ibp import (
     ETAPA_BOTTOMUP,
 )
 
-router = APIRouter(tags=["Metas Comercial"])
+router = APIRouter(prefix="/api/v1/carteira", tags=["Metas Comercial"])
 
 
 def require_metas(usuario: dict = Depends(get_current_user)):
@@ -324,6 +325,9 @@ def salvar(payload: PayloadSalvar, db: Session = Depends(get_db), u: dict = Depe
             for r, parte in zip(result, partes):
                 db.execute(text("UPDATE fato_ibp_granular SET vol_meta=:v WHERE id=:id"),
                            {"v": int(parte), "id": r.fato_id})
+
+            # Propaga para jusante (Supply, Final) — nunca toca vol_ia
+            propagar_linha_jusante(db, ciclo, aj.sku, aj.mes_projetado, ETAPA_METAS)
 
         db.commit()
         return {"status": "ok"}

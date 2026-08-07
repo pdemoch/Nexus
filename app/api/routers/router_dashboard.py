@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 import pandas as pd
+import io
 
 from app.core.database import get_db
 from app.api.routers.router_auth import get_current_user
@@ -161,7 +162,7 @@ def exportar_visao_geral(
 
 
 @router.get("/tabela")
-def tabela(db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
+def tabela(db: Session = Depends(get_db), u: dict = Depends(get_current_user)):
     """
     Consolidação categoria->segmento->SKU. Cada célula traz as 5 camadas +
     final + PMV, orçamento e o final do ciclo anterior (para o toggle de
@@ -252,6 +253,7 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
     return {
         "ciclo": ciclo, "ciclo_anterior": ciclo_ant, "publicado": publicado,
         "congelada": congelada,
+        "sou_admin": u.get("funcao") == "Administrador",
         "aguardando_upstream": aguardando,
         "motivo_bloqueio": ("Supply Review ainda nao congelou o plano." if aguardando
                              else "S&OP publicado." if publicado else None),
@@ -268,34 +270,32 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
 @router.get("/dossie")
 def dossie(sku: str, db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
     """
-    Dossiê enriquecido do Dashboard: dossiê padrão (plurianual+FVA+24m) +
-    comparador de cenários (as 5 camadas por mês) + dispersão entre camadas.
+    Dossiê do Dashboard = dossiê CANÔNICO (montar_dossie, coluna_meta=vol_final)
+    + comparador de cenários (as 5 camadas por mês da janela) exclusivo desta tela.
+
+    Usa a mesma fonte das outras 4 telas, então o gráfico, o FVA de 3 meses e as
+    comparações por mês vêm no formato que o DossieInferior espera.
     """
     try:
-        from app.api.routers.perfil_sku import comparativo_plurianual, fva_sku
+        from app.api.routers.perfil_sku import montar_dossie
         ciclo = get_current_cycle(db)
         meses = get_working_window_months(db)
-        hoje = datetime.date.today().replace(day=1)
-        mes_fechado = (hoje - relativedelta(months=1)).strftime("%Y-%m-%d")
+        desc  = db.execute(text("SELECT descricao FROM dim_produtos WHERE sku=:s"),
+                           {"s": sku}).scalar()
 
-        plurianual = comparativo_plurianual(db, sku, mes_referencia=mes_fechado, ciclo_ativo=ciclo)
-        fva = fva_sku(db, sku, mes_fechado)
+        # Dossiê canônico — mesmo payload das outras telas
+        base = montar_dossie(db, sku, ciclo, meses, descricao=desc,
+                             coluna_meta="vol_final")
 
-        hist = db.execute(text("""
-            SELECT TO_CHAR(data_pedido,'YYYY-MM') AS mes,
-                   SUM(qt_pedido) AS vendido, SUM(qtfatura) AS faturado
-            FROM fato_vendas
-            WHERE sku = :sku AND data_pedido >= (CURRENT_DATE - INTERVAL '24 months')
-            GROUP BY 1 ORDER BY 1
-        """), {"sku": sku}).fetchall()
-        serie = [{"mes": r.mes, "vendido": int(r.vendido or 0), "faturado": int(r.faturado or 0)} for r in hist]
-
-        # Comparador de cenários: as 5 camadas por mês da janela
+        # Extra exclusivo do Dashboard: as 5 camadas lado a lado por mês
         camadas = db.execute(text("""
             SELECT TO_CHAR(mes_projetado,'YYYY-MM-DD') AS mes,
-                   SUM(vol_ia) AS ia, SUM(vol_topdown) AS topdown,
-                   SUM(vol_bottomup) AS bottomup, SUM(vol_meta) AS meta,
-                   SUM(vol_supply) AS supply, SUM(vol_final) AS final
+                   SUM(vol_ia)       AS ia,
+                   SUM(vol_topdown)  AS topdown,
+                   SUM(vol_bottomup) AS bottomup,
+                   SUM(vol_meta)     AS meta,
+                   SUM(vol_supply)   AS supply,
+                   SUM(vol_final)    AS final
             FROM fato_ibp_granular
             WHERE sku = :sku AND ciclo_sop = :c AND mes_projetado = ANY(:meses)
             GROUP BY mes_projetado ORDER BY mes_projetado
@@ -306,19 +306,13 @@ def dossie(sku: str, db: Session = Depends(get_db), _: dict = Depends(get_curren
             vals = {"ia": int(r.ia or 0), "topdown": int(r.topdown or 0),
                     "bottomup": int(r.bottomup or 0), "meta": int(r.meta or 0),
                     "supply": int(r.supply or 0), "final": int(r.final or 0)}
-            # dispersão: amplitude relativa entre as camadas de plano
-            plan_layers = [vals["topdown"], vals["bottomup"], vals["meta"], vals["supply"]]
-            positivos = [v for v in plan_layers if v > 0]
-            disp = 0.0
-            if positivos:
-                disp = (max(positivos) - min(positivos)) / max(positivos)
+            plan = [vals["topdown"], vals["bottomup"], vals["meta"], vals["supply"]]
+            pos  = [v for v in plan if v > 0]
+            disp = (max(pos) - min(pos)) / max(pos) if pos else 0.0
             cenarios.append({"mes": r.mes, **vals, "dispersao": round(disp, 3)})
 
-        desc = db.execute(text("SELECT descricao FROM dim_produtos WHERE sku=:s"), {"s": sku}).scalar()
-        return {
-            "sku": sku, "descricao": desc or sku, "grafico": serie,
-            "plurianual": plurianual, "fva": fva, "cenarios": cenarios,
-        }
+        base["cenarios"] = cenarios
+        return base
     except Exception as e:
         raise HTTPException(500, repr(e))
 

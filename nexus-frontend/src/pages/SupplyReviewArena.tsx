@@ -83,6 +83,8 @@ function PreenchimentoSupply() {
   const meses: string[] = dados?.meses || [];
   const congelada: boolean = dados?.congelada;
   const aguardandoUpstream: boolean = dados?.aguardando_upstream;
+  const souAdmin: boolean = dados?.sou_admin;
+  const congeladaPropria: boolean = dados?.congelada_propria;
 
   // valor corrente de uma célula (edição local sobrepõe o banco)
   const valorCelula = (sku: string, mes: string, original: number) => {
@@ -159,6 +161,23 @@ function PreenchimentoSupply() {
     }
   };
 
+  const congelarEtapa = async () => {
+    if (!confirm('Congelar Supply Review? A etapa seguinte será liberada e esta ficará somente leitura.')) return;
+    try {
+      if (temEdicoes) await salvar();
+      await axios.post('/api/v1/supply/congelar', {});
+      await carregar();
+    } catch (e: any) { alert(e?.response?.data?.detail || 'Falha ao congelar.'); }
+  };
+
+  const reabrirEtapa = async () => {
+    if (!confirm('Reabrir Supply Review? A etapa voltará a ser editável.')) return;
+    try {
+      await axios.post('/api/v1/supply/reabrir', {});
+      await carregar();
+    } catch (e: any) { alert(e?.response?.data?.detail || 'Falha ao reabrir.'); }
+  };
+
   const toggle = (nome: string) =>
     setAbertas((p) => { const n = new Set(p); n.has(nome) ? n.delete(nome) : n.add(nome); return n; });
 
@@ -212,6 +231,20 @@ function PreenchimentoSupply() {
               {salvando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
               Salvar{temEdicoes ? ` (${Object.keys(edits).length})` : ''}
             </button>
+            {souAdmin && (
+              congeladaPropria ? (
+                <button onClick={reabrirEtapa}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-amber-500 text-white hover:bg-amber-600">
+                  <Unlock className="w-4 h-4" /> Reabrir etapa
+                </button>
+              ) : (
+                <button onClick={congelarEtapa} disabled={aguardandoUpstream}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black
+                    ${aguardandoUpstream ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-emerald-600 text-white hover:bg-emerald-700'}`}>
+                  <Lock className="w-4 h-4" /> Congelar etapa
+                </button>
+              )
+            )}
             <button
               onClick={async () => {
                 if (temEdicoes) await salvar();

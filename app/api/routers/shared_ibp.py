@@ -369,6 +369,49 @@ def propagar_para_jusante(db: Session, ciclo: str, origem: str) -> dict:
     return {"linhas": res.rowcount or 0, "propagou": destinos, "preservou": preservadas}
 
 
+
+def propagar_linha_jusante(db: Session, ciclo: str, sku: str, mes, origem: str) -> dict:
+    """
+    Propaga o valor de UMA linha (sku x mes) da etapa 'origem' para as etapas
+    de jusante NÃO congeladas. Chamado a cada /salvar, para que o número que o
+    planejador acaba de digitar já apareça como ponto de partida nas etapas
+    seguintes — sem esperar o congelamento.
+
+    NUNCA toca vol_ia: a previsão da máquina é gerada uma vez no início do
+    ciclo e permanece imutável como baseline de comparação.
+
+    Respeita:
+      • etapa congelada a jusante -> preserva (não sobrescreve decisão fechada)
+      • mês já realizado          -> preserva (não reescreve passado)
+    """
+    ciclo = normalizar_ciclo(ciclo)
+    mes_d = _coerce_mes(mes)
+    campo_origem = CAMPO_DA_ETAPA[origem]
+    idx = ORDEM_ETAPAS.index(origem)
+
+    # Não propaga para meses já fechados
+    if mes_d < datetime.date.today().replace(day=1):
+        return {"linhas": 0, "propagou": [], "preservou": ["mes_realizado"]}
+
+    destinos, preservadas = [], []
+    for etapa in ORDEM_ETAPAS[idx + 1:]:
+        if etapa_congelada(db, ciclo, etapa):
+            preservadas.append(etapa)
+        else:
+            destinos.append(CAMPO_DA_ETAPA[etapa])
+
+    if not destinos:
+        return {"linhas": 0, "propagou": [], "preservou": preservadas}
+
+    sets = ", ".join([f"{c} = {campo_origem}" for c in destinos])
+    res = db.execute(text(f"""
+        UPDATE fato_ibp_granular
+        SET {sets}
+        WHERE ciclo_sop = :c AND sku = :s AND mes_projetado = :m
+    """), {"c": ciclo, "s": sku, "m": mes_d})
+    return {"linhas": res.rowcount or 0, "propagou": destinos, "preservou": preservadas}
+
+
 # =====================================================================
 # 6. AUDITORIA (trilha)
 # =====================================================================
