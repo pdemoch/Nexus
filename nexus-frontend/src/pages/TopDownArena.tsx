@@ -94,8 +94,10 @@ function PreenchimentoMarketing() {
 
   // Totalizadores VIVOS — recalculam com as edições locais
   const totaisVivos = useMemo(() => {
-    const vol: Record<string, number> = {}; const fat: Record<string, number> = {};
-    meses.forEach((m) => { vol[m] = 0; fat[m] = 0; });
+    const vol: Record<string, number> = {};
+    const fat: Record<string, number> = {};
+    const orc: Record<string, number> = {};
+    meses.forEach((m) => { vol[m] = 0; fat[m] = 0; orc[m] = 0; });
     dados?.categorias?.forEach((cat: any) =>
       cat.segmentos.forEach((seg: any) =>
         seg.skus.forEach((s: any) =>
@@ -105,11 +107,12 @@ function PreenchimentoMarketing() {
             const v = valorCelula(s.sku, m, cel.topdown);
             vol[m] += v;
             fat[m] += v * (cel.pmv || 0);
+            orc[m] += cel.orcamento || 0;
           })
         )
       )
     );
-    return { vol, fat };
+    return { vol, fat, orc };
   }, [dados, edits, meses]);
 
   const temEdicoes = Object.keys(edits).length > 0;
@@ -168,16 +171,12 @@ function PreenchimentoMarketing() {
             </button>
             <button
               onClick={async () => {
-                // Se há edições pendentes, salva primeiro (com rateio) antes de exportar.
-                // Assim o CSV reflete exatamente o que o usuário digitou.
+                // Salva edições pendentes antes de exportar — o CSV
+                // deve refletir exatamente o vol_topdown que o usuário editou.
                 if (temEdicoes) await salvar();
-                // Dispara o download via link temporário (funciona com autenticação por cookie).
-                const a = document.createElement('a');
-                a.href = '/api/v1/topdown/exportar';
-                a.download = '';
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
+                // window.location.href é mais confiável que a.click() após await,
+                // porque alguns browsers bloqueiam cliques programáticos em async.
+                window.location.href = '/api/v1/topdown/exportar';
               }}
               className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-white border border-slate-200 text-slate-600 hover:bg-slate-50"
             >
@@ -192,8 +191,11 @@ function PreenchimentoMarketing() {
           {meses.map((m) => (
             <div key={m} className="bg-slate-50 rounded-lg px-3 py-2">
               <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">{mesLabel(m)}</div>
+              {totaisVivos.orc[m] > 0 && (
+                <div className="text-[9px] font-bold text-amber-500">orç {fmtRs(totaisVivos.orc[m])}</div>
+              )}
+              <div className="text-[11px] font-bold text-indigo-500">{fmtRs(totaisVivos.fat[m])}</div>
               <div className="text-sm font-black text-slate-900">{fmtCx(totaisVivos.vol[m])} <span className="text-[10px] font-bold text-slate-400">cx</span></div>
-              <div className="text-[11px] font-bold text-emerald-600">{fmtRs(totaisVivos.fat[m])}</div>
             </div>
           ))}
         </div>
@@ -298,11 +300,16 @@ function PreenchimentoMarketing() {
                           );
                         })}
                         <button
-                          onClick={() => setDossiesAbertos((prev) => {
-                            const novo = new Set(prev);
-                            novo.has(s.sku) ? novo.delete(s.sku) : novo.add(s.sku);
-                            return novo;
-                          })}
+                          onClick={async () => {
+                            // Salva edições pendentes antes de abrir o dossiê,
+                            // para que a linha "Meta" reflita o vol_topdown atual.
+                            if (temEdicoes) await salvar();
+                            setDossiesAbertos((prev) => {
+                              const novo = new Set(prev);
+                              novo.has(s.sku) ? novo.delete(s.sku) : novo.add(s.sku);
+                              return novo;
+                            });
+                          }}
                           className={`justify-self-center p-1.5 rounded-lg transition-colors ${aberto ? 'bg-indigo-100 text-indigo-600' : 'text-slate-300 hover:bg-indigo-50 hover:text-indigo-600'}`}
                           title="Ver dossiê do SKU"
                         >

@@ -518,15 +518,20 @@ def fva_sku(db: Session, sku: str, mes) -> Dict[str, Any]:
 # =====================================================================
 # TESTE MANUAL — roda contra um SKU conhecido
 # =====================================================================
-def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None) -> Dict[str, Any]:
+def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
+                 coluna_meta: str = "vol_final") -> Dict[str, Any]:
     """
-    Série unificada do gráfico do dossiê: realizado (vendido/faturado, 24 meses)
-    SOBREPOSTO ao previsto (vol_ia e vol_final), onde cada mês de previsão vem do
-    ciclo M-2 que o congelou (regra ciclo_fonte_do_mes). Mais orçamento e ano
-    anterior por mês. Otimizada: poucas queries agregadas (não uma por mês).
+    Série unificada do gráfico do dossiê.
 
-    Estrutura por mês: mes, vendido_cx, faturado_cx, vendido_rs, faturado_rs,
-    ia_cx, final_cx, orcamento_rs, ano_ant_cx, ano_ant_rs, eh_futuro.
+    coluna_meta: qual coluna de planejamento usar como "Meta" nos meses da
+    janela ativa (M+2, M+3, M+4). Cada tela de preenchimento passa a sua:
+      - Demanda Marketing  → 'vol_topdown'
+      - Gerenciamento      → 'vol_bottomup'
+      - Supply             → 'vol_supply'
+      - Consenso / default → 'vol_final'
+
+    Para meses passados (fora da janela ativa), a Meta sempre vem do
+    vol_final do ciclo M-2 histórico — o compromisso original.
     """
     hoje = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
     mes_atual = hoje.replace(day=1)
@@ -568,16 +573,36 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None) ->
                 mapa[key]["eh_futuro"] = md >= mes_atual
 
     # 3) Previsão — TODO o forecast relevante numa query (todos os ciclos).
+    #    Traz todas as colunas de planejamento para que coluna_meta possa ser
+    #    qualquer uma delas sem precisar de query extra.
     prev_rows = db.execute(text("""
         SELECT ciclo_sop, TO_CHAR(mes_projetado,'YYYY-MM-01') AS mes,
-               SUM(vol_ia) AS ia, SUM(vol_final) AS final,
-               SUM(vol_ia * pmv_aplicado) AS ia_rs,
-               SUM(vol_final * pmv_aplicado) AS final_rs
+               SUM(vol_ia)       AS ia,
+               SUM(vol_final)    AS final,
+               SUM(vol_topdown)  AS topdown,
+               SUM(vol_bottomup) AS bottomup,
+               SUM(vol_supply)   AS supply,
+               SUM(vol_ia      * pmv_aplicado) AS ia_rs,
+               SUM(vol_final   * pmv_aplicado) AS final_rs,
+               SUM(vol_topdown * pmv_aplicado) AS topdown_rs
         FROM fato_ibp_granular
         WHERE sku = :sku
         GROUP BY ciclo_sop, mes_projetado
     """), {"sku": sku}).fetchall()
     prev_idx = {(p.ciclo_sop, p.mes): p for p in prev_rows}
+
+    def _meta_cx(p: any, coluna: str) -> int:
+        """Retorna o volume da coluna_meta, com fallback para vol_final."""
+        val = getattr(p, coluna.replace("vol_", ""), None)
+        if val is None:
+            val = p.final  # fallback seguro
+        return int(val or 0)
+
+    def _meta_rs(p: any, coluna: str) -> float:
+        """Receita da coluna_meta — só topdown tem precomputed; outros estimam via pmv."""
+        if coluna == "vol_topdown":
+            return round(float(p.topdown_rs or 0), 2)
+        return round(float(p.final_rs or 0), 2)
 
     # Ciclo anterior (para a linha de referência histórica).
     mm, yy = ciclo_ativo.split("/")
@@ -599,26 +624,25 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None) ->
         if md < primeiro_mes_forecast:
             continue  # antes do primeiro ciclo: sem forecast M-2 real
 
-        # LINHA A — plano do ciclo ATIVO (dinâmico), SOMENTE nos meses da
-        # janela de trabalho (M2/M3/M4). É o que o planejador está construindo
-        # agora — não misturar com histórico de ciclos passados.
+        # LINHA A — Meta nos meses da JANELA ATIVA: usa coluna_meta (ex:
+        # vol_topdown quando chamado pela Demanda Marketing). Para meses
+        # passados fora da janela, usa sempre vol_final do M-2 histórico
+        # (o que foi prometido antes de acontecer — imutável).
         if key in chaves_janela_ativa:
             p_ativo = prev_idx.get((ciclo_ativo, key))
             if p_ativo and (p_ativo.ia is not None or p_ativo.final is not None):
-                linha["ia_cx"] = int(p_ativo.ia or 0)
-                linha["final_cx"] = int(p_ativo.final or 0)
-                linha["ia_rs"] = round(float(p_ativo.ia_rs or 0), 2)
-                linha["final_rs"] = round(float(p_ativo.final_rs or 0), 2)
+                linha["ia_cx"]    = int(p_ativo.ia or 0)
+                linha["final_cx"] = _meta_cx(p_ativo, coluna_meta)
+                linha["ia_rs"]    = round(float(p_ativo.ia_rs or 0), 2)
+                linha["final_rs"] = _meta_rs(p_ativo, coluna_meta)
         else:
-            # Fora da janela ativa: usa o M-2 histórico como IA/Final de referência
-            # (o que foi prometido antes de cada mês acontecer).
+            # Meses passados: M-2 histórico (vol_final — o compromisso original)
             cf = ciclo_fonte_do_mes(md)
             p_hist = prev_idx.get((cf, key))
             if p_hist and p_hist.ia is not None:
                 linha["ia_cx"] = int(p_hist.ia or 0)
                 linha["ia_rs"] = round(float(p_hist.ia_rs or 0), 2)
                 linha["ciclo_fonte"] = cf
-            # final_cx para meses passados: usa o M-2 histórico como "humano previsto"
             if p_hist and p_hist.final is not None:
                 linha["final_cx"] = int(p_hist.final or 0)
                 linha["final_rs"] = round(float(p_hist.final_rs or 0), 2)
@@ -699,16 +723,21 @@ def _pct(x):
 
 
 def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
-                  descricao: str = None) -> Dict[str, Any]:
+                  descricao: str = None,
+                  coluna_meta: str = "vol_final") -> Dict[str, Any]:
     """
     Empacota o dossie COMPLETO de um SKU: serie do grafico + plurianual + FVA +
     comparacoes do mes-foco + insights em texto. Consumido pelos 5 routers.
 
-    Mes-foco = primeiro mes da janela do ciclo ativo (dinamico). Ciclo 07 -> set;
-    quando abrir o 08 -> out, sem alterar codigo.
+    coluna_meta: qual coluna usar como "Meta" nos meses da janela ativa.
+      - Demanda Marketing  → 'vol_topdown'
+      - Gerenciamento      → 'vol_bottomup'
+      - Supply             → 'vol_supply'
+      - Consenso / default → 'vol_final'
     """
     mes_foco = meses_janela[0] if meses_janela else None
-    serie = serie_dossie(db, sku, ciclo_ativo, meses_futuros=meses_janela)
+    serie = serie_dossie(db, sku, ciclo_ativo, meses_futuros=meses_janela,
+                         coluna_meta=coluna_meta)
     hoje = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
     mes_fechado = (hoje.replace(day=1) - relativedelta(months=1))
 

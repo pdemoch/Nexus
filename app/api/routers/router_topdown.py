@@ -265,7 +265,8 @@ def dossie(sku: str, db: Session = Depends(get_db), _: dict = Depends(require_ma
         meses = get_working_window_months(db)
         desc = db.execute(text(
             "SELECT descricao FROM dim_produtos WHERE sku=:s"), {"s": sku}).scalar()
-        return montar_dossie(db, sku, ciclo, meses, descricao=desc)
+        return montar_dossie(db, sku, ciclo, meses, descricao=desc,
+                             coluna_meta="vol_topdown")
     except Exception as e:
         raise HTTPException(500, repr(e))
 
