@@ -74,8 +74,17 @@ function BadgeVenc({ v }: { v: string | null }) {
   return <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${cfg.cls}`}>{cfg.label}</span>;
 }
 
-function cagrDados(anos: any[], campo: string): string | null {
-  const comDado = (anos||[]).filter((a: any) => a[campo] != null && a[campo] > 0);
+// Piso mínimo para o ano-base do CAGR (mesmo critério do backend).
+// Se o primeiro ano com dado está abaixo do piso, avança — assim itens
+// nascentes como SHAKE (5 cx em 2025) não geram +89.000%/a.
+const PISO_CAGR_CX  = 50;
+const PISO_CAGR_RS  = 5000;
+
+function cagrDados(anos: any[], campo: string, piso = PISO_CAGR_CX): string | null {
+  // Filtra anos com dado acima do piso (ignora anos de baixíssimo volume inicial)
+  const comDado = (anos||[])
+    .filter((a: any) => a[campo] != null && a[campo] >= piso)
+    .sort((a: any, b: any) => a.ano - b.ano);
   if (comDado.length < 2) return null;
   const vi = comDado[0][campo];
   const vf = comDado[comDado.length-1][campo];
@@ -88,16 +97,26 @@ function cagrDados(anos: any[], campo: string): string | null {
 const CAGR_TOOLTIP = 'CAGR = Compound Annual Growth Rate (Crescimento Médio Anual Composto). '
   + 'Fórmula: (Valor_final ÷ Valor_inicial)^(1/nº de anos) − 1. '
   + 'Representa a taxa de crescimento constante que, aplicada ano a ano, '
-  + 'levaria do primeiro valor ao último. Mais estável que a variação simples, '
-  + 'pois neutraliza picos e quedas pontuais.';
+  + 'levaria do primeiro valor ao último. '
+  + 'Calculado apenas entre anos com volume ≥ 50 cx (ou R$ 5.000), '
+  + 'para evitar distorções de itens nascentes com base muito baixa. '
+  + 'Itens com histórico insuficiente mostram "—".';
 
-function CagrCell({ anos, campo }: { anos: any[]; campo: string }) {
-  const val = cagrDados(anos, campo);
-  if (!val) return <span className="text-slate-300 text-right block">—</span>;
+function CagrCell({ anos, campo, piso }: { anos: any[]; campo: string; piso?: number }) {
+  const val = cagrDados(anos, campo, piso);
+  if (!val) return (
+    <div className="flex items-center justify-end gap-1">
+      <span className="text-slate-300">—</span>
+      <span title={CAGR_TOOLTIP}
+        className="text-[9px] font-black text-slate-300 cursor-help border border-slate-200 rounded-full w-3.5 h-3.5 flex items-center justify-center hover:text-indigo-500 hover:border-indigo-300">
+        ?
+      </span>
+    </div>
+  );
   const positivo = val.startsWith('+');
   return (
-    <div className="flex items-center justify-end gap-1 group relative">
-      <span className={`font-black text-right ${positivo ? 'text-emerald-600' : 'text-rose-500'}`}>{val}</span>
+    <div className="flex items-center justify-end gap-1">
+      <span className={`font-black ${positivo ? 'text-emerald-600' : 'text-rose-500'}`}>{val}</span>
       <span title={CAGR_TOOLTIP}
         className="text-[9px] font-black text-slate-300 cursor-help border border-slate-200 rounded-full w-3.5 h-3.5 flex items-center justify-center hover:text-indigo-500 hover:border-indigo-300">
         ?
@@ -106,28 +125,42 @@ function CagrCell({ anos, campo }: { anos: any[]; campo: string }) {
   );
 }
 
-function ColunasAnos({ anos, campo, fmt }: { anos: any[]; campo: string; fmt:(n:number)=>string }) {
-  const ultimos = (anos || []).slice(-4); // últimos 4 anos
+// Grade fixa de anos: todos os anos possíveis do dataset inteiro, passados
+// como prop. Cada item preenche as colunas onde tem dado; o resto mostra "—".
+// Formato da célula: "12.345 (+67%)" — valor e YoY na mesma linha.
+function ColunasAnos({
+  anos, campo, fmt, todosAnos,
+}: {
+  anos: any[];
+  campo: string;
+  fmt: (n: number) => string;
+  todosAnos: number[];
+}) {
+  const idx: Record<number, number | null> = {};
+  (anos || []).forEach((a: any) => { idx[a.ano] = a[campo] ?? null; });
+
   return (
-    <div className="flex items-center gap-3 text-[10px] font-bold text-slate-400 flex-wrap">
-      {ultimos.map((a: any, i: number) => {
-        const ant = i > 0 ? ultimos[i-1][campo] : null;
-        const rec = a[campo];
+    <div className="flex items-center gap-0 text-[10px] font-bold text-slate-400" style={{ minWidth: 0 }}>
+      {todosAnos.map((ano) => {
+        const val = idx[ano];
+        // YoY: compara com o ano anterior que exista na grade
+        const anoAnt = todosAnos[todosAnos.indexOf(ano) - 1];
+        const valAnt = anoAnt != null ? idx[anoAnt] : null;
         let yoy: string | null = null;
-        if (ant != null && ant > 0 && rec != null) {
-          const v = (rec - ant) / ant;
+        if (valAnt != null && valAnt > 0 && val != null) {
+          const v = (val - valAnt) / valAnt;
           yoy = `${v >= 0 ? '+' : ''}${(v * 100).toFixed(0)}%`;
         }
         return (
-          <span key={a.ano} className="flex flex-col items-end">
-            <span className="text-[9px] text-slate-300">{a.ano}</span>
-            <span className="text-slate-600">{fmt(rec)}</span>
-            {yoy && (
-              <span className={`text-[9px] font-black ${yoy.startsWith('+') ? 'text-emerald-500' : 'text-rose-400'}`}>
-                {yoy}
-              </span>
-            )}
-          </span>
+          <div key={ano} className="flex flex-col items-end px-2 border-l border-slate-100 first:border-l-0" style={{ minWidth: 72 }}>
+            <span className="text-[9px] text-slate-300">{ano}</span>
+            {val != null
+              ? <span className="text-slate-700 font-bold whitespace-nowrap">{fmt(val)}</span>
+              : <span className="text-slate-200">—</span>}
+            {yoy
+              ? <span className={`text-[9px] font-black ${yoy.startsWith('+') ? 'text-emerald-500' : 'text-rose-400'}`}>{yoy}</span>
+              : <span className="text-[9px] text-transparent">·</span>}
+          </div>
         );
       })}
     </div>
@@ -181,6 +214,22 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
   const volSort = useSort(volData, varKey, 'desc');
   const pmvSort = useSort(pmvData, 'variacao_pct', 'desc');
   const assSort = useSort(assData, 'vendido_cx', 'desc');
+
+  // Grade global de anos — todos os anos presentes em qualquer item do dataset
+  // completo (não só o filtrado), para que a grade seja consistente ao filtrar.
+  const todosAnosVol = useMemo(() => {
+    const s = new Set<number>();
+    (data?.tendencia_volume_categoria||[]).forEach((r: any) => (r.anos||[]).forEach((a: any) => s.add(Number(a.ano))));
+    (data?.tendencia_volume_sku||[]).forEach((r: any) => (r.anos||[]).forEach((a: any) => s.add(Number(a.ano))));
+    return [...s].sort((a,b) => a-b);
+  }, [data]);
+
+  const todosAnosPmv = useMemo(() => {
+    const s = new Set<number>();
+    (data?.tendencia_pmv_categoria||[]).forEach((r: any) => (r.anos||[]).forEach((a: any) => s.add(Number(a.ano))));
+    (data?.tendencia_pmv_sku||[]).forEach((r: any) => (r.anos||[]).forEach((a: any) => s.add(Number(a.ano))));
+    return [...s].sort((a,b) => a-b);
+  }, [data]);
 
   // Cards: itens com base válida, reativos a nivel + metrica
   const volValido  = volData.filter((c: any) => c[tendKey] !== 'SEM_BASE' && c[tendKey] !== 'SEM_DADO' && c[varKey] != null);
@@ -516,11 +565,11 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
                 {nivel==='sku' && <div className="text-[10px] font-bold text-slate-300">{row.sku} · {row.categoria}</div>}
               </div>
               <div className="flex items-center gap-1"><TendIcon t={row[tendKey]}/><LabelTend t={row[tendKey]}/></div>
-              <CagrCell anos={row.anos} campo={metricaVol==='cx'?'vol_cx':'vol_rs'}/>
+              <CagrCell anos={row.anos} campo={metricaVol==='cx'?'vol_cx':'vol_rs'} piso={metricaVol==='cx'?50:5000}/>
               <div className="text-right font-bold text-slate-600">
                 {metricaVol==='cx'?`${fmtCx(row.vol_cx_atual)} cx`:fmtRs(row.vol_rs_atual)}
               </div>
-              <ColunasAnos anos={row.anos} campo={metricaVol==='cx'?'vol_cx':'vol_rs'} fmt={metricaVol==='cx'?fmtCx:fmtRs}/>
+              <ColunasAnos anos={row.anos} campo={metricaVol==='cx'?'vol_cx':'vol_rs'} fmt={metricaVol==='cx'?fmtCx:fmtRs} todosAnos={todosAnosVol}/>
             </div>
           ))}
         </div>
@@ -552,9 +601,9 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
                 {nivel==='sku' && <div className="text-[10px] font-bold text-slate-300">{row.sku} · {row.categoria}</div>}
               </div>
               <div className="flex items-center gap-1"><TendIcon t={row.tendencia}/><LabelTend t={row.tendencia}/></div>
-              <CagrCell anos={row.anos} campo="pmv"/>
+              <CagrCell anos={row.anos} campo="pmv" piso={5000}/>
               <div className="text-right font-bold text-slate-600">{fmtRs(row.pmv_atual)}</div>
-              <ColunasAnos anos={row.anos} campo="pmv" fmt={fmtRs}/>
+              <ColunasAnos anos={row.anos} campo="pmv" fmt={fmtRs} todosAnos={todosAnosPmv}/>
             </div>
           ))}
         </div>
