@@ -171,16 +171,19 @@ function PreenchimentoMarketing() {
             </button>
             <button
               onClick={async () => {
-                // Salva edições pendentes antes de exportar — o CSV
-                // deve refletir exatamente o vol_topdown que o usuário editou.
                 if (temEdicoes) await salvar();
-                // window.location.href é mais confiável que a.click() após await,
-                // porque alguns browsers bloqueiam cliques programáticos em async.
-                window.location.href = '/api/v1/topdown/exportar';
+                try {
+                  const resp = await axios.get('/api/v1/topdown/exportar', { responseType: 'blob' });
+                  const url = window.URL.createObjectURL(new Blob([resp.data]));
+                  const a = document.createElement('a');
+                  a.href = url; a.download = 'topdown_preenchimento.xlsx';
+                  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                  window.URL.revokeObjectURL(url);
+                } catch { alert('Erro ao gerar o Excel. Tente novamente.'); }
               }}
               className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-white border border-slate-200 text-slate-600 hover:bg-slate-50"
             >
-              <Download className="w-4 h-4" /> CSV
+              <Download className="w-4 h-4" /> Excel
             </button>
           </div>
         </div>

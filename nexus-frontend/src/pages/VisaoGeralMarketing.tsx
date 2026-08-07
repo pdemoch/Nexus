@@ -81,9 +81,9 @@ const PISO_CAGR_CX  = 50;
 const PISO_CAGR_RS  = 5000;
 
 function cagrDados(anos: any[], campo: string, piso = PISO_CAGR_CX): string | null {
-  // Filtra anos com dado acima do piso (ignora anos de baixíssimo volume inicial)
+  // Filtra anos com dado acima do piso. Para PMV (piso=0) aceita qualquer valor > 0.
   const comDado = (anos||[])
-    .filter((a: any) => a[campo] != null && a[campo] >= piso)
+    .filter((a: any) => a[campo] != null && a[campo] > 0 && a[campo] >= piso)
     .sort((a: any, b: any) => a.ano - b.ano);
   if (comDado.length < 2) return null;
   const vi = comDado[0][campo];
@@ -382,8 +382,19 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
             {semBase > 0 && <span className="ml-2">· {semBase} {nivel==='categoria'?'categoria(s)':'SKU(s)'} sem histórico suficiente (item novo)</span>}
           </p>
         </div>
-        <button onClick={() => {
-          window.location.href = `/api/v1/topdown/exportar-visao-geral?nivel=${nivel}`;
+        <button onClick={async () => {
+          try {
+            const resp = await axios.get(
+              `/api/v1/topdown/exportar-visao-geral?nivel=${nivel}`,
+              { responseType: 'blob' }
+            );
+            const url = window.URL.createObjectURL(new Blob([resp.data]));
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `visao_geral_${(data?.ciclo_ativo||'ciclo').replace('/','_')}_${nivel}.xlsx`;
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+          } catch { alert('Erro ao gerar o Excel. Tente novamente.'); }
         }}
           className="flex items-center gap-2 px-3 py-1.5 text-xs font-black rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 transition-colors">
           <Download className="w-3.5 h-3.5"/> Excel
@@ -601,7 +612,7 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
                 {nivel==='sku' && <div className="text-[10px] font-bold text-slate-300">{row.sku} · {row.categoria}</div>}
               </div>
               <div className="flex items-center gap-1"><TendIcon t={row.tendencia}/><LabelTend t={row.tendencia}/></div>
-              <CagrCell anos={row.anos} campo="pmv" piso={5000}/>
+              <CagrCell anos={row.anos} campo="pmv" piso={0}/>
               <div className="text-right font-bold text-slate-600">{fmtRs(row.pmv_atual)}</div>
               <ColunasAnos anos={row.anos} campo="pmv" fmt={fmtRs} todosAnos={todosAnosPmv}/>
             </div>

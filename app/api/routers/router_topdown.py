@@ -350,53 +350,81 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(require_marketing)):
 
 
 # ---------------------------------------------------------------------
-# GET /exportar  — CSV do plano Top-Down do ciclo
+# GET /exportar  — Excel do plano Top-Down (cópia de segurança do preenchimento)
 # ---------------------------------------------------------------------
 @router.get("/exportar")
 def exportar(db: Session = Depends(get_db), _: dict = Depends(require_marketing)):
     """
-    CSV do plano Top-Down no grão SKU × mês, com IA, TopDown, PMV e receita
-    prevista. Separador ';' e decimal ',' (padrão pt-BR / Excel Brasil).
+    Excel (.xlsx) do plano Top-Down no grão SKU × mês — cópia de segurança
+    para o planejador ao finalizar o preenchimento. Inclui: categoria,
+    segmento, SKU, descrição, mês, IA (cx), vol_topdown (cx), PMV e
+    receita prevista (R$) = vol_topdown × PMV.
     """
-    import io
-    from fastapi.responses import StreamingResponse
+    try:
+        ciclo = get_current_cycle(db)
+        meses = get_working_window_months(db)
 
-    ciclo = get_current_cycle(db)
-    meses = get_working_window_months(db)
+        rows = db.execute(text("""
+            SELECT f.sku,
+                   COALESCE(p.descricao,'')  AS descricao,
+                   COALESCE(p.categoria,'')  AS categoria,
+                   COALESCE(p.segmento,'')   AS segmento,
+                   TO_CHAR(f.mes_projetado,'MM/YYYY') AS mes,
+                   SUM(f.vol_ia)             AS ia,
+                   SUM(f.vol_topdown)        AS topdown,
+                   SUM(f.vol_topdown * f.pmv_aplicado) AS receita_td,
+                   COALESCE(o.receita_orcamento, 0) AS orcamento
+            FROM fato_ibp_granular f
+            LEFT JOIN dim_produtos p ON p.sku = f.sku
+            LEFT JOIN fato_orcamento o
+              ON o.sku = f.sku AND o.mes_projetado = f.mes_projetado
+            WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)
+            GROUP BY f.sku, p.descricao, p.categoria, p.segmento,
+                     f.mes_projetado, o.receita_orcamento
+            ORDER BY p.categoria, p.segmento, p.descricao, f.mes_projetado
+        """), {"c": ciclo, "meses": meses}).fetchall()
 
-    rows = db.execute(text("""
-        SELECT f.sku,
-               COALESCE(p.descricao,'')  AS descricao,
-               COALESCE(p.categoria,'')  AS categoria,
-               COALESCE(p.segmento,'')   AS segmento,
-               TO_CHAR(f.mes_projetado,'MM/YYYY') AS mes,
-               SUM(f.vol_ia)             AS ia,
-               SUM(f.vol_topdown)        AS topdown,
-               SUM(f.vol_topdown * f.pmv_aplicado) AS receita_td
-        FROM fato_ibp_granular f
-        LEFT JOIN dim_produtos p ON p.sku = f.sku
-        WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)
-        GROUP BY f.sku, p.descricao, p.categoria, p.segmento, f.mes_projetado
-        ORDER BY p.categoria, p.segmento, p.descricao, f.mes_projetado
-    """), {"c": ciclo, "meses": meses}).fetchall()
+        registros = []
+        for r in rows:
+            td = int(r.topdown or 0)
+            receita = float(r.receita_td or 0)
+            pmv = (receita / td) if td > 0 else 0.0
+            registros.append({
+                "Categoria":           r.categoria,
+                "Segmento":            r.segmento,
+                "SKU":                 r.sku,
+                "Descrição":           r.descricao,
+                "Mês":                 r.mes,
+                "IA (cx)":             int(r.ia or 0),
+                "Vol. TopDown (cx)":   td,
+                "PMV (R$)":            round(pmv, 2),
+                "Receita Prevista (R$)": round(receita, 2),
+                "Orçamento (R$)":      round(float(r.orcamento or 0), 2),
+            })
 
-    def _num(v):
-        return f"{float(v or 0):.2f}".replace(".", ",")
+        df = pd.DataFrame(registros)
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Plano TopDown")
+            # Rodapé informativo
+            notas = pd.DataFrame([
+                [f"Ciclo: {ciclo}"],
+                [f"Meses: {', '.join(m.strftime('%m/%Y') for m in meses)}"],
+                ["Receita Prevista = Vol. TopDown × PMV aplicado"],
+                ["Gerado pelo Nexus S&OP — cópia de segurança do preenchimento"],
+            ], columns=["Nota"])
+            notas.to_excel(writer, index=False, sheet_name="Plano TopDown",
+                           startrow=len(df) + 2, header=False)
 
-    linhas = ["Categoria;Segmento;SKU;Descricao;Mes;IA (cx);TopDown (cx);PMV;Receita Prevista (R$)"]
-    for r in rows:
-        td = int(r.topdown or 0); receita = float(r.receita_td or 0)
-        pmv = (receita / td) if td > 0 else 0.0
-        linhas.append(";".join([
-            r.categoria, r.segmento, r.sku, r.descricao, r.mes,
-            str(int(r.ia or 0)), str(td), _num(pmv), _num(receita),
-        ]))
-
-    conteudo = "\r\n".join(linhas)
-    buffer = io.StringIO(conteudo)
-    resp = StreamingResponse(iter([buffer.getvalue()]), media_type="text/csv")
-    resp.headers["Content-Disposition"] = f'attachment; filename="demanda_marketing_{ciclo.replace("/","_")}.csv"'
-    return resp
+        buffer.seek(0)
+        nome = f"topdown_{ciclo.replace('/','_')}.xlsx"
+        return StreamingResponse(
+            buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{nome}"'},
+        )
+    except Exception as e:
+        raise HTTPException(500, repr(e))
 
 
 # ---------------------------------------------------------------------
