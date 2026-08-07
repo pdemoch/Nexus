@@ -39,15 +39,15 @@ from app.api.routers.shared_ibp import (
     ETAPA_BOTTOMUP,
 )
 
-router = APIRouter(prefix="/api/v1/bottomup", tags=["Demanda Marketing (Top-Down)"])
+router = APIRouter(prefix="/api/v1/gerenciamento", tags=["Demanda Comercial (Bottom-Up)"])
 
 
 # ---------------------------------------------------------------------
 # Governança de acesso
 # ---------------------------------------------------------------------
 def require_gerenciamento(usuario: dict = Depends(get_current_user)):
-    if usuario.get("funcao") not in ("Administrador", "Marketing"):
-        raise HTTPException(403, "Acesso restrito à Diretoria de Marketing.")
+    if usuario.get("funcao") not in ("Administrador", "Gerente"):
+        raise HTTPException(403, "Acesso restrito ao Gerenciamento Comercial.")
     return usuario
 
 def require_admin(usuario: dict = Depends(get_current_user)):
