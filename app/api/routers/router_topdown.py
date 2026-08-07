@@ -19,13 +19,16 @@ Endpoints:
 """
 
 import datetime
+import io
 from dateutil.relativedelta import relativedelta
 from typing import List, Optional
 from collections import defaultdict
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text
+import pandas as pd
 
 from app.core.database import get_db
 from app.api.routers.router_auth import get_current_user
@@ -94,8 +97,156 @@ def resumo(db: Session = Depends(get_db), _: dict = Depends(require_marketing)):
 
 
 # ---------------------------------------------------------------------
-# GET /tabela  — a mesa de trabalho
+# GET /exportar-visao-geral — Excel com 4 abas (Volume cx, Valor R$, PMV, Assertividade)
 # ---------------------------------------------------------------------
+@router.get("/exportar-visao-geral")
+def exportar_visao_geral(
+    nivel: str = Query("categoria", regex="^(categoria|sku)$"),
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_marketing),
+):
+    """
+    Gera um .xlsx com 4 abas:
+      - Volume (cx)       : qtd_pedida por SKU/categoria, grade de anos alinhada, YoY, CAGR
+      - Valor de Venda    : vl_pedido por SKU/categoria, mesma estrutura
+      - PMV               : preço médio ponderado, mesma estrutura
+      - Assertividade     : Humano vs IA vs Realizado dos últimos meses fechados
+
+    CAGR = (Valor_final / Valor_inicial)^(1/nº_anos) − 1
+    Taxa de crescimento médio anual composto desde a 1ª venda até o ano atual.
+    """
+    try:
+        from app.api.routers.perfil_sku import resumo_marketing
+        ciclo = get_current_cycle(db)
+        dados = resumo_marketing(db, ciclo)
+
+        label_col = "categoria" if nivel == "categoria" else "descricao"
+
+        # --- helpers ---
+        def _cagr(anos_com_dado, campo):
+            filtrados = [a for a in anos_com_dado if a.get(campo, 0) and a[campo] > 0]
+            if len(filtrados) < 2:
+                return None
+            vi, vf = filtrados[0][campo], filtrados[-1][campo]
+            n = len(filtrados) - 1
+            if vi <= 0:
+                return None
+            return (vf / vi) ** (1 / n) - 1
+
+        def _pct(v):
+            if v is None:
+                return "—"
+            return f"{v*100:+.1f}%"
+
+        def _build_vol_df(rows, campo_val, campo_tend, campo_var):
+            """Monta DataFrame com grade de anos alinhada, YoY e CAGR."""
+            # grade global de anos
+            todos_anos = sorted({a["ano"] for r in rows for a in r.get("anos", [])})
+            registros = []
+            for r in rows:
+                idx = {a["ano"]: a.get(campo_val) for a in r.get("anos", [])}
+                rec = {
+                    "Nome": r.get(label_col) or r.get("sku", ""),
+                    "Categoria": r.get("categoria", ""),
+                    "Tendência": r.get(campo_tend, ""),
+                    "CAGR": _pct(_cagr(r.get("anos", []), campo_val)),
+                }
+                for i, ano in enumerate(todos_anos):
+                    rec[str(ano)] = idx.get(ano, "")
+                    if i > 0:
+                        ant_ano = todos_anos[i-1]
+                        ant_v, rec_v = idx.get(ant_ano), idx.get(ano)
+                        if ant_v and ant_v > 0 and rec_v is not None:
+                            rec[f"{ant_ano}→{ano}"] = _pct((rec_v - ant_v) / ant_v)
+                        else:
+                            rec[f"{ant_ano}→{ano}"] = "—"
+                # ordena colunas: ano1, ant→ano2, ano2, ant→ano3, ano3...
+                registros.append(rec)
+
+            # Constrói colunas na ordem certa (intercalado)
+            cols_base = ["Nome", "Categoria", "Tendência", "CAGR"]
+            cols_anos = []
+            for i, ano in enumerate(todos_anos):
+                if i > 0:
+                    cols_anos.append(f"{todos_anos[i-1]}→{ano}")
+                cols_anos.append(str(ano))
+            if nivel == "categoria":
+                cols_base = [c for c in cols_base if c != "Categoria"]
+            return pd.DataFrame(registros, columns=cols_base + cols_anos)
+
+        # Aba 1 — Volume (cx)
+        src_vol = dados["tendencia_volume_categoria"] if nivel == "categoria" else dados["tendencia_volume_sku"]
+        df_vol = _build_vol_df(src_vol, "vol_cx", "tendencia_cx", "variacao_pct_cx")
+
+        # Aba 2 — Valor de Venda (R$)
+        df_val = _build_vol_df(src_vol, "vol_rs", "tendencia_rs", "variacao_pct_rs")
+
+        # Aba 3 — PMV
+        src_pmv = dados["tendencia_pmv_categoria"] if nivel == "categoria" else dados["tendencia_pmv_sku"]
+        df_pmv = _build_vol_df(src_pmv, "pmv", "tendencia", "variacao_pct")
+
+        # Aba 4 — Assertividade
+        src_ass = dados["assertividade_categoria"] if nivel == "categoria" else dados["assertividade_sku"]
+        ass_rows = []
+        for r in src_ass:
+            ass_rows.append({
+                "Nome": r.get(label_col) or r.get("sku", ""),
+                "Categoria": r.get("categoria", ""),
+                "Realizado (cx)": r.get("vendido_cx", 0),
+                "Humano (cx)": r.get("humano_cx", 0),
+                "Aderência Humano": _pct(r.get("aderencia_humano")),
+                "IA (cx)": r.get("ia_cx", 0),
+                "Aderência IA": _pct(r.get("aderencia_ia")),
+                "Vencedor": r.get("vencedor", "—"),
+            })
+        cols_ass = ["Nome", "Realizado (cx)", "Humano (cx)", "Aderência Humano",
+                    "IA (cx)", "Aderência IA", "Vencedor"]
+        if nivel == "sku":
+            cols_ass.insert(1, "Categoria")
+        df_ass = pd.DataFrame(ass_rows, columns=cols_ass)
+
+        # Meses auditados (para título da aba)
+        meses_label = ", ".join(dados.get("meses_auditados", []))
+
+        # Gera o Excel
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            # Rodapé explicativo no primeiro df
+            nota_cagr = pd.DataFrame([
+                ["CAGR = Compound Annual Growth Rate (Crescimento Médio Anual Composto)"],
+                ["Fórmula: (Valor_final / Valor_inicial)^(1/nº_anos) − 1"],
+                ["Representa a taxa constante que, aplicada a cada ano, levaria do 1º ao último valor."],
+                ["Mais estável que a variação simples: neutraliza picos e quedas pontuais."],
+            ], columns=["Nota"])
+
+            df_vol.to_excel(writer, index=False, sheet_name="Volume (cx)")
+            nota_cagr.to_excel(writer, index=False, sheet_name="Volume (cx)",
+                               startrow=len(df_vol) + 2, header=False)
+
+            df_val.to_excel(writer, index=False, sheet_name="Valor de Venda (R$)")
+            nota_cagr.to_excel(writer, index=False, sheet_name="Valor de Venda (R$)",
+                               startrow=len(df_val) + 2, header=False)
+
+            df_pmv.to_excel(writer, index=False, sheet_name="PMV")
+            nota_cagr.to_excel(writer, index=False, sheet_name="PMV",
+                               startrow=len(df_pmv) + 2, header=False)
+
+            df_ass.to_excel(writer, index=False,
+                            sheet_name=f"Assertividade ({meses_label})" if meses_label else "Assertividade")
+
+        buffer.seek(0)
+        ciclo_safe = ciclo.replace("/", "_")
+        nome_arquivo = f"visao_geral_{ciclo_safe}_{nivel}.xlsx"
+        return StreamingResponse(
+            buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{nome_arquivo}"'},
+        )
+    except Exception as e:
+        raise HTTPException(500, repr(e))
+
+
+
 @router.get("/tabela")
 def tabela(db: Session = Depends(get_db), _: dict = Depends(require_marketing)):
     """

@@ -74,6 +74,38 @@ function BadgeVenc({ v }: { v: string | null }) {
   return <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${cfg.cls}`}>{cfg.label}</span>;
 }
 
+function cagrDados(anos: any[], campo: string): string | null {
+  const comDado = (anos||[]).filter((a: any) => a[campo] != null && a[campo] > 0);
+  if (comDado.length < 2) return null;
+  const vi = comDado[0][campo];
+  const vf = comDado[comDado.length-1][campo];
+  const n  = comDado.length - 1;
+  if (vi <= 0 || n <= 0) return null;
+  const r = Math.pow(vf / vi, 1 / n) - 1;
+  return `${r >= 0 ? '+' : ''}${(r * 100).toFixed(1)}%/a`;
+}
+
+const CAGR_TOOLTIP = 'CAGR = Compound Annual Growth Rate (Crescimento Médio Anual Composto). '
+  + 'Fórmula: (Valor_final ÷ Valor_inicial)^(1/nº de anos) − 1. '
+  + 'Representa a taxa de crescimento constante que, aplicada ano a ano, '
+  + 'levaria do primeiro valor ao último. Mais estável que a variação simples, '
+  + 'pois neutraliza picos e quedas pontuais.';
+
+function CagrCell({ anos, campo }: { anos: any[]; campo: string }) {
+  const val = cagrDados(anos, campo);
+  if (!val) return <span className="text-slate-300 text-right block">—</span>;
+  const positivo = val.startsWith('+');
+  return (
+    <div className="flex items-center justify-end gap-1 group relative">
+      <span className={`font-black text-right ${positivo ? 'text-emerald-600' : 'text-rose-500'}`}>{val}</span>
+      <span title={CAGR_TOOLTIP}
+        className="text-[9px] font-black text-slate-300 cursor-help border border-slate-200 rounded-full w-3.5 h-3.5 flex items-center justify-center hover:text-indigo-500 hover:border-indigo-300">
+        ?
+      </span>
+    </div>
+  );
+}
+
 function ColunasAnos({ anos, campo, fmt }: { anos: any[]; campo: string; fmt:(n:number)=>string }) {
   const ultimos = (anos || []).slice(-4); // últimos 4 anos
   return (
@@ -172,9 +204,7 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
     return { label: cv[labelNivel] || cv.sku, volVar: (cv[varKey] || 0)*100, pmvVar, volAbs: cv[atualKey] };
   });
 
-  // CSV download das 3 tabelas — grade de anos ALINHADA (todos compartilham
-  // os mesmos cabeçalhos de ano; células vazias onde o item não existia ainda)
-  // + variação ano a ano para cada par consecutivo + CAGR desde o nascimento.
+  // CSV download das 3 tabelas
   const downloadCSV = () => {
     const sep = ';';
     const rows: string[] = [];
@@ -182,64 +212,82 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
     rows.push(`Visão Geral — Ciclo ${data?.ciclo_ativo || ''} — ${nivel} — ${mLabel}`);
     rows.push('');
 
-    // --- grade de anos: todos os anos presentes em qualquer item ---
-    const todosAnosVol = new Set<number>();
-    volSort.sorted.forEach((r: any) => (r.anos||[]).forEach((a: any) => todosAnosVol.add(a.ano)));
-    const anosVol = [...todosAnosVol].sort();
+    // CAGR: crescimento médio anual composto (Compound Annual Growth Rate)
+    // Fórmula: (Valor_final / Valor_inicial)^(1/anos) - 1
+    // Representa a taxa de crescimento constante que levaria do valor inicial ao final
+    // no mesmo número de anos. Mais representativo que a variação simples ano a ano.
+    rows.push('CAGR (Compound Annual Growth Rate) = taxa de crescimento media anual composta desde o 1o ano com venda ate o ano atual');
+    rows.push('Formula: (Valor_final / Valor_inicial)^(1/numero_de_anos) - 1');
+    rows.push('');
 
-    const todosAnosPmv = new Set<number>();
-    pmvSort.sorted.forEach((r: any) => (r.anos||[]).forEach((a: any) => todosAnosPmv.add(a.ano)));
-    const anosPmv = [...todosAnosPmv].sort();
-
-    // cabeçalho: anos + "vs ANO-1" para cada par + CAGR
-    const cabecalhoAnos = (anos: number[]) => [
-      ...anos.map(a => String(a)),
-      ...anos.slice(1).map((a, i) => `${anos[i]}→${a}`),
-      'CAGR desde início',
-    ];
-
-    const cagr = (vi: number, vf: number, anos: number): string => {
-      if (vi <= 0 || anos <= 0) return '—';
-      const r = Math.pow(vf / vi, 1 / anos) - 1;
+    const cagrCalc = (vi: number, vf: number, nAnos: number): string => {
+      if (vi <= 0 || nAnos <= 0) return '—';
+      const r = Math.pow(vf / vi, 1 / nAnos) - 1;
       return `${r >= 0 ? '+' : ''}${(r * 100).toFixed(1)}%/a`;
     };
 
-    const linhaAnos = (r: any, anos: number[], campo: 'vol_cx'|'vol_rs'|'pmv') => {
-      const idx: Record<number, number> = {};
-      (r.anos||[]).forEach((a: any) => { idx[a.ano] = a[campo] ?? 0; });
-      const vals = anos.map(a => idx[a] != null ? idx[a] : '');
-      // variações ano a ano — só onde ambos os anos têm dado
-      const vars = anos.slice(1).map((a, i) => {
-        const ant = idx[anos[i]], rec = idx[a];
-        if (ant == null || ant === 0 || rec == null) return '—';
-        const v = (rec - ant) / ant;
-        return `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%`;
+    // Grade de anos global (todos os itens usam as mesmas colunas)
+    const todosAnosVol = new Set<number>();
+    volSort.sorted.forEach((r: any) => (r.anos||[]).forEach((a: any) => todosAnosVol.add(Number(a.ano))));
+    const anosVol = [...todosAnosVol].sort((a,b) => a-b);
+
+    const todosAnosPmv = new Set<number>();
+    pmvSort.sorted.forEach((r: any) => (r.anos||[]).forEach((a: any) => todosAnosPmv.add(Number(a.ano))));
+    const anosPmv = [...todosAnosPmv].sort((a,b) => a-b);
+
+    // Cabeçalho intercalado: Ano | vs anterior (para cada par) | CAGR no fim
+    // Estrutura: [Nome] [Tendência] [CAGR] [2022] [2022→2023] [2023] [2023→2024] [2024] ... [Atual]
+    const cabecalho = (anos: number[], label: string) => {
+      const cols = [label, 'Tendência', 'CAGR (desde 1ª venda)'];
+      anos.forEach((ano, i) => {
+        if (i > 0) cols.push(`${anos[i-1]}→${ano}`);
+        cols.push(String(ano));
       });
-      // CAGR: primeiro ao último ano com dado
-      const anosComDado = anos.filter(a => idx[a] != null && idx[a] > 0);
+      return cols;
+    };
+
+    const linhaIntercalada = (r: any, anos: number[], campo: 'vol_cx'|'vol_rs'|'pmv', tendField: string, cagrField: string) => {
+      // Monta índice ano→valor
+      const idx: Record<number, number|null> = {};
+      anos.forEach(a => { idx[a] = null; });
+      (r.anos||[]).forEach((a: any) => { idx[Number(a.ano)] = a[campo] ?? null; });
+
+      // CAGR: do primeiro ao último ano com dado positivo
+      const anosComDado = anos.filter(a => idx[a] != null && (idx[a] as number) > 0);
       const cagrStr = anosComDado.length >= 2
-        ? cagr(idx[anosComDado[0]], idx[anosComDado[anosComDado.length-1]], anosComDado.length - 1)
+        ? cagrCalc(idx[anosComDado[0]] as number, idx[anosComDado[anosComDado.length-1]] as number, anosComDado.length - 1)
         : '—';
-      return [...vals, ...vars, cagrStr];
+
+      const cells = [r[labelNivel]||r.sku, r[tendField]||'', cagrStr];
+      anos.forEach((ano, i) => {
+        if (i > 0) {
+          const ant = idx[anos[i-1]], rec = idx[ano];
+          if (ant != null && ant > 0 && rec != null) {
+            const v = (rec - ant) / ant;
+            cells.push(`${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%`);
+          } else {
+            cells.push('—');
+          }
+        }
+        // Valor do ano — vazio se o item não existia ainda
+        cells.push(idx[ano] != null ? String(idx[ano]) : '');
+      });
+      return cells;
     };
 
     // VOLUME
-    rows.push(['VOLUME','Tendência','Variação atual','Atual',
-      ...cabecalhoAnos(anosVol)].join(sep));
+    rows.push(cabecalho(anosVol, 'VOLUME').join(sep));
     volSort.sorted.forEach((r: any) => {
-      const var_ = r[varKey] != null ? `${(r[varKey]*100).toFixed(1)}%` : 'SEM BASE';
-      rows.push([r[labelNivel]||r.sku, r[tendKey]||'', var_, r[atualKey]||0,
-        ...linhaAnos(r, anosVol, metricaVol==='cx'?'vol_cx':'vol_rs')].join(sep));
+      rows.push(linhaIntercalada(r, anosVol,
+        metricaVol==='cx' ? 'vol_cx' : 'vol_rs',
+        tendKey, varKey).join(sep));
     });
     rows.push('');
 
     // PMV
-    rows.push(['PMV','Tendência','Variação atual','PMV Atual',
-      ...cabecalhoAnos(anosPmv)].join(sep));
+    rows.push(cabecalho(anosPmv, 'PMV').join(sep));
     pmvSort.sorted.forEach((r: any) => {
-      const var_ = r.variacao_pct != null ? `${(r.variacao_pct*100).toFixed(1)}%` : 'SEM BASE';
-      rows.push([r[labelNivel]||r.sku, r.tendencia||'', var_, r.pmv_atual||0,
-        ...linhaAnos(r, anosPmv, 'pmv')].join(sep));
+      rows.push(linhaIntercalada(r, anosPmv, 'pmv', 'tendencia', 'variacao_pct').join(sep));
     });
     rows.push('');
 
@@ -285,9 +333,11 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
             {semBase > 0 && <span className="ml-2">· {semBase} {nivel==='categoria'?'categoria(s)':'SKU(s)'} sem histórico suficiente (item novo)</span>}
           </p>
         </div>
-        <button onClick={downloadCSV}
+        <button onClick={() => {
+          window.location.href = `/api/v1/topdown/exportar-visao-geral?nivel=${nivel}`;
+        }}
           className="flex items-center gap-2 px-3 py-1.5 text-xs font-black rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 transition-colors">
-          <Download className="w-3.5 h-3.5"/> CSV
+          <Download className="w-3.5 h-3.5"/> Excel
         </button>
       </div>
 
@@ -445,26 +495,28 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
               className={`px-2.5 py-0.5 text-[10px] font-black rounded-md ${metricaVol==='rs'?'bg-slate-900 text-white':'text-slate-500'}`}>Valor pedido</button>
           </div>
         </div>
-        <div className="grid gap-2 px-1 py-2 border-b border-slate-100" style={{ gridTemplateColumns:'1.3fr 100px 110px 110px 1fr' }}>
+        <div className="grid gap-2 px-1 py-2 border-b border-slate-100" style={{ gridTemplateColumns:'1.3fr 100px 130px 110px 1fr' }}>
           <Th label={nivel==='categoria'?'Categoria':'SKU'} k={labelNivel} sortKey={volSort.sortKey} sortDir={volSort.sortDir} onClick={volSort.toggle} left/>
           <Th label="Tendência" k={tendKey}  sortKey={volSort.sortKey} sortDir={volSort.sortDir} onClick={volSort.toggle}/>
-          <Th label="Variação"  k={varKey}   sortKey={volSort.sortKey} sortDir={volSort.sortDir} onClick={volSort.toggle}/>
+          <div className="flex items-center justify-end gap-1">
+            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">CAGR</span>
+            <span title={CAGR_TOOLTIP}
+              className="text-[9px] font-black text-slate-300 cursor-help border border-slate-200 rounded-full w-3.5 h-3.5 flex items-center justify-center hover:text-indigo-500">?</span>
+          </div>
           <Th label={metricaVol==='cx'?'Atual (cx)':'Atual (R$)'} k={atualKey} sortKey={volSort.sortKey} sortDir={volSort.sortDir} onClick={volSort.toggle}/>
-          <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Últimos anos</div>
+          <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Últimos anos (com variação YoY)</div>
         </div>
         <div className="max-h-96 overflow-y-auto">
           {volSort.sorted.map((row: any) => (
             <div key={nivel==='categoria'?row.categoria:row.sku}
               className="grid gap-2 px-1 py-2 items-center border-b border-slate-50 hover:bg-slate-50/50 text-xs"
-              style={{ gridTemplateColumns:'1.3fr 100px 110px 110px 1fr' }}>
+              style={{ gridTemplateColumns:'1.3fr 100px 130px 110px 1fr' }}>
               <div className="min-w-0">
                 <div className="font-bold text-slate-700 truncate">{row[labelNivel]}</div>
                 {nivel==='sku' && <div className="text-[10px] font-bold text-slate-300">{row.sku} · {row.categoria}</div>}
               </div>
               <div className="flex items-center gap-1"><TendIcon t={row[tendKey]}/><LabelTend t={row[tendKey]}/></div>
-              <div className={`text-right font-black ${(row[varKey]||0)>0?'text-emerald-600':(row[varKey]||0)<0?'text-rose-500':'text-slate-400'}`}>
-                {fmtPct(row[varKey])}
-              </div>
+              <CagrCell anos={row.anos} campo={metricaVol==='cx'?'vol_cx':'vol_rs'}/>
               <div className="text-right font-bold text-slate-600">
                 {metricaVol==='cx'?`${fmtCx(row.vol_cx_atual)} cx`:fmtRs(row.vol_rs_atual)}
               </div>
@@ -479,26 +531,28 @@ export default function VisaoGeralMarketing({ prefixoApi }: { prefixoApi: string
         <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
           Tendência de PMV (Σ valor pedido ÷ Σ volume pedido — não é média de preços)
         </div>
-        <div className="grid gap-2 px-1 py-2 border-b border-slate-100" style={{ gridTemplateColumns:'1.3fr 100px 110px 110px 1fr' }}>
+        <div className="grid gap-2 px-1 py-2 border-b border-slate-100" style={{ gridTemplateColumns:'1.3fr 100px 130px 110px 1fr' }}>
           <Th label={nivel==='categoria'?'Categoria':'SKU'} k={labelNivel} sortKey={pmvSort.sortKey} sortDir={pmvSort.sortDir} onClick={pmvSort.toggle} left/>
           <Th label="Tendência" k="tendencia"   sortKey={pmvSort.sortKey} sortDir={pmvSort.sortDir} onClick={pmvSort.toggle}/>
-          <Th label="Variação"  k="variacao_pct" sortKey={pmvSort.sortKey} sortDir={pmvSort.sortDir} onClick={pmvSort.toggle}/>
+          <div className="flex items-center justify-end gap-1">
+            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">CAGR</span>
+            <span title={CAGR_TOOLTIP}
+              className="text-[9px] font-black text-slate-300 cursor-help border border-slate-200 rounded-full w-3.5 h-3.5 flex items-center justify-center hover:text-indigo-500">?</span>
+          </div>
           <Th label="PMV atual" k="pmv_atual"   sortKey={pmvSort.sortKey} sortDir={pmvSort.sortDir} onClick={pmvSort.toggle}/>
-          <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Últimos anos (PMV)</div>
+          <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Últimos anos (com variação YoY)</div>
         </div>
         <div className="max-h-96 overflow-y-auto">
           {pmvSort.sorted.map((row: any) => (
             <div key={nivel==='categoria'?row.categoria:row.sku}
               className="grid gap-2 px-1 py-2 items-center border-b border-slate-50 hover:bg-slate-50/50 text-xs"
-              style={{ gridTemplateColumns:'1.3fr 100px 110px 110px 1fr' }}>
+              style={{ gridTemplateColumns:'1.3fr 100px 130px 110px 1fr' }}>
               <div className="min-w-0">
                 <div className="font-bold text-slate-700 truncate">{row[labelNivel]}</div>
                 {nivel==='sku' && <div className="text-[10px] font-bold text-slate-300">{row.sku} · {row.categoria}</div>}
               </div>
               <div className="flex items-center gap-1"><TendIcon t={row.tendencia}/><LabelTend t={row.tendencia}/></div>
-              <div className={`text-right font-black ${(row.variacao_pct||0)>0?'text-emerald-600':(row.variacao_pct||0)<0?'text-rose-500':'text-slate-400'}`}>
-                {fmtPct(row.variacao_pct)}
-              </div>
+              <CagrCell anos={row.anos} campo="pmv"/>
               <div className="text-right font-bold text-slate-600">{fmtRs(row.pmv_atual)}</div>
               <ColunasAnos anos={row.anos} campo="pmv" fmt={fmtRs}/>
             </div>
