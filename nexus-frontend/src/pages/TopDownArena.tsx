@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import axios from 'axios';
 import {
   ChevronRight, ChevronDown, Save, Lock, Unlock, Download,
-  Loader2, LineChart as LineIcon, LayoutGrid, ClipboardList,
+  Loader2, LineChart as LineIcon, LayoutGrid, ClipboardList, Search, X,
 } from 'lucide-react';
 import DossieInferior from './Dossieinferior';
 import VisaoGeralMarketing from './VisaoGeralMarketing';
@@ -65,6 +65,7 @@ function PreenchimentoMarketing() {
   const [abertas, setAbertas] = useState<Set<string>>(new Set());
   const [edits, setEdits] = useState<Record<string, number>>({}); // `${sku}|${mes}` -> valor
   const [dossiesAbertos, setDossiesAbertos] = useState<Set<string>>(new Set()); // múltiplos SKUs
+  const [busca, setBusca] = useState(''); // filtro de busca (categoria, SKU, descrição)
 
   const carregar = useCallback(async () => {
     setLoading(true);
@@ -117,6 +118,29 @@ function PreenchimentoMarketing() {
 
   const temEdicoes = Object.keys(edits).length > 0;
 
+  // Filtra categorias/segmentos/SKUs pela busca.
+  // Se busca não-vazia: filtra SKUs cujo sku/descricao/categoria bate, e
+  // mantém só as categorias/segmentos que têm pelo menos 1 SKU com match.
+  // Categorias com match abrem automaticamente.
+  const categoriasFiltradas = useMemo(() => {
+    const q = busca.trim().toLowerCase();
+    if (!q) return dados?.categorias || [];
+    return (dados?.categorias || [])
+      .map((cat: any) => {
+        const catMatch = cat.nome.toLowerCase().includes(q);
+        const segsFiltrados = cat.segmentos.map((seg: any) => {
+          const skusFiltrados = seg.skus.filter((s: any) =>
+            catMatch ||
+            s.sku.toLowerCase().includes(q) ||
+            s.descricao.toLowerCase().includes(q)
+          );
+          return skusFiltrados.length > 0 ? { ...seg, skus: skusFiltrados } : null;
+        }).filter(Boolean);
+        return segsFiltrados.length > 0 ? { ...cat, segmentos: segsFiltrados } : null;
+      })
+      .filter(Boolean);
+  }, [dados, busca]);
+
   const salvar = async () => {
     if (!temEdicoes) return;
     setSalvando(true);
@@ -160,6 +184,23 @@ function PreenchimentoMarketing() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {/* Campo de busca por categoria, SKU ou descrição */}
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+              <input
+                type="text"
+                value={busca}
+                onChange={e => setBusca(e.target.value)}
+                placeholder="Buscar categoria, SKU ou produto…"
+                className="pl-8 pr-7 py-2 text-xs rounded-xl border border-slate-200 bg-white text-slate-700 placeholder:text-slate-300 focus:outline-none focus:border-indigo-400 w-64"
+              />
+              {busca && (
+                <button onClick={() => setBusca('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-300 hover:text-slate-600">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
             <button
               onClick={salvar}
               disabled={!temEdicoes || salvando || congelada}
@@ -216,8 +257,9 @@ function PreenchimentoMarketing() {
 
       {/* ---------- CORPO ---------- */}
       <div className="px-6 pb-6">
-        {dados?.categorias?.map((cat: any) => {
-          const catAberta = abertas.has(cat.nome);
+        {categoriasFiltradas.map((cat: any) => {
+          // Com busca ativa, abre automaticamente todas as categorias que têm match
+          const catAberta = busca.trim() ? true : abertas.has(cat.nome);
           return (
             <div key={cat.nome} className="mb-1">
               <button
@@ -340,6 +382,16 @@ function PreenchimentoMarketing() {
             </div>
           );
         })}
+        {categoriasFiltradas.length === 0 && busca.trim() && (
+          <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+            <Search className="w-8 h-8 mb-2 opacity-30" />
+            <div className="text-sm font-bold">Nenhum resultado para "{busca}"</div>
+            <div className="text-xs mt-1">Tente buscar por categoria, código SKU ou nome do produto.</div>
+            <button onClick={() => setBusca('')} className="mt-3 text-xs font-black text-indigo-500 hover:underline">
+              Limpar busca
+            </button>
+          </div>
+        )}
       </div>
       {/* fim do corpo da tabela */}
       </div>

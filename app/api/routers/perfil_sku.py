@@ -417,7 +417,122 @@ def comparativo_plurianual(db: Session, sku: str, mes_referencia=None,
 # =====================================================================
 # BLOCO FVA — humano vs IA vs naive, no grão (o loop de aprendizado)
 # =====================================================================
-def fva_sku(db: Session, sku: str, mes) -> Dict[str, Any]:
+def fva_sku_janela(db: Session, sku: str, n_meses: int = 3) -> Dict[str, Any]:
+    """
+    Versão acumulada do FVA: avalia os últimos N meses FECHADOS com dado real
+    (M-2 legítimo, piso = junho/2026). Agrega volume por ciclo-fonte de cada
+    mês — humano = vol_final do M-2, ia = vol_ia do M-2, vendido = fato_vendas.
+
+    Usa a aderência acumulada (1 − |total_previsto − total_vendido| / total_vendido)
+    sobre o somatório do período — assim um erro pontual grande não apaga meses bons.
+    Também devolve o detalhamento mês a mês para o dossiê mostrar a evolução.
+    """
+    hoje = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
+    mes_atual = hoje.replace(day=1)
+    piso_forecast = CICLO_PISO + relativedelta(months=DEFASAGEM_MESES)  # 06/2026
+
+    meses_avaliar = []
+    for i in range(1, n_meses + 1):
+        m = mes_atual - relativedelta(months=i)
+        if m >= piso_forecast:
+            meses_avaliar.append(m)
+    meses_avaliar = sorted(meses_avaliar)
+
+    if not meses_avaliar:
+        return None
+
+    total_vendido = 0.0
+    total_humano  = 0.0
+    total_ia      = 0.0
+    detalhe       = []
+
+    for mes_d in meses_avaliar:
+        ciclo = ciclo_fonte_do_mes(mes_d)
+
+        plano = db.execute(text("""
+            SELECT COALESCE(SUM(vol_final), 0) AS humano_cx,
+                   COALESCE(SUM(vol_ia), 0)    AS ia_cx
+            FROM fato_ibp_granular
+            WHERE sku = :sku AND ciclo_sop = :ciclo AND mes_projetado = :mes
+        """), {"sku": sku, "ciclo": ciclo, "mes": mes_d}).fetchone()
+
+        vendido = db.execute(text("""
+            SELECT COALESCE(SUM(qt_pedido), 0)
+            FROM fato_vendas
+            WHERE sku = :sku AND TO_CHAR(data_pedido, 'YYYY-MM') = :ym
+        """), {"sku": sku, "ym": mes_d.strftime("%Y-%m")}).scalar()
+
+        h_cx = float(plano.humano_cx or 0)
+        i_cx = float(plano.ia_cx or 0)
+        v_cx = float(vendido or 0)
+
+        total_humano  += h_cx
+        total_ia      += i_cx
+        total_vendido += v_cx
+
+        def _ad(p, r):
+            return max(0.0, 1 - abs(p - r) / r) if r > 0 else None
+
+        detalhe.append({
+            "mes": mes_d.strftime("%Y-%m"),
+            "mes_label": mes_d.strftime("%m/%Y"),
+            "ciclo_fonte": ciclo,
+            "vendido_cx":  round(v_cx, 0),
+            "humano_cx":   round(h_cx, 0),
+            "ia_cx":       round(i_cx, 0),
+            "aderencia_humano": round(_ad(h_cx, v_cx), 4) if _ad(h_cx, v_cx) is not None else None,
+            "aderencia_ia":     round(_ad(i_cx, v_cx), 4) if _ad(i_cx, v_cx) is not None else None,
+        })
+
+    # Aderência acumulada sobre o total do período
+    def _ad_total(previsto, real):
+        return max(0.0, 1 - abs(previsto - real) / real) if real > 0 else None
+
+    ad_humano = _ad_total(total_humano, total_vendido)
+    ad_ia     = _ad_total(total_ia, total_vendido)
+
+    cand = [(n, a) for n, a in [("HUMANO", ad_humano), ("IA", ad_ia)] if a is not None]
+    vencedor = max(cand, key=lambda x: x[1])[0] if cand else "SEM VENDA"
+
+    fva_ia = (ad_humano - ad_ia) if (ad_humano is not None and ad_ia is not None) else None
+    baixo_volume = (total_vendido > 0 and total_vendido < 200 * len(meses_avaliar))
+
+    # Insight resumido
+    insight_fva = None
+    if total_vendido <= 0:
+        insight_fva = "Sem vendas nos meses auditados — sem base para avaliar acurácia."
+    else:
+        periodo = f"{len(meses_avaliar)} meses ({meses_avaliar[0].strftime('%m/%Y')}–{meses_avaliar[-1].strftime('%m/%Y')})"
+        v = int(round(total_vendido))
+        if vencedor == "IA":
+            insight_fva = (f"Nos últimos {periodo}, a IA ({int(round(total_ia))} cx) "
+                           f"previu melhor que o humano ({int(round(total_humano))}) "
+                           f"— vendeu {v} cx no total.")
+        elif vencedor == "HUMANO":
+            insight_fva = (f"Nos últimos {periodo}, o humano ({int(round(total_humano))} cx) "
+                           f"previu melhor que a IA ({int(round(total_ia))}) "
+                           f"— vendeu {v} cx no total.")
+        if baixo_volume:
+            insight_fva = (insight_fva or "") + " (Volume baixo no período.)"
+
+    return {
+        "sku": sku,
+        "meses_avaliados": [m.strftime("%Y-%m") for m in meses_avaliar],
+        "n_meses": len(meses_avaliar),
+        "vendido_cx":  round(total_vendido, 0),
+        "humano_cx":   round(total_humano, 0),
+        "ia_cx":       round(total_ia, 0),
+        "aderencia_humano": round(ad_humano, 4) if ad_humano is not None else None,
+        "aderencia_ia":     round(ad_ia, 4)     if ad_ia is not None else None,
+        "fva_ia":           round(fva_ia, 4)    if fva_ia is not None else None,
+        "vencedor":         vencedor,
+        "baixo_volume":     baixo_volume,
+        "insight_fva":      insight_fva,
+        "detalhe_por_mes":  detalhe,  # para o dossiê mostrar evolução mês a mês
+    }
+
+
+
     """
     Compara, para o mês fechado, quem previu melhor no grão SKU:
       humano (vol_final) vs IA (vol_ia) vs naive (venda do mesmo mês ano passado).
@@ -742,7 +857,9 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
 
     plur = comparativo_plurianual(db, sku, mes_referencia=mes_fechado.strftime("%Y-%m-%d"),
                                   ciclo_ativo=ciclo_ativo)
-    fva = fva_sku(db, sku, mes_fechado.strftime("%Y-%m-%d"))
+    # FVA acumulado: últimos 3 meses fechados (piso junho/2026).
+    # Agrega humano vs IA no total do período — mais robusto que avaliar 1 mês.
+    fva = fva_sku_janela(db, sku, n_meses=3)
 
     ciclo_ant = get_previous_cycle_str(ciclo_ativo)
 

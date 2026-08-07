@@ -272,6 +272,25 @@ export default function DossieInferior({ prefixoApi, tipo, id, titulo, onFechar 
                     );
                   })}
                 </div>
+                {/* Detalhe mês a mês */}
+                {(d.fva.detalhe_por_mes || []).length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    <div className="text-[9px] font-black uppercase tracking-widest text-slate-300 mb-1">
+                      Mês a mês ({d.fva.n_meses} meses)
+                    </div>
+                    {d.fva.detalhe_por_mes.map((m: any) => (
+                      <div key={m.mes} className="grid grid-cols-3 gap-1 text-[10px]">
+                        <span className="font-bold text-slate-500">{m.mes_label}</span>
+                        <span className={`text-right font-black ${d.fva.vencedor === 'HUMANO' && m.aderencia_humano >= m.aderencia_ia ? 'text-indigo-600' : 'text-slate-400'}`}>
+                          H: {m.aderencia_humano != null ? fmtPct(m.aderencia_humano) : '—'}
+                        </span>
+                        <span className={`text-right font-black ${d.fva.vencedor === 'IA' && m.aderencia_ia >= m.aderencia_humano ? 'text-violet-600' : 'text-slate-400'}`}>
+                          IA: {m.aderencia_ia != null ? fmtPct(m.aderencia_ia) : '—'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {d.fva.insight_fva && (
                   <div className="mt-2 text-[11px] font-medium text-slate-600">{d.fva.insight_fva}</div>
                 )}
