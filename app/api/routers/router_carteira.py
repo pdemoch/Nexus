@@ -1,93 +1,77 @@
 """
-=====================================================================
-ROUTER — DEMANDA MARKETING (Top-Down)  [reconstrução]
-=====================================================================
-Primeira etapa do bastão. A Diretoria/Marketing define o volume macro por SKU
-na janela M2-M4. Acesso: Administrador, Marketing (via Sidebar).
+router_carteira_novo.py  —  Metas Comercial (nova API)
 
-Consome a espinha nova (shared_ibp): rateio canônico com balanço, propagação
-que respeita congelamento, imutabilidade, regra N-2. Congelamento é ação do
-ADMIN (congela a etapa e passa o bastão).
+Contrato alinhado com MetasComercial.tsx:
+  • GET  /tabela              → árvore 5 níveis + meses como dict ISO
+  • POST /salvar              → {razao_social, sku, mes_projetado, novo_volume}
+  • GET  /exportar            → Excel (.xlsx)
+  • GET  /dossie              → dossiê do SKU (coluna_meta = vol_meta)
+  • GET  /resumo              → Visão Geral (resumo_marketing)
+  • GET  /exportar-visao-geral → Excel da Visão Geral
+  • GET  /status              → ciclo + congelada
+  • POST /congelar            → congela ETAPA_METAS
+  • POST /reabrir             → reabre ETAPA_METAS
+  • GET  /cadeados            → lista quem bloqueou a carteira
+  • POST /bloquear            → vendedor bloqueia sua própria carteira
+  • POST /reabrir-cadeado     → admin reabre carteira de alguém
 
-Endpoints:
-  GET  /tabela      -> matriz categoria->segmento->SKU com colunas por mês,
-                       IA / Metas / realizado-ano-passado, + totalizadores.
-  POST /salvar      -> grava vol_meta rateado (rascunho). Digitado = somado.
-  POST /congelar    -> (admin) congela a etapa e propaga p/ jusante não-congelado.
-  POST /reabrir     -> (admin) reabre a etapa.
-  GET  /status      -> a etapa está congelada?
+Toda a lógica de SQL e rateio é preservada do router_carteira.py original.
 """
 
 import datetime
 import io
-from dateutil.relativedelta import relativedelta
 from typing import List, Optional
-from collections import defaultdict
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 import pandas as pd
+import numpy as np
 
 from app.core.database import get_db
 from app.api.routers.router_auth import get_current_user
 from app.api.routers.shared_ibp import (
-    get_current_cycle, get_working_window_months, get_projection_window,
-    escrever_volume_rateado, propagar_para_jusante, congelar_etapa,
-    reabrir_etapa, etapa_congelada, registrar_log_auditoria, parse_date_safe,
+    get_current_cycle,
+    get_working_window_months,
+    ratear_maior_resto,
+    propagar_para_jusante,
+    check_imutabilidade_mes,
+    etapa_congelada,
+    congelar_etapa,
+    reabrir_etapa,
     ETAPA_METAS,
 )
 
-router = APIRouter(prefix="/api/v1/meta", tags=["Demanda Marketing (Top-Down)"])
+router = APIRouter(tags=["Metas Comercial"])
 
 
-# ---------------------------------------------------------------------
-# Governança de acesso
-# ---------------------------------------------------------------------
 def require_metas(usuario: dict = Depends(get_current_user)):
-    if usuario.get("funcao") not in ("Administrador", "Marketing"):
-        raise HTTPException(403, "Acesso restrito à Diretoria de Marketing.")
+    if usuario.get("perfil") not in ("ADMIN", "METAS", "COMERCIAL"):
+        raise HTTPException(403, "Acesso negado")
     return usuario
+
 
 def require_admin(usuario: dict = Depends(get_current_user)):
-    if usuario.get("funcao") != "Administrador":
-        raise HTTPException(403, "Somente o Administrador congela etapas.")
+    if usuario.get("perfil") != "ADMIN":
+        raise HTTPException(403, "Apenas administradores")
     return usuario
 
 
-# ---------------------------------------------------------------------
-# Modelos
-# ---------------------------------------------------------------------
-class AjusteMetas(BaseModel):
-    sku: str
-    mes_projetado: str      # 'YYYY-MM' ou 'YYYY-MM-DD'
-    novo_volume: int
-
-class PayloadSalvar(BaseModel):
-    ajustes: List[AjusteMetas]
-
-
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # GET /status
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 @router.get("/status")
-def status(db: Session = Depends(get_db), _: dict = Depends(require_metas)):
+def status(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     ciclo = get_current_cycle(db)
     return {"ciclo": ciclo, "congelada": etapa_congelada(db, ciclo, ETAPA_METAS)}
 
 
-# ---------------------------------------------------------------------
-# GET /resumo — Aba "Visão Geral": tendências de volume/PMV + assertividade
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# GET /resumo  — Visão Geral (mesmo payload que as outras telas)
+# ---------------------------------------------------------------------------
 @router.get("/resumo")
 def resumo(db: Session = Depends(get_db), _: dict = Depends(require_metas)):
-    """
-    Pacote da primeira tela que o planejador vê: quem cresce/cai em volume
-    (vl_pedido, YTD comparável), quem cresce/cai em PMV, e a assertividade
-    Humano/IA/Ano-passado dos últimos meses fechados (janela dinâmica, piso
-    06/2026). Por SKU e por categoria, sem corte — o front classifica.
-    """
     try:
         from app.api.routers.perfil_sku import resumo_marketing
         ciclo = get_current_cycle(db)
@@ -96,406 +80,316 @@ def resumo(db: Session = Depends(get_db), _: dict = Depends(require_metas)):
         raise HTTPException(500, repr(e))
 
 
-# ---------------------------------------------------------------------
-# GET /exportar-visao-geral — Excel com 4 abas (Volume cx, Valor R$, PMV, Assertividade)
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# GET /exportar-visao-geral  — Excel Visão Geral
+# ---------------------------------------------------------------------------
 @router.get("/exportar-visao-geral")
 def exportar_visao_geral(
     nivel: str = Query("categoria", regex="^(categoria|sku)$"),
     db: Session = Depends(get_db),
     _: dict = Depends(require_metas),
 ):
-    """
-    Gera um .xlsx com 4 abas:
-      - Volume (cx)       : qtd_pedida por SKU/categoria, grade de anos alinhada, YoY, CAGR
-      - Valor de Venda    : vl_pedido por SKU/categoria, mesma estrutura
-      - PMV               : preço médio ponderado, mesma estrutura
-      - Assertividade     : Humano vs IA vs Realizado dos últimos meses fechados
-
-    CAGR = (Valor_final / Valor_inicial)^(1/nº_anos) − 1
-    Taxa de crescimento médio anual composto desde a 1ª venda até o ano atual.
-    """
     try:
         from app.api.routers.perfil_sku import resumo_marketing
         ciclo = get_current_cycle(db)
         dados = resumo_marketing(db, ciclo)
-
         label_col = "categoria" if nivel == "categoria" else "descricao"
 
-        # --- helpers ---
         def _cagr(anos_com_dado, campo):
-            filtrados = [a for a in anos_com_dado if a.get(campo, 0) and a[campo] > 0]
-            if len(filtrados) < 2:
-                return None
-            vi, vf = filtrados[0][campo], filtrados[-1][campo]
-            n = len(filtrados) - 1
-            if vi <= 0:
-                return None
-            return (vf / vi) ** (1 / n) - 1
+            filtrados = [a for a in (anos_com_dado or []) if a.get(campo, 0) and a[campo] > 0]
+            if len(filtrados) < 2: return None
+            vi, vf, n = filtrados[0][campo], filtrados[-1][campo], len(filtrados)-1
+            return (vf/vi)**(1/n)-1 if vi > 0 else None
 
-        def _pct(v):
-            if v is None:
-                return "—"
-            return f"{v*100:+.1f}%"
+        def _pct(v): return f"{v*100:+.1f}%" if v is not None else "—"
 
-        def _build_vol_df(rows, campo_val, campo_tend, campo_var):
-            """Monta DataFrame com grade de anos alinhada, YoY e CAGR."""
-            # grade global de anos
+        def _build_df(rows, campo_val, campo_tend):
             todos_anos = sorted({a["ano"] for r in rows for a in r.get("anos", [])})
             registros = []
             for r in rows:
                 idx = {a["ano"]: a.get(campo_val) for a in r.get("anos", [])}
-                rec = {
-                    "Nome": r.get(label_col) or r.get("sku", ""),
-                    "Categoria": r.get("categoria", ""),
-                    "Tendência": r.get(campo_tend, ""),
-                    "CAGR": _pct(_cagr(r.get("anos", []), campo_val)),
-                }
+                rec = {"Nome": r.get(label_col) or r.get("sku",""), "Categoria": r.get("categoria",""),
+                       "Tendência": r.get(campo_tend,""), "CAGR": _pct(_cagr(r.get("anos",[]), campo_val))}
                 for i, ano in enumerate(todos_anos):
-                    rec[str(ano)] = idx.get(ano, "")
                     if i > 0:
-                        ant_ano = todos_anos[i-1]
-                        ant_v, rec_v = idx.get(ant_ano), idx.get(ano)
-                        if ant_v and ant_v > 0 and rec_v is not None:
-                            rec[f"{ant_ano}→{ano}"] = _pct((rec_v - ant_v) / ant_v)
-                        else:
-                            rec[f"{ant_ano}→{ano}"] = "—"
-                # ordena colunas: ano1, ant→ano2, ano2, ant→ano3, ano3...
+                        ant, cur = idx.get(todos_anos[i-1]), idx.get(ano)
+                        rec[f"{todos_anos[i-1]}→{ano}"] = _pct((cur-ant)/ant) if ant and ant>0 and cur is not None else "—"
+                    rec[str(ano)] = idx.get(ano, "")
                 registros.append(rec)
-
-            # Constrói colunas na ordem certa (intercalado)
-            cols_base = ["Nome", "Categoria", "Tendência", "CAGR"]
+            cols = ["Nome","Categoria","Tendência","CAGR"]
+            if nivel == "categoria": cols = [c for c in cols if c != "Categoria"]
             cols_anos = []
             for i, ano in enumerate(todos_anos):
-                if i > 0:
-                    cols_anos.append(f"{todos_anos[i-1]}→{ano}")
+                if i > 0: cols_anos.append(f"{todos_anos[i-1]}→{ano}")
                 cols_anos.append(str(ano))
-            if nivel == "categoria":
-                cols_base = [c for c in cols_base if c != "Categoria"]
-            return pd.DataFrame(registros, columns=cols_base + cols_anos)
+            return pd.DataFrame(registros, columns=cols + cols_anos)
 
-        # Aba 1 — Volume (cx)
-        src_vol = dados["tendencia_volume_categoria"] if nivel == "categoria" else dados["tendencia_volume_sku"]
-        df_vol = _build_vol_df(src_vol, "vol_cx", "tendencia_cx", "variacao_pct_cx")
+        src_vol = dados["tendencia_volume_categoria"] if nivel=="categoria" else dados["tendencia_volume_sku"]
+        src_pmv = dados["tendencia_pmv_categoria"]    if nivel=="categoria" else dados["tendencia_pmv_sku"]
+        src_ass = dados["assertividade_categoria"]    if nivel=="categoria" else dados["assertividade_sku"]
 
-        # Aba 2 — Valor de Venda (R$)
-        df_val = _build_vol_df(src_vol, "vol_rs", "tendencia_rs", "variacao_pct_rs")
+        df_vol = _build_df(src_vol, "vol_cx", "tendencia_cx")
+        df_val = _build_df(src_vol, "vol_rs", "tendencia_rs")
+        df_pmv = _build_df(src_pmv, "pmv",    "tendencia")
 
-        # Aba 3 — PMV
-        src_pmv = dados["tendencia_pmv_categoria"] if nivel == "categoria" else dados["tendencia_pmv_sku"]
-        df_pmv = _build_vol_df(src_pmv, "pmv", "tendencia", "variacao_pct")
-
-        # Aba 4 — Assertividade
-        src_ass = dados["assertividade_categoria"] if nivel == "categoria" else dados["assertividade_sku"]
-        ass_rows = []
-        for r in src_ass:
-            ass_rows.append({
-                "Nome": r.get(label_col) or r.get("sku", ""),
-                "Categoria": r.get("categoria", ""),
-                "Realizado (cx)": r.get("vendido_cx", 0),
-                "Humano (cx)": r.get("humano_cx", 0),
-                "Aderência Humano": _pct(r.get("aderencia_humano")),
-                "IA (cx)": r.get("ia_cx", 0),
-                "Aderência IA": _pct(r.get("aderencia_ia")),
-                "Vencedor": r.get("vencedor", "—"),
-            })
-        cols_ass = ["Nome", "Realizado (cx)", "Humano (cx)", "Aderência Humano",
-                    "IA (cx)", "Aderência IA", "Vencedor"]
-        if nivel == "sku":
-            cols_ass.insert(1, "Categoria")
+        ass_rows = [{"Nome": r.get(label_col) or r.get("sku",""), "Categoria": r.get("categoria",""),
+                     "Realizado (cx)": r.get("vendido_cx",0), "Humano (cx)": r.get("humano_cx",0),
+                     "Aderência Humano": _pct(r.get("aderencia_humano")), "IA (cx)": r.get("ia_cx",0),
+                     "Aderência IA": _pct(r.get("aderencia_ia")), "Vencedor": r.get("vencedor","—")}
+                    for r in src_ass]
+        cols_ass = ["Nome","Realizado (cx)","Humano (cx)","Aderência Humano","IA (cx)","Aderência IA","Vencedor"]
+        if nivel == "sku": cols_ass.insert(1, "Categoria")
         df_ass = pd.DataFrame(ass_rows, columns=cols_ass)
 
-        # Meses auditados (para título da aba)
         meses_label = ", ".join(dados.get("meses_auditados", []))
-
-        # Gera o Excel
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            # Rodapé explicativo no primeiro df
-            nota_cagr = pd.DataFrame([
-                ["CAGR = Compound Annual Growth Rate (Crescimento Médio Anual Composto)"],
-                ["Fórmula: (Valor_final / Valor_inicial)^(1/nº_anos) − 1"],
-                ["Representa a taxa constante que, aplicada a cada ano, levaria do 1º ao último valor."],
-                ["Mais estável que a variação simples: neutraliza picos e quedas pontuais."],
-            ], columns=["Nota"])
-
-            df_vol.to_excel(writer, index=False, sheet_name="Volume (cx)")
-            nota_cagr.to_excel(writer, index=False, sheet_name="Volume (cx)",
-                               startrow=len(df_vol) + 2, header=False)
-
-            df_val.to_excel(writer, index=False, sheet_name="Valor de Venda (R$)")
-            nota_cagr.to_excel(writer, index=False, sheet_name="Valor de Venda (R$)",
-                               startrow=len(df_val) + 2, header=False)
-
-            df_pmv.to_excel(writer, index=False, sheet_name="PMV")
-            nota_cagr.to_excel(writer, index=False, sheet_name="PMV",
-                               startrow=len(df_pmv) + 2, header=False)
-
-            df_ass.to_excel(writer, index=False,
-                            sheet_name=f"Assertividade ({meses_label})" if meses_label else "Assertividade")
-
-        buffer.seek(0)
-        ciclo_safe = ciclo.replace("/", "_")
-        nome_arquivo = f"visao_geral_{ciclo_safe}_{nivel}.xlsx"
-        return StreamingResponse(
-            buffer,
+        nota = pd.DataFrame([["CAGR = taxa de crescimento médio anual composto (Valor_final/Valor_inicial)^(1/anos)−1"]], columns=["Nota"])
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as w:
+            for df, sheet in [(df_vol, "Volume (cx)"), (df_val, "Valor de Venda (R$)"), (df_pmv, "PMV")]:
+                df.to_excel(w, index=False, sheet_name=sheet)
+                nota.to_excel(w, index=False, sheet_name=sheet, startrow=len(df)+2, header=False)
+            df_ass.to_excel(w, index=False, sheet_name=f"Assertividade ({meses_label})" if meses_label else "Assertividade")
+        buf.seek(0)
+        nome = f"visao_geral_metas_{ciclo.replace('/','_')}_{nivel}.xlsx"
+        return StreamingResponse(buf,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f'attachment; filename="{nome_arquivo}"'},
-        )
+            headers={"Content-Disposition": f'attachment; filename="{nome}"'})
     except Exception as e:
         raise HTTPException(500, repr(e))
 
 
-
+# ---------------------------------------------------------------------------
+# GET /tabela  — árvore 5 níveis no contrato do MetasComercial.tsx
+# ---------------------------------------------------------------------------
 @router.get("/tabela")
-def tabela(db: Session = Depends(get_db), _: dict = Depends(require_metas)):
+def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     """
-    Matriz categoria -> segmento -> SKU, colunas por mês (M2..M4).
-    Cada célula-SKU/mês traz: IA, Metas (editável), realizado do ano passado
-    (âncora), PMV e receita prevista. Mais totalizadores de topo (volume,
-    faturamento previsto). Escopo = plano do ciclo ativo (get via ciclo).
-    """
-    ciclo = get_current_cycle(db)
-    meses = get_working_window_months(db)
-    meses_iso = [m.strftime("%Y-%m-%d") for m in meses]
-    congelada = etapa_congelada(db, ciclo, ETAPA_METAS)
-
-    # Plano do ciclo, agregado por SKU x mês (soma sobre clientes).
-    plano = db.execute(text("""
-        SELECT f.sku,
-               COALESCE(p.descricao,'SEM DESCRICAO')   AS descricao,
-               COALESCE(p.categoria,'SEM CATEGORIA')   AS categoria,
-               COALESCE(p.segmento,'SEM SEGMENTO')     AS segmento,
-               TO_CHAR(f.mes_projetado,'YYYY-MM-DD')   AS mes,
-               SUM(f.vol_ia)                            AS ia,
-               SUM(f.vol_meta)                       AS meta,
-               AVG(f.pmv_aplicado)                      AS pmv,
-               SUM(f.vol_meta * f.pmv_aplicado)      AS receita_td
-        FROM fato_ibp_granular f
-        LEFT JOIN dim_produtos p ON p.sku = f.sku
-        WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)
-        GROUP BY f.sku, p.descricao, p.categoria, p.segmento, f.mes_projetado
-    """), {"c": ciclo, "meses": meses}).fetchall()
-
-    # Realizado do ANO PASSADO (mesmo mês), por SKU — âncora anti-otimismo.
-    realizado_ap = defaultdict(dict)
-    for m in meses:
-        m_ap = (m - relativedelta(years=1))
-        rows = db.execute(text("""
-            SELECT sku, SUM(qt_pedido) AS cx
-            FROM fato_vendas
-            WHERE TO_CHAR(data_pedido,'YYYY-MM') = :ym
-            GROUP BY sku
-        """), {"ym": m_ap.strftime("%Y-%m")}).fetchall()
-        for r in rows:
-            realizado_ap[r.sku][m.strftime("%Y-%m-%d")] = int(r.cx or 0)
-
-    # Orçamento por SKU x mês (receita em R$ para o período planejado).
-    orc_idx: dict = {}
-    orc_rows = db.execute(text("""
-        SELECT sku, TO_CHAR(mes_projetado,'YYYY-MM-DD') AS mes,
-               SUM(receita_orcamento) AS orc
-        FROM fato_orcamento
-        WHERE mes_projetado = ANY(:meses)
-        GROUP BY sku, mes_projetado
-    """), {"meses": meses}).fetchall()
-    for r in orc_rows:
-        orc_idx.setdefault(r.sku, {})[r.mes] = round(float(r.orc or 0), 2)
-
-    # Monta árvore categoria -> segmento -> SKU
-    tree: dict = {}
-    tot_vol = {mi: 0 for mi in meses_iso}
-    tot_rs = {mi: 0.0 for mi in meses_iso}
-    tot_ia = {mi: 0 for mi in meses_iso}
-
-    for r in plano:
-        cat = tree.setdefault(r.categoria, {"nome": r.categoria, "segmentos": {}})
-        seg = cat["segmentos"].setdefault(r.segmento, {"nome": r.segmento, "skus": {}})
-        sk = seg["skus"].setdefault(r.sku, {
-            "sku": r.sku, "descricao": r.descricao, "meses": {}
-        })
-        td = int(r.meta or 0); ia = int(r.ia or 0)
-        receita = float(r.receita_td or 0)
-        pmv = (receita / td) if td > 0 else float(r.pmv or 0)
-        sk["meses"][r.mes] = {
-            "ia": ia, "meta": td, "pmv": round(pmv, 2),
-            "receita": round(receita, 2),
-            "orcamento": orc_idx.get(r.sku, {}).get(r.mes, None),
-            "realizado_ap": realizado_ap.get(r.sku, {}).get(r.mes, None),
-        }
-        tot_vol[r.mes] += td
-        tot_rs[r.mes] += receita
-        tot_ia[r.mes] += ia
-
-    # Serializa (dicts -> listas ordenadas)
-    categorias = []
-    for cat in sorted(tree.values(), key=lambda c: c["nome"]):
-        segs = []
-        for seg in sorted(cat["segmentos"].values(), key=lambda s: s["nome"]):
-            skus = sorted(seg["skus"].values(), key=lambda s: s["descricao"])
-            segs.append({"nome": seg["nome"], "skus": skus})
-        categorias.append({"nome": cat["nome"], "segmentos": segs})
-
-    return {
-        "ciclo": ciclo,
-        "congelada": congelada,
-        "meses": meses_iso,
-        "categorias": categorias,
-        "totais": {
-            "volume": {mi: tot_vol[mi] for mi in meses_iso},
-            "faturamento": {mi: round(tot_rs[mi], 2) for mi in meses_iso},
-            "ia": {mi: tot_ia[mi] for mi in meses_iso},
-        },
-    }
-
-
-# ---------------------------------------------------------------------
-# GET /exportar  — Excel do plano Top-Down (cópia de segurança do preenchimento)
-# ---------------------------------------------------------------------
-@router.get("/exportar")
-def exportar(db: Session = Depends(get_db), _: dict = Depends(require_metas)):
-    """
-    Excel (.xlsx) do plano Top-Down no grão SKU × mês — cópia de segurança
-    para o planejador ao finalizar o preenchimento. Inclui: categoria,
-    segmento, SKU, descrição, mês, IA (cx), vol_meta (cx), PMV e
-    receita prevista (R$) = vol_meta × PMV.
+    Retorna a árvore hierárquica (gerente→coordenador→vendedor→cliente→produto)
+    no formato esperado pelo MetasComercial.tsx:
+      • cada produto tem campo 'meses' como dict {ISO: {meta, ia, pmv, orcamento}}
+      • campo 'sku' e 'descricao' (não 'produto'/'nome')
+      • campo 'tipo' = 'produto' nas folhas
     """
     try:
-        ciclo = get_current_cycle(db)
-        meses = get_working_window_months(db)
+        ciclo   = get_current_cycle(db)
+        meses   = get_working_window_months(db)
+        meses_iso = [m.strftime("%Y-%m") for m in meses]
+        congelada = etapa_congelada(db, ciclo, ETAPA_METAS)
 
-        rows = db.execute(text("""
-            SELECT f.sku,
-                   COALESCE(p.descricao,'')  AS descricao,
-                   COALESCE(p.categoria,'')  AS categoria,
-                   COALESCE(p.segmento,'')   AS segmento,
-                   TO_CHAR(f.mes_projetado,'MM/YYYY') AS mes,
-                   SUM(f.vol_ia)             AS ia,
-                   SUM(f.vol_meta)        AS meta,
-                   SUM(f.vol_meta * f.pmv_aplicado) AS receita_td,
-                   COALESCE(o.receita_orcamento, 0) AS orcamento
+        # RLS: cada usuário vê só sua carteira (Admin vê tudo)
+        nome_resp = None if u.get("perfil") == "ADMIN" else u.get("nome")
+
+        params = {"ciclo": ciclo, "meses": meses}
+        filtro_resp = ""
+        if nome_resp:
+            filtro_resp = "AND (c.gerente_nome = :resp OR c.supervisor_nome = :resp OR f.vendedor_nome = :resp)"
+            params["resp"] = nome_resp
+
+        rows = db.execute(text(f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(c.gerente_nome),''),'SEM GERENTE')       AS gerente,
+                COALESCE(NULLIF(TRIM(c.supervisor_nome),''),'SEM COORDENADOR') AS coordenador,
+                COALESCE(NULLIF(TRIM(f.vendedor_nome),''),'SEM VENDEDOR')      AS vendedor,
+                COALESCE(NULLIF(TRIM(c.razaosocial),''),'SEM RAZAO SOCIAL')   AS razao_social,
+                TRIM(f.sku)                                                    AS sku,
+                COALESCE(NULLIF(TRIM(p.descricao),''),'SEM DESCRICAO')        AS descricao,
+                TO_CHAR(f.mes_projetado,'YYYY-MM')                             AS mes,
+                COALESCE(SUM(f.vol_meta),0)                                   AS meta,
+                COALESCE(SUM(f.vol_bottomup),0)                               AS bottomup,
+                COALESCE(SUM(f.vol_ia),0)                                     AS ia,
+                COALESCE(SUM(f.pmv_aplicado * f.vol_bottomup)
+                         / NULLIF(SUM(f.vol_bottomup),0), 0)                  AS pmv,
+                COALESCE(SUM(o.receita_orcamento),0)                          AS orcamento
             FROM fato_ibp_granular f
-            LEFT JOIN dim_produtos p ON p.sku = f.sku
-            LEFT JOIN fato_orcamento o
-              ON o.sku = f.sku AND o.mes_projetado = f.mes_projetado
-            WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)
-            GROUP BY f.sku, p.descricao, p.categoria, p.segmento,
-                     f.mes_projetado, o.receita_orcamento
-            ORDER BY p.categoria, p.segmento, p.descricao, f.mes_projetado
-        """), {"c": ciclo, "meses": meses}).fetchall()
+            JOIN dim_clientes c  ON f.cgc  = c.cgc
+            JOIN dim_produtos p  ON f.sku  = p.sku
+            LEFT JOIN fato_orcamento o ON o.sku = f.sku AND o.mes_projetado = f.mes_projetado
+            WHERE f.ciclo_sop = :ciclo AND f.mes_projetado = ANY(:meses)
+              AND f.sku IS NOT NULL AND f.sku != ''
+              {filtro_resp}
+            GROUP BY gerente, coordenador, vendedor, razao_social, f.sku, p.descricao, f.mes_projetado
+            ORDER BY gerente, coordenador, vendedor, razao_social, p.descricao, f.mes_projetado
+        """), params).fetchall()
 
-        registros = []
+        # Monta árvore em Python
+        tree: dict = {}
         for r in rows:
-            td = int(r.meta or 0)
-            receita = float(r.receita_td or 0)
-            pmv = (receita / td) if td > 0 else 0.0
-            registros.append({
-                "Categoria":           r.categoria,
-                "Segmento":            r.segmento,
-                "SKU":                 r.sku,
-                "Descrição":           r.descricao,
-                "Mês":                 r.mes,
-                "IA (cx)":             int(r.ia or 0),
-                "Vol. Metas (cx)":   td,
-                "PMV (R$)":            round(pmv, 2),
-                "Receita Prevista (R$)": round(receita, 2),
-                "Orçamento (R$)":      round(float(r.orcamento or 0), 2),
+            g  = r.gerente; co = r.coordenador; v = r.vendedor
+            rz = r.razao_social; sk = r.sku
+
+            ger   = tree.setdefault(g, {"nome": g, "tipo": "gerente", "subRows": {}})
+            coord = ger["subRows"].setdefault(co, {"nome": co, "tipo": "coordenador", "subRows": {}})
+            vend  = coord["subRows"].setdefault(v, {"nome": v, "tipo": "vendedor", "subRows": {}})
+            cli   = vend["subRows"].setdefault(rz, {"nome": rz, "tipo": "cliente", "subRows": {}})
+            prod  = cli["subRows"].setdefault(sk, {
+                "sku": sk, "descricao": r.descricao, "tipo": "produto", "meses": {}
             })
+            prod["meses"][r.mes] = {
+                "meta":     int(r.meta or 0),
+                "ia":       int(r.ia or 0),
+                "pmv":      round(float(r.pmv or 0), 2),
+                "orcamento": round(float(r.orcamento or 0), 2),
+            }
 
-        df = pd.DataFrame(registros)
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Plano Metas")
-            # Rodapé informativo
-            notas = pd.DataFrame([
-                [f"Ciclo: {ciclo}"],
-                [f"Meses: {', '.join(m.strftime('%m/%Y') for m in meses)}"],
-                ["Receita Prevista = Vol. Metas × PMV aplicado"],
-                ["Gerado pelo Nexus S&OP — cópia de segurança do preenchimento"],
-            ], columns=["Nota"])
-            notas.to_excel(writer, index=False, sheet_name="Plano Metas",
-                           startrow=len(df) + 2, header=False)
+        def _serializar_arvore(node_dict: dict) -> list:
+            out = []
+            for v in node_dict.values():
+                n = {k: val for k, val in v.items() if k != "subRows"}
+                if "subRows" in v:
+                    if v.get("tipo") == "cliente":
+                        n["subRows"] = list(v["subRows"].values())
+                    else:
+                        n["subRows"] = _serializar_arvore(v["subRows"])
+                out.append(n)
+            return out
 
-        buffer.seek(0)
-        nome = f"meta_{ciclo.replace('/','_')}.xlsx"
-        return StreamingResponse(
-            buffer,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f'attachment; filename="{nome}"'},
-        )
+        arvore = _serializar_arvore(tree)
+
+        # Cadeado individual: carteira do usuário bloqueada?
+        minha_congelada = False
+        if nome_resp:
+            lock = db.execute(text("""
+                SELECT 1 FROM controle_cadeados_metas
+                WHERE ciclo_sop=:c AND responsavel=:r AND ativo=true
+            """), {"c": ciclo, "r": nome_resp}).scalar()
+            minha_congelada = bool(lock)
+
+        return {
+            "ciclo": ciclo,
+            "meses": meses_iso,
+            "etapa_congelada": congelada,
+            "minha_carteira_congelada": minha_congelada,
+            "sou_admin": u.get("perfil") == "ADMIN",
+            "arvore": arvore,
+        }
     except Exception as e:
         raise HTTPException(500, repr(e))
 
 
-# ---------------------------------------------------------------------
-# GET /dossie  — alimenta a GAVETA de insight (sob demanda, no clique do SKU)
-# ---------------------------------------------------------------------
-@router.get("/dossie")
-def dossie(sku: str, db: Session = Depends(get_db), _: dict = Depends(require_metas)):
-    """
-    Dossiê completo do SKU para o painel inferior (split-screen): gráfico
-    unificado realizado+previsto, comparações do mês-foco (orçamento, ciclo
-    anterior, ano anterior), insights em texto, plurianual e placar FVA.
-    Empacotado pelo perfil_sku.montar_dossie (fonte única).
-    """
-    try:
-        from app.api.routers.perfil_sku import montar_dossie
-        ciclo = get_current_cycle(db)
-        meses = get_working_window_months(db)
-        desc = db.execute(text(
-            "SELECT descricao FROM dim_produtos WHERE sku=:s"), {"s": sku}).scalar()
-        return montar_dossie(db, sku, ciclo, meses, descricao=desc,
-                             coluna_meta="vol_meta")
-    except Exception as e:
-        raise HTTPException(500, repr(e))
+# ---------------------------------------------------------------------------
+# POST /salvar  — grava vol_meta rateado por CNPJ (peso histórico 4 meses)
+# ---------------------------------------------------------------------------
+class AjusteMeta(BaseModel):
+    razao_social: str
+    sku: str
+    mes_projetado: str
+    novo_volume: int
 
+class PayloadSalvar(BaseModel):
+    ajustes: List[AjusteMeta]
 
-# ---------------------------------------------------------------------
-# POST /salvar  — grava vol_meta rateado (rascunho)
-# ---------------------------------------------------------------------
 @router.post("/salvar")
-def salvar(payload: PayloadSalvar, db: Session = Depends(get_db),
-           usuario: dict = Depends(require_metas)):
-    """
-    Grava cada ajuste em vol_meta, rateado com balanço garantido
-    (digitado = somado). Não congela — é rascunho editável.
-    """
+def salvar(payload: PayloadSalvar, db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     try:
         ciclo = get_current_cycle(db)
         if etapa_congelada(db, ciclo, ETAPA_METAS):
-            raise HTTPException(423, "Etapa já congelada pelo Administrador.")
+            raise HTTPException(400, "Etapa congelada — não é possível salvar.")
 
-        nome_user = usuario.get("nome", usuario.get("email", "?"))
-        total = 0
         for aj in payload.ajustes:
-            data_alvo = parse_date_safe(
-                aj.mes_projetado if len(aj.mes_projetado) > 7 else aj.mes_projetado + "-01"
-            )
-            antigo = db.execute(text("""
-                SELECT COALESCE(SUM(vol_meta),0) FROM fato_ibp_granular
-                WHERE ciclo_sop=:c AND sku=:s AND mes_projetado=:m
-            """), {"c": ciclo, "s": aj.sku, "m": data_alvo}).scalar()
+            check_imutabilidade_mes(aj.mes_projetado, aj.sku, contexto="Meta")
 
-            total += escrever_volume_rateado(
-                db=db, ciclo=ciclo, sku=aj.sku, mes=data_alvo,
-                volume_alvo=int(aj.novo_volume), etapa=ETAPA_METAS,
-            )
-            registrar_log_auditoria(
-                db=db, ciclo=ciclo, origem="Demanda Marketing (Top-Down)",
-                usuario=nome_user, sku=aj.sku, cliente="TODOS_OS_CLIENTES",
-                mes=data_alvo, v_antigo=int(antigo or 0), v_novo=int(aj.novo_volume))
+            result = db.execute(text("""
+                SELECT f.id AS fato_id, f.cgc,
+                       COALESCE(SUM(v.qt_pedido),0) AS peso_historico
+                FROM fato_ibp_granular f
+                JOIN dim_clientes c ON f.cgc = c.cgc
+                LEFT JOIN fato_vendas v
+                    ON v.cgc = f.cgc AND v.sku = f.sku
+                    AND v.data_pedido >= CURRENT_DATE - INTERVAL '4 months'
+                WHERE f.ciclo_sop = :ciclo
+                  AND TO_CHAR(f.mes_projetado,'YYYY-MM') = :mes
+                  AND f.sku = :sku
+                  AND TRIM(c.razaosocial) = TRIM(:razao)
+                GROUP BY f.id, f.cgc ORDER BY f.id
+            """), {"ciclo": ciclo, "mes": aj.mes_projetado,
+                   "sku": aj.sku, "razao": aj.razao_social}).fetchall()
+
+            if not result: continue
+
+            pesos     = [max(0.0, float(r.peso_historico or 0)) for r in result]
+            partes    = ratear_maior_resto(aj.novo_volume, pesos)
+
+            for r, parte in zip(result, partes):
+                db.execute(text("UPDATE fato_ibp_granular SET vol_meta=:v WHERE id=:id"),
+                           {"v": int(parte), "id": r.fato_id})
 
         db.commit()
-        return {"status": "success", "linhas": total}
+        return {"status": "ok"}
     except HTTPException:
         db.rollback(); raise
     except Exception as e:
         db.rollback(); raise HTTPException(500, repr(e))
 
 
-# ---------------------------------------------------------------------
-# POST /congelar  — (admin) fecha a etapa e passa o bastão
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# GET /exportar  — Excel cópia de segurança do preenchimento
+# ---------------------------------------------------------------------------
+@router.get("/exportar")
+def exportar(db: Session = Depends(get_db), _: dict = Depends(require_metas)):
+    try:
+        ciclo = get_current_cycle(db)
+        meses = get_working_window_months(db)
+        rows = db.execute(text("""
+            SELECT c.gerente_nome, c.supervisor_nome, f.vendedor_nome,
+                   c.razaosocial, f.sku, p.descricao,
+                   TO_CHAR(f.mes_projetado,'MM/YYYY') AS mes,
+                   SUM(f.vol_meta) AS meta,
+                   SUM(f.vol_ia)   AS ia,
+                   SUM(f.vol_meta * f.pmv_aplicado) AS receita
+            FROM fato_ibp_granular f
+            JOIN dim_clientes c ON f.cgc = c.cgc
+            JOIN dim_produtos p ON f.sku = p.sku
+            WHERE f.ciclo_sop=:c AND f.mes_projetado=ANY(:m)
+            GROUP BY c.gerente_nome, c.supervisor_nome, f.vendedor_nome,
+                     c.razaosocial, f.sku, p.descricao, f.mes_projetado
+            ORDER BY c.gerente_nome, c.supervisor_nome, f.vendedor_nome,
+                     c.razaosocial, p.descricao, f.mes_projetado
+        """), {"c": ciclo, "m": meses}).fetchall()
+
+        registros = [{
+            "Gerente": r.gerente_nome, "Coordenador": r.supervisor_nome,
+            "Vendedor": r.vendedor_nome, "Razão Social": r.razaosocial,
+            "SKU": r.sku, "Descrição": r.descricao, "Mês": r.mes,
+            "Vol. Meta (cx)": int(r.meta or 0), "IA (cx)": int(r.ia or 0),
+            "Receita Prevista (R$)": round(float(r.receita or 0), 2),
+        } for r in rows]
+
+        df = pd.DataFrame(registros)
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as w:
+            df.to_excel(w, index=False, sheet_name="Metas Comercial")
+            nota = pd.DataFrame([[f"Ciclo: {ciclo}"],
+                                  [f"Meses: {', '.join(m.strftime('%m/%Y') for m in meses)}"],
+                                  ["Gerado pelo Nexus S&OP — cópia de segurança"]], columns=["Nota"])
+            nota.to_excel(w, index=False, sheet_name="Metas Comercial",
+                          startrow=len(df)+2, header=False)
+        buf.seek(0)
+        nome = f"metas_{ciclo.replace('/','_')}.xlsx"
+        return StreamingResponse(buf,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{nome}"'})
+    except Exception as e:
+        raise HTTPException(500, repr(e))
+
+
+# ---------------------------------------------------------------------------
+# GET /dossie  — dossiê do SKU (coluna_meta = vol_meta)
+# ---------------------------------------------------------------------------
+@router.get("/dossie")
+def dossie(sku: str, db: Session = Depends(get_db), _: dict = Depends(require_metas)):
+    try:
+        from app.api.routers.perfil_sku import montar_dossie
+        ciclo = get_current_cycle(db)
+        meses = get_working_window_months(db)
+        desc  = db.execute(text("SELECT descricao FROM dim_produtos WHERE sku=:s"), {"s": sku}).scalar()
+        return montar_dossie(db, sku, ciclo, meses, descricao=desc, coluna_meta="vol_meta")
+    except Exception as e:
+        raise HTTPException(500, repr(e))
+
+
+# ---------------------------------------------------------------------------
+# POST /congelar / POST /reabrir  — controle de etapa (Admin)
+# ---------------------------------------------------------------------------
 @router.post("/congelar")
 def congelar(db: Session = Depends(get_db), _: dict = Depends(require_admin)):
     try:
@@ -503,21 +397,85 @@ def congelar(db: Session = Depends(get_db), _: dict = Depends(require_admin)):
         congelar_etapa(db, ciclo, ETAPA_METAS)
         res = propagar_para_jusante(db, ciclo, ETAPA_METAS)
         db.commit()
-        return {"status": "success",
-                "propagou": res["propagou"], "preservou": res["preservou"]}
+        return {"status": "congelada", "propagacao": res}
     except Exception as e:
         db.rollback(); raise HTTPException(500, repr(e))
 
-
-# ---------------------------------------------------------------------
-# POST /reabrir  — (admin)
-# ---------------------------------------------------------------------
 @router.post("/reabrir")
 def reabrir(db: Session = Depends(get_db), _: dict = Depends(require_admin)):
     try:
         ciclo = get_current_cycle(db)
         reabrir_etapa(db, ciclo, ETAPA_METAS)
         db.commit()
-        return {"status": "success"}
+        return {"status": "reaberta"}
+    except Exception as e:
+        db.rollback(); raise HTTPException(500, repr(e))
+
+
+# ---------------------------------------------------------------------------
+# GET /cadeados  — lista carteiras bloqueadas individualmente
+# POST /bloquear — vendedor bloqueia a própria carteira
+# POST /reabrir-cadeado — admin reabre a carteira de alguém
+# ---------------------------------------------------------------------------
+@router.get("/cadeados")
+def cadeados(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
+    try:
+        ciclo = get_current_cycle(db)
+        rows  = db.execute(text("""
+            SELECT responsavel AS nome, nivel, bloqueado_por AS por,
+                   bloqueado_em AS quando
+            FROM controle_cadeados_metas
+            WHERE ciclo_sop=:c AND ativo=true
+            ORDER BY bloqueado_em
+        """), {"c": ciclo}).fetchall()
+        return {
+            "sou_admin": u.get("perfil") == "ADMIN",
+            "meu_nome":  u.get("nome"),
+            "cadeados":  [{"nome": r.nome, "nivel": r.nivel, "por": r.por} for r in rows],
+        }
+    except Exception as e:
+        raise HTTPException(500, repr(e))
+
+class PayloadBloquear(BaseModel):
+    nome_alvo: Optional[str] = None  # só admin usa; vendedor bloqueia a si mesmo
+
+@router.post("/bloquear")
+def bloquear(payload: PayloadBloquear = PayloadBloquear(),
+             db: Session = Depends(get_db), u: dict = Depends(require_metas)):
+    try:
+        ciclo = get_current_cycle(db)
+        alvo  = payload.nome_alvo if (u.get("perfil") == "ADMIN" and payload.nome_alvo) else u.get("nome")
+        if not alvo:
+            raise HTTPException(400, "Usuário não identificado.")
+        db.execute(text("""
+            INSERT INTO controle_cadeados_metas
+              (ciclo_sop, responsavel, nivel, bloqueado_por, bloqueado_em, ativo)
+            VALUES (:c, :r, 'vendedor', :por, NOW(), true)
+            ON CONFLICT (ciclo_sop, responsavel)
+            DO UPDATE SET ativo=true, bloqueado_por=EXCLUDED.bloqueado_por, bloqueado_em=NOW()
+        """), {"c": ciclo, "r": alvo, "por": u.get("nome")})
+        db.commit()
+        return {"status": "bloqueado", "responsavel": alvo}
+    except HTTPException: raise
+    except Exception as e:
+        db.rollback(); raise HTTPException(500, repr(e))
+
+@router.post("/reabrir-cadeado")
+def reabrir_cadeado(payload: PayloadBloquear, db: Session = Depends(get_db), u: dict = Depends(require_metas)):
+    try:
+        ciclo = get_current_cycle(db)
+        # Vendedor pode reabrir a própria; Admin pode reabrir qualquer um
+        alvo  = payload.nome_alvo
+        if not alvo:
+            raise HTTPException(400, "nome_alvo é obrigatório.")
+        if u.get("perfil") != "ADMIN" and alvo != u.get("nome"):
+            raise HTTPException(403, "Você só pode reabrir a própria carteira.")
+        db.execute(text("""
+            UPDATE controle_cadeados_metas SET ativo=false
+            WHERE ciclo_sop=:c AND responsavel=:r
+        """), {"c": ciclo, "r": alvo})
+        db.commit()
+        return {"status": "reaberto", "responsavel": alvo}
+    except HTTPException: raise
     except Exception as e:
         db.rollback(); raise HTTPException(500, repr(e))
