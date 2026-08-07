@@ -37,6 +37,7 @@ from app.api.routers.shared_ibp import (
     escrever_volume_rateado, propagar_para_jusante, congelar_etapa,
     reabrir_etapa, etapa_congelada, registrar_log_auditoria, parse_date_safe,
     ETAPA_BOTTOMUP,
+    ETAPA_TOPDOWN,
 )
 
 router = APIRouter(prefix="/api/v1/gerenciamento", tags=["Demanda Comercial (Bottom-Up)"])
@@ -258,7 +259,10 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(require_gerenciament
     ciclo = get_current_cycle(db)
     meses = get_working_window_months(db)
     meses_iso = [m.strftime("%Y-%m-%d") for m in meses]
-    congelada = etapa_congelada(db, ciclo, ETAPA_BOTTOMUP)
+    upstream_ok   = etapa_congelada(db, ciclo, ETAPA_TOPDOWN)
+    propria_congelada = etapa_congelada(db, ciclo, ETAPA_BOTTOMUP)
+    aguardando    = not upstream_ok
+    congelada     = propria_congelada or aguardando
 
     # Plano do ciclo, agregado por SKU x mês (soma sobre clientes).
     plano = db.execute(text("""
@@ -339,6 +343,10 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(require_gerenciament
     return {
         "ciclo": ciclo,
         "congelada": congelada,
+        "congelada_propria": propria_congelada,
+        "aguardando_upstream": aguardando,
+        "motivo_bloqueio": ("Demanda Marketing ainda nao congelou o plano." if aguardando
+                             else "Etapa congelada pelo Administrador." if propria_congelada else None),
         "meses": meses_iso,
         "categorias": categorias,
         "totais": {
@@ -462,6 +470,8 @@ def salvar(payload: PayloadSalvar, db: Session = Depends(get_db),
     """
     try:
         ciclo = get_current_cycle(db)
+        if not etapa_congelada(db, ciclo, ETAPA_TOPDOWN):
+            raise HTTPException(423, "Demanda Marketing ainda nao congelou. Aguarde o bastao.")
         if etapa_congelada(db, ciclo, ETAPA_BOTTOMUP):
             raise HTTPException(423, "Etapa já congelada pelo Administrador.")
 

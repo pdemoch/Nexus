@@ -3,11 +3,12 @@ import axios from 'axios';
 import {
   ChevronRight, ChevronDown, Save, Download, X, Rocket, Unlock,
   TrendingUp, TrendingDown, Minus, Bot, AlertTriangle, Loader2, LineChart as LineIcon,
-  Layers, Check,
+  Layers, Check, LayoutGrid, ClipboardList,
 } from 'lucide-react';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from 'recharts';
+import VisaoGeralMarketing from './VisaoGeralMarketing';
 
 /* =====================================================================
    DEMANDA FINAL — a sala de guerra do C-Level.
@@ -27,6 +28,33 @@ const mesLabel = (iso: string) => {
 type Visao = 'caixas' | 'financeiro';
 
 export default function DemandaFinal() {
+  const [aba, setAba] = useState<'geral' | 'preenchimento'>('geral');
+  return (
+    <div className="h-screen flex flex-col bg-slate-50">
+      <div className="shrink-0 bg-white border-b border-slate-200 px-6 pt-3">
+        <div className="flex items-center gap-1">
+          <button onClick={() => setAba('geral')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-xs font-black rounded-t-lg border-b-2 transition-colors
+              ${aba === 'geral' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>
+            <LayoutGrid className="w-4 h-4" /> Visão Geral
+          </button>
+          <button onClick={() => setAba('preenchimento')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-xs font-black rounded-t-lg border-b-2 transition-colors
+              ${aba === 'preenchimento' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>
+            <ClipboardList className="w-4 h-4" /> Consolidação
+          </button>
+        </div>
+      </div>
+      <div className="flex-1 min-h-0">
+        {aba === 'geral'
+          ? <VisaoGeralMarketing prefixoApi="/api/v1/dashboard" />
+          : <ConsolidacaoFinal />}
+      </div>
+    </div>
+  );
+}
+
+function ConsolidacaoFinal() {
   const [dados, setDados] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [salvando, setSalvando] = useState(false);
@@ -36,6 +64,7 @@ export default function DemandaFinal() {
   const [visao, setVisao] = useState<Visao>('caixas');
   const [cmpOrcamento, setCmpOrcamento] = useState(false);
   const [cmpAnterior, setCmpAnterior] = useState(false);
+  const [busca, setBusca] = useState('');
 
   const carregar = useCallback(async () => {
     setLoading(true);
@@ -48,6 +77,8 @@ export default function DemandaFinal() {
 
   const meses: string[] = dados?.meses || [];
   const publicado: boolean = dados?.publicado;
+  const aguardandoUpstream: boolean = dados?.aguardando_upstream;
+  const bloqueado: boolean = publicado || aguardandoUpstream;
   const fin = visao === 'financeiro';
 
   const valorCelula = (sku: string, mes: string, original: number) => {
@@ -109,7 +140,7 @@ export default function DemandaFinal() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50" style={{ fontVariantNumeric: 'tabular-nums' }}>
+    <div className="h-full overflow-y-auto bg-slate-50" style={{ fontVariantNumeric: 'tabular-nums' }}>
       {/* CABEÇALHO */}
       <div className="sticky top-0 z-20 bg-white border-b border-slate-200">
         <div className="px-6 pt-5 pb-3 flex items-center justify-between">
@@ -117,13 +148,14 @@ export default function DemandaFinal() {
             <h1 className="text-lg font-black text-slate-900 tracking-tight">Demanda Final · S&OP</h1>
             <p className="text-xs font-medium text-slate-400">
               Ciclo {dados?.ciclo} · consolide e publique o número oficial
-              {publicado && <span className="ml-2 text-emerald-600 font-bold">· publicado</span>}
+              {aguardandoUpstream && <span className="ml-2 text-orange-500 font-bold">· aguardando Supply Review congelar</span>}
+              {!aguardandoUpstream && publicado && <span className="ml-2 text-emerald-600 font-bold">· publicado</span>}
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={salvar} disabled={!temEdicoes || salvando || publicado}
+            <button onClick={salvar} disabled={!temEdicoes || salvando || bloqueado}
               className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all
-                ${temEdicoes && !publicado ? 'bg-indigo-600 text-white shadow-sm hover:bg-indigo-700' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}>
+                ${temEdicoes && !bloqueado ? 'bg-indigo-600 text-white shadow-sm hover:bg-indigo-700' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}>
               {salvando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
               Salvar{temEdicoes ? ` (${Object.keys(edits).length})` : ''}
             </button>
@@ -184,6 +216,16 @@ export default function DemandaFinal() {
         </div>
       </div>
 
+      {aguardandoUpstream && (
+        <div className="mx-6 mt-4 mb-2 flex items-center gap-3 rounded-xl bg-orange-50 border border-orange-200 px-4 py-3">
+          <div className="w-2 h-2 rounded-full bg-orange-400 shrink-0 animate-pulse" />
+          <div>
+            <div className="text-xs font-black text-orange-700">Consolidação bloqueada</div>
+            <div className="text-[11px] font-medium text-orange-600">Supply Review ainda não congelou o plano deste ciclo. Os números ficam visíveis, mas não editáveis até o bastão ser passado.</div>
+          </div>
+        </div>
+      )}
+
       {/* CABEÇALHO TABELA */}
       <div className="px-6 pt-4">
         <div className="grid gap-2 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400"
@@ -237,11 +279,11 @@ export default function DemandaFinal() {
                         const vsAnt = cmpAnterior && cel.final_anterior ? val - cel.final_anterior : null;
                         return (
                           <div key={m} className="text-right">
-                            <input type="number" value={val} disabled={publicado}
+                            <input type="number" value={val} disabled={bloqueado}
                               onChange={(e) => setCelula(s.sku, m, parseInt(e.target.value))}
                               className={`w-full text-right text-sm font-bold rounded-md px-2 py-1 border transition-colors
                                 ${editado ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-transparent bg-transparent text-slate-700'}
-                                ${publicado ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`} />
+                                ${bloqueado ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`} />
                             <div className="text-[9px] font-bold text-slate-300 pr-2">
                               {fin ? fmtRs(val * (cel.pmv || 0)) : `PMV ${cel.pmv}`}
                               {vsAnt != null && <span className={vsAnt >= 0 ? 'text-emerald-500' : 'text-rose-400'}> · {vsAnt >= 0 ? '+' : ''}{fmtCx(vsAnt)}</span>}

@@ -82,6 +82,7 @@ function PreenchimentoSupply() {
 
   const meses: string[] = dados?.meses || [];
   const congelada: boolean = dados?.congelada;
+  const aguardandoUpstream: boolean = dados?.aguardando_upstream;
 
   // valor corrente de uma célula (edição local sobrepõe o banco)
   const valorCelula = (sku: string, mes: string, original: number) => {
@@ -180,7 +181,8 @@ function PreenchimentoSupply() {
             <h1 className="text-lg font-black text-slate-900 tracking-tight">Demanda Marketing</h1>
             <p className="text-xs font-medium text-slate-400">
               Ciclo {dados?.ciclo} · defina o Vol. Supply por SKU
-              {congelada && <span className="ml-2 text-amber-600 font-bold">· etapa congelada</span>}
+              {aguardandoUpstream && <span className="ml-2 text-orange-500 font-bold">· aguardando Metas Comercial congelar</span>}
+              {!aguardandoUpstream && congelada && <span className="ml-2 text-amber-600 font-bold">· etapa congelada</span>}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -244,6 +246,16 @@ function PreenchimentoSupply() {
           ))}
         </div>
       </div>
+
+      {aguardandoUpstream && (
+        <div className="mx-6 mt-4 mb-2 flex items-center gap-3 rounded-xl bg-orange-50 border border-orange-200 px-4 py-3">
+          <div className="w-2 h-2 rounded-full bg-orange-400 shrink-0 animate-pulse" />
+          <div>
+            <div className="text-xs font-black text-orange-700">Preenchimento bloqueado</div>
+            <div className="text-[11px] font-medium text-orange-600">Metas Comercial ainda não congelou o plano deste ciclo. Os dados ficam visíveis, mas não editáveis até o bastão ser passado.</div>
+          </div>
+        </div>
+      )}
 
       {/* ---------- CABEÇALHO DA TABELA ---------- */}
       <div className="px-6 pt-4">

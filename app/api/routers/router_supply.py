@@ -37,17 +37,18 @@ from app.api.routers.shared_ibp import (
     escrever_volume_rateado, propagar_para_jusante, congelar_etapa,
     reabrir_etapa, etapa_congelada, registrar_log_auditoria, parse_date_safe,
     ETAPA_SUPPLY,
+    ETAPA_METAS,
 )
 
-router = APIRouter(prefix="/api/v1/supply", tags=["Demanda Marketing (Top-Down)"])
+router = APIRouter(prefix="/api/v1/supply", tags=["Supply Review"])
 
 
 # ---------------------------------------------------------------------
 # Governança de acesso
 # ---------------------------------------------------------------------
 def require_supply(usuario: dict = Depends(get_current_user)):
-    if usuario.get("funcao") not in ("Administrador", "Marketing"):
-        raise HTTPException(403, "Acesso restrito à Diretoria de Marketing.")
+    if usuario.get("funcao") not in ("Administrador", "Supply Chain"):
+        raise HTTPException(403, "Acesso restrito ao Supply Chain.")
     return usuario
 
 def require_admin(usuario: dict = Depends(get_current_user)):
@@ -258,7 +259,10 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(require_supply)):
     ciclo = get_current_cycle(db)
     meses = get_working_window_months(db)
     meses_iso = [m.strftime("%Y-%m-%d") for m in meses]
-    congelada = etapa_congelada(db, ciclo, ETAPA_SUPPLY)
+    upstream_ok   = etapa_congelada(db, ciclo, ETAPA_METAS)
+    propria_congelada = etapa_congelada(db, ciclo, ETAPA_SUPPLY)
+    aguardando    = not upstream_ok
+    congelada     = propria_congelada or aguardando
 
     # Plano do ciclo, agregado por SKU x mês (soma sobre clientes).
     plano = db.execute(text("""
@@ -339,6 +343,10 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(require_supply)):
     return {
         "ciclo": ciclo,
         "congelada": congelada,
+        "congelada_propria": propria_congelada,
+        "aguardando_upstream": aguardando,
+        "motivo_bloqueio": ("Metas Comercial ainda nao congelou o plano." if aguardando
+                             else "Etapa congelada pelo Administrador." if propria_congelada else None),
         "meses": meses_iso,
         "categorias": categorias,
         "totais": {
@@ -462,6 +470,8 @@ def salvar(payload: PayloadSalvar, db: Session = Depends(get_db),
     """
     try:
         ciclo = get_current_cycle(db)
+        if not etapa_congelada(db, ciclo, ETAPA_METAS):
+            raise HTTPException(423, "Metas Comercial ainda nao congelou. Aguarde o bastao.")
         if etapa_congelada(db, ciclo, ETAPA_SUPPLY):
             raise HTTPException(423, "Etapa já congelada pelo Administrador.")
 

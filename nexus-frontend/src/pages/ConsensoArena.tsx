@@ -87,7 +87,8 @@ function PreenchimentoMetas() {
   const meses: string[]       = dados?.meses || [];
   const congeladaEtapa        = Boolean(dados?.etapa_congelada);
   const minhaCongelada        = Boolean(dados?.minha_carteira_congelada);
-  const bloqueado             = congeladaEtapa || minhaCongelada;
+  const aguardandoUpstream    = Boolean(dados?.aguardando_upstream);
+  const bloqueado             = congeladaEtapa || minhaCongelada || aguardandoUpstream;
 
   const keyOf       = (razao: string, sku: string, mes: string) => `${razao}||${sku}||${mes}`;
   const valorCelula = (razao: string, sku: string, mes: string, original: number) => {
@@ -201,8 +202,9 @@ function PreenchimentoMetas() {
             <h1 className="text-base font-black text-slate-900">Metas Comercial</h1>
             <p className="text-xs font-medium text-slate-400">
               Ciclo {dados?.ciclo} · distribua a meta na sua carteira
-              {minhaCongelada && <span className="ml-2 text-emerald-600 font-bold">· sua carteira bloqueada</span>}
-              {congeladaEtapa && <span className="ml-2 text-amber-600 font-bold">· etapa congelada</span>}
+              {aguardandoUpstream && <span className="ml-2 text-orange-500 font-bold">· aguardando Demanda Comercial congelar</span>}
+              {!aguardandoUpstream && minhaCongelada && <span className="ml-2 text-emerald-600 font-bold">· sua carteira bloqueada</span>}
+              {!aguardandoUpstream && congeladaEtapa && <span className="ml-2 text-amber-600 font-bold">· etapa congelada</span>}
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
@@ -260,6 +262,16 @@ function PreenchimentoMetas() {
             </div>
           ))}
         </div>
+
+        {aguardandoUpstream && (
+          <div className="mx-6 mb-3 flex items-center gap-3 rounded-xl bg-orange-50 border border-orange-200 px-4 py-3">
+            <div className="w-2 h-2 rounded-full bg-orange-400 shrink-0 animate-pulse" />
+            <div>
+              <div className="text-xs font-black text-orange-700">Preenchimento bloqueado</div>
+              <div className="text-[11px] font-medium text-orange-600">Demanda Comercial ainda não congelou o plano deste ciclo. Sua carteira fica visível, mas não editável até o bastão ser passado.</div>
+            </div>
+          </div>
+        )}
 
         {/* Cabeçalho da tabela */}
         <div className="px-6 pb-1">

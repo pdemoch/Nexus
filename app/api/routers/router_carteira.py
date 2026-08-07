@@ -41,20 +41,25 @@ from app.api.routers.shared_ibp import (
     congelar_etapa,
     reabrir_etapa,
     ETAPA_METAS,
+    ETAPA_BOTTOMUP,
 )
 
 router = APIRouter(tags=["Metas Comercial"])
 
 
 def require_metas(usuario: dict = Depends(get_current_user)):
-    if usuario.get("perfil") not in ("ADMIN", "METAS", "COMERCIAL"):
-        raise HTTPException(403, "Acesso negado")
+    """
+    Acesso à etapa de Metas: Administrador, Gerente ou Coordenador com
+    vínculo válido. A validação profunda (escopo + RLS) fica em rls_metas.
+    """
+    from app.api.routers.rls_metas import exigir_acesso_metas
+    exigir_acesso_metas(usuario)   # levanta 403 se não tiver vínculo
     return usuario
 
 
 def require_admin(usuario: dict = Depends(get_current_user)):
-    if usuario.get("perfil") != "ADMIN":
-        raise HTTPException(403, "Apenas administradores")
+    if usuario.get("funcao") != "Administrador":
+        raise HTTPException(403, "Somente o Administrador congela etapas.")
     return usuario
 
 
@@ -174,16 +179,20 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
         ciclo   = get_current_cycle(db)
         meses   = get_working_window_months(db)
         meses_iso = [m.strftime("%Y-%m") for m in meses]
-        congelada = etapa_congelada(db, ciclo, ETAPA_METAS)
+        upstream_ok       = etapa_congelada(db, ciclo, ETAPA_BOTTOMUP)
+        propria_congelada = etapa_congelada(db, ciclo, ETAPA_METAS)
+        aguardando        = not upstream_ok
+        congelada         = propria_congelada or aguardando
 
-        # RLS: cada usuário vê só sua carteira (Admin vê tudo)
-        nome_resp = None if u.get("perfil") == "ADMIN" else u.get("nome")
+        # RLS canônico — escopo derivado do BANCO a cada request (rls_metas)
+        from app.api.routers.rls_metas import escopo_usuario, clausula_rls
+        escopo = escopo_usuario(u)
+        rls    = clausula_rls(escopo, alias_cli="c")
+        nome_resp = None if escopo["ve_tudo"] else escopo["nome_responsavel"]
 
         params = {"ciclo": ciclo, "meses": meses}
-        filtro_resp = ""
-        if nome_resp:
-            filtro_resp = "AND (c.gerente_nome = :resp OR c.supervisor_nome = :resp OR f.vendedor_nome = :resp)"
-            params["resp"] = nome_resp
+        params.update(rls["params"])
+        filtro_resp = f"AND {rls['where']}"
 
         rows = db.execute(text(f"""
             SELECT
@@ -248,18 +257,19 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
         # Cadeado individual: carteira do usuário bloqueada?
         minha_congelada = False
         if nome_resp:
-            lock = db.execute(text("""
-                SELECT 1 FROM controle_cadeados_metas
-                WHERE ciclo_sop=:c AND responsavel=:r AND ativo=true
-            """), {"c": ciclo, "r": nome_resp}).scalar()
-            minha_congelada = bool(lock)
+            from app.api.routers.rls_metas import esta_congelado_para_usuario
+            minha_congelada = esta_congelado_para_usuario(db, escopo, ciclo)
 
         return {
             "ciclo": ciclo,
             "meses": meses_iso,
             "etapa_congelada": congelada,
+            "congelada_propria": propria_congelada,
+            "aguardando_upstream": aguardando,
+            "motivo_bloqueio": ("Demanda Comercial ainda nao congelou o plano." if aguardando
+                                 else "Etapa congelada pelo Administrador." if propria_congelada else None),
             "minha_carteira_congelada": minha_congelada,
-            "sou_admin": u.get("perfil") == "ADMIN",
+            "sou_admin": u.get("funcao") == "Administrador",
             "arvore": arvore,
         }
     except Exception as e:
@@ -282,8 +292,10 @@ class PayloadSalvar(BaseModel):
 def salvar(payload: PayloadSalvar, db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     try:
         ciclo = get_current_cycle(db)
+        if not etapa_congelada(db, ciclo, ETAPA_BOTTOMUP):
+            raise HTTPException(423, "Demanda Comercial ainda nao congelou. Aguarde o bastao.")
         if etapa_congelada(db, ciclo, ETAPA_METAS):
-            raise HTTPException(400, "Etapa congelada — não é possível salvar.")
+            raise HTTPException(423, "Etapa congelada — não é possível salvar.")
 
         for aj in payload.ajustes:
             check_imutabilidade_mes(aj.mes_projetado, aj.sku, contexto="Meta")
@@ -422,15 +434,15 @@ def cadeados(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     try:
         ciclo = get_current_cycle(db)
         rows  = db.execute(text("""
-            SELECT responsavel AS nome, nivel, bloqueado_por AS por,
-                   bloqueado_em AS quando
-            FROM controle_cadeados_metas
-            WHERE ciclo_sop=:c AND ativo=true
-            ORDER BY bloqueado_em
+            SELECT nome_responsavel AS nome, nivel, congelado_por AS por,
+                   data_congelamento AS quando
+            FROM controle_metas_responsavel
+            WHERE ciclo_sop=:c AND status='CONGELADO'
+            ORDER BY data_congelamento
         """), {"c": ciclo}).fetchall()
         return {
-            "sou_admin": u.get("perfil") == "ADMIN",
-            "meu_nome":  u.get("nome"),
+            "sou_admin": u.get("funcao") == "Administrador",
+            "meu_nome":  (u.get("gerente_nome") or u.get("supervisor_nome") or u.get("nome")),
             "cadeados":  [{"nome": r.nome, "nivel": r.nivel, "por": r.por} for r in rows],
         }
     except Exception as e:
@@ -442,40 +454,39 @@ class PayloadBloquear(BaseModel):
 @router.post("/bloquear")
 def bloquear(payload: PayloadBloquear = PayloadBloquear(),
              db: Session = Depends(get_db), u: dict = Depends(require_metas)):
+    """Congela a carteira do próprio responsável (ou de um subordinado, se Gerente)."""
     try:
-        ciclo = get_current_cycle(db)
-        alvo  = payload.nome_alvo if (u.get("perfil") == "ADMIN" and payload.nome_alvo) else u.get("nome")
-        if not alvo:
-            raise HTTPException(400, "Usuário não identificado.")
-        db.execute(text("""
-            INSERT INTO controle_cadeados_metas
-              (ciclo_sop, responsavel, nivel, bloqueado_por, bloqueado_em, ativo)
-            VALUES (:c, :r, 'vendedor', :por, NOW(), true)
-            ON CONFLICT (ciclo_sop, responsavel)
-            DO UPDATE SET ativo=true, bloqueado_por=EXCLUDED.bloqueado_por, bloqueado_em=NOW()
-        """), {"c": ciclo, "r": alvo, "por": u.get("nome")})
-        db.commit()
-        return {"status": "bloqueado", "responsavel": alvo}
+        from app.api.routers.rls_metas import (
+            escopo_usuario, garantir_tabela_cadeados, travar_cadeado)
+        ciclo  = get_current_cycle(db)
+        escopo = escopo_usuario(u)
+        garantir_tabela_cadeados(db)
+        nome = travar_cadeado(db, escopo, ciclo, nome_alvo=payload.nome_alvo)
+        return {"status": "bloqueado", "responsavel": nome}
     except HTTPException: raise
     except Exception as e:
         db.rollback(); raise HTTPException(500, repr(e))
 
+
 @router.post("/reabrir-cadeado")
-def reabrir_cadeado(payload: PayloadBloquear, db: Session = Depends(get_db), u: dict = Depends(require_metas)):
+def reabrir_cadeado_ep(payload: PayloadBloquear, db: Session = Depends(get_db),
+                       u: dict = Depends(require_metas)):
+    """Reabre a carteira. Precedência hierárquica validada em rls_metas."""
     try:
-        ciclo = get_current_cycle(db)
-        # Vendedor pode reabrir a própria; Admin pode reabrir qualquer um
-        alvo  = payload.nome_alvo
-        if not alvo:
+        from app.api.routers.rls_metas import escopo_usuario, reabrir_cadeado
+        ciclo  = get_current_cycle(db)
+        escopo = escopo_usuario(u)
+        if not payload.nome_alvo:
             raise HTTPException(400, "nome_alvo é obrigatório.")
-        if u.get("perfil") != "ADMIN" and alvo != u.get("nome"):
-            raise HTTPException(403, "Você só pode reabrir a própria carteira.")
-        db.execute(text("""
-            UPDATE controle_cadeados_metas SET ativo=false
-            WHERE ciclo_sop=:c AND responsavel=:r
-        """), {"c": ciclo, "r": alvo})
-        db.commit()
-        return {"status": "reaberto", "responsavel": alvo}
+        # Gerente pode reabrir coordenador da sua gerência
+        pertence = False
+        if not escopo["ve_tudo"] and escopo["funcao"] == "Gerente":
+            pertence = bool(db.execute(text("""
+                SELECT 1 FROM dim_clientes
+                WHERE TRIM(gerente_nome) = :g AND TRIM(supervisor_nome) = :a LIMIT 1
+            """), {"g": escopo["valor_rls"], "a": payload.nome_alvo.strip()}).scalar())
+        reabrir_cadeado(db, escopo, ciclo, payload.nome_alvo, pertence)
+        return {"status": "reaberto", "responsavel": payload.nome_alvo}
     except HTTPException: raise
     except Exception as e:
         db.rollback(); raise HTTPException(500, repr(e))

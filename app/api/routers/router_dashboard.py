@@ -21,10 +21,12 @@ import datetime
 from dateutil.relativedelta import relativedelta
 from typing import List, Optional
 from collections import defaultdict
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text
+import pandas as pd
 
 from app.core.database import get_db
 from app.api.routers.router_auth import get_current_user
@@ -59,6 +61,105 @@ def status(db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
     return {"ciclo": ciclo, "publicado": etapa_congelada(db, ciclo, ETAPA_FINAL)}
 
 
+
+# ---------------------------------------------------------------------
+# GET /resumo — Aba "Visão Geral" (idêntica em todas as 5 telas)
+# ---------------------------------------------------------------------
+@router.get("/resumo")
+def resumo(db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
+    try:
+        from app.api.routers.perfil_sku import resumo_marketing
+        ciclo = get_current_cycle(db)
+        return resumo_marketing(db, ciclo)
+    except Exception as e:
+        raise HTTPException(500, repr(e))
+
+
+# ---------------------------------------------------------------------
+# GET /exportar-visao-geral — Excel 4 abas (Volume, Valor, PMV, Assertividade)
+# ---------------------------------------------------------------------
+@router.get("/exportar-visao-geral")
+def exportar_visao_geral(
+    nivel: str = Query("categoria", regex="^(categoria|sku)$"),
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_user),
+):
+    try:
+        from app.api.routers.perfil_sku import resumo_marketing
+        ciclo = get_current_cycle(db)
+        dados = resumo_marketing(db, ciclo)
+        label_col = "categoria" if nivel == "categoria" else "descricao"
+
+        def _cagr(anos, campo):
+            f = [a for a in (anos or []) if a.get(campo, 0) and a[campo] > 0]
+            if len(f) < 2: return None
+            vi, vf, n = f[0][campo], f[-1][campo], len(f) - 1
+            return (vf / vi) ** (1 / n) - 1 if vi > 0 else None
+
+        def _pct(v): return f"{v*100:+.1f}%" if v is not None else "\u2014"
+
+        def _build(rows, campo_val, campo_tend):
+            anos_all = sorted({a["ano"] for r in rows for a in r.get("anos", [])})
+            regs = []
+            for r in rows:
+                idx = {a["ano"]: a.get(campo_val) for a in r.get("anos", [])}
+                rec = {"Nome": r.get(label_col) or r.get("sku", ""),
+                       "Categoria": r.get("categoria", ""),
+                       "Tend\u00eancia": r.get(campo_tend, ""),
+                       "CAGR": _pct(_cagr(r.get("anos", []), campo_val))}
+                for i, ano in enumerate(anos_all):
+                    if i > 0:
+                        ant, cur = idx.get(anos_all[i-1]), idx.get(ano)
+                        rec[f"{anos_all[i-1]}\u2192{ano}"] = (
+                            _pct((cur - ant) / ant) if ant and ant > 0 and cur is not None else "\u2014")
+                    rec[str(ano)] = idx.get(ano, "")
+                regs.append(rec)
+            cols = ["Nome", "Categoria", "Tend\u00eancia", "CAGR"]
+            if nivel == "categoria": cols = [c for c in cols if c != "Categoria"]
+            cols_anos = []
+            for i, ano in enumerate(anos_all):
+                if i > 0: cols_anos.append(f"{anos_all[i-1]}\u2192{ano}")
+                cols_anos.append(str(ano))
+            return pd.DataFrame(regs, columns=cols + cols_anos)
+
+        src_vol = dados["tendencia_volume_categoria"] if nivel == "categoria" else dados["tendencia_volume_sku"]
+        src_pmv = dados["tendencia_pmv_categoria"]    if nivel == "categoria" else dados["tendencia_pmv_sku"]
+        src_ass = dados["assertividade_categoria"]    if nivel == "categoria" else dados["assertividade_sku"]
+
+        df_vol = _build(src_vol, "vol_cx", "tendencia_cx")
+        df_val = _build(src_vol, "vol_rs", "tendencia_rs")
+        df_pmv = _build(src_pmv, "pmv", "tendencia")
+        df_ass = pd.DataFrame([{
+            "Nome": r.get(label_col) or r.get("sku", ""),
+            "Categoria": r.get("categoria", ""),
+            "Realizado (cx)": r.get("vendido_cx", 0),
+            "Humano (cx)": r.get("humano_cx", 0),
+            "Ader\u00eancia Humano": _pct(r.get("aderencia_humano")),
+            "IA (cx)": r.get("ia_cx", 0),
+            "Ader\u00eancia IA": _pct(r.get("aderencia_ia")),
+            "Vencedor": r.get("vencedor", "\u2014"),
+        } for r in src_ass])
+
+        nota = pd.DataFrame([
+            ["CAGR = Compound Annual Growth Rate (crescimento medio anual composto)"],
+            ["Formula: (Valor_final / Valor_inicial)^(1/n_anos) - 1"],
+        ], columns=["Nota"])
+
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as w:
+            for df, sheet in [(df_vol, "Volume (cx)"), (df_val, "Valor de Venda (R$)"), (df_pmv, "PMV")]:
+                df.to_excel(w, index=False, sheet_name=sheet)
+                nota.to_excel(w, index=False, sheet_name=sheet, startrow=len(df)+2, header=False)
+            df_ass.to_excel(w, index=False, sheet_name="Assertividade")
+        buf.seek(0)
+        nome = f"visao_geral_final_{ciclo.replace('/','_')}_{nivel}.xlsx"
+        return StreamingResponse(buf,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{nome}"'})
+    except Exception as e:
+        raise HTTPException(500, repr(e))
+
+
 @router.get("/tabela")
 def tabela(db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
     """
@@ -70,7 +171,10 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
     ciclo_ant = get_previous_cycle(db)
     meses = get_working_window_months(db)
     meses_iso = [m.strftime("%Y-%m-%d") for m in meses]
-    publicado = etapa_congelada(db, ciclo, ETAPA_FINAL)
+    upstream_ok = etapa_congelada(db, ciclo, ETAPA_SUPPLY)
+    publicado   = etapa_congelada(db, ciclo, ETAPA_FINAL)
+    aguardando  = not upstream_ok
+    congelada   = publicado or aguardando
 
     plano = db.execute(text("""
         SELECT f.sku,
@@ -147,6 +251,10 @@ def tabela(db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
 
     return {
         "ciclo": ciclo, "ciclo_anterior": ciclo_ant, "publicado": publicado,
+        "congelada": congelada,
+        "aguardando_upstream": aguardando,
+        "motivo_bloqueio": ("Supply Review ainda nao congelou o plano." if aguardando
+                             else "S&OP publicado." if publicado else None),
         "meses": meses_iso, "categorias": categorias,
         "totais": {
             "volume": {mi: tot[mi]["vol"] for mi in meses_iso},
@@ -228,6 +336,8 @@ def adotar_cenario(sku: str, mes: str, camada: str,
         raise HTTPException(400, f"Camada inválida: {camada}")
     try:
         ciclo = get_current_cycle(db)
+        if not etapa_congelada(db, ciclo, ETAPA_SUPPLY):
+            raise HTTPException(423, "Supply Review ainda nao congelou. Aguarde o bastao.")
         if etapa_congelada(db, ciclo, ETAPA_FINAL):
             raise HTTPException(423, "S&OP já publicado. Reabra para editar.")
         data_alvo = parse_date_safe(mes if len(mes) > 7 else mes + "-01")
@@ -252,6 +362,8 @@ def salvar(payload: PayloadSalvar, db: Session = Depends(get_db),
     """Edição direta do Final pelo C-Level. Trava de balanço, peso vol_meta."""
     try:
         ciclo = get_current_cycle(db)
+        if not etapa_congelada(db, ciclo, ETAPA_SUPPLY):
+            raise HTTPException(423, "Supply Review ainda nao congelou. Aguarde o bastao.")
         if etapa_congelada(db, ciclo, ETAPA_FINAL):
             raise HTTPException(423, "S&OP já publicado. Reabra para editar.")
         nome_user = usuario.get("nome", usuario.get("email", "?"))
