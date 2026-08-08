@@ -15,7 +15,7 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
     { id: 'topdown', label: 'Demanda Marketing', icon: BarChart3, roles: ['Administrador', 'Marketing'] },
     { id: 'npd', label: 'Inovações', icon: Rocket, roles: ['Administrador', 'Marketing'] },
     { id: 'supply', label: 'Supply Review', icon: Factory, roles: ['Administrador', 'Supply Chain'] },
-    { id: 'consenso', label: 'Metas Comercial', icon: Users, roles: ['Administrador', 'Gerente'] },
+    { id: 'consenso', label: 'Metas Comercial', icon: Users, roles: ['Administrador', 'Gerente', 'Coordenador'] },
     { id: 'gerenciamento', label: 'Demanda Comercial', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },
     { id: 'admin', label: 'Painel Admin', icon: Settings, roles: ['Administrador'] },
   ];

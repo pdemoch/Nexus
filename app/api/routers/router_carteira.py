@@ -172,7 +172,7 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     """
     Retorna a árvore hierárquica (gerente→coordenador→vendedor→cliente→produto)
     no formato esperado pelo MetasComercial.tsx:
-      • cada produto tem campo 'meses' como dict {ISO: {meta, ia, pmv, orcamento}}
+      • cada produto tem campo 'meses' como dict {ISO: {meta, ia, pmv}}
       • campo 'sku' e 'descricao' (não 'produto'/'nome')
       • campo 'tipo' = 'produto' nas folhas
     """
@@ -208,12 +208,10 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
                 COALESCE(SUM(f.vol_bottomup),0)                               AS bottomup,
                 COALESCE(SUM(f.vol_ia),0)                                     AS ia,
                 COALESCE(SUM(f.pmv_aplicado * f.vol_bottomup)
-                         / NULLIF(SUM(f.vol_bottomup),0), 0)                  AS pmv,
-                COALESCE(SUM(o.receita_orcamento),0)                          AS orcamento
+                         / NULLIF(SUM(f.vol_bottomup),0), 0)                  AS pmv
             FROM fato_ibp_granular f
             JOIN dim_clientes c  ON f.cgc  = c.cgc
             JOIN dim_produtos p  ON f.sku  = p.sku
-            LEFT JOIN fato_orcamento o ON o.sku = f.sku AND o.mes_projetado = f.mes_projetado
             WHERE f.ciclo_sop = :ciclo AND f.mes_projetado = ANY(:meses)
               AND f.sku IS NOT NULL AND f.sku != ''
               {filtro_resp}
@@ -238,7 +236,6 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
                 "meta":     int(r.meta or 0),
                 "ia":       int(r.ia or 0),
                 "pmv":      round(float(r.pmv or 0), 2),
-                "orcamento": round(float(r.orcamento or 0), 2),
             }
 
         def _serializar_arvore(node_dict: dict) -> list:
@@ -392,13 +389,18 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_metas)):
 # GET /dossie  — dossiê do SKU (coluna_meta = vol_meta)
 # ---------------------------------------------------------------------------
 @router.get("/dossie")
-def dossie(sku: str, db: Session = Depends(get_db), _: dict = Depends(require_metas)):
+def dossie(sku: str, razao_social: str = None,
+           db: Session = Depends(get_db), _: dict = Depends(require_metas)):
     try:
         from app.api.routers.perfil_sku import montar_dossie
         ciclo = get_current_cycle(db)
         meses = get_working_window_months(db)
         desc  = db.execute(text("SELECT descricao FROM dim_produtos WHERE sku=:s"), {"s": sku}).scalar()
-        return montar_dossie(db, sku, ciclo, meses, descricao=desc, coluna_meta="vol_meta")
+        # Na tela de Metas o dossie e SEMPRE por cliente: mostra o historico
+        # e o plano daquele SKU naquela razao social (somando os CNPJs dela),
+        # nunca o total da empresa.
+        return montar_dossie(db, sku, ciclo, meses, descricao=desc,
+                             coluna_meta="vol_meta", razao_social=razao_social)
     except Exception as e:
         raise HTTPException(500, repr(e))
 

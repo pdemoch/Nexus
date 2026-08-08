@@ -47,6 +47,21 @@ def require_admin(usuario: dict = Depends(get_current_user)):
     return usuario
 
 
+def require_decisor(usuario: dict = Depends(get_current_user)):
+    """
+    Quem pode ESCREVER o numero final do S&OP. Leitura e a Visao Geral
+    seguem abertas a todos os papeis do menu (Gerente, Supply, Marketing),
+    mas a decisao final e do Admin e do C-Level.
+    """
+    if usuario.get("funcao") not in ("Administrador", "C-Level"):
+        raise HTTPException(
+            403,
+            "Apenas Administrador e C-Level editam a Demanda Final. "
+            "Voce pode consultar o plano, mas nao altera-lo."
+        )
+    return usuario
+
+
 class AjusteFinal(BaseModel):
     sku: str
     mes_projetado: str
@@ -254,6 +269,7 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(get_current_user)):
         "ciclo": ciclo, "ciclo_anterior": ciclo_ant, "publicado": publicado,
         "congelada": congelada,
         "sou_admin": u.get("funcao") == "Administrador",
+        "pode_editar": u.get("funcao") in ("Administrador", "C-Level"),
         "aguardando_upstream": aguardando,
         "motivo_bloqueio": ("Supply Review ainda nao congelou o plano." if aguardando
                              else "S&OP publicado." if publicado else None),
@@ -319,7 +335,7 @@ def dossie(sku: str, db: Session = Depends(get_db), _: dict = Depends(get_curren
 
 @router.post("/adotar-cenario")
 def adotar_cenario(sku: str, mes: str, camada: str,
-                   db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
+                   db: Session = Depends(get_db), _: dict = Depends(require_decisor)):
     """
     Copia o volume de uma camada (topdown/bottomup/meta/supply/ia) para o Final
     de um SKU/mês. É o 'adotar cenário' da gaveta. Rateia por vol_meta.
@@ -352,7 +368,7 @@ def adotar_cenario(sku: str, mes: str, camada: str,
 
 @router.post("/salvar")
 def salvar(payload: PayloadSalvar, db: Session = Depends(get_db),
-           usuario: dict = Depends(get_current_user)):
+           usuario: dict = Depends(require_decisor)):
     """Edição direta do Final pelo C-Level. Trava de balanço, peso vol_meta."""
     try:
         ciclo = get_current_cycle(db)

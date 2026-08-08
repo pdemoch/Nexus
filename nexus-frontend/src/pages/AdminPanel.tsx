@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import axios from 'axios';
 import { 
   Settings, RefreshCw, Terminal, Play, ShieldAlert, Loader2, Download, 
-  UserPlus, Check, X, Unlock, Calendar, Users, KeyRound, Database, Shield, History, Search, ArrowRight, TrendingUp, TrendingDown, Trash2 
+  UserPlus, Check, X, Unlock, Calendar, Users, KeyRound, Database, Shield, History, Search, ArrowRight, TrendingUp, TrendingDown, Trash2, BrainCircuit 
 } from 'lucide-react';
 
 export default function AdminPanel() {
@@ -10,6 +10,7 @@ export default function AdminPanel() {
   const [activeTab, setActiveTab] = useState<'motor' | 'acessos' | 'auditoria'>('motor');
   const [isLoading, setIsLoading] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
+  const [isExportingIA, setIsExportingIA] = useState(false);
   
   // ESTADOS DO MOTOR E PIPELINE
   const [logs, setLogs] = useState<string[]>([]);
@@ -159,6 +160,24 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
     } finally { setIsExporting(false); }
   };
 
+
+  const handleExportarDatasetIA = async () => {
+    setIsExportingIA(true);
+    try {
+      const response = await axios.get('/api/v1/admin/exportar-dataset-ia', { responseType: 'blob' });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `Nexus_Dataset_IA_${new Date().toISOString().slice(0,10)}.xlsx`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (e: any) {
+      alert("Erro ao gerar o dataset de IA. Verifique se há histórico de vendas carregado.");
+    } finally { setIsExportingIA(false); }
+  };
+
   const handleDescongelar = async () => {
     if (!origemDesbloqueio) return alert("Selecione a origem que deseja descongelar.");
     if (!window.confirm(`Deseja realmente forçar a reabertura da tela para: ${origemDesbloqueio} no ciclo ${cicloAtivo}?`)) return;
@@ -221,6 +240,16 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
             <p className="text-slate-500 font-medium text-sm mt-1 ml-11">Gestão de utilizadores, travas de segurança e motor de IA.</p>
           </div>
           
+          <div className="flex flex-wrap items-center gap-3">
+          <button 
+            onClick={handleExportarDatasetIA} 
+            disabled={isExportingIA}
+            title="Histórico completo por SKU, gabarito de acurácia IA vs Humano e perfil de cada item — formato pronto para modelagem preditiva."
+            className="flex items-center gap-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 px-6 py-3.5 rounded-2xl text-sm font-black tracking-widest uppercase transition-all shadow-sm disabled:opacity-50"
+          >
+            {isExportingIA ? <Loader2 className="w-5 h-5 animate-spin" /> : <BrainCircuit className="w-5 h-5" />} 
+            {isExportingIA ? 'A Gerar...' : 'Dataset p/ IA'}
+          </button>
           <button 
             onClick={handleExportarBase} 
             disabled={isExporting}
@@ -229,6 +258,7 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
             {isExporting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Download className="w-5 h-5" />} 
             {isExporting ? 'A Gerar...' : 'Exportar Base S&OP'}
           </button>
+          </div>
         </div>
 
         {/* NAVEGAÇÃO DE ABAS */}

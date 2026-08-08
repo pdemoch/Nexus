@@ -71,7 +71,7 @@ function PreenchimentoMetas() {
   const [salvando,       setSalvando]       = useState(false);
   const [abertas,        setAbertas]        = useState<Set<string>>(new Set());
   const [edits,          setEdits]          = useState<Record<string, number>>({});
-  const [dossieSku,      setDossieSku]      = useState<string | null>(null);
+  const [dossieAlvo,     setDossieAlvo]     = useState<{sku: string; razao: string; descricao: string} | null>(null);
   const [painelCadeados, setPainelCadeados] = useState(false);
   const [busca,          setBusca]          = useState('');
 
@@ -103,8 +103,7 @@ function PreenchimentoMetas() {
   const totaisVivos = useMemo(() => {
     const vol: Record<string, number> = {};
     const fat: Record<string, number> = {};
-    const orc: Record<string, number> = {};
-    meses.forEach(m => { vol[m] = 0; fat[m] = 0; orc[m] = 0; });
+    meses.forEach(m => { vol[m] = 0; fat[m] = 0; });
     const walk = (node: any, razaoCtx: string | null) => {
       if (node.tipo === 'produto') {
         meses.forEach(m => {
@@ -112,7 +111,6 @@ function PreenchimentoMetas() {
           const v = valorCelula(razaoCtx || '', node.sku, m, cel.meta);
           vol[m] += v;
           fat[m] += v * (cel.pmv || 0);
-          orc[m] += cel.orcamento || 0;
         });
         return;
       }
@@ -120,7 +118,7 @@ function PreenchimentoMetas() {
       (node.subRows || []).forEach((f: any) => walk(f, novoCtx));
     };
     (dados?.arvore || []).forEach((g: any) => walk(g, null));
-    return { vol, fat, orc };
+    return { vol, fat };
   }, [dados, edits, meses]);
 
   const temEdicoes = Object.keys(edits).length > 0;
@@ -286,9 +284,6 @@ function PreenchimentoMetas() {
           {meses.map(m => (
             <div key={m} className="bg-slate-50 rounded-lg px-3 py-2">
               <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">{mesLabel(m)}</div>
-              {totaisVivos.orc[m] > 0 && (
-                <div className="text-[9px] font-bold text-amber-500">orç {fmtRs(totaisVivos.orc[m])}</div>
-              )}
               <div className="text-[10px] font-bold text-indigo-500">{fmtRs(totaisVivos.fat[m])}</div>
               <div className="text-sm font-black text-slate-900">{fmtCx(totaisVivos.vol[m])} <span className="text-[10px] font-bold text-slate-400">cx</span></div>
             </div>
@@ -332,7 +327,7 @@ function PreenchimentoMetas() {
               meses={meses} abertas={abertas} toggle={toggle}
               valorCelula={valorCelula} setCelula={setCelula}
               bloqueado={bloqueado} edits={edits}
-              setDossieSku={setDossieSku}
+              setDossieAlvo={setDossieAlvo}
               idPath={g.nome}
               buscaAtiva={!!busca.trim()} />
           ))
@@ -340,8 +335,8 @@ function PreenchimentoMetas() {
       </div>
 
       {/* GAVETA DOSSIÊ */}
-      {dossieSku && (
-        <GavetaDossie sku={dossieSku} fechar={() => setDossieSku(null)} />
+      {dossieAlvo && (
+        <GavetaDossie alvo={dossieAlvo} fechar={() => setDossieAlvo(null)} />
       )}
 
       {/* PAINEL DE CADEADOS */}
@@ -354,7 +349,7 @@ function PreenchimentoMetas() {
 
 /* ── NÓ RECURSIVO DA ÁRVORE ──────────────────────────────────────── */
 function NoArvore({ node, razaoCtx, nivel, meses, abertas, toggle, valorCelula, setCelula,
-  bloqueado, edits, setDossieSku, idPath, buscaAtiva }: any) {
+  bloqueado, edits, setDossieAlvo, idPath, buscaAtiva }: any) {
 
   if (node.tipo === 'produto') {
     const razao = razaoCtx || '';
@@ -371,12 +366,8 @@ function NoArvore({ node, razaoCtx, nivel, meses, abertas, toggle, valorCelula, 
           const val    = valorCelula(razao, node.sku, m, cel.meta);
           const editado = `${razao}||${node.sku}||${m}` in edits;
           const fatPrev = val && cel.pmv ? val * cel.pmv : null;
-          const orcPrev = cel.orcamento ?? null;
           return (
             <div key={m} className="text-right">
-              {orcPrev != null && orcPrev > 0 && (
-                <div className="text-[9px] font-bold text-amber-500 pr-2">orç {fmtRs(orcPrev)}</div>
-              )}
               <div className="text-[9px] font-bold text-indigo-400 pr-2 mb-0.5">
                 {fatPrev != null ? fmtRs(fatPrev) : '—'}
               </div>
@@ -389,7 +380,7 @@ function NoArvore({ node, razaoCtx, nivel, meses, abertas, toggle, valorCelula, 
             </div>
           );
         })}
-        <button onClick={() => setDossieSku(node.sku)}
+        <button onClick={() => setDossieAlvo({ sku: node.sku, razao, descricao: node.descricao })}
           className="justify-self-center p-1.5 rounded-lg text-slate-300 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
           title="Ver dossiê do SKU">
           <LineIcon className="w-4 h-4" />
@@ -457,7 +448,7 @@ function NoArvore({ node, razaoCtx, nivel, meses, abertas, toggle, valorCelula, 
           meses={meses} abertas={abertas} toggle={toggle}
           valorCelula={valorCelula} setCelula={setCelula}
           bloqueado={bloqueado} edits={edits}
-          setDossieSku={setDossieSku}
+          setDossieAlvo={setDossieAlvo}
           idPath={`${idPath}>${f.nome || f.sku}`}
           buscaAtiva={buscaAtiva} />
       ))}
@@ -466,7 +457,7 @@ function NoArvore({ node, razaoCtx, nivel, meses, abertas, toggle, valorCelula, 
 }
 
 /* ── GAVETA DE DOSSIÊ (lateral, não inline — árvore já é densa) ──── */
-function GavetaDossie({ sku, fechar }: { sku: string; fechar: () => void }) {
+function GavetaDossie({ alvo, fechar }: { alvo: {sku: string; razao: string; descricao: string}; fechar: () => void }) {
   return (
     <>
       <div className="fixed inset-0 bg-slate-900/20 z-30" onClick={fechar} />
@@ -474,8 +465,10 @@ function GavetaDossie({ sku, fechar }: { sku: string; fechar: () => void }) {
         <DossieInferior
           prefixoApi="/api/v1/carteira"
           tipo="sku"
-          id={sku}
-          titulo={sku}
+          id={alvo.sku}
+          titulo={alvo.descricao || alvo.sku}
+          subtitulo={`${alvo.sku} · ${alvo.razao}`}
+          paramsExtra={{ razao_social: alvo.razao }}
           onFechar={fechar}
         />
       </div>

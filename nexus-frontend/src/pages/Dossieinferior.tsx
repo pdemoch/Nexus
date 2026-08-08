@@ -38,7 +38,7 @@ const tendIcon = (t: string) =>
   t === 'DECLINIO' ? <TrendingDown className="w-4 h-4 text-rose-600" /> :
   <Minus className="w-4 h-4 text-slate-400" />;
 
-export default function DossieInferior({ prefixoApi, tipo, id, titulo, onFechar }: any) {
+export default function DossieInferior({ prefixoApi, tipo, id, titulo, onFechar, paramsExtra, subtitulo }: any) {
   const [d, setD] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
@@ -48,11 +48,17 @@ export default function DossieInferior({ prefixoApi, tipo, id, titulo, onFechar 
     const param = tipo === 'categoria'
       ? `categoria=${encodeURIComponent(id)}`
       : `sku=${encodeURIComponent(id)}`;
-    axios.get(`${prefixoApi}/${rota}?${param}`)
+    // paramsExtra permite escopo adicional (ex.: razao_social na tela de Metas)
+    const extra = paramsExtra
+      ? '&' + Object.entries(paramsExtra)
+          .filter(([, v]) => v != null && v !== '')
+          .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`).join('&')
+      : '';
+    axios.get(`${prefixoApi}/${rota}?${param}${extra}`)
       .then((r) => setD(r.data))
       .catch(() => setD(null))
       .finally(() => setLoading(false));
-  }, [prefixoApi, tipo, id]);
+  }, [prefixoApi, tipo, id, JSON.stringify(paramsExtra || {})]);
 
   // Só caixas — o planejador decide volume, o valor é derivado.
   const dadosGrafico = (d?.serie || []).map((x: any) => ({
@@ -77,6 +83,7 @@ export default function DossieInferior({ prefixoApi, tipo, id, titulo, onFechar 
             {tipo === 'categoria' ? 'Dossiê da categoria' : 'Dossiê do SKU'}
           </div>
           <div className="text-sm font-black text-slate-900 truncate">{titulo || id}</div>
+          {subtitulo && <div className="text-[10px] font-bold text-slate-400 truncate">{subtitulo}</div>}
         </div>
         <button onClick={onFechar} className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-200 shrink-0">
           <X className="w-4 h-4" />

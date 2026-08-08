@@ -291,7 +291,7 @@ def _classificar_tendencia(valores_por_ano: list) -> str:
     return "MATURIDADE"
 
 
-def comparativo_plurianual(db: Session, sku: str, mes_referencia=None,
+def comparativo_plurianual(db: Session, sku: str, mes_referencia=None, razao_social=None,
                            exigir_no_plano: bool = True,
                            ciclo_ativo: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -307,6 +307,12 @@ def comparativo_plurianual(db: Session, sku: str, mes_referencia=None,
     mes_referencia: se dado, também devolve o MES-EQUIVALENTE (ex.: junho de
     cada ano) para a sazonalidade não se perder na média anual.
     """
+    # Escopo por cliente (tela de Metas): a trajetoria plurianual passa a ser
+    # a daquele SKU naquela razao social, nao o total da empresa.
+    _fpl = ("AND v.cgc = ANY(SELECT cgc FROM dim_clientes "
+            "WHERE TRIM(razaosocial) = TRIM(:rz))") if razao_social else ""
+    _ppl = {"rz": razao_social} if razao_social else {}
+
     # Guarda: o SKU está no plano do ciclo ativo?
     no_plano = True
     if exigir_no_plano and ciclo_ativo:
@@ -333,9 +339,10 @@ def comparativo_plurianual(db: Session, sku: str, mes_referencia=None,
         LEFT JOIN dim_clientes c ON c.cgc = v.cgc
         WHERE v.sku = :sku
           AND EXTRACT(DOY FROM v.data_pedido) <= :doy_corte
+          """ + _fpl + """
         GROUP BY EXTRACT(YEAR FROM v.data_pedido)
         ORDER BY ano
-    """), {"sku": sku, "doy_corte": doy_corte}).fetchall()
+    """), {"sku": sku, "doy_corte": doy_corte, **_ppl}).fetchall()
 
     anos = []
     for r in linhas:
@@ -380,9 +387,10 @@ def comparativo_plurianual(db: Session, sku: str, mes_referencia=None,
                    COALESCE(SUM(v.vl_pedido), 0) AS vendido_rs
             FROM fato_vendas v
             WHERE v.sku = :sku AND EXTRACT(MONTH FROM v.data_pedido) = :m
+            """ + _fpl + """
             GROUP BY EXTRACT(YEAR FROM v.data_pedido)
             ORDER BY ano
-        """), {"sku": sku, "m": m}).fetchall()
+        """), {"sku": sku, "m": m, **_ppl}).fetchall()
         for r in linhas_m:
             vcx = float(r.vendido_cx or 0)
             vrs = float(r.vendido_rs or 0)
@@ -417,7 +425,8 @@ def comparativo_plurianual(db: Session, sku: str, mes_referencia=None,
 # =====================================================================
 # BLOCO FVA — humano vs IA vs naive, no grão (o loop de aprendizado)
 # =====================================================================
-def fva_sku_janela(db: Session, sku: str, n_meses: int = 3) -> Dict[str, Any]:
+def fva_sku_janela(db: Session, sku: str, n_meses: int = 3,
+                   razao_social: str = None) -> Dict[str, Any]:
     """
     Versão acumulada do FVA: avalia os últimos N meses FECHADOS com dado real
     (M-2 legítimo, piso = junho/2026). Agrega volume por ciclo-fonte de cada
@@ -430,6 +439,15 @@ def fva_sku_janela(db: Session, sku: str, n_meses: int = 3) -> Dict[str, Any]:
     hoje = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
     mes_atual = hoje.replace(day=1)
     piso_forecast = CICLO_PISO + relativedelta(months=DEFASAGEM_MESES)  # 06/2026
+
+    # Escopo por cliente (Metas): avalia acuracia so naquela razao social
+    cgcs = None
+    if razao_social:
+        cgcs = [r[0] for r in db.execute(text(
+            "SELECT cgc FROM dim_clientes WHERE TRIM(razaosocial) = TRIM(:rz)"
+        ), {"rz": razao_social}).fetchall()] or ["__SEM_CLIENTE__"]
+    f_cli = "AND cgc = ANY(:cgcs)" if cgcs else ""
+    p_cli = {"cgcs": cgcs} if cgcs else {}
 
     meses_avaliar = []
     for i in range(1, n_meses + 1):
@@ -454,13 +472,15 @@ def fva_sku_janela(db: Session, sku: str, n_meses: int = 3) -> Dict[str, Any]:
                    COALESCE(SUM(vol_ia), 0)    AS ia_cx
             FROM fato_ibp_granular
             WHERE sku = :sku AND ciclo_sop = :ciclo AND mes_projetado = :mes
-        """), {"sku": sku, "ciclo": ciclo, "mes": mes_d}).fetchone()
+            """ + f_cli + """
+        """), {"sku": sku, "ciclo": ciclo, "mes": mes_d, **p_cli}).fetchone()
 
         vendido = db.execute(text("""
             SELECT COALESCE(SUM(qt_pedido), 0)
             FROM fato_vendas
             WHERE sku = :sku AND TO_CHAR(data_pedido, 'YYYY-MM') = :ym
-        """), {"sku": sku, "ym": mes_d.strftime("%Y-%m")}).scalar()
+            """ + f_cli + """
+        """), {"sku": sku, "ym": mes_d.strftime("%Y-%m"), **p_cli}).scalar()
 
         h_cx = float(plano.humano_cx or 0)
         i_cx = float(plano.ia_cx or 0)
@@ -634,7 +654,8 @@ def fva_sku_janela(db: Session, sku: str, n_meses: int = 3) -> Dict[str, Any]:
 # TESTE MANUAL — roda contra um SKU conhecido
 # =====================================================================
 def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
-                 coluna_meta: str = "vol_final") -> Dict[str, Any]:
+                 coluna_meta: str = "vol_final",
+                 razao_social: str = None) -> Dict[str, Any]:
     """
     Série unificada do gráfico do dossiê.
 
@@ -651,6 +672,22 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
     hoje = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
     mes_atual = hoje.replace(day=1)
 
+    # ESCOPO POR CLIENTE — quando razao_social vem preenchida (tela de Metas),
+    # todo o dossie passa a enxergar SOMENTE aquele SKU naquela razao social.
+    # Como uma razao social agrega varios CNPJs (ex.: Atacadao S.A. com 10 lojas),
+    # o filtro busca todos os CNPJs dela e restringe as queries a esse conjunto.
+    cgcs = None
+    if razao_social:
+        cgcs = [r[0] for r in db.execute(text("""
+            SELECT cgc FROM dim_clientes WHERE TRIM(razaosocial) = TRIM(:rz)
+        """), {"rz": razao_social}).fetchall()]
+        if not cgcs:
+            cgcs = ["__SEM_CLIENTE__"]   # falha fechada: nao vaza total da empresa
+
+    f_vendas = "AND cgc = ANY(:cgcs)" if cgcs else ""
+    f_ibp    = "AND cgc = ANY(:cgcs)" if cgcs else ""
+    p_cgc    = {"cgcs": cgcs} if cgcs else {}
+
     # 1) Realizado — 24 meses (vendido/faturado).
     realizado = db.execute(text("""
         SELECT TO_CHAR(data_pedido,'YYYY-MM-01') AS mes,
@@ -658,8 +695,9 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
                SUM(vl_pedido) AS vendido_rs, SUM(vlfatura) AS faturado_rs
         FROM fato_vendas
         WHERE sku = :sku AND data_pedido >= (CURRENT_DATE - INTERVAL '24 months')
+        """ + f_vendas + """
         GROUP BY 1
-    """), {"sku": sku}).fetchall()
+    """), {"sku": sku, **p_cgc}).fetchall()
 
     mapa: Dict[str, Any] = {}
     def _novo(mes_key):
@@ -702,8 +740,9 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
                SUM(vol_topdown * pmv_aplicado) AS topdown_rs
         FROM fato_ibp_granular
         WHERE sku = :sku
+        """ + f_ibp + """
         GROUP BY ciclo_sop, mes_projetado
-    """), {"sku": sku}).fetchall()
+    """), {"sku": sku, **p_cgc}).fetchall()
     prev_idx = {(p.ciclo_sop, p.mes): p for p in prev_rows}
 
     def _meta_cx(p: any, coluna: str) -> int:
@@ -793,8 +832,9 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
                SUM(qt_pedido) AS cx, SUM(vl_pedido) AS rs
         FROM fato_vendas
         WHERE sku = :sku AND data_pedido >= (CURRENT_DATE - INTERVAL '36 months')
+        """ + f_vendas + """
         GROUP BY 1
-    """), {"sku": sku}).fetchall()
+    """), {"sku": sku, **p_cgc}).fetchall()
     ant_idx = {a.mes: a for a in ant_rows}
     for key, linha in mapa.items():
         md = datetime.datetime.strptime(key, "%Y-%m-%d").date()
@@ -839,7 +879,8 @@ def _pct(x):
 
 def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
                   descricao: str = None,
-                  coluna_meta: str = "vol_final") -> Dict[str, Any]:
+                  coluna_meta: str = "vol_final",
+                  razao_social: str = None) -> Dict[str, Any]:
     """
     Empacota o dossie COMPLETO de um SKU: serie do grafico + plurianual + FVA +
     comparacoes do mes-foco + insights em texto. Consumido pelos 5 routers.
@@ -851,15 +892,15 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
       - Consenso / default → 'vol_final'
     """
     serie = serie_dossie(db, sku, ciclo_ativo, meses_futuros=meses_janela,
-                         coluna_meta=coluna_meta)
+                         coluna_meta=coluna_meta, razao_social=razao_social)
     hoje = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
     mes_fechado = (hoje.replace(day=1) - relativedelta(months=1))
 
     plur = comparativo_plurianual(db, sku, mes_referencia=mes_fechado.strftime("%Y-%m-%d"),
-                                  ciclo_ativo=ciclo_ativo)
+                                  razao_social=razao_social, ciclo_ativo=ciclo_ativo)
     # FVA acumulado: últimos 3 meses fechados (piso junho/2026).
     # Agrega humano vs IA no total do período — mais robusto que avaliar 1 mês.
-    fva = fva_sku_janela(db, sku, n_meses=3)
+    fva = fva_sku_janela(db, sku, n_meses=3, razao_social=razao_social)
 
     ciclo_ant = get_previous_cycle_str(ciclo_ativo)
 
@@ -868,6 +909,15 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
     # coluna_meta decide qual volume usar como "Meta" (vol_topdown na Marketing,
     # vol_bottomup no Gerenciamento, vol_supply no Supply, vol_final default).
     col_sql = coluna_meta  # ex: 'vol_topdown'
+
+    # Escopo por cliente nas comparacoes (tela de Metas)
+    _cgcs = None
+    if razao_social:
+        _cgcs = [r[0] for r in db.execute(text(
+            "SELECT cgc FROM dim_clientes WHERE TRIM(razaosocial) = TRIM(:rz)"
+        ), {"rz": razao_social}).fetchall()] or ["__SEM_CLIENTE__"]
+    _fc = "AND cgc = ANY(:cgcs)" if _cgcs else ""
+    _pc = {"cgcs": _cgcs} if _cgcs else {}
 
     comparacoes_por_mes = []
     insights = []
@@ -878,9 +928,12 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
                    COALESCE(SUM({col_sql} * pmv_aplicado),0) AS rs
             FROM fato_ibp_granular
             WHERE sku=:s AND ciclo_sop=:c AND mes_projetado=:m
-        """), {"s": sku, "c": ciclo_ativo, "m": mes_foco}).fetchone()
+            """ + _fc + """
+        """), {"s": sku, "c": ciclo_ativo, "m": mes_foco, **_pc}).fetchone()
 
-        orc = db.execute(text("""
+        # Orcamento e corporativo (nao existe por cliente). No dossie de Metas,
+        # que e por razao social, ele nao se aplica — fica zerado.
+        orc = 0 if razao_social else db.execute(text("""
             SELECT COALESCE(SUM(receita_orcamento),0) FROM fato_orcamento
             WHERE sku=:s AND mes_projetado=:m
         """), {"s": sku, "m": mes_foco}).scalar()
@@ -890,14 +943,16 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
                    COALESCE(SUM(vol_final * pmv_aplicado),0) AS rs
             FROM fato_ibp_granular
             WHERE sku=:s AND ciclo_sop=:ca AND mes_projetado=:m
-        """), {"s": sku, "ca": ciclo_ant, "m": mes_foco}).fetchone()
+            """ + _fc + """
+        """), {"s": sku, "ca": ciclo_ant, "m": mes_foco, **_pc}).fetchone()
 
         mes_ano_ant = (mes_foco - relativedelta(years=1)).strftime("%Y-%m")
         aant = db.execute(text("""
             SELECT COALESCE(SUM(qt_pedido),0) AS cx, COALESCE(SUM(vl_pedido),0) AS rs
             FROM fato_vendas
             WHERE sku=:s AND TO_CHAR(data_pedido,'YYYY-MM')=:ym
-        """), {"s": sku, "ym": mes_ano_ant}).fetchone()
+            """ + _fc + """
+        """), {"s": sku, "ym": mes_ano_ant, **_pc}).fetchone()
 
         plano_cx = int(plano.cx or 0)
         plano_rs = float(plano.rs or 0)

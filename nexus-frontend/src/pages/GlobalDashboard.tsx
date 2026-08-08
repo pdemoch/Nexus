@@ -79,7 +79,8 @@ function ConsolidacaoFinal() {
   const meses: string[] = dados?.meses || [];
   const publicado: boolean = dados?.publicado;
   const aguardandoUpstream: boolean = dados?.aguardando_upstream;
-  const bloqueado: boolean = publicado || aguardandoUpstream;
+  const podeEditar: boolean = dados?.pode_editar ?? false;
+  const bloqueado: boolean = publicado || aguardandoUpstream || !podeEditar;
   const fin = visao === 'financeiro';
 
   const valorCelula = (sku: string, mes: string, original: number) => {
@@ -151,6 +152,7 @@ function ConsolidacaoFinal() {
               Ciclo {dados?.ciclo} · consolide e publique o número oficial
               {aguardandoUpstream && <span className="ml-2 text-orange-500 font-bold">· aguardando Supply Review congelar</span>}
               {!aguardandoUpstream && publicado && <span className="ml-2 text-emerald-600 font-bold">· publicado</span>}
+              {!podeEditar && <span className="ml-2 text-slate-400 font-bold">· somente leitura</span>}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -223,6 +225,16 @@ function ConsolidacaoFinal() {
           <div>
             <div className="text-xs font-black text-orange-700">Consolidação bloqueada</div>
             <div className="text-[11px] font-medium text-orange-600">Supply Review ainda não congelou o plano deste ciclo. Os números ficam visíveis, mas não editáveis até o bastão ser passado.</div>
+          </div>
+        </div>
+      )}
+
+      {!podeEditar && !aguardandoUpstream && (
+        <div className="mx-6 mt-4 mb-2 flex items-center gap-3 rounded-xl bg-slate-100 border border-slate-200 px-4 py-3">
+          <div className="w-2 h-2 rounded-full bg-slate-400 shrink-0" />
+          <div>
+            <div className="text-xs font-black text-slate-700">Modo consulta</div>
+            <div className="text-[11px] font-medium text-slate-500">A Demanda Final é decidida pelo C-Level e pelo Administrador. Você pode consultar o plano consolidado e o dossiê de cada SKU.</div>
           </div>
         </div>
       )}
@@ -306,7 +318,7 @@ function ConsolidacaoFinal() {
         })}
       </div>
 
-      {dossieSku && <GavetaDossie sku={dossieSku} publicado={publicado} fechar={() => setDossieSku(null)} recarregar={carregar} />}
+      {dossieSku && <GavetaDossie sku={dossieSku} publicado={bloqueado} fechar={() => setDossieSku(null)} recarregar={carregar} />}
     </div>
   );
 }

@@ -110,9 +110,23 @@ def exigir_acesso_metas(usuario: Dict[str, Any]) -> Dict[str, Any]:
     """
     escopo = escopo_usuario(usuario)
     if not escopo["nivel_ok"]:
+        funcao = escopo.get("funcao") or "(sem função)"
+        if funcao in FUNCOES_COM_ACESSO:
+            # Tem a função certa, mas falta o vínculo no cadastro. Erro
+            # operacional, não de permissão — a mensagem precisa dizer isso,
+            # senão o usuário acha que perdeu acesso.
+            campo = ("gerente_nome" if funcao == NIVEL_GERENTE else "supervisor_nome")
+            raise HTTPException(
+                status_code=403,
+                detail=(f"Seu usuário está como {funcao}, mas o campo '{campo}' "
+                        f"não está preenchido no cadastro. Sem esse vínculo não é "
+                        f"possível identificar sua carteira. Peça ao Administrador "
+                        f"para completar seu cadastro no Painel Admin.")
+            )
         raise HTTPException(
             status_code=403,
-            detail="Acesso restrito à etapa de Metas: apenas Gerente, Coordenador ou Administrador com vínculo válido."
+            detail=(f"A etapa de Metas é restrita a Gerente, Coordenador ou "
+                    f"Administrador. Sua função atual é {funcao}.")
         )
     return escopo
 
