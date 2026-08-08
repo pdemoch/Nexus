@@ -174,7 +174,18 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
       link.remove();
       window.URL.revokeObjectURL(url);
     } catch (e: any) {
-      alert("Erro ao gerar o dataset de IA. Verifique se há histórico de vendas carregado.");
+      // Mostra o erro real do backend — o blob precisa ser lido como texto
+      let detalhe = e?.message || "erro desconhecido";
+      try {
+        if (e?.response?.data instanceof Blob) {
+          const txt = await e.response.data.text();
+          try { detalhe = JSON.parse(txt).detail || txt; } catch { detalhe = txt; }
+        } else if (e?.response?.data?.detail) {
+          detalhe = e.response.data.detail;
+        }
+      } catch {}
+      console.error("Dataset IA:", detalhe);
+      alert("Erro ao gerar o dataset de IA:\n\n" + detalhe);
     } finally { setIsExportingIA(false); }
   };
 

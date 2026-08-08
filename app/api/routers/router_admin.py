@@ -5,6 +5,7 @@ from sqlalchemy import func, text
 import datetime
 import io
 import pandas as pd
+import numpy as np
 from fastapi.responses import StreamingResponse
 
 from app.core.database import get_db
@@ -258,10 +259,16 @@ async def exportar_dataset_ia(db: Session = Depends(get_db),
             LEFT JOIN dim_produtos p ON p.sku = b.sku
             ORDER BY b.sku, b.mes
         """
-        df_serie = pd.read_sql(text(sql_serie), engine)
+        avisos = []
+        try:
+            df_serie = pd.read_sql(text(sql_serie), engine)
+        except Exception as e:
+            df_serie = pd.DataFrame()
+            avisos.append(f"serie_mensal falhou: {e!r}")
 
         # Features derivadas — calculadas aqui para o arquivo já sair pronto
-        if not df_serie.empty:
+        try:
+          if not df_serie.empty:
             df_serie = df_serie.sort_values(["sku", "mes"])
             g = df_serie.groupby("sku")["qt_pedido"]
             df_serie["qt_lag_1"]   = g.shift(1)
@@ -269,11 +276,13 @@ async def exportar_dataset_ia(db: Session = Depends(get_db),
             df_serie["qt_mm_3"]    = g.transform(lambda x: x.shift(1).rolling(3).mean().round(2))
             df_serie["qt_mm_12"]   = g.transform(lambda x: x.shift(1).rolling(12).mean().round(2))
             df_serie["var_vs_mes_ant"] = (
-                (df_serie["qt_pedido"] - df_serie["qt_lag_1"]) / df_serie["qt_lag_1"].replace(0, None)
+                (df_serie["qt_pedido"] - df_serie["qt_lag_1"]) / df_serie["qt_lag_1"].replace(0, np.nan)
             ).round(4)
             df_serie["var_vs_ano_ant"] = (
-                (df_serie["qt_pedido"] - df_serie["qt_lag_12"]) / df_serie["qt_lag_12"].replace(0, None)
+                (df_serie["qt_pedido"] - df_serie["qt_lag_12"]) / df_serie["qt_lag_12"].replace(0, np.nan)
             ).round(4)
+        except Exception as e:
+            avisos.append(f"features da serie_mensal falharam: {e!r}")
 
         # ── 2. FORECAST vs REAL (o gabarito de acurácia) ─────────────
         sql_acc = """
@@ -298,9 +307,14 @@ async def exportar_dataset_ia(db: Session = Depends(get_db),
             GROUP BY f.sku, p.categoria, f.ciclo_sop, f.mes_projetado, r.realizado
             ORDER BY f.sku, f.ciclo_sop, f.mes_projetado
         """
-        df_acc = pd.read_sql(text(sql_acc), engine)
+        try:
+            df_acc = pd.read_sql(text(sql_acc), engine)
+        except Exception as e:
+            df_acc = pd.DataFrame()
+            avisos.append(f"forecast_vs_real falhou: {e!r}")
 
-        if not df_acc.empty:
+        try:
+          if not df_acc.empty:
             # horizonte = distância em meses entre o ciclo de origem e o mês previsto
             def _horizonte(row):
                 try:
@@ -314,8 +328,10 @@ async def exportar_dataset_ia(db: Session = Depends(get_db),
             for col, nome in [("previsto_ia", "erro_ia"), ("plano_final", "erro_humano")]:
                 df_acc[nome] = df_acc[col] - df_acc["realizado"]
                 df_acc[nome + "_abs_pct"] = (
-                    df_acc[nome].abs() / df_acc["realizado"].replace(0, None)
+                    df_acc[nome].abs() / df_acc["realizado"].replace(0, np.nan)
                 ).round(4)
+        except Exception as e:
+            avisos.append(f"metricas de erro falharam: {e!r}")
 
         # ── 3. CADASTRO / PERFIL DO SKU ──────────────────────────────
         sql_cad = """
@@ -342,9 +358,14 @@ async def exportar_dataset_ia(db: Session = Depends(get_db),
             FROM v LEFT JOIN dim_produtos p ON p.sku = v.sku
             ORDER BY v.vl_total DESC
         """
-        df_cad = pd.read_sql(text(sql_cad), engine)
+        try:
+            df_cad = pd.read_sql(text(sql_cad), engine)
+        except Exception as e:
+            df_cad = pd.DataFrame()
+            avisos.append(f"cadastro_sku falhou: {e!r}")
 
-        if not df_cad.empty:
+        try:
+          if not df_cad.empty:
             # Curva ABC por valor pedido acumulado
             df_cad = df_cad.sort_values("vl_total", ascending=False)
             total = df_cad["vl_total"].sum()
@@ -355,16 +376,17 @@ async def exportar_dataset_ia(db: Session = Depends(get_db),
                     acum, bins=[-0.01, 0.8, 0.95, 1.01], labels=["A", "B", "C"]
                 ).astype(str)
             # Intermitência: quantos meses do intervalo de vida ficaram sem venda
-            df_cad["meses_de_vida"] = df_cad.apply(
-                lambda r: max(1, (
-                    datetime.datetime.strptime(r["ultima_venda"], "%Y-%m-%d").date().year * 12
-                    + datetime.datetime.strptime(r["ultima_venda"], "%Y-%m-%d").date().month
-                    - datetime.datetime.strptime(r["primeira_venda"], "%Y-%m-%d").date().year * 12
-                    - datetime.datetime.strptime(r["primeira_venda"], "%Y-%m-%d").date().month + 1
-                )), axis=1)
+            # Meses de vida: usa to_datetime (tolera nulo/formato invalido)
+            _pv = pd.to_datetime(df_cad["primeira_venda"], errors="coerce")
+            _uv = pd.to_datetime(df_cad["ultima_venda"],   errors="coerce")
+            df_cad["meses_de_vida"] = (
+                (_uv.dt.year * 12 + _uv.dt.month) - (_pv.dt.year * 12 + _pv.dt.month) + 1
+            ).fillna(1).clip(lower=1).astype(int)
             df_cad["taxa_intermitencia"] = (
-                1 - df_cad["meses_com_venda"] / df_cad["meses_de_vida"]
+                1 - df_cad["meses_com_venda"] / df_cad["meses_de_vida"].replace(0, np.nan)
             ).round(4)
+        except Exception as e:
+            avisos.append(f"perfil do cadastro_sku falhou: {e!r}")
 
         # ── 4. DICIONÁRIO DE DADOS ───────────────────────────────────
         dicionario = pd.DataFrame([
@@ -391,12 +413,32 @@ async def exportar_dataset_ia(db: Session = Depends(get_db),
         ], columns=["aba", "coluna", "significado"])
 
         # ── Monta o Excel ────────────────────────────────────────────
+        # Se as tres abas vieram vazias, o problema e de dados — avisa claro.
+        if df_serie.empty and df_acc.empty and df_cad.empty:
+            raise HTTPException(
+                404,
+                "Nenhum dado encontrado. Verifique se fato_vendas e fato_ibp_granular "
+                "tem registros. Detalhes: " + ("; ".join(avisos) if avisos else "sem erro tecnico")
+            )
+
+        diagnostico = pd.DataFrame({
+            "item": ["linhas serie_mensal", "linhas forecast_vs_real",
+                     "linhas cadastro_sku", "gerado_em", "avisos"],
+            "valor": [len(df_serie), len(df_acc), len(df_cad),
+                      datetime.datetime.now().strftime("%d/%m/%Y %H:%M"),
+                      "; ".join(avisos) if avisos else "nenhum"],
+        })
+
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df_serie.to_excel(writer, index=False, sheet_name='serie_mensal')
-            df_acc.to_excel(writer, index=False, sheet_name='forecast_vs_real')
-            df_cad.to_excel(writer, index=False, sheet_name='cadastro_sku')
+            (df_serie if not df_serie.empty else pd.DataFrame({"aviso": ["sem dados"]})
+             ).to_excel(writer, index=False, sheet_name='serie_mensal')
+            (df_acc if not df_acc.empty else pd.DataFrame({"aviso": ["sem dados"]})
+             ).to_excel(writer, index=False, sheet_name='forecast_vs_real')
+            (df_cad if not df_cad.empty else pd.DataFrame({"aviso": ["sem dados"]})
+             ).to_excel(writer, index=False, sheet_name='cadastro_sku')
             dicionario.to_excel(writer, index=False, sheet_name='dicionario')
+            diagnostico.to_excel(writer, index=False, sheet_name='diagnostico')
 
         buffer.seek(0)
         hoje = datetime.date.today().strftime("%Y%m%d")
