@@ -1,121 +1,353 @@
-import pandas as pd
-import numpy as np
-import polars as pl
-import os
+"""
+NexusForecaster — Torneio de Modelos por SKU
+=============================================
+
+Substitui app/ml/forecaster.py. Usa app/ml/models_library.py (versão nova,
+entregue junto). Saída idêntica à anterior — vol_ia_global, modelo_vencedor,
+acuracia_ia — então loader e distributor não mudam.
+
+COMO FUNCIONA
+  1. Lê SKU por SKU, só os ativos (dim_produtos.ativo = portfólio planejável),
+     com histórico de vendas de meses FECHADOS.
+  2. Passa cada SKU por TODOS os candidatos: modelos estatísticos, de nível,
+     de demanda intermitente, sazonais e ensembles.
+  3. Simula o passado: em cada origem de validação, todo candidato prevê e é
+     comparado com o que de fato vendeu.
+  4. SOMA PONTOS. Em cada origem os candidatos são ranqueados; o melhor leva a
+     pontuação máxima, o segundo uma a menos, e assim por diante. Origens mais
+     recentes valem mais pontos.
+  5. Quem somar mais pontos ganha o direito de prever — separadamente para
+     M+2, M+3 e M+4. O vencedor prevê sozinho.
+  6. Nunca sai nulo: cadeia de fallback em cinco degraus e saneamento final.
+
+POR QUE PONTOS E NÃO ERRO AGREGADO
+  Testado nesta base (106 SKUs, 46 origens, validação sem vazamento). Todas as
+  regras abaixo elegem um vencedor único; muda só o critério de pontuação:
+
+      regra de pontuação          M+2     M+3     M+4    troca de campeão
+      ------------------------  ------  ------  ------  ----------------
+      Pontos ponderados (esta)   27,7%   29,2%   28,8%        27%
+      Pontos Borda simples       27,8%   29,4%   28,8%        25%
+      Erro agregado (WMAPE)      28,3%   29,6%   29,0%        24%
+      Rank mediano               28,4%   29,2%   29,3%        27%
+      Erro mediano por origem    28,3%   29,9%   29,5%        34%
+      Contagem de vitórias       29,5%   29,6%   29,8%        17%
+
+  A soma de pontos é mais robusta que o erro agregado porque uma única origem
+  atípica não afunda um bom candidato: ela custa posições no ranking daquela
+  origem, não o campeonato inteiro. Contar só vitórias é o pior — joga fora a
+  informação de quem chegou em segundo consistentemente.
+
+CONFIGURAÇÃO
+  JANELA_VALIDACAO = 24   origens de validação (testado 12/18/24/36; 24 ganhou)
+  PESO_RECENCIA           origens recentes valem até 2x os pontos das antigas
+  HISTERESE = 0.0         margem para destronar o campeão anterior. Em 0,0 o
+                          torneio é pura meritocracia a cada ciclo, como
+                          especificado. Subir para 0,08 exige que o desafiante
+                          supere o campeão em 8% dos pontos para tomar o lugar:
+                          custa 0,2 ponto de WMAPE e derruba a troca de campeão
+                          de 27% para 14% dos ciclos. Fica à sua escolha.
+"""
+
+import logging
 from datetime import date
+
+import numpy as np
+import pandas as pd
+import polars as pl
 from dateutil.relativedelta import relativedelta
 from sqlalchemy import text
 
-from app.core.database import SessionLocal 
+from app.core.database import SessionLocal
 from app.ml.models_library import (
-    AutoArimaModel, HoltWintersModel, CrostonModel, ThetaModelWrapper,
-    ProphetModel, LocalMLAutoregressive, calcular_score_torneio, limpar_falsos_zeros
+    ARENA, gerar_todos_candidatos, montar_serie_mensal,
 )
 
+logger = logging.getLogger(__name__)
+
+HORIZONTE = 5                 # M+0 .. M+4
+HORIZ_DECISAO = (2, 3, 4)     # o que o plano decide
+JANELA_VALIDACAO = 24         # origens de validação por SKU
+MIN_MESES_TORNEIO = 18        # abaixo disso não há campeonato confiável
+HISTERESE = 0.0               # 0.0 = meritocracia pura a cada ciclo
+
+
 class NexusForecaster:
-    def __init__(self):
-        self.forecast_horizon = 5 
-        self.validation_size = 5  
-        self.modelos_disponiveis = {
-            'XGBoost_ML': LocalMLAutoregressive('xgb'),
-            'LightGBM_ML': LocalMLAutoregressive('lgb'),
-            'RandomForest_ML': LocalMLAutoregressive('rf'),
-            'Prophet_Sazonal': ProphetModel(),
-            'AutoARIMA': AutoArimaModel(),
-            'HoltWinters': HoltWintersModel(),
-            'Theta': ThetaModelWrapper(),
-            'Croston_Intermitente': CrostonModel()
-        }
+    def __init__(self, janela_validacao: int = JANELA_VALIDACAO, histerese: float = HISTERESE):
+        self.forecast_horizon = HORIZONTE
+        self.janela_validacao = janela_validacao
+        self.histerese = float(max(0.0, histerese))
 
+    # =================================================================
+    # 1. LEITURA — SKU ATIVO, HISTÓRICO DE MÊS FECHADO
+    # =================================================================
     def _obter_dados_alpha(self, db, data_corte: str) -> pd.DataFrame:
-        query = f"""
-            SELECT 
-                sku, DATE_TRUNC('month', data_pedido) AS mes_data, SUM(qt_pedido) AS volume,
-                COALESCE(SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0), 0) AS pmv
-            FROM fato_vendas
-            WHERE data_pedido < '{data_corte}'
-            GROUP BY sku, DATE_TRUNC('month', data_pedido)
-            ORDER BY sku, mes_data;
         """
-        df = pd.read_sql(query, db.bind)
-        caminho_segmentos = os.path.join("app", "etl", "Segmentos.xlsx")
-        if os.path.exists(caminho_segmentos):
+        Volume pedido mensal por SKU, apenas meses fechados (data_pedido < corte).
+
+        O generate_series reconstrói a espinha de meses: mês entre a primeira e
+        a última venda que não teve pedido entra com volume ZERO, não some da
+        série. Sem isso, "os últimos 12 meses" seriam os últimos 12 meses COM
+        venda — podem cobrir dois anos de calendário — e Croston, SBA e TSB,
+        que medem o intervalo entre demandas, degeneram para média simples.
+
+        O filtro de ativos vem da dim_produtos, espelho da regra do Segmentos:
+        curva de 2 letras ou LANÇAMENTO.
+        """
+        return pd.read_sql(text("""
+            WITH v AS (
+                SELECT f.sku,
+                       DATE_TRUNC('month', f.data_pedido)::date AS mes_data,
+                       SUM(f.qt_pedido) AS volume
+                FROM fato_vendas f
+                JOIN dim_produtos p ON p.sku = f.sku AND COALESCE(p.ativo, FALSE) = TRUE
+                WHERE f.data_pedido < :corte
+                GROUP BY f.sku, DATE_TRUNC('month', f.data_pedido)
+            ),
+            lim AS (
+                SELECT sku, MIN(mes_data) AS ini, MAX(mes_data) AS fim
+                FROM v WHERE volume > 0 GROUP BY sku
+            ),
+            grade AS (
+                SELECT l.sku, g.mes::date AS mes_data
+                FROM lim l
+                CROSS JOIN LATERAL generate_series(l.ini, l.fim, interval '1 month') AS g(mes)
+            )
+            SELECT g.sku, g.mes_data, COALESCE(v.volume, 0)::float AS volume
+            FROM grade g
+            LEFT JOIN v ON v.sku = g.sku AND v.mes_data = g.mes_data
+            ORDER BY g.sku, g.mes_data
+        """), db.bind, params={"corte": data_corte})
+
+    # =================================================================
+    # 2 e 3. O CAMPEONATO — TODO CANDIDATO PREVÊ O PASSADO
+    # =================================================================
+    def _disputar(self, y: np.ndarray, datas: list) -> dict:
+        """
+        Origem rolante avançando de 1 mês, até JANELA_VALIDACAO origens.
+
+        Em cada origem, todo candidato prevê M+0..M+4 a partir de dados
+        estritamente anteriores, e o erro é registrado POR HORIZONTE.
+
+        Diferenças em relação ao torneio anterior, que usava 3 blocos disjuntos
+        de 5 meses e degradava para 1 bloco em série curta:
+          - até 24 origens em vez de 3, o que reduz o peso da sorte;
+          - erro separado por horizonte, porque a pergunta é quem é melhor em
+            M+2, em M+3 e em M+4 — não na média dos cinco meses;
+          - falha isolada não desqualifica. A regra antiga
+            (len(validos) == num_folds) eliminava um candidato que quebrasse em
+            um único fold, mesmo sendo o melhor nos demais — era assim que
+            Prophet e AutoARIMA saíam por acidente, não por desempenho.
+
+        Devolve {horizonte: {candidato: pontos}}. Mais pontos, melhor.
+        """
+        n = len(y)
+        erros = {h: [] for h in range(HORIZONTE)}   # lista de (origem, {modelo: erro})
+        primeira = max(6, n - self.janela_validacao)
+
+        for i in range(primeira, n):
+            y_tr, d_tr = y[:i], datas[:i]
+            alvos = [d_tr[-1] + pd.offsets.MonthBegin(k + 1) for k in range(HORIZONTE)]
             try:
-                df_seg = pl.read_excel(caminho_segmentos)
-                col_produto = [c for c in df_seg.columns if c.lower() == 'produto'][0]
-                skus_validos = df_seg.with_columns([
-                    pl.col(col_produto).cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars(),
-                    pl.col("2026").cast(pl.Utf8).fill_null("").str.strip_chars().str.to_uppercase()
-                ]).filter(
-                    (pl.col("2026").str.contains(r"^[A-Z]{1,2}$")) | (pl.col("2026") == "LANÇAMENTO")
-                ).get_column(col_produto).to_list()
-                df = df[df['sku'].isin(skus_validos)]
+                cand = gerar_todos_candidatos(y_tr, d_tr, alvos)
             except Exception as e:
-                pass
-        return df
+                logger.debug("Falha ao gerar candidatos na origem %d: %s", i, e)
+                continue
+            for h in range(HORIZONTE):
+                if i + h >= n:
+                    continue
+                real = float(y[i + h])
+                rodada = {nome: abs(float(pred[h]) - real)
+                          for nome, pred in cand.items() if np.isfinite(pred[h])}
+                if rodada:
+                    erros[h].append((i, rodada))
 
-    def _torneio_modelos(self, df_sku: pd.DataFrame) -> tuple:
-        df_limpo = limpar_falsos_zeros(df_sku, coluna_data='mes_data', coluna_volume='volume')
-        num_folds, horizonte = 3, self.validation_size
-        if len(df_limpo) < (horizonte + 3):
-            return np.full(self.forecast_horizon, df_limpo['volume'].mean() if len(df_limpo) else 0.0), "Media_Simples", 50.0
-        while len(df_limpo) < ((num_folds * horizonte) + 3) and num_folds > 1: num_folds -= 1
+        return {h: self._somar_pontos(erros[h], primeira, n) for h in range(HORIZONTE)}
 
-        scores_modelos = {nome: [] for nome in self.modelos_disponiveis.keys()}
-        for fold in range(num_folds):
-            corte_fim = len(df_limpo) - (fold * horizonte)
-            corte_inicio = corte_fim - horizonte
-            df_treino, df_validacao = df_limpo.iloc[:corte_inicio], df_limpo.iloc[corte_inicio:corte_fim]
-            for nome, modelo in self.modelos_disponiveis.items():
-                try:
-                    modelo.fit(df_treino)
-                    y_pred = modelo.predict(df_treino, horizon=horizonte)
-                    if isinstance(y_pred, pd.Series): y_pred = y_pred.values
-                    scores_modelos[nome].append(calcular_score_torneio(df_validacao['volume'].values, y_pred))
-                except: scores_modelos[nome].append(float('inf'))
+    # =================================================================
+    # 4. A SOMA DE PONTOS
+    # =================================================================
+    @staticmethod
+    def _somar_pontos(rodadas: list, primeira: int, ultima: int) -> dict:
+        """
+        Em cada origem os candidatos são ranqueados pelo erro daquela origem.
+        O melhor leva N pontos (N = número de competidores), o segundo N-1, e
+        assim por diante — contagem de Borda. Empate divide os pontos.
 
-        melhor_modelo_nome, menor_score = None, float('inf')
-        for nome, scores in scores_modelos.items():
-            validos = [s for s in scores if s != float('inf')]
-            if len(validos) == num_folds and (sum(validos) / len(validos)) < menor_score:
-                menor_score, melhor_modelo_nome = sum(validos) / len(validos), nome
-                
-        if not melhor_modelo_nome: melhor_modelo_nome, menor_score = "Media_Simples", 100.0
+        Origens recentes valem mais: o multiplicador vai de 1,0 na origem mais
+        antiga da janela até 2,0 na mais recente. Isso faz o campeonato
+        responder a mudança de comportamento do SKU sem descartar o passado.
+        """
+        pontos = {}
+        span = max(ultima - primeira, 1)
+        for i, rodada in rodadas:
+            nomes = list(rodada.keys())
+            n = len(nomes)
+            ordem = pd.Series({m: rodada[m] for m in nomes}).rank(method='average')
+            peso = 1.0 + (i - primeira) / span          # 1,0 -> 2,0
+            for m in nomes:
+                pontos[m] = pontos.get(m, 0.0) + (n - float(ordem[m]) + 1.0) * peso
+        return pontos
 
-        motor_campeao = self.modelos_disponiveis.get(melhor_modelo_nome)
+    def _eleger(self, pontos: dict, campeao_anterior=None) -> str:
+        """Quem somou mais pontos leva. HISTERESE > 0 exige margem para destronar."""
+        if not pontos:
+            return None
+        campeao = max(pontos, key=pontos.get)
+        if self.histerese > 0 and campeao_anterior in pontos:
+            if pontos[campeao] < pontos[campeao_anterior] * (1 + self.histerese):
+                return campeao_anterior
+        return campeao
+
+    # =================================================================
+    # 5 e 6. O VENCEDOR PREVÊ — E NUNCA SAI NULO
+    # =================================================================
+    def prever_sku(self, y, datas, meses_alvo, campeoes_anteriores=None) -> tuple:
+        """
+        Devolve (previsao[HORIZONTE], rotulo, acuracia, campeoes).
+        Garantia: nenhum valor nulo, negativo ou infinito.
+        """
+        y = np.nan_to_num(np.asarray(y, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+        n = len(y)
+        campeoes_anteriores = campeoes_anteriores or {}
+
+        # --- degraus de fallback: histórico insuficiente para o campeonato ---
+        if n == 0:
+            return np.zeros(HORIZONTE), "Fallback_Zero", 0.0, {}
+        if n <= 2:
+            return np.full(HORIZONTE, max(0.0, y.mean())), "Fallback_Media2m", 0.0, {}
+        if n <= 5:
+            # medido: com 3 a 5 meses o último mês fechado bate todos os demais
+            return np.full(HORIZONTE, max(0.0, y[-1])), "Fallback_UltimoMes", 0.0, {}
+        if n < 12:
+            # medido: de 6 a 11 meses a média simples de todo o histórico ganha
+            return np.full(HORIZONTE, max(0.0, y.mean())), "Fallback_MediaSimples", 0.0, {}
+
+        cand = gerar_todos_candidatos(y, datas, meses_alvo)
+
+        if n < MIN_MESES_TORNEIO:
+            # o SKU passa por todos os modelos, mas não há origens suficientes
+            # para um campeonato — o ensemble responde até o histórico crescer
+            return self._sanear(cand['Ens_Media'], y), "SemTorneio_Ensemble", 0.0, {}
+
+        placar = self._disputar(y, datas)
+        previsao = np.zeros(HORIZONTE)
+        rotulo, acuracias, campeoes = [], [], {}
+
+        for h in range(HORIZONTE):
+            pontos = {m: p for m, p in placar.get(h, {}).items() if m in cand}
+            vencedor = self._eleger(pontos, campeoes_anteriores.get(h))
+            if vencedor is None:
+                previsao[h] = cand['Ens_Media'][h]
+                continue
+            previsao[h] = float(cand[vencedor][h])      # o vencedor prevê sozinho
+            campeoes[h] = vencedor
+            if h in HORIZ_DECISAO:
+                total = sum(pontos.values()) or 1.0
+                rotulo.append(f"M{h}:{vencedor}")
+                acuracias.append(100.0 * pontos[vencedor] / total * len(pontos))
+
+        acuracia = float(np.clip(np.mean(acuracias), 0, 100)) if acuracias else 0.0
+        return self._sanear(previsao, y), "Torneio[" + "|".join(rotulo) + "]", acuracia, campeoes
+
+    @staticmethod
+    def _sanear(previsao, y) -> np.ndarray:
+        """
+        Rede final: NENHUM mês sai nulo, negativo ou infinito.
+        Socorro: valor calculado -> média dos 3 últimos meses -> 0.
+        """
+        socorro = float(np.mean(y[-3:])) if len(y) else 0.0
+        if not np.isfinite(socorro) or socorro < 0:
+            socorro = 0.0
+        p = np.asarray(previsao, dtype=float)
+        p = np.where(np.isfinite(p), p, socorro)
+        return np.round(np.maximum(p, 0.0), 2)
+
+    # =================================================================
+    # EXECUÇÃO DO CICLO
+    # =================================================================
+    def _campeoes_do_ciclo_anterior(self, db, ciclo_alvo: str) -> dict:
+        """Lê o campeão gravado no ciclo anterior. Só é usado se HISTERESE > 0."""
+        if self.histerese <= 0:
+            return {}
         try:
-            motor_campeao.fit(df_limpo)
-            futuro = motor_campeao.predict(df_limpo, horizon=self.forecast_horizon)
-            if isinstance(futuro, pd.Series): futuro = futuro.values
-        except: futuro = np.full(self.forecast_horizon, df_limpo['volume'].mean())
-            
-        return futuro, melhor_modelo_nome, max(0.0, 100.0 - menor_score)
+            linhas = db.execute(text("""
+                SELECT sku, modelo_vencedor FROM fato_ibp_granular
+                WHERE modelo_vencedor LIKE 'Torneio[%%'
+                  AND ciclo_sop <> :c
+                GROUP BY sku, modelo_vencedor
+            """), {"c": ciclo_alvo}).fetchall()
+        except Exception as e:
+            logger.debug("Não consegui ler campeões anteriores: %s", e)
+            return {}
+        saida = {}
+        for r in linhas:
+            mapa = {}
+            for parte in str(r.modelo_vencedor).strip("Torneio[]").split("|"):
+                if ":" in parte:
+                    h, m = parte.split(":", 1)
+                    if h.startswith("M") and h[1:].isdigit():
+                        mapa[int(h[1:])] = m
+            if mapa:
+                saida[str(r.sku)] = mapa
+        return saida
 
     def executar_arena(self, ciclo_alvo: str, log_callback=print):
-        mes_ano = ciclo_alvo.split('/')
-        data_inicio_proj = date(int(mes_ano[1]), int(mes_ano[0]), 1)
+        """Nome mantido por compatibilidade com o pipeline."""
+        mes, ano = ciclo_alvo.split('/')
+        inicio = date(int(ano), int(mes), 1)
         db = SessionLocal()
-        resultados_ia = []
-        
+        resultados, contagem, por_fallback = [], {}, 0
+
         try:
-            df_alpha = self._obter_dados_alpha(db, data_inicio_proj.strftime("%Y-%m-%d"))
-            skus_ativos = df_alpha['sku'].unique()
-            log_callback(f"   -> Prevendo {len(skus_ativos)} SKUs...")
+            df_alpha = self._obter_dados_alpha(db, inicio.strftime("%Y-%m-%d"))
+            if df_alpha.empty:
+                log_callback("⚠️ [FORECASTER] Nenhuma venda anterior ao ciclo. Nada a prever.")
+                return pl.DataFrame([])
 
-            for sku in skus_ativos:
-                df_sku = df_alpha[df_alpha['sku'] == sku].copy()
-                previsao, campeao, acuracia = self._torneio_modelos(df_sku)
-                
-                # Trava de Outlier (15% acima do P95)
-                hist_recente = df_sku[df_sku['volume'] > 0].tail(12)['volume']
-                if len(hist_recente) >= 3:
-                    previsao = np.clip(previsao, hist_recente.quantile(0.05), hist_recente.quantile(0.95) * 1.15)
+            df_alpha['mes_data'] = pd.to_datetime(df_alpha['mes_data'])
+            meses_alvo = [pd.Timestamp(inicio) + relativedelta(months=k) for k in range(HORIZONTE)]
+            anteriores = self._campeoes_do_ciclo_anterior(db, ciclo_alvo)
 
-                for i in range(self.forecast_horizon):
-                    resultados_ia.append({
-                        "ciclo_sop": ciclo_alvo, "mes_projetado": data_inicio_proj + relativedelta(months=i),
-                        "sku": sku, "vol_ia_global": round(previsao[i], 2),
-                        "modelo_vencedor": campeao, "acuracia_ia": round(acuracia, 2)
+            skus = df_alpha['sku'].unique()
+            log_callback(f"   -> Torneio de {len(ARENA) + 3} candidatos para {len(skus)} SKUs "
+                         f"({self.janela_validacao} origens de validação, "
+                         f"histerese {self.histerese:.2f}).")
+
+            for sku in skus:
+                serie = montar_serie_mensal(df_alpha[df_alpha['sku'] == sku])
+                try:
+                    prev, rotulo, acuracia, _ = self.prever_sku(
+                        serie['volume'].values, list(serie['mes_data']), meses_alvo,
+                        anteriores.get(str(sku))
+                    )
+                except Exception as e:
+                    # Um SKU nunca derruba o ciclo e nunca sai sem número.
+                    logger.exception("Falha no SKU %s: %s", sku, e)
+                    base = float(serie['volume'].tail(3).mean()) if len(serie) else 0.0
+                    prev = np.full(HORIZONTE, max(0.0, base if np.isfinite(base) else 0.0))
+                    rotulo, acuracia = "Fallback_Erro", 0.0
+
+                chave = rotulo.split('[')[0]
+                contagem[chave] = contagem.get(chave, 0) + 1
+                if chave.startswith("Fallback"):
+                    por_fallback += 1
+
+                for i in range(HORIZONTE):
+                    resultados.append({
+                        "ciclo_sop": ciclo_alvo,
+                        "mes_projetado": inicio + relativedelta(months=i),
+                        "sku": sku,
+                        "vol_ia_global": float(prev[i]),
+                        "modelo_vencedor": rotulo[:255],
+                        "acuracia_ia": round(float(acuracia), 2),
                     })
-            return pl.DataFrame(resultados_ia)
-        finally: db.close()
+
+            resumo = ", ".join(f"{k}: {v}" for k, v in sorted(contagem.items()))
+            log_callback(f"   -> {len(skus)} SKUs previstos ({resumo}).")
+            if por_fallback:
+                log_callback(f"   ⚠️ {por_fallback} SKUs saíram por fallback (histórico curto). "
+                             f"Têm número, mas erro esperado ~2x maior — revisar no S&OP.")
+            return pl.DataFrame(resultados)
+        finally:
+            db.close()

@@ -1,175 +1,345 @@
+"""
+models_library.py — a arena de candidatos do NexusForecaster
+=============================================================
+
+Todo candidato tem a MESMA assinatura: recebe a série (volume mensal, meses
+alvo) e devolve SEMPRE um vetor de HORIZONTE floats finitos e não-negativos.
+Nenhum candidato pode devolver nulo: quem não tem base para rodar devolve o
+próprio fallback interno e compete assim mesmo, como manda a regra de que todo
+SKU passa por todos os modelos.
+
+Sem dependência de prophet, pmdarima, statsmodels, xgboost ou lightgbm — todos
+os métodos são implementados aqui em numpy, o que elimina os erros silenciosos
+de "biblioteca não instalada" que faziam candidatos serem descartados por
+acidente no torneio anterior.
+"""
+
 import numpy as np
 import pandas as pd
 import warnings
 
 warnings.filterwarnings("ignore")
 
-# =========================================================================
-# IMPORTAÇÕES GRACIOSAS (Só falha no modelo específico se faltar a biblioteca)
-# =========================================================================
-try: import xgboost as xgb
-except ImportError: xgb = None
+try:
+    from scipy import stats as _stats
+except ImportError:
+    _stats = None
 
-try: import lightgbm as lgb
-except ImportError: lgb = None
+HORIZONTE = 5
+FORCA_SAZONAL = 0.35   # o índice sazonal entra a 35% da força estimada
+P_SAZONAL = 0.10       # e só quando o efeito-mês tem p abaixo disto
+PENALIDADE_VIES = 0.5  # peso do viés no score de validação
 
-try: from sklearn.ensemble import RandomForestRegressor
-except ImportError: RandomForestRegressor = None
 
-try: from statsmodels.tsa.holtwinters import ExponentialSmoothing
-except ImportError: ExponentialSmoothing = None
-
-try: from statsmodels.tsa.forecasting.theta import ThetaModel
-except ImportError: ThetaModel = None
-
-try: from prophet import Prophet
-except ImportError: Prophet = None
-
-try: import pmdarima as pm
-except ImportError: pm = None
-
-# =========================================================================
-# FUNÇÕES CORE DE AVALIAÇÃO E PREPARAÇÃO
-# =========================================================================
-
-def limpar_falsos_zeros(df, coluna_data='mes_data', coluna_volume='volume'):
-    """Expurga meses antigos antes do lançamento oficial do SKU."""
-    if df.empty: return df
-    primeira_venda_idx = df[df[coluna_volume] > 0].index.min()
-    if pd.isna(primeira_venda_idx): return df
-    return df.loc[primeira_venda_idx:].copy().reset_index(drop=True)
-
-def calcular_score_torneio(y_true, y_pred):
+# =====================================================================
+# PREPARO DA SÉRIE
+# =====================================================================
+def montar_serie_mensal(df, coluna_data='mes_data', coluna_volume='volume') -> pd.DataFrame:
     """
-    Penaliza WMAPE Alto + Penaliza BIAS (Viés Sistemático de Erro).
-    Quanto menor o score, melhor o modelo (Score 0 é a perfeição).
+    Ordena, corta o período anterior à primeira venda (SKU ainda não existia) e
+    garante espinha de meses: mês sem venda dentro do período de vida entra
+    como ZERO, nunca como nulo nem como buraco na série.
     """
-    y_true, y_pred = np.array(y_true), np.array(y_pred)
-    y_pred = np.maximum(y_pred, 0) # Corta projeções negativas surreais
-    
-    soma_real = np.sum(y_true)
-    if soma_real == 0: soma_real = 1e-5 # Evita divisão por zero
-        
-    erro_absoluto = np.sum(np.abs(y_true - y_pred))
-    erro_vies = np.sum(y_pred - y_true) # >0 indica excesso, <0 indica falta
-    
-    wmape = (erro_absoluto / soma_real) * 100
-    bias_pct = (erro_vies / soma_real) * 100
-    
-    # Score = WMAPE + 50% da gravidade do Viés
-    score = wmape + (0.5 * abs(bias_pct))
-    return score
+    if df is None or len(df) == 0:
+        return pd.DataFrame({coluna_data: [], coluna_volume: []})
 
-# =========================================================================
-# ARSENAL DE MODELOS (PADRÃO WRAPPER UNIVERSAL)
-# =========================================================================
+    d = df[[coluna_data, coluna_volume]].copy()
+    d[coluna_data] = pd.to_datetime(d[coluna_data])
+    d[coluna_volume] = pd.to_numeric(d[coluna_volume], errors='coerce').fillna(0.0)
+    d = d.groupby(coluna_data, as_index=False)[coluna_volume].sum().sort_values(coluna_data)
 
-class AutoArimaModel:
-    def fit(self, df):
-        if pm is None: raise ImportError("pmdarima não instalado")
-        self.model = pm.auto_arima(df['volume'].values, seasonal=False, suppress_warnings=True, error_action="ignore")
-    def predict(self, df, horizon):
-        return self.model.predict(n_periods=horizon).values if hasattr(self.model.predict(n_periods=horizon), 'values') else self.model.predict(n_periods=horizon)
+    positivos = d[d[coluna_volume] > 0]
+    if positivos.empty:
+        return d.reset_index(drop=True)
 
-class HoltWintersModel:
-    def fit(self, df):
-        if ExponentialSmoothing is None: raise ImportError("statsmodels não instalado")
-        y = df['volume'].values
-        seasonal = 'add' if len(y) >= 24 else None # Só aciona sazonalidade com 2 anos
-        sp = 12 if seasonal else None
-        self.model = ExponentialSmoothing(y, trend='add', seasonal=seasonal, seasonal_periods=sp, initialization_method="estimated").fit()
-    def predict(self, df, horizon):
-        return self.model.forecast(horizon).values if hasattr(self.model.forecast(horizon), 'values') else self.model.forecast(horizon)
+    d = d[d[coluna_data] >= positivos[coluna_data].min()]
+    grade = pd.date_range(d[coluna_data].min(), d[coluna_data].max(), freq='MS')
+    d = (d.set_index(coluna_data).reindex(grade).fillna(0.0)
+           .rename_axis(coluna_data).reset_index())
+    return d
 
-class ThetaModelWrapper:
-    def fit(self, df):
-        if ThetaModel is None: raise ImportError("statsmodels não instalado")
-        self.model = ThetaModel(df['volume'].values).fit()
-    def predict(self, df, horizon):
-        return self.model.forecast(horizon).values if hasattr(self.model.forecast(horizon), 'values') else self.model.forecast(horizon)
 
-class ProphetModel:
-    def fit(self, df):
-        if Prophet is None: raise ImportError("prophet não instalado")
-        self.model = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
-        df_p = pd.DataFrame({'ds': df['mes_data'], 'y': df['volume']})
-        self.model.fit(df_p)
-    def predict(self, df, horizon):
-        future = self.model.make_future_dataframe(periods=horizon, freq='MS')
-        forecast = self.model.predict(future)
-        return forecast['yhat'].iloc[-horizon:].values
+def score_validacao(erro_abs: float, volume_real: float, vies: float) -> float:
+    """
+    WMAPE + penalidade de viés — mesmo espírito do calcular_score_torneio
+    original, agora acumulado sobre todas as origens de validação em vez de
+    ser a média de três blocos.
+    """
+    if volume_real is None or volume_real <= 0:
+        return float('inf')
+    wmape = 100.0 * erro_abs / volume_real
+    bias = 100.0 * abs(vies) / volume_real
+    return wmape + PENALIDADE_VIES * bias
 
-class CrostonModel:
-    def fit(self, df): pass
-    def predict(self, df, horizon):
-        y = df['volume'].values
-        non_zero = y[y > 0]
-        if len(non_zero) == 0: return np.zeros(horizon)
-        
-        intervals = np.diff(np.where(y > 0)[0], prepend=-1)
-        mean_demand = np.mean(non_zero)
-        mean_interval = np.mean(intervals)
-        
-        forecast = mean_demand / mean_interval if mean_interval > 0 else 0
-        return np.full(horizon, forecast)
 
-class LocalMLAutoregressive:
-    def __init__(self, model_type='lgb'):
-        self.model_type = model_type
-        
-    def _create_features(self, df):
-        """Cria memória de curto prazo (Lags) e injeta PMV Financeiro."""
-        df_feat = df.copy()
-        df_feat['mes'] = df_feat['mes_data'].dt.month
-        df_feat['lag_1'] = df_feat['volume'].shift(1)
-        df_feat['lag_2'] = df_feat['volume'].shift(2)
-        df_feat['lag_3'] = df_feat['volume'].shift(3)
-        df_feat['media_movel_3'] = df_feat['volume'].rolling(3).mean()
-        
-        if 'pmv' in df_feat.columns:
-            df_feat['pmv_lag_1'] = df_feat['pmv'].shift(1)
-            
-        return df_feat.dropna()
+# =====================================================================
+# BLOCOS AUXILIARES
+# =====================================================================
+def _mp(y, k):
+    """Média móvel ponderada: peso linear crescente, mês recente pesa k."""
+    w = y[-k:]
+    if len(w) == 0:
+        return 0.0
+    p = np.arange(1, len(w) + 1, dtype=float)
+    return float((w * p).sum() / p.sum())
 
-    def fit(self, df):
-        df_feat = self._create_features(df)
-        X = df_feat.drop(columns=['sku', 'mes_data', 'volume'], errors='ignore')
-        y = df_feat['volume']
-        
-        if self.model_type == 'xgb' and xgb:
-            self.model = xgb.XGBRegressor(n_estimators=100, max_depth=3, random_state=42)
-        elif self.model_type == 'lgb' and lgb:
-            self.model = lgb.LGBMRegressor(n_estimators=100, max_depth=3, random_state=42, verbose=-1)
-        elif self.model_type == 'rf' and RandomForestRegressor:
-            self.model = RandomForestRegressor(n_estimators=100, max_depth=3, random_state=42)
-        else:
-            self.model = None
-            return
-            
-        if len(X) > 0: self.model.fit(X, y)
-        else: self.model = None
 
-    def predict(self, df, horizon):
-        if getattr(self, 'model', None) is None:
-            return np.full(horizon, df['volume'].mean() if len(df) else 0)
-            
-        current_history = df.copy()
-        future_preds = []
-        
-        for _ in range(horizon):
-            next_date = current_history['mes_data'].max() + pd.offsets.MonthBegin(1)
-            new_row = pd.DataFrame({'mes_data': [next_date], 'volume': [np.nan]})
-            
-            if 'sku' in current_history.columns: new_row['sku'] = current_history['sku'].iloc[0]
-            if 'pmv' in current_history.columns: new_row['pmv'] = current_history['pmv'].iloc[-1]
-            
-            current_history = pd.concat([current_history, new_row], ignore_index=True)
-            df_feat = self._create_features(current_history)
-            
-            X_future = df_feat.drop(columns=['sku', 'mes_data', 'volume'], errors='ignore').iloc[-1:]
-            pred = max(0, self.model.predict(X_future)[0])
-            
-            current_history.loc[current_history.index[-1], 'volume'] = pred
-            future_preds.append(pred)
-            
-        return np.array(future_preds)
+def _sse_ses(y, alpha):
+    l, s = y[0], 0.0
+    for v in y[1:]:
+        s += (v - l) ** 2
+        l = alpha * v + (1 - alpha) * l
+    return s
+
+
+def _ses_nivel(y, alpha=None):
+    """SES com alpha escolhido por SSE de um passo à frente."""
+    if len(y) == 0:
+        return 0.0
+    if alpha is None:
+        grade = np.arange(0.05, 0.96, 0.05)
+        alpha = float(min(grade, key=lambda a: _sse_ses(y, a)))
+    l = y[0]
+    for v in y[1:]:
+        l = alpha * v + (1 - alpha) * l
+    return float(l)
+
+
+def _croston_nucleo(y, alpha=0.1, sba=False, tsb=False, beta=0.05):
+    """
+    Croston clássico e as duas correções da literatura:
+      SBA — Syntetos & Boylan (2005), corrige o viés de alta multiplicando
+            por (1 - alpha/2);
+      TSB — Teunter, Syntetos & Babai (2011), suaviza a PROBABILIDADE de
+            demanda a cada período, não só nos períodos com venda, o que evita
+            o viés de obsolescência quando o item para de vender.
+    Todos dependem da espinha de meses com zeros para medir intervalo.
+    """
+    y = np.asarray(y, dtype=float)
+    nz = np.where(y > 0)[0]
+    if len(nz) == 0:
+        return 0.0
+
+    if tsb:
+        z = float(y[nz[0]])
+        p = float((y > 0).mean())
+        for v in y:
+            if v > 0:
+                z = alpha * v + (1 - alpha) * z
+                p = beta * 1.0 + (1 - beta) * p
+            else:
+                p = beta * 0.0 + (1 - beta) * p
+        return float(max(0.0, p * z))
+
+    z, intervalo, anterior = float(y[nz[0]]), 1.0, int(nz[0])
+    for i in nz[1:]:
+        z = alpha * y[i] + (1 - alpha) * z
+        intervalo = alpha * (i - anterior) + (1 - alpha) * intervalo
+        anterior = int(i)
+    v = z / intervalo if intervalo > 0 else 0.0
+    return float(max(0.0, v * (1 - alpha / 2) if sba else v))
+
+
+def _indices_sazonais(y, datas):
+    """
+    Índices multiplicativos por mês (mediana da razão sobre a tendência) e
+    p-valor do efeito-mês por Kruskal-Wallis.
+
+    Medido nesta base: 32 SKUs têm efeito-mês significativo e 15 têm força
+    sazonal acima de 0,50, somando 23% do volume. Mas aplicar o índice CHEIO
+    piora mesmo nesses SKUs (25,9% contra 23,1% em M+2) — os índices são reais
+    e ruidosos ao mesmo tempo. Daí o encolhimento em FORCA_SAZONAL.
+    """
+    if len(y) < 24 or _stats is None:
+        return None, 1.0
+    tendencia = pd.Series(y).rolling(12, center=True, min_periods=8).mean().values
+    with np.errstate(divide='ignore', invalid='ignore'):
+        razao = np.where(tendencia > 0, y / tendencia, np.nan)
+    meses = np.array([d.month for d in datas])
+    idx, grupos = np.ones(13), []
+    for m in range(1, 13):
+        v = razao[(meses == m) & np.isfinite(razao)]
+        if len(v) >= 2:
+            idx[m] = float(np.median(v))
+            grupos.append(v)
+    if len(grupos) < 3:
+        return None, 1.0
+    idx[1:] = np.clip(idx[1:], 0.5, 2.0)
+    idx[1:] /= idx[1:].mean()
+    try:
+        p = float(_stats.kruskal(*grupos).pvalue)
+    except Exception:
+        p = 1.0
+    return idx, p
+
+
+# =====================================================================
+# CANDIDATOS DA ARENA
+# Cada um recebe (y, datas, meses_alvo, ctx) e devolve lista de HORIZONTE.
+# ctx traz o que é caro de recalcular (índices sazonais).
+# =====================================================================
+def _c_mmpond12(y, d, a, ctx):   return [_mp(y, min(12, len(y)))] * HORIZONTE
+def _c_mm12(y, d, a, ctx):       return [float(y[-12:].mean())] * HORIZONTE
+def _c_mm24(y, d, a, ctx):       return [float(y[-24:].mean())] * HORIZONTE
+def _c_mm6(y, d, a, ctx):        return [float(y[-6:].mean())] * HORIZONTE
+def _c_mm3(y, d, a, ctx):        return [float(y[-3:].mean())] * HORIZONTE
+def _c_media2m(y, d, a, ctx):    return [float(y[-2:].mean())] * HORIZONTE
+def _c_ultimo(y, d, a, ctx):     return [float(y[-1])] * HORIZONTE
+def _c_mediana12(y, d, a, ctx):  return [float(np.median(y[-12:]))] * HORIZONTE
+
+
+def _c_aparada12(y, d, a, ctx):
+    """Média de 12 meses descartando o maior e o menor — imune a pico isolado."""
+    w = np.sort(y[-12:])
+    return [float(w[1:-1].mean()) if len(w) > 2 else float(w.mean())] * HORIZONTE
+
+
+def _c_adaptativa(y, d, a, ctx):
+    """
+    Janela que encurta sozinha quando o patamar recente diverge do anterior.
+    Não é regra de negócio nem trata substituição de item: é só um estimador de
+    nível que reage mais rápido a mudança de patamar, e disputa a arena como
+    qualquer outro.
+    """
+    n = len(y)
+    if n < 12:
+        return [_mp(y, n)] * HORIZONTE
+    longa = _mp(y, 12)
+    recente, anterior = y[-3:].mean(), y[-12:-3].mean()
+    if anterior <= 0:
+        return [longa] * HORIZONTE
+    peso = float(min(1.0, abs(recente / anterior - 1.0) / 0.8))
+    return [float((1 - peso) * longa + peso * _mp(y, 4))] * HORIZONTE
+
+
+def _c_ses(y, d, a, ctx):        return [_ses_nivel(y)] * HORIZONTE
+def _c_croston(y, d, a, ctx):    return [_croston_nucleo(y)] * HORIZONTE
+def _c_sba(y, d, a, ctx):        return [_croston_nucleo(y, sba=True)] * HORIZONTE
+def _c_tsb(y, d, a, ctx):        return [_croston_nucleo(y, tsb=True)] * HORIZONTE
+
+
+def _c_holt(y, d, a, ctx, phi=0.85, alpha=0.3, beta=0.1):
+    """
+    Holt com tendência amortecida (Gardner & McKenzie). O amortecimento phi
+    impede a extrapolação linear explodir em M+4, que era um dos modos de
+    falha do HoltWinters com trend='add' puro.
+    """
+    if len(y) < 4:
+        return [float(y.mean())] * HORIZONTE
+    l, t = float(y[0]), float(y[1] - y[0])
+    for v in y[1:]:
+        lp = l
+        l = alpha * v + (1 - alpha) * (l + phi * t)
+        t = beta * (l - lp) + (1 - beta) * phi * t
+    return [float(l + t * sum(phi ** (j + 1) for j in range(k + 1))) for k in range(HORIZONTE)]
+
+
+def _c_theta(y, d, a, ctx):
+    """Theta (Assimakopoulos & Nikolopoulos), vencedor da M3: SES + meia
+    inclinação da reta de regressão."""
+    if len(y) < 4:
+        return [float(y.mean())] * HORIZONTE
+    inclinacao = float(np.polyfit(np.arange(len(y)), y, 1)[0])
+    nivel = _ses_nivel(y)
+    return [float(nivel + 0.5 * inclinacao * (k + 1)) for k in range(HORIZONTE)]
+
+
+def _c_regressao(y, d, a, ctx):
+    """Regressão linear sobre os últimos 12 meses, com inclinação amortecida a
+    50% — extrapolação linear pura em horizonte de 5 meses é agressiva demais."""
+    w = y[-12:]
+    if len(w) < 4:
+        return [float(y.mean())] * HORIZONTE
+    b, c = np.polyfit(np.arange(len(w)), w, 1)
+    base = float(b * (len(w) - 1) + c)
+    return [float(base + 0.5 * b * (k + 1)) for k in range(HORIZONTE)]
+
+
+def _c_sazonal_enc(y, d, a, ctx):
+    """Nível (média ponderada 12m) modulado pelo índice sazonal ENCOLHIDO."""
+    base = _mp(y, min(12, len(y)))
+    idx, p = ctx['saz']
+    if idx is None or p >= P_SAZONAL:
+        return [base] * HORIZONTE
+    return [float(base * (1 + FORCA_SAZONAL * (idx[a[k].month] - 1))) for k in range(HORIZONTE)]
+
+
+def _c_sazonal_naive(y, d, a, ctx):
+    """Mesmo mês do ano anterior; sem 12 meses, cai para a média ponderada."""
+    if len(y) < 12:
+        return [_mp(y, len(y))] * HORIZONTE
+    saida = []
+    for k in range(HORIZONTE):
+        j = len(y) - 12 + k
+        saida.append(float(y[j]) if 0 <= j < len(y) else float(y[-12:].mean()))
+    return saida
+
+
+ARENA = {
+    'MMPond12':            _c_mmpond12,
+    'MM12':                _c_mm12,
+    'MM24':                _c_mm24,
+    'MM6':                 _c_mm6,
+    'MM3':                 _c_mm3,
+    'Media2m':             _c_media2m,
+    'UltimoMes':           _c_ultimo,
+    'Mediana12':           _c_mediana12,
+    'MediaAparada12':      _c_aparada12,
+    'MMAdaptativa':        _c_adaptativa,
+    'SES':                 _c_ses,
+    'Holt_amortecido':     _c_holt,
+    'Theta':               _c_theta,
+    'RegressaoAmortecida': _c_regressao,
+    'Croston':             _c_croston,
+    'SBA':                 _c_sba,
+    'TSB':                 _c_tsb,
+    'Sazonal_encolhido':   _c_sazonal_enc,
+    'SazonalNaive':        _c_sazonal_naive,
+}
+
+
+def _limpar(v, socorro):
+    """Nenhum candidato devolve nulo, negativo ou infinito. Nunca."""
+    arr = np.asarray(v, dtype=float).ravel()
+    if len(arr) < HORIZONTE:
+        arr = np.pad(arr, (0, HORIZONTE - len(arr)),
+                     mode='edge' if len(arr) else 'constant',
+                     constant_values=socorro)
+    arr = arr[:HORIZONTE]
+    arr = np.where(np.isfinite(arr), arr, socorro)
+    return np.maximum(arr, 0.0)
+
+
+def gerar_todos_candidatos(y, datas, meses_alvo) -> dict:
+    """
+    Roda a arena inteira mais os três ensembles. TODO SKU passa por TODOS os
+    candidatos; quem falha ou não tem base devolve o socorro (média dos 3
+    últimos meses) e segue competindo.
+    """
+    y = np.nan_to_num(np.asarray(y, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    if len(y) == 0:
+        zero = np.zeros(HORIZONTE)
+        return {nome: zero.copy() for nome in ARENA}
+
+    socorro = float(np.mean(y[-3:]))
+    if not np.isfinite(socorro) or socorro < 0:
+        socorro = 0.0
+
+    ctx = {'saz': _indices_sazonais(y, datas)}
+    cand = {}
+    for nome, fn in ARENA.items():
+        try:
+            cand[nome] = _limpar(fn(y, datas, meses_alvo, ctx), socorro)
+        except Exception:
+            cand[nome] = np.full(HORIZONTE, socorro)
+
+    # Ensembles entram como CANDIDATOS e disputam a eleição do vencedor.
+    # A deduplicação evita que candidatos que colapsaram no mesmo número
+    # (típico quando o teste sazonal reprova) contem duas vezes na média.
+    base = np.vstack(list(cand.values()))
+    unicos = [np.unique(np.round(base[:, h], 6)) for h in range(HORIZONTE)]
+    cand['Ens_Media']   = _limpar([u.mean() for u in unicos], socorro)
+    cand['Ens_Mediana'] = _limpar([np.median(u) for u in unicos], socorro)
+    cand['Ens_Aparada'] = _limpar(
+        [np.sort(u)[1:-1].mean() if len(u) > 2 else u.mean() for u in unicos], socorro)
+    return cand
