@@ -12,6 +12,15 @@ from app.etl.transformer import NexusTransformer
 from app.etl.loader import NexusLoader
 from app.ml.forecaster import NexusForecaster
 
+# =========================================================================
+# JANELA DE RECARGA — ÚNICO PONTO DE VERDADE
+# O loader apaga (DELETE FROM fato_vendas WHERE data_pedido >= data_inicio) e
+# reinsere o que o transformer deixar passar. As duas pontas TÊM que usar esta
+# mesma data, por isso ela é calculada aqui e PASSADA adiante — nunca
+# recalculada dentro do transformer.
+# =========================================================================
+JANELA_MESES = 5
+
 
 def _auditar_pmv_zerado(ciclo_alvo: str, log_callback=print):
     """
@@ -70,9 +79,12 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print):
         # ====================================================================
         log_callback("⏳ [EXTRACT/TRANSFORM] Sincronizando ERP...")
 
-        # Janela deslizante de 3 meses
+        # Janela deslizante — ver JANELA_MESES no topo do arquivo
         data_fim = date.today()
-        data_inicio = (data_fim - relativedelta(months=3)).replace(day=1)
+        data_inicio = (data_fim - relativedelta(months=JANELA_MESES)).replace(day=1)
+        log_callback(f"🗓️ [JANELA] Recarga de {JANELA_MESES} meses: "
+                     f"{data_inicio} até {data_fim}. Tudo a partir de {data_inicio} "
+                     f"será APAGADO da fato_vendas e reinserido do ERP.")
 
         # A. Extração Original
         lf_150, lf_188, df_seg, df_orc = await extrator.extrair_tudo(data_inicio, data_fim)
@@ -81,7 +93,9 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print):
         lf_90 = await extrator.extrair_estoque_90()
 
         # C. Transformações (Camada Silver e Estoque)
-        lf_silver, lf_clientes, df_orc_final = transformer.processar_camada_silver(lf_150, lf_188, df_seg, df_orc)
+        # data_inicio é PASSADA: o transformer não recalcula a janela.
+        lf_silver, lf_clientes, df_orc_final = transformer.processar_camada_silver(
+            lf_150, lf_188, df_seg, df_orc, data_inicio_janela=data_inicio)
         lf_estoque_d0 = transformer.processar_estoque_d0(lf_90)
 
         # D. Cargas no Banco (Se houver dados retornados do cruzamento)
@@ -96,6 +110,16 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print):
             # nunca falhe. O produto nasce da venda; o Segmentos so enriquece.
             loader.executar_carga_produtos(df_silver_coletado, df_seg, log_callback=log_callback)
             loader.executar_carga_clientes(df_clientes_coletado, log_callback=log_callback)
+            # TRAVA DE SEGURANÇA: o DELETE do loader é irreversível. Se a
+            # extração voltou vazia ou quase vazia, abortar é melhor que apagar
+            # 5 meses de venda e reinserir um punhado de linhas.
+            linhas_silver = df_silver_coletado.height
+            if linhas_silver < 1000:
+                raise ValueError(
+                    f"[SEGURANÇA] Só {linhas_silver} linhas de venda vieram do ERP para "
+                    f"uma janela de {JANELA_MESES} meses. Carga abortada para não apagar "
+                    f"a fato_vendas a partir de {data_inicio}. Verifique a API 150."
+                )
             loader.executar_carga_silver(df_silver_coletado, data_inicio, log_callback=log_callback)
             loader.executar_carga_orcamento(df_orc_final, log_callback=log_callback)
 
@@ -146,9 +170,14 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print):
 
         log_callback("\n✅ Pipeline Executado com Sucesso Absoluto!")
 
-    except Exception as e:
-        log_callback(f"❌ [ERRO CRÍTICO] Falha no pipeline: {e}")
-        raise e
+    except BaseException as e:
+        # BaseException e não Exception: pyo3_runtime.PanicException (pânico do
+        # Rust vindo do polars) herda de BaseException justamente para não ser
+        # engolido por except genérico. Com `except Exception`, a falha de schema
+        # da API 188 encerrou o pipeline SEM mensagem no painel — só apareceu a
+        # linha do finally.
+        log_callback(f"❌ [ERRO CRÍTICO] Falha no pipeline: {type(e).__name__}: {e}")
+        raise
     finally:
         # GARANTIA DE DESTRAVAMENTO: o flag global e desligado em QUALQUER
         # caminho de saida — sucesso completo, abort do ciclo existente (return

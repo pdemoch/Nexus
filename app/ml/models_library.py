@@ -275,6 +275,166 @@ def _c_sazonal_naive(y, d, a, ctx):
     return saida
 
 
+
+# =====================================================================
+# AGREGAÇÃO TEMPORAL MÚLTIPLA E OUTROS CANDIDATOS DA LITERATURA RECENTE
+# =====================================================================
+def _theta_vetor(y, h=HORIZONTE):
+    if len(y) < 4:
+        return [float(np.mean(y))] * h
+    inclinacao = float(np.polyfit(np.arange(len(y)), y, 1)[0])
+    nivel = _ses_nivel(y)
+    return [float(nivel + 0.5 * inclinacao * (k + 1)) for k in range(h)]
+
+
+def _agregar(y, m):
+    """Soma a série em blocos contíguos de m meses, alinhando pelo fim."""
+    if len(y) // m < 1:
+        return np.array([])
+    corte = (len(y) // m) * m
+    return y[len(y) - corte:].reshape(-1, m).sum(axis=1)
+
+
+def _c_mapa_theta(y, d, a, ctx):
+    """
+    MAPA — Kourentzes, Petropoulos & Trapero (IJF 2014).
+
+    Agrega a série em blocos de 1, 2, 3, 4 e 6 meses, prevê em cada frequência
+    e desagrega de volta para o mês, combinando os níveis. A lógica: componentes
+    que ficam escondidos no ruído mensal (tendência) aparecem no agregado, e o
+    inverso também vale. Em vez de escolher um nível de agregação — que pode
+    ser o errado — o método repete o processo em vários e combina, o que
+    administra o risco de modelagem e aproveita o ganho conhecido de combinação.
+
+    Neste conjunto de dados MAPA vence 2,1% dos SKUs em M+2. Não melhorou o
+    resultado agregado do torneio, mas ganha onde ganha por mérito.
+    """
+    estimativas = []
+    for m in (1, 2, 3, 4, 6):
+        agg = _agregar(y, m)
+        if len(agg) < 5:
+            continue
+        passos = int(np.ceil((HORIZONTE + 1) / m)) + 1
+        f = np.asarray(_theta_vetor(agg, passos), dtype=float)
+        estimativas.append(np.repeat(f / m, m)[:HORIZONTE])
+    if not estimativas:
+        return [_mp(y, min(12, len(y)))] * HORIZONTE
+    return list(np.mean(np.vstack(estimativas), axis=0))
+
+
+def _c_mapa_ses(y, d, a, ctx):
+    """Mesma ideia do MAPA, com SES como método base em cada nível."""
+    estimativas = []
+    for m in (1, 2, 3, 4, 6):
+        agg = _agregar(y, m)
+        if len(agg) < 5:
+            continue
+        estimativas.append(np.full(HORIZONTE, _ses_nivel(agg) / m))
+    if not estimativas:
+        return [_mp(y, min(12, len(y)))] * HORIZONTE
+    return list(np.mean(np.vstack(estimativas), axis=0))
+
+
+def _c_adida(y, d, a, ctx, bloco=3):
+    """
+    ADIDA — Nikolopoulos, Syntetos, Boylan, Petropoulos & Assimakopoulos (2011).
+    Agrega em blocos até a intermitência desaparecer, prevê o bloco e
+    desagrega. Alternativa a Croston para item de giro lento.
+    """
+    agg = _agregar(y, bloco)
+    if len(agg) < 3:
+        return [_mp(y, min(12, len(y)))] * HORIZONTE
+    return [float(_ses_nivel(agg) / bloco)] * HORIZONTE
+
+
+def _erro_um_passo(y, alpha, beta=None, phi=1.0):
+    """SSE de previsão um passo à frente, usado no critério de informação."""
+    n = len(y)
+    if beta is None:
+        return _sse_ses(y, alpha)
+    l, t, sse = float(y[0]), float(y[1] - y[0]) if n > 1 else 0.0, 0.0
+    for v in y[1:]:
+        sse += (v - (l + phi * t)) ** 2
+        lp = l
+        l = alpha * v + (1 - alpha) * (l + phi * t)
+        t = beta * (l - lp) + (1 - beta) * phi * t
+    return sse
+
+
+def _c_ets_aicc(y, d, a, ctx):
+    """
+    ETS automático por AICc — família de Hyndman & Khandakar, escolhendo entre
+    erro constante (ANN), tendência (AAN) e tendência amortecida (AAdN).
+
+    Diferente de todo o resto da arena: seleciona por PARSIMÔNIA, penalizando
+    parâmetros, não por erro de backtest. É uma segunda opinião de natureza
+    distinta dentro do campeonato.
+    """
+    n = len(y)
+    if n < 8:
+        return [float(np.mean(y))] * HORIZONTE
+
+    melhor = (np.inf, None, None)
+    for alpha in np.arange(0.1, 0.95, 0.1):
+        sse, k = _erro_um_passo(y, alpha), 2
+        aicc = n * np.log(sse / n + 1e-12) + 2 * k + (2 * k * (k + 1)) / max(n - k - 1, 1)
+        if aicc < melhor[0]:
+            melhor = (aicc, 'ANN', (alpha,))
+        for beta in np.arange(0.05, 0.5, 0.1):
+            for phi in (1.0, 0.8, 0.9, 0.98):
+                sse = _erro_um_passo(y, alpha, beta, phi)
+                k = 3 if phi == 1.0 else 4
+                aicc = n * np.log(sse / n + 1e-12) + 2 * k + (2 * k * (k + 1)) / max(n - k - 1, 1)
+                if aicc < melhor[0]:
+                    melhor = (aicc, 'AAN' if phi == 1.0 else 'AAdN', (alpha, beta, phi))
+
+    _, tipo, par = melhor
+    if tipo == 'ANN' or par is None or len(par) < 3:
+        return [_ses_nivel(y, par[0] if par else None)] * HORIZONTE
+    alpha, beta, phi = par
+    l, t = float(y[0]), float(y[1] - y[0])
+    for v in y[1:]:
+        lp = l
+        l = alpha * v + (1 - alpha) * (l + phi * t)
+        t = beta * (l - lp) + (1 - beta) * phi * t
+    return [float(l + t * sum(phi ** (j + 1) for j in range(k + 1))) for k in range(HORIZONTE)]
+
+
+def _c_theil_sen(y, d, a, ctx, janela=18):
+    """
+    Tendência por Theil-Sen: mediana das inclinações entre todos os pares de
+    pontos. Um pico isolado desloca a reta mínimos-quadrados; a mediana o
+    ignora. Inclinação amortecida a 50% porque extrapolar linear em 5 meses é
+    agressivo.
+    """
+    w = y[-janela:]
+    if len(w) < 6:
+        return [float(np.mean(y))] * HORIZONTE
+    n = len(w)
+    idx = np.arange(n)
+    inclinacoes = []
+    for i in range(n - 1):
+        inclinacoes.extend((w[i + 1:] - w[i]) / (idx[i + 1:] - idx[i]))
+    b = float(np.median(inclinacoes))
+    intercepto = float(np.median(w - b * idx))
+    base = b * (n - 1) + intercepto
+    return [float(base + 0.5 * b * (k + 1)) for k in range(HORIZONTE)]
+
+
+def _c_bootstrap(y, d, a, ctx, janela=12, amostras=400):
+    """
+    Mediana da distribuição bootstrap da média dos últimos 12 meses.
+    Estima o centro da distribuição sem supor forma, e a mediana é menos
+    sensível a cauda que a média amostral.
+    """
+    w = y[-janela:]
+    if len(w) < 4:
+        return [float(np.mean(y))] * HORIZONTE
+    rng = np.random.default_rng(42)
+    medias = rng.choice(w, size=(amostras, len(w)), replace=True).mean(axis=1)
+    return [float(np.median(medias))] * HORIZONTE
+
+
 ARENA = {
     'MMPond12':            _c_mmpond12,
     'MM12':                _c_mm12,
@@ -295,6 +455,12 @@ ARENA = {
     'TSB':                 _c_tsb,
     'Sazonal_encolhido':   _c_sazonal_enc,
     'SazonalNaive':        _c_sazonal_naive,
+    'MAPA_Theta':          _c_mapa_theta,
+    'MAPA_SES':            _c_mapa_ses,
+    'ADIDA':               _c_adida,
+    'ETS_AICc':            _c_ets_aicc,
+    'TheilSen':            _c_theil_sen,
+    'Bootstrap':           _c_bootstrap,
 }
 
 

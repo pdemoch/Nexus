@@ -2,19 +2,71 @@ import polars as pl
 from datetime import date
 from dateutil.relativedelta import relativedelta
 
+# Fallback usado APENAS se o pipeline não passar a data. O valor que vale é o
+# do pipeline (app/etl/pipeline.py -> JANELA_MESES).
+JANELA_MESES = 5
+
 class NexusTransformer:
-    def processar_camada_silver(self, lf_150: pl.LazyFrame, lf_188: pl.LazyFrame, df_seg: pl.DataFrame, df_orc: pl.DataFrame):
+    def _carregar_de_para(self) -> pl.DataFrame:
+        """
+        Mapa de SKU origem -> destino, lido da dim_de_para_sku a cada rodada.
+
+        POR QUE ISTO EXISTE NA CARGA E NAO COMO UPDATE AVULSO:
+        executar_carga_silver roda DELETE FROM fato_vendas WHERE data_pedido >= :dt
+        e reinsere o que veio do ERP. A janela e de 3 meses. Um UPDATE manual em
+        fato_vendas seria apagado na proxima rodada, porque o ERP continua
+        mandando o codigo de origem. O mapa precisa ser aplicado TODA VEZ, aqui.
+
+        Incluir um par novo passa a ser um INSERT na tabela, sem deploy.
+        Se a tabela ainda nao existir, devolve vazio e a carga segue como antes.
+        """
+        try:
+            from sqlalchemy import text
+            from app.core.database import SessionLocal
+            with SessionLocal() as db:
+                linhas = db.execute(text("""
+                    SELECT sku_origem, sku_destino, descricao_destino
+                    FROM dim_de_para_sku WHERE ativo
+                """)).fetchall()
+            if not linhas:
+                return pl.DataFrame()
+            return pl.DataFrame({
+                "produto":           [str(r[0]).strip() for r in linhas],
+                "produto_destino":   [str(r[1]).strip() for r in linhas],
+                "descricao_destino": [r[2] for r in linhas],
+            })
+        except Exception as e:
+            print(f"⚠️ [SILVER] dim_de_para_sku indisponível ({e}). Seguindo sem DE-PARA.")
+            return pl.DataFrame()
+
+    def processar_camada_silver(self, lf_150: pl.LazyFrame, lf_188: pl.LazyFrame,
+                                df_seg: pl.DataFrame, df_orc: pl.DataFrame,
+                                data_inicio_janela=None):
         print("\n⚙️ [SILVER] Harmonizando dados (Filtro Cerca-Viva: Janela Móvel)...")
 
         # =========================================================================
         # 🔥 O FILTRO CERCA-VIVA (BARREIRA CONTRA HISTÓRICO ANTIGO)
-        # Calcula a mesma janela do pipeline para garantir que apenas os últimos
-        # 3 meses sejam processados e enviados para o Loader.
+        #
+        # A DATA VEM DO PIPELINE, não é mais recalculada aqui.
+        #
+        # POR QUE: antes esta janela era calculada de forma INDEPENDENTE da do
+        # pipeline, com um segundo `months=3` escrito neste arquivo. O loader
+        # apaga a partir da data do PIPELINE
+        # (DELETE FROM fato_vendas WHERE data_pedido >= :dt) e reinsere só o que
+        # este filtro deixa passar. Se as duas janelas divergirem — por exemplo
+        # pipeline em 5 meses e transformer em 3 — o loader apaga 5 meses e
+        # devolve 3, e DOIS MESES DE VENDA SOMEM SEM AVISO.
+        #
+        # Agora existe um único ponto de cálculo, no pipeline. O fallback abaixo
+        # só cobre chamada isolada em teste.
         # =========================================================================
-        hoje = date.today()
-        data_inicio_janela = (hoje - relativedelta(months=3)).replace(day=1)
+        if data_inicio_janela is None:
+            hoje = date.today()
+            data_inicio_janela = (hoje - relativedelta(months=JANELA_MESES)).replace(day=1)
+            print(f"⚠️ [SILVER] Janela não recebida do pipeline; assumindo {JANELA_MESES} meses.")
         # Converte para string YYYYMMDD para comparar com a coluna 'dtapedido' da 150
         data_inicio_str = data_inicio_janela.strftime("%Y%m%d")
+        print(f"   -> Janela: pedidos a partir de {data_inicio_str}")
 
         # 1. Tratamento da Tabela de Vendas (150)
         lf_vendas = lf_150.filter(
@@ -31,6 +83,36 @@ class NexusTransformer:
         ]).with_columns([
             pl.concat_str([pl.col("cliente"), pl.lit("_"), pl.col("loja")]).alias("cliente_loja")
         ])
+
+        # =========================================================================
+        # 🔁 DE-PARA DE SKU — aplicado AQUI, antes de qualquer agregação.
+        #
+        # Precisa vir antes do group_by(["pedido","produto","cgc"]) lá embaixo:
+        # se o mesmo pedido tiver linha do código origem e do destino, o group_by
+        # SOMA as duas naturalmente numa só. Aplicado depois, sobrariam duas
+        # linhas do mesmo par e a contagem de pedidos dobraria.
+        #
+        # Usa join em vez de replace/map_dict porque a API desses dois muda entre
+        # versões do polars; o join funciona em todas. O coalesce troca o SKU e a
+        # descrição de uma vez: sem trocar a descrição, o executar_carga_produtos
+        # pegaria descricao.first() do agrupamento e renomearia o SKU base na
+        # dim_produtos (ex.: 410014792 viraria "...COPA...").
+        # =========================================================================
+        df_de_para = self._carregar_de_para()
+        if not df_de_para.is_empty():
+            lf_vendas = lf_vendas.join(
+                df_de_para.lazy(), on="produto", how="left"
+            ).with_columns([
+                pl.coalesce([pl.col("produto_destino"), pl.col("produto")]).alias("produto"),
+                pl.coalesce([pl.col("descricao_destino"), pl.col("descricao")]).alias("descricao"),
+            ]).drop(["produto_destino", "descricao_destino"])
+            pares = ", ".join(
+                f"{o}->{d}" for o, d in zip(
+                    df_de_para["produto"].to_list()[:6],
+                    df_de_para["produto_destino"].to_list()[:6])
+            )
+            print(f"🔁 [SILVER] DE-PARA aplicado em {df_de_para.height} SKU(s): {pares}")
+
         
         # --- GARANTIA FINANCEIRA: Adicionando colunas de valores reais com fallback 0 se vier nulo ---
         colunas_disponiveis = lf_vendas.columns
