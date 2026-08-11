@@ -8,33 +8,52 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # 1º ESCUDO: Evita que o GitHub Actions mate o job cedo demais
+    timeout-minutes: 60
+
     steps:
-      - name: Baixar código no robô
+      - name: Baixar código no runner
         uses: actions/checkout@v4
 
-      - name: Empurrar arquivos para a AWS (Substitui o git pull)
-        uses: appleboy/scp-action@master
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ubuntu
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "."
-          target: "~/Nexus"
+      # ── SSH: configura chave e known_hosts ─────────────────────────────────
+      # Não baixa nenhum binário externo — usa o openssh que já vem no runner.
+      - name: Configurar SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # registra a fingerprint do host para não precisar de StrictHostKeyChecking=no
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
 
-      - name: Executar Faxina e Subir o Sistema
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ubuntu
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          command_timeout: 60m  # <--- A MÁGICA ESTÁ AQUI: Dá 60 minutos para o Docker compilar tudo!
-          script: |
+      # ── COPIA arquivos para a EC2 ──────────────────────────────────────────
+      # rsync: só envia o que mudou (mais rápido que scp -r em todo o repo)
+      # --delete remove na EC2 arquivos que foram apagados no repo
+      - name: Enviar código para a AWS
+        run: |
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            --exclude='.git' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='.env' \
+            --exclude='node_modules' \
+            . ubuntu@${{ secrets.EC2_HOST }}:~/Nexus/
+
+      # ── EXECUTA na EC2 ────────────────────────────────────────────────────
+      # ServerAliveInterval evita que a conexão caia em builds longos do Docker.
+      # O script é idêntico ao original.
+      - name: Faxina e subir o sistema
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=120 \
+              ubuntu@${{ secrets.EC2_HOST }} << 'ENDSSH'
+            set -e
             cd ~/Nexus
-            
+
             # Faxina preventiva
             sudo docker builder prune -a -f
             sudo docker image prune -a -f
-            
-            # Sobe o sistema com o código novo recém-copiado
+
+            # Sobe o sistema com o código novo
             sudo docker-compose up -d --build
+          ENDSSH
