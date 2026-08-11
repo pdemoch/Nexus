@@ -1,475 +1,551 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import axios from 'axios';
 import {
-  Activity, TrendingUp, TrendingDown, Target, Bot, HelpCircle,
-  ChevronDown, ChevronRight, Loader2, AlertTriangle, Filter, X, LineChart as LineChartIcon
+  Activity, TrendingUp, TrendingDown, Target, Bot, Sparkles,
+  ArrowUpCircle, ArrowDownCircle, AlertTriangle, CheckCircle2,
+  ChevronDown, ChevronRight, Loader2, Info, Send, Wallet
 } from 'lucide-react';
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ResponsiveContainer, ReferenceLine
+  LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer, ReferenceLine, Cell
 } from 'recharts';
 
-// ============================================================
-// HELPERS
-// ============================================================
-const fmtNum = (v: any, visao: string) => {
+const API = '/api/v1/kpis';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FORMATADORES
+// ═══════════════════════════════════════════════════════════════════════════
+const cx = (v: any) => `${Math.round(Number(v) || 0).toLocaleString('pt-BR')} cx`;
+const rs = (v: any) => {
   const n = Number(v) || 0;
-  if (visao === 'financeiro') return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(n));
-  return Math.round(n).toLocaleString('pt-BR');
+  if (Math.abs(n) >= 1_000_000) return `R$ ${(n / 1_000_000).toFixed(1).replace('.', ',')}M`;
+  if (Math.abs(n) >= 1_000)     return `R$ ${(n / 1_000).toFixed(0)}k`;
+  return `R$ ${n.toFixed(0)}`;
 };
-const fmtPct = (v: any) => `${(Number(v) || 0).toFixed(1)}%`;
-
-const corAcuracia = (a: number) => a >= 0.7 ? 'text-emerald-600' : a >= 0.5 ? 'text-amber-600' : 'text-rose-600';
-
-// Ponto que marca mês parcial (aro vazado tracejado).
-const PontoParcial = (props: any) => {
-  const { cx, cy, payload, stroke } = props;
-  if (cx == null || cy == null) return null;
-  if (payload?.parcial) return <circle cx={cx} cy={cy} r={5} fill="#fff" stroke={stroke} strokeWidth={2} strokeDasharray="2 2" />;
-  return <circle cx={cx} cy={cy} r={4} fill={stroke} />;
+const rsFull = (v: any) =>
+  (Number(v) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 });
+const pct = (v: any, casas = 1) =>
+  v == null ? '—' : `${(Number(v) * 100).toFixed(casas).replace('.', ',')}%`;
+const pctSinal = (v: any) => {
+  if (v == null) return '—';
+  const n = Number(v) * 100;
+  return `${n > 0 ? '+' : ''}${n.toFixed(1).replace('.', ',')}%`;
 };
 
-// ============================================================
-// COMPONENTE PRINCIPAL
-// ============================================================
-export default function AuditoriaArena() {
-  const [visao, setVisao] = useState<'caixas' | 'financeiro'>('caixas');
-  const [mesesDisp, setMesesDisp] = useState<any[]>([]);
-  const [mesesSel, setMesesSel] = useState<string[]>([]);
-  const [serie, setSerie] = useState<any[]>([]);
-  const [totais, setTotais] = useState<any>({});
-  const [loading, setLoading] = useState(false);
-  const [dossie, setDossie] = useState<any>(null); // {tipo:'categoria'|'sku', nome, descricao}
+// ═══════════════════════════════════════════════════════════════════════════
+// ESTILO POR CLASSE DE DIAGNÓSTICO
+// ═══════════════════════════════════════════════════════════════════════════
+const ESTILO: Record<string, any> = {
+  'Superestimando': { cor: '#e11d48', bg: 'bg-rose-50',    txt: 'text-rose-700',    borda: 'border-rose-200',    Icone: ArrowUpCircle },
+  'Subestimando':   { cor: '#2563eb', bg: 'bg-blue-50',    txt: 'text-blue-700',    borda: 'border-blue-200',    Icone: ArrowDownCircle },
+  'Errático':       { cor: '#d97706', bg: 'bg-amber-50',   txt: 'text-amber-700',   borda: 'border-amber-200',   Icone: AlertTriangle },
+  'Atenção':        { cor: '#7c3aed', bg: 'bg-violet-50',  txt: 'text-violet-700',  borda: 'border-violet-200',  Icone: Info },
+  'Sob controle':   { cor: '#059669', bg: 'bg-emerald-50', txt: 'text-emerald-700', borda: 'border-emerald-200', Icone: CheckCircle2 },
+  'Sem base':       { cor: '#64748b', bg: 'bg-slate-50',   txt: 'text-slate-500',   borda: 'border-slate-200',   Icone: Info },
+};
+const est = (c: string) => ESTILO[c] || ESTILO['Sem base'];
 
-  useEffect(() => {
-    axios.get('/api/v1/kpis/meses-auditaveis').then(r => {
-      // Normalizacao defensiva: aceita objeto {mes, ano, num, parcial} ou string.
-      const brutos = r.data.meses || [];
-      const ms = brutos.map((m: any) => typeof m === 'string'
-        ? { mes: m, ano: m.split('/')[1] || '', num: m.split('/')[0] || m, parcial: false }
-        : m);
-      setMesesDisp(ms);
-      setMesesSel(ms.map((m: any) => m.mes));
-    }).catch(() => {});
-  }, []);
+const corWmape = (v: any) => v == null ? '#94a3b8' : v <= 0.20 ? '#059669' : v <= 0.35 ? '#d97706' : '#e11d48';
+const clsWmape = (v: any) => v == null ? 'text-slate-400' : v <= 0.20 ? 'text-emerald-600' : v <= 0.35 ? 'text-amber-600' : 'text-rose-600';
 
-  const params = useMemo(() => {
-    const p = new URLSearchParams();
-    p.append('visao', visao);
-    mesesSel.forEach(m => p.append('meses', m));
-    return p;
-  }, [visao, mesesSel]);
-
-  const carregar = useCallback(async () => {
-    if (mesesSel.length === 0) { setSerie([]); setTotais({}); return; }
-    setLoading(true);
-    try {
-      const [ev, rs] = await Promise.all([
-        axios.get(`/api/v1/kpis/evolucao?${params.toString()}`),
-        axios.get(`/api/v1/kpis/resumo?${params.toString()}`),
-      ]);
-      setSerie(ev.data.serie || []);
-      setTotais(rs.data.totais || {});
-    } catch { setSerie([]); setTotais({}); }
-    finally { setLoading(false); }
-  }, [params, mesesSel]);
-
-  useEffect(() => { carregar(); }, [carregar]);
-
-  const temParcial = serie.some(s => s.parcial);
-
+// ═══════════════════════════════════════════════════════════════════════════
+// CARD DE KPI
+// ═══════════════════════════════════════════════════════════════════════════
+const Card = ({ titulo, valor, sub, cor = '#4f46e5', Icone, ajuda }: any) => {
+  const [ver, setVer] = useState(false);
   return (
-    <div className="min-h-screen bg-slate-50 p-6 lg:p-8">
-      <div className="max-w-[1500px] mx-auto">
-
-        <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
-          <div>
-            <h1 className="text-2xl font-black text-slate-900 tracking-tight flex items-center gap-2">
-              <Activity className="w-7 h-7 text-indigo-600" /> Desvios · Acurácia do S&OP
-            </h1>
-            <p className="text-sm text-slate-500 font-medium mt-0.5">
-              O plano congelado (2 meses antes) vs o que se realizou dele. IA contra o humano, mês a mês.
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            <SeletorMeses mesesDisp={mesesDisp} mesesSel={mesesSel} setMesesSel={setMesesSel} />
-            <div className="flex items-center bg-white rounded-2xl p-1 shadow-sm border border-slate-100">
-              <button onClick={() => setVisao('caixas')} className={`px-4 py-2 rounded-xl text-xs font-black transition-all ${visao === 'caixas' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400'}`}>Caixas</button>
-              <button onClick={() => setVisao('financeiro')} className={`px-4 py-2 rounded-xl text-xs font-black transition-all ${visao === 'financeiro' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400'}`}>Financeiro</button>
-            </div>
-          </div>
-        </div>
-
-        {/* CARTÕES RESUMO */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-          <CardResumo titulo="Acurácia" valor={fmtPct((totais.acuracia || 0) * 100)}
-            sub={`erro de ${fmtPct((totais.wmape || 0) * 100)}`} tom={(totais.acuracia || 0) >= 0.7 ? 'bom' : (totais.acuracia || 0) >= 0.5 ? 'medio' : 'ruim'}
-            icone={<Target className="w-5 h-5" />} ajuda="Acurácia = 1 − WMAPE. Mede, sobre os totais do plano, quão perto o realizado ficou do previsto." />
-          <CardResumo titulo="Tendência (BIAS)" valor={totais.vies_label || '—'}
-            sub={`viés de ${fmtPct((totais.bias || 0) * 100)}`} tom={Math.abs(totais.bias || 0) < 0.05 ? 'bom' : 'medio'}
-            icone={(totais.bias || 0) > 0 ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}
-            ajuda="BIAS = (previsto − realizado) / realizado. Positivo = prevê demais (infla estoque). Negativo = prevê de menos (rupturas)." />
-          <CardResumo titulo="Valor vs IA (FVA)" valor={(totais.fva || 0) >= 0 ? 'Humano supera' : 'IA supera'}
-            sub={`FVA ${fmtPct((totais.fva || 0) * 100)}`} tom={(totais.fva || 0) >= 0 ? 'bom' : 'ruim'}
-            icone={<Bot className="w-5 h-5" />} ajuda="FVA = erro da IA − erro do humano. Positivo: o ajuste humano melhorou a previsão da máquina." />
-          <CardResumo titulo={visao === 'financeiro' ? 'Realizado (R$)' : 'Realizado (cx)'} valor={fmtNum(totais.realizado, visao)}
-            sub={`previsto: ${fmtNum(totais.previsto_final, visao)}`} tom="neutro" icone={<Activity className="w-5 h-5" />}
-            ajuda="Realizado dos pares que estavam no plano vs o total previsto. O escopo da auditoria é o plano (fato IBP): vendas sem planejamento não entram nesta conta." />
-        </div>
-
-        {temParcial && (
-          <div className="flex items-center gap-2 text-[12px] font-bold text-amber-600 bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 mb-6">
-            <AlertTriangle className="w-4 h-4" /> Meses com aro tracejado ainda estão em andamento — a acurácia é parcial e tende a melhorar até o fechamento.
-          </div>
-        )}
-
-        {loading ? (
-          <div className="p-16 flex items-center justify-center text-slate-400"><Loader2 className="w-6 h-6 animate-spin mr-2" /> Calculando indicadores...</div>
-        ) : (
-          <>
-            {/* OS 4 GRÁFICOS DE LINHA — IA vs HUMANO */}
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
-              <GraficoLinha titulo="WMAPE — erro percentual do plano" subtitulo="Quanto o plano errou vs o que se realizou dele. Menor é melhor."
-                serie={serie} chaves={[{ k: 'wmape', nome: 'Humano (S&OP)', cor: '#6366f1' }, { k: 'wmape_ia', nome: 'Nexus Bot (IA)', cor: '#94a3b8' }]}
-                ajuda="WMAPE = |Σprevisto − Σrealizado| ÷ Σrealizado, sobre os pares planejados. 20% = o plano errou 20 de cada 100 caixas." />
-              <GraficoLinha titulo="Acurácia — o quanto acertou" subtitulo="1 − WMAPE. Maior é melhor."
-                serie={serie} chaves={[{ k: 'acuracia', nome: 'Humano (S&OP)', cor: '#059669' }, { k: 'acuracia_ia', nome: 'Nexus Bot (IA)', cor: '#94a3b8' }]}
-                ajuda="Acurácia = 1 − WMAPE. De cada 100 caixas do escopo planejado, quantas o plano acertou no total." />
-              <GraficoLinha titulo="BIAS — tendência de erro" subtitulo="Acima de zero: prevê demais. Abaixo: prevê de menos."
-                serie={serie} chaves={[{ k: 'bias', nome: 'Humano (S&OP)', cor: '#d97706' }, { k: 'bias_ia', nome: 'Nexus Bot (IA)', cor: '#94a3b8' }]}
-                ajuda="BIAS = (Σprevisto − Σrealizado) ÷ Σrealizado. Viés sistemático: inflar (positivo) ou subestimar (negativo)." zero />
-              <GraficoLinha titulo="FVA — valor que o humano agrega" subtitulo="Acima de zero: o humano bate a IA. Abaixo: a IA seria melhor."
-                serie={serie} chaves={[{ k: 'fva', nome: 'FVA (humano − IA)', cor: '#7c3aed' }]}
-                ajuda="FVA (Forecast Value Added) = erro da IA − erro do humano. Positivo: o ajuste humano melhorou a previsão pura da máquina." zero />
-            </div>
-
-            {/* TABELA DRILL: CATEGORIA -> SKU, com os volumes que comprovam */}
-            <TabelaDrill params={params} visao={visao} abrirDossie={setDossie} />
-
-            <ExplicacaoCalculos />
-          </>
-        )}
-
-        {/* DOSSIÊ (modal com os 4 gráficos do item) */}
-        {dossie && <DossieModal item={dossie} visao={visao} mesesSel={mesesSel} fechar={() => setDossie(null)} />}
-      </div>
-    </div>
-  );
-}
-
-// ============================================================
-// GRÁFICO DE LINHA (IA vs Humano)
-// ============================================================
-function GraficoLinha({ titulo, subtitulo, serie, chaves, ajuda, zero, compacto }: any) {
-  return (
-    <div className={compacto ? '' : 'bg-white rounded-[28px] shadow-sm border border-slate-100 p-6'}>
-      <h3 className={`font-black text-slate-800 tracking-tight ${compacto ? 'text-xs' : 'text-sm'}`}>{titulo}{ajuda && <Explica titulo={titulo} texto={ajuda} />}</h3>
-      {subtitulo && <p className="text-xs text-slate-400 font-medium mb-4">{subtitulo}</p>}
-      <div className={compacto ? 'h-44' : 'h-64'}>
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={serie} margin={{ top: 10, right: 20, left: -10, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
-            <XAxis dataKey="mes" tick={{ fill: '#64748b', fontSize: 11, fontWeight: 700 }} axisLine={false} tickLine={false} />
-            <YAxis tick={{ fill: '#94a3b8', fontSize: 10 }} axisLine={false} tickLine={false} unit="%" />
-            <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12, border: '1px solid #e2e8f0' }} formatter={(v: any) => `${v}%`}
-              labelFormatter={(l: any) => { const p = serie.find((s: any) => s.mes === l); return p?.parcial ? `${l} (parcial)` : l; }} />
-            <Legend wrapperStyle={{ fontSize: 11, fontWeight: 700, paddingTop: 6 }} iconType="circle" />
-            {zero && <ReferenceLine y={0} stroke="#cbd5e1" strokeWidth={1.5} />}
-            {chaves.map((c: any) => (
-              <Line key={c.k} dataKey={c.k} name={c.nome} stroke={c.cor} strokeWidth={c.k.includes('ia') ? 2 : 3}
-                strokeDasharray={c.k.includes('ia') ? '5 5' : undefined}
-                dot={<PontoParcial stroke={c.cor} />} activeDot={{ r: 5 }} />
-            ))}
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
-    </div>
-  );
-}
-
-// ============================================================
-// TABELA DRILL — Categoria expansível -> SKUs
-// ============================================================
-function TabelaDrill({ params, visao, abrirDossie }: any) {
-  const [dados, setDados] = useState<any[]>([]);
-  const [carregando, setCarregando] = useState(false);
-  const [abertas, setAbertas] = useState<Set<string>>(new Set());
-
-  useEffect(() => {
-    setCarregando(true);
-    axios.get(`/api/v1/kpis/tabela?${params.toString()}`)
-      .then(r => setDados(r.data.categorias || []))
-      .catch(() => setDados([]))
-      .finally(() => setCarregando(false));
-  }, [params]);
-
-  const toggle = (cat: string) => {
-    setAbertas(prev => {
-      const n = new Set(prev);
-      n.has(cat) ? n.delete(cat) : n.add(cat);
-      return n;
-    });
-  };
-
-  return (
-    <div className="bg-white rounded-[28px] shadow-sm border border-slate-100 mb-6 overflow-hidden">
-      <div className="px-6 py-4 border-b border-slate-100">
-        <h3 className="text-sm font-black text-slate-800 tracking-tight flex items-center gap-2">
-          <Filter className="w-4 h-4 text-indigo-600" /> Os números que comprovam
-          <Explica titulo="Tabela de comprovação" texto="Volumes lado a lado — realizado, previsto pelo humano, previsto pela IA — por categoria e SKU, no período selecionado. As duas colunas de acurácia mostram quanto o plano publicado acertou e quanto a IA teria acertado sozinha; o triângulo vermelho marca os itens onde a IA seria melhor. Clique na categoria para abrir os SKUs; o botão de gráfico abre o dossiê do item." />
-        </h3>
-      </div>
-
-      {/* Cabeçalho — 3 + 2 + 2 + 2 + 1 + 1 + 1 = 12 */}
-      <div className="grid grid-cols-12 gap-2 px-6 py-2.5 bg-slate-50/60 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-        <div className="col-span-3">Categoria / SKU</div>
-        <div className="col-span-2 text-right">Realizado</div>
-        <div className="col-span-2 text-right">Prev. Humano</div>
-        <div className="col-span-2 text-right">Prev. IA</div>
-        <div className="col-span-1 text-center">Acur. Humano</div>
-        <div className="col-span-1 text-center">Acur. IA</div>
-        <div className="col-span-1 text-center">Dossiê</div>
-      </div>
-
-      {carregando ? (
-        <div className="p-10 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> montando a tabela...</div>
-      ) : dados.length === 0 ? (
-        <div className="p-10 text-center text-slate-400 text-sm font-medium">Sem dados no período.</div>
-      ) : (
-        <div className="divide-y divide-slate-50">
-          {dados.map((cat: any) => {
-            const aberta = abertas.has(cat.nome);
-            const ilusao = (cat.acuracia ?? 0) - (cat.acuracia_fina ?? 0);
-            return (
-              <div key={cat.nome}>
-                {/* LINHA DA CATEGORIA */}
-                <div className="grid grid-cols-12 gap-2 px-6 py-3 items-center hover:bg-slate-50/50 cursor-pointer transition-colors" onClick={() => toggle(cat.nome)}>
-                  <div className="col-span-3 flex items-center gap-2 min-w-0">
-                    {aberta ? <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" /> : <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />}
-                    <span className="font-black text-slate-800 truncate">{cat.nome}</span>
-                    <span className="text-[9px] font-black text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded-md shrink-0">{cat.skus.length} SKU</span>
-                    {ilusao > 0.15 && (
-                      <span
-                        title={`No grão SKU a acurácia é ${fmtPct((cat.acuracia_fina ?? 0) * 100)}. O número da categoria é maior porque erros de SKUs diferentes se cancelam na soma.`}
-                        className="text-[9px] font-black text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded-md shrink-0 cursor-help">
-                        SKU {fmtPct((cat.acuracia_fina ?? 0) * 100)}
-                      </span>
-                    )}
-                  </div>
-                  <div className="col-span-2 text-right font-black text-slate-700">{fmtNum(cat.realizado, visao)}</div>
-                  <div className="col-span-2 text-right font-bold text-indigo-600">{fmtNum(cat.previsto_final, visao)}</div>
-                  <div className="col-span-2 text-right font-bold text-slate-400">{fmtNum(cat.previsto_ia, visao)}</div>
-                  <div className={`col-span-1 text-center font-black ${corAcuracia(cat.acuracia)}`}>{fmtPct(cat.acuracia * 100)}</div>
-                  <div className={`col-span-1 text-center font-black ${corAcuracia(cat.acuracia_ia ?? 0)}`}>
-                    {fmtPct((cat.acuracia_ia ?? 0) * 100)}
-                    {(cat.fva ?? 0) < 0 && (
-                      <span className="ml-1 text-[9px] text-rose-500" title="A IA sozinha teria acertado mais que o plano publicado nesta categoria.">▲</span>
-                    )}
-                  </div>
-                  <div className="col-span-1 text-center">
-                    <button onClick={(e) => { e.stopPropagation(); abrirDossie({ tipo: 'categoria', nome: cat.nome }); }}
-                      className="p-1.5 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors">
-                      <LineChartIcon className="w-4 h-4" />
-                    </button>
-                  </div>
+    <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5 relative">
+      <div className="flex items-start justify-between mb-3">
+        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{titulo}</span>
+        <div className="flex items-center gap-1.5">
+          <Icone className="w-4 h-4" style={{ color: cor }} />
+          {ajuda && (
+            <span className="relative" onMouseEnter={() => setVer(true)} onMouseLeave={() => setVer(false)}>
+              <Info className="w-3.5 h-3.5 text-slate-300 cursor-help" />
+              {ver && (
+                <div className="absolute right-0 top-5 z-50 bg-slate-800 text-white text-[11px] rounded-xl p-3 w-64 shadow-xl leading-relaxed font-normal normal-case tracking-normal">
+                  {ajuda}
                 </div>
-
-                {/* SKUs DA CATEGORIA */}
-                {aberta && cat.skus.map((s: any) => (
-                  <div key={s.nome} className="grid grid-cols-12 gap-2 px-6 py-2 items-center bg-slate-50/40 border-t border-slate-50">
-                    <div className="col-span-3 min-w-0 pl-7">
-                      <div className="font-bold text-slate-700 text-xs truncate">{s.descricao || s.nome}</div>
-                      <div className="text-[10px] font-bold text-slate-400">{s.nome}</div>
-                    </div>
-                    <div className="col-span-2 text-right font-bold text-slate-600 text-xs">{fmtNum(s.realizado, visao)}</div>
-                    <div className="col-span-2 text-right font-bold text-indigo-500 text-xs">{fmtNum(s.previsto_final, visao)}</div>
-                    <div className="col-span-2 text-right font-bold text-slate-400 text-xs">{fmtNum(s.previsto_ia, visao)}</div>
-                    <div className={`col-span-1 text-center font-black text-xs ${corAcuracia(s.acuracia)}`}>{fmtPct(s.acuracia * 100)}</div>
-                    <div className={`col-span-1 text-center font-black text-xs ${corAcuracia(s.acuracia_ia ?? 0)}`}>
-                      {fmtPct((s.acuracia_ia ?? 0) * 100)}
-                      {(s.fva ?? 0) < 0 && (
-                        <span className="ml-1 text-[9px] text-rose-500" title="A IA sozinha teria acertado mais que o plano publicado neste SKU.">▲</span>
-                      )}
-                    </div>
-                    <div className="col-span-1 text-center">
-                      <button onClick={() => abrirDossie({ tipo: 'sku', nome: s.nome, descricao: s.descricao })}
-                        className="p-1.5 rounded-lg bg-slate-100 text-slate-500 hover:bg-indigo-50 hover:text-indigo-600 transition-colors">
-                        <LineChartIcon className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ============================================================
-// DOSSIÊ — modal com os 4 gráficos do item (categoria ou SKU)
-// ============================================================
-function DossieModal({ item, visao, mesesSel, fechar }: any) {
-  const [serie, setSerie] = useState<any[]>([]);
-  const [carregando, setCarregando] = useState(true);
-
-  useEffect(() => {
-    const p = new URLSearchParams();
-    p.append('visao', visao);
-    mesesSel.forEach((m: string) => p.append('meses', m));
-    p.append(item.tipo === 'categoria' ? 'categoria' : 'sku', item.nome);
-    setCarregando(true);
-    axios.get(`/api/v1/kpis/evolucao?${p.toString()}`)
-      .then(r => setSerie(r.data.serie || []))
-      .catch(() => setSerie([]))
-      .finally(() => setCarregando(false));
-  }, [item, visao, mesesSel]);
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={fechar} />
-      <div className="relative bg-white rounded-[28px] shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-auto">
-        <div className="sticky top-0 bg-white border-b border-slate-100 px-6 py-4 flex items-center justify-between rounded-t-[28px]">
-          <div>
-            <div className="text-[10px] font-black text-indigo-500 uppercase tracking-widest">Dossiê · {item.tipo === 'categoria' ? 'Categoria' : 'SKU'}</div>
-            <h3 className="text-lg font-black text-slate-900 tracking-tight">{item.descricao || item.nome}</h3>
-            {item.descricao && <div className="text-[11px] font-bold text-slate-400">{item.nome}</div>}
-          </div>
-          <button onClick={fechar} className="p-2 rounded-xl bg-slate-100 text-slate-500 hover:bg-slate-200"><X className="w-5 h-5" /></button>
-        </div>
-
-        <div className="p-6">
-          {carregando ? (
-            <div className="p-10 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin mr-2" /> montando o dossiê...</div>
-          ) : serie.length === 0 ? (
-            <div className="p-10 text-center text-slate-400 text-sm font-medium">Sem dados planejados para este item no período.</div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <GraficoLinha compacto titulo="WMAPE — erro do plano" serie={serie}
-                chaves={[{ k: 'wmape', nome: 'Humano', cor: '#6366f1' }, { k: 'wmape_ia', nome: 'Nexus Bot', cor: '#94a3b8' }]} />
-              <GraficoLinha compacto titulo="Acurácia" serie={serie}
-                chaves={[{ k: 'acuracia', nome: 'Humano', cor: '#059669' }, { k: 'acuracia_ia', nome: 'Nexus Bot', cor: '#94a3b8' }]} />
-              <GraficoLinha compacto titulo="BIAS — tendência" serie={serie} zero
-                chaves={[{ k: 'bias', nome: 'Humano', cor: '#d97706' }, { k: 'bias_ia', nome: 'Nexus Bot', cor: '#94a3b8' }]} />
-              <GraficoLinha compacto titulo="FVA — humano vs IA" serie={serie} zero
-                chaves={[{ k: 'fva', nome: 'FVA', cor: '#7c3aed' }]} />
-            </div>
+              )}
+            </span>
           )}
         </div>
       </div>
+      <div className="text-[26px] font-black leading-none tracking-tight" style={{ color: cor }}>{valor}</div>
+      {sub && <div className="text-[11px] text-slate-400 font-medium mt-1.5">{sub}</div>}
     </div>
   );
-}
+};
 
-// ============================================================
-// SELETOR DE MESES (ano -> meses, seleção múltipla)
-// ============================================================
-function SeletorMeses({ mesesDisp, mesesSel, setMesesSel }: any) {
-  const [aberto, setAberto] = useState(false);
-  const porAno = useMemo(() => {
-    const g: Record<string, any[]> = {};
-    mesesDisp.forEach((m: any) => { (g[m.ano] = g[m.ano] || []).push(m); });
-    return g;
-  }, [mesesDisp]);
-  const toggle = (mes: string) => setMesesSel(mesesSel.includes(mes) ? mesesSel.filter((x: string) => x !== mes) : [...mesesSel, mes]);
-  const toggleAno = (ano: string) => {
-    const doAno = porAno[ano].map((m: any) => m.mes);
-    const todosSel = doAno.every((m: string) => mesesSel.includes(m));
-    setMesesSel(todosSel ? mesesSel.filter((m: string) => !doAno.includes(m)) : [...new Set([...mesesSel, ...doAno])]);
+// ═══════════════════════════════════════════════════════════════════════════
+// PAINEL DO AGENTE
+// ═══════════════════════════════════════════════════════════════════════════
+const Agente = ({ filtros }: any) => {
+  const [msgs, setMsgs] = useState<any[]>([]);
+  const [txt, setTxt] = useState('');
+  const [carregando, setCarregando] = useState(false);
+  const [sugestoes, setSugestoes] = useState<string[]>([]);
+  const fim = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    axios.get(`${API}/agente/sugestoes`).then(r => setSugestoes(r.data.sugestoes || [])).catch(() => {});
+  }, []);
+  useEffect(() => { fim.current?.scrollIntoView({ behavior: 'smooth' }); }, [msgs, carregando]);
+
+  const perguntar = async (pergunta: string) => {
+    if (!pergunta.trim() || carregando) return;
+    setMsgs(m => [...m, { tipo: 'user', texto: pergunta }]);
+    setTxt(''); setCarregando(true);
+    try {
+      const r = await axios.post(`${API}/agente`, { pergunta, ...filtros });
+      setMsgs(m => [...m, { tipo: 'bot', texto: r.data.resposta, ctx: r.data.contexto }]);
+    } catch (e: any) {
+      setMsgs(m => [...m, { tipo: 'erro', texto: e?.response?.data?.detail || 'Falha ao consultar o agente.' }]);
+    } finally { setCarregando(false); }
   };
+
   return (
-    <div className="relative">
-      <button onClick={() => setAberto(!aberto)} className="flex items-center gap-1.5 px-4 py-2.5 rounded-2xl text-xs font-black bg-white text-slate-600 shadow-sm border border-slate-100 hover:bg-slate-50">
-        {mesesSel.length === 0 ? 'Selecionar meses' : `${mesesSel.length} mês(es)`} <ChevronDown className="w-3.5 h-3.5" />
-      </button>
-      {aberto && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setAberto(false)} />
-          <div className="absolute right-0 z-50 mt-2 w-56 bg-white rounded-2xl shadow-xl border border-slate-100 p-3 max-h-80 overflow-auto">
-            {Object.keys(porAno).sort().map(ano => (
-              <div key={ano} className="mb-2">
-                <button onClick={() => toggleAno(ano)} className="w-full text-left text-[11px] font-black text-slate-700 uppercase tracking-widest py-1 hover:text-indigo-600">{ano}</button>
-                <div className="grid grid-cols-3 gap-1 mt-1">
-                  {porAno[ano].sort((a: any, b: any) => a.num.localeCompare(b.num)).map((m: any) => (
-                    <button key={m.mes} onClick={() => toggle(m.mes)}
-                      className={`text-[11px] font-bold py-1 rounded-lg relative ${mesesSel.includes(m.mes) ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-50 text-slate-400'}`}>
-                      {m.num}{m.parcial && <span className="absolute -top-1 -right-1 w-2 h-2 bg-amber-400 rounded-full" />}
-                    </button>
-                  ))}
-                </div>
-              </div>
+    <div className="flex flex-col h-[560px]">
+      <div className="flex items-center gap-2 pb-3 mb-3 border-b border-slate-100">
+        <Sparkles className="w-4 h-4 text-indigo-500" />
+        <span className="text-xs font-bold text-slate-600">Análise sobre os dados filtrados</span>
+        <span className="ml-auto text-[10px] text-slate-400">
+          Os números vêm dos endpoints; o agente só interpreta
+        </span>
+      </div>
+
+      <div className="flex-1 overflow-y-auto space-y-3 pr-1">
+        {msgs.length === 0 && (
+          <div className="space-y-2">
+            <p className="text-xs text-slate-400 mb-3">Comece por uma destas:</p>
+            {sugestoes.map(s => (
+              <button key={s} onClick={() => perguntar(s)}
+                className="block w-full text-left text-[13px] text-slate-600 bg-slate-50 hover:bg-indigo-50 hover:text-indigo-700 rounded-xl px-4 py-2.5 transition-colors border border-slate-100">
+                {s}
+              </button>
             ))}
           </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-// ============================================================
-// AUXILIARES
-// ============================================================
-function Explica({ titulo, texto }: any) {
-  return (
-    <span className="group relative inline-flex items-center ml-1 align-middle">
-      <HelpCircle className="w-3.5 h-3.5 text-slate-300 hover:text-slate-500 cursor-help" />
-      <span className="invisible group-hover:visible absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-slate-900 text-white text-[11px] leading-relaxed rounded-xl shadow-xl font-medium">
-        <span className="block font-black mb-1 text-indigo-300">{titulo}</span>{texto}
-      </span>
-    </span>
-  );
-}
-
-function CardResumo({ titulo, valor, sub, icone, tom, ajuda }: any) {
-  const tomCor = tom === 'bom' ? 'text-emerald-600' : tom === 'ruim' ? 'text-rose-600' : tom === 'medio' ? 'text-amber-600' : 'text-slate-700';
-  const tomBg = tom === 'bom' ? 'bg-emerald-50' : tom === 'ruim' ? 'bg-rose-50' : tom === 'medio' ? 'bg-amber-50' : 'bg-slate-100';
-  return (
-    <div className="bg-white rounded-[24px] shadow-sm border border-slate-100 p-5">
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{titulo}<Explica titulo={titulo} texto={ajuda} /></span>
-        <div className={`p-2 rounded-xl ${tomBg} ${tomCor}`}>{icone}</div>
-      </div>
-      <div className={`text-2xl font-black tracking-tight ${tomCor}`}>{valor}</div>
-      <div className="text-[11px] font-bold text-slate-400 mt-1">{sub}</div>
-    </div>
-  );
-}
-
-function ExplicacaoCalculos() {
-  const [aberto, setAberto] = useState(false);
-  const metricas = [
-    { n: 'WMAPE', f: '|Σprev − Σreal| ÷ Σreal', t: 'Erro percentual sobre os totais do recorte. Método agregado: soma tudo primeiro, depois a razão. É o erro de dimensionamento — quão perto o plano ficou do que se realizou dele.' },
-    { n: 'Acurácia', f: '1 − WMAPE', t: 'O complemento do erro. De cada 100 caixas do escopo planejado, quantas o plano acertou no total. É a nota-base do desempenho.' },
-    { n: 'BIAS', f: '(Σprev − Σreal) ÷ Σreal', t: 'A tendência sistemática. Positivo: prevê demais (infla estoque, trava capital). Negativo: prevê de menos (rupturas). Perto de zero é saudável.' },
-    { n: 'FVA', f: 'WMAPE da IA − WMAPE do humano', t: 'Forecast Value Added. Mede se o ajuste humano melhorou a previsão pura da máquina (Nexus Bot). Positivo: o humano agregou valor. Negativo: a IA sozinha teria acertado mais.' },
-  ];
-  return (
-    <div className="bg-white rounded-[28px] shadow-sm border border-slate-100 overflow-hidden">
-      <button onClick={() => setAberto(!aberto)} className="w-full flex items-center justify-between px-6 py-4 hover:bg-slate-50/50">
-        <span className="text-sm font-black text-slate-700 flex items-center gap-2"><HelpCircle className="w-4 h-4 text-indigo-600" /> Como os indicadores são calculados</span>
-        {aberto ? <ChevronDown className="w-5 h-5 text-slate-400" /> : <ChevronRight className="w-5 h-5 text-slate-400" />}
-      </button>
-      {aberto && (
-        <div className="px-6 pb-6 grid grid-cols-1 md:grid-cols-2 gap-3">
-          {metricas.map(m => (
-            <div key={m.n} className="bg-slate-50 rounded-2xl p-4 border border-slate-100">
-              <div className="flex items-baseline gap-2 mb-1 flex-wrap">
-                <span className="font-black text-slate-800">{m.n}</span>
-                <code className="text-[11px] font-mono text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded">{m.f}</code>
-              </div>
-              <p className="text-xs text-slate-500 font-medium leading-relaxed">{m.t}</p>
+        )}
+        {msgs.map((m, i) => (
+          <div key={i} className={m.tipo === 'user' ? 'flex justify-end' : ''}>
+            <div className={`rounded-2xl px-4 py-3 text-[13px] leading-relaxed max-w-[85%] whitespace-pre-wrap
+              ${m.tipo === 'user' ? 'bg-indigo-600 text-white'
+                : m.tipo === 'erro' ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                : 'bg-slate-50 text-slate-700 border border-slate-100'}`}>
+              {m.texto}
+              {m.ctx && (
+                <div className="mt-2 pt-2 border-t border-slate-200 text-[10px] text-slate-400">
+                  {m.ctx.skus_analisados} SKUs · {m.ctx.periodo?.inicio} a {m.ctx.periodo?.fim}
+                </div>
+              )}
             </div>
-          ))}
-          <div className="bg-indigo-50 rounded-2xl p-4 border border-indigo-100 md:col-span-2">
-            <p className="text-xs text-indigo-900 font-medium leading-relaxed">
-              <span className="font-black">O escopo é o plano (fato IBP):</span> a auditoria compara o que foi planejado com o que se realizou daquele plano. Vendas que ocorreram sem nenhum planejamento ficam fora destes indicadores — elas permanecem registradas na base de vendas, mas não entram na conta da acurácia.
-              <span className="block mt-1"><span className="font-black">Regra temporal:</span> cada mês é comparado com o plano congelado 2 meses antes (o mês 07 usa o ciclo 05). O mês corrente aparece como parcial até fechar.</span>
+          </div>
+        ))}
+        {carregando && (
+          <div className="flex items-center gap-2 text-slate-400 text-xs px-4">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" /> analisando…
+          </div>
+        )}
+        <div ref={fim} />
+      </div>
+
+      <div className="flex gap-2 pt-3 border-t border-slate-100 mt-3">
+        <input value={txt} onChange={e => setTxt(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && perguntar(txt)}
+          placeholder="Pergunte sobre os indicadores…"
+          className="flex-1 border border-slate-200 rounded-xl px-4 py-2.5 text-[13px] focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300" />
+        <button onClick={() => perguntar(txt)} disabled={carregando || !txt.trim()}
+          className="bg-indigo-600 text-white rounded-xl px-4 disabled:opacity-30 hover:bg-indigo-700 transition-colors">
+          <Send className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TELA
+// ═══════════════════════════════════════════════════════════════════════════
+export default function AuditoriaArena() {
+  const [opts, setOpts] = useState<any>({ bus: [], categorias: [], skus: [] });
+  const [f, setF] = useState<any>({ inicio: '2023-01', fim: '', bu: '', categoria: '', sku: '' });
+  const [resumo, setResumo] = useState<any>({});
+  const [serie, setSerie] = useState<any[]>([]);
+  const [diag, setDiag] = useState<any>({ itens: [], agregados: {} });
+  const [nivel, setNivel] = useState<'sku' | 'categoria'>('sku');
+  const [filtroClasse, setFiltroClasse] = useState<string>('');
+  const [aba, setAba] = useState<'diagnostico' | 'evolucao' | 'agente'>('diagnostico');
+  const [aberto, setAberto] = useState<string | null>(null);
+  const [hist, setHist] = useState<any>(null);
+  const [load, setLoad] = useState(false);
+
+  useEffect(() => {
+    axios.get(`${API}/filtros`).then(r => {
+      setOpts(r.data);
+      setF((p: any) => ({ ...p, fim: r.data.ultimo_mes_fechado }));
+    }).catch(() => {});
+  }, []);
+
+  const qs = useMemo(() => {
+    const p = new URLSearchParams();
+    Object.entries(f).forEach(([k, v]) => { if (v) p.append(k, String(v)); });
+    return p.toString();
+  }, [f]);
+
+  const carregar = useCallback(async () => {
+    if (!f.fim) return;
+    setLoad(true);
+    try {
+      const [r, e, d] = await Promise.all([
+        axios.get(`${API}/resumo?${qs}`),
+        axios.get(`${API}/evolucao?${qs}`),
+        axios.get(`${API}/diagnostico?${qs}&nivel=${nivel}`),
+      ]);
+      setResumo(r.data.totais || {});
+      setSerie(e.data.serie || []);
+      setDiag(d.data || { itens: [], agregados: {} });
+    } catch { setResumo({}); setSerie([]); setDiag({ itens: [], agregados: {} }); }
+    finally { setLoad(false); }
+  }, [qs, nivel, f.fim]);
+
+  useEffect(() => { carregar(); }, [carregar]);
+
+  const abrir = async (chave: string) => {
+    if (aberto === chave) { setAberto(null); return; }
+    setAberto(chave); setHist(null);
+    if (nivel !== 'sku') return;
+    try {
+      const r = await axios.get(`${API}/sku/${chave}/historico?inicio=${f.inicio}&fim=${f.fim}`);
+      setHist(r.data);
+    } catch { setHist(null); }
+  };
+
+  const ag = diag.agregados || {};
+  const itens = filtroClasse ? diag.itens.filter((i: any) => i.classe === filtroClasse) : diag.itens;
+  const temIA = serie.some(s => s.vol_ia != null);
+
+  // top 12 por exposição, para o gráfico de barras
+  const topBarras = useMemo(() =>
+    diag.itens.slice(0, 12).map((i: any) => ({
+      nome: nivel === 'sku' ? i.sku : i.categoria,
+      desc: i.descricao || i.categoria,
+      excesso: i.excesso_rs, falta: -i.falta_rs, classe: i.classe,
+    })), [diag.itens, nivel]);
+
+  return (
+    <div className="min-h-screen bg-slate-50 p-6 lg:p-8">
+      <div className="max-w-[1560px] mx-auto">
+
+        {/* CABEÇALHO */}
+        <div className="flex flex-wrap items-end justify-between gap-4 mb-5">
+          <div>
+            <h1 className="text-[22px] font-black text-slate-900 tracking-tight flex items-center gap-2">
+              <Activity className="w-6 h-6 text-indigo-600" /> Acurácia do S&OP
+            </h1>
+            <p className="text-[13px] text-slate-500 font-medium mt-0.5">
+              Onde o plano erra, em que direção, com que frequência e quanto custa
             </p>
           </div>
+          {load && <Loader2 className="w-4 h-4 text-slate-300 animate-spin mb-2" />}
         </div>
-      )}
+
+        {/* FILTROS */}
+        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4 mb-5 flex flex-wrap gap-3 items-end">
+          {[['inicio', 'De'], ['fim', 'Até']].map(([k, label]) => (
+            <label key={k} className="flex flex-col gap-1">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{label}</span>
+              <input type="month" value={f[k]} max={opts.ultimo_mes_fechado}
+                min={opts.primeiro_mes}
+                onChange={e => setF((p: any) => ({ ...p, [k]: e.target.value }))}
+                className="border border-slate-200 rounded-xl px-3 py-1.5 text-[13px]" />
+            </label>
+          ))}
+          {[['bu', 'BU', opts.bus], ['categoria', 'Categoria', opts.categorias]].map(([k, label, lista]: any) => (
+            <label key={k} className="flex flex-col gap-1">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{label}</span>
+              <select value={f[k]} onChange={e => setF((p: any) => ({ ...p, [k]: e.target.value, sku: '' }))}
+                className="border border-slate-200 rounded-xl px-3 py-1.5 text-[13px] bg-white min-w-[140px]">
+                <option value="">Todas</option>
+                {(lista || []).map((o: string) => <option key={o} value={o}>{o}</option>)}
+              </select>
+            </label>
+          ))}
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">SKU</span>
+            <select value={f.sku} onChange={e => setF((p: any) => ({ ...p, sku: e.target.value }))}
+              className="border border-slate-200 rounded-xl px-3 py-1.5 text-[13px] bg-white min-w-[240px]">
+              <option value="">Todos</option>
+              {(opts.skus || [])
+                .filter((s: any) => !f.categoria || s.categoria === f.categoria)
+                .map((s: any) => <option key={s.sku} value={s.sku}>{s.sku} — {s.descricao}</option>)}
+            </select>
+          </label>
+          <div className="ml-auto flex items-center bg-slate-100 rounded-xl p-1">
+            {(['sku', 'categoria'] as const).map(n => (
+              <button key={n} onClick={() => { setNivel(n); setAberto(null); }}
+                className={`px-3.5 py-1.5 rounded-lg text-[11px] font-black uppercase tracking-wider transition-all
+                  ${nivel === n ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400'}`}>
+                {n === 'sku' ? 'SKU' : 'Categoria'}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* CARDS */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+          <Card titulo="Erro do plano (WMAPE)" valor={pct(resumo.wmape)}
+            sub={`acurácia ${pct(resumo.acuracia)} · ${resumo.meses || 0} meses · ${resumo.skus_avaliados || 0} SKUs`}
+            cor={corWmape(resumo.wmape)} Icone={Target}
+            ajuda="Erro absoluto ponderado por volume. Mede o tamanho do erro, não a direção." />
+          <Card titulo="Viés do plano" valor={pctSinal(resumo.vies)}
+            sub={(resumo.vies || 0) > 0.02 ? 'planejando acima do vendido'
+               : (resumo.vies || 0) < -0.02 ? 'planejando abaixo do vendido' : 'equilibrado'}
+            cor={Math.abs(resumo.vies || 0) < 0.05 ? '#059669' : (resumo.vies || 0) > 0 ? '#e11d48' : '#2563eb'}
+            Icone={(resumo.vies || 0) > 0 ? TrendingUp : TrendingDown}
+            ajuda="Direção do erro. Positivo = plano acima do vendido, gera estoque. Negativo = plano abaixo, gera ruptura." />
+          <Card titulo="Exposição financeira" valor={rs(ag.exposicao_total_rs)}
+            sub={`${rs(ag.excesso_total_rs)} em excesso · ${rs(ag.falta_total_rs)} em falta`}
+            cor="#7c3aed" Icone={Wallet}
+            ajuda="Valor do desvio entre plano e vendido, ao PMV do mês. Excesso é capital parado; falta é venda em risco. Nenhum dos dois é perda realizada." />
+          <Card titulo="Tendência" valor={resumo.tendencia == null ? '—' : pctSinal(resumo.tendencia)}
+            sub={resumo.tendencia == null ? '—'
+               : resumo.tendencia < 0 ? `melhorou (${pct(resumo.wmape_antigo)} → ${pct(resumo.wmape_recente)})`
+               : `piorou (${pct(resumo.wmape_antigo)} → ${pct(resumo.wmape_recente)})`}
+            cor={(resumo.tendencia || 0) < 0 ? '#059669' : '#e11d48'}
+            Icone={(resumo.tendencia || 0) < 0 ? TrendingDown : TrendingUp}
+            ajuda="WMAPE da metade recente do período menos o da metade anterior. Negativo é melhora." />
+        </div>
+
+        {/* FAIXA DE CLASSES CLICÁVEL */}
+        <div className="flex flex-wrap gap-2 mb-5">
+          {[
+            ['Superestimando', ag.superestimando],
+            ['Subestimando',   ag.subestimando],
+            ['Errático',       ag.erratico],
+            ['Atenção',        ag.atencao],
+            ['Sob controle',   ag.sob_controle],
+          ].map(([classe, dados]: any) => {
+            const e = est(classe); const ativo = filtroClasse === classe;
+            return (
+              <button key={classe} onClick={() => setFiltroClasse(ativo ? '' : classe)}
+                className={`flex items-center gap-2.5 rounded-2xl border px-4 py-2.5 transition-all
+                  ${ativo ? `${e.bg} ${e.borda} ring-2 ring-offset-1` : 'bg-white border-slate-100 hover:border-slate-200'}`}
+                style={ativo ? { boxShadow: `0 0 0 2px ${e.cor}22` } : {}}>
+                <e.Icone className="w-4 h-4" style={{ color: e.cor }} />
+                <div className="text-left">
+                  <div className="text-[11px] font-bold text-slate-600 leading-none">{classe}</div>
+                  <div className="text-[10px] text-slate-400 mt-1">
+                    {dados?.qtd || 0} {nivel === 'sku' ? 'SKUs' : 'categorias'} · {rs(dados?.erro_rs)}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+          {filtroClasse && (
+            <button onClick={() => setFiltroClasse('')}
+              className="text-[11px] text-slate-400 underline self-center ml-1">limpar filtro</button>
+          )}
+        </div>
+
+        {/* ABAS */}
+        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm">
+          <div className="flex border-b border-slate-100 px-5">
+            {([['diagnostico', 'Diagnóstico e ação'], ['evolucao', 'Evolução'], ['agente', 'Agente']] as const).map(([id, label]) => (
+              <button key={id} onClick={() => setAba(id)}
+                className={`py-3.5 px-4 text-[13px] font-bold border-b-2 transition-all flex items-center gap-1.5
+                  ${aba === id ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>
+                {id === 'agente' && <Bot className="w-3.5 h-3.5" />}{label}
+              </button>
+            ))}
+          </div>
+
+          <div className="p-5">
+
+            {/* ─── DIAGNÓSTICO ─────────────────────────────────────────── */}
+            {aba === 'diagnostico' && (
+              <>
+                {topBarras.length > 0 && (
+                  <div className="mb-6">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-3">
+                      Exposição por {nivel === 'sku' ? 'SKU' : 'categoria'} — acima do eixo é excesso, abaixo é falta
+                    </p>
+                    <ResponsiveContainer width="100%" height={190}>
+                      <BarChart data={topBarras} margin={{ top: 4, right: 8, bottom: 4, left: 8 }} stackOffset="sign">
+                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                        <XAxis dataKey="nome" tick={{ fontSize: 9, fill: '#94a3b8' }} interval={0} angle={-30} textAnchor="end" height={50} />
+                        <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={v => rs(v)} />
+                        <Tooltip formatter={(v: any, n: any) => [rsFull(Math.abs(v)), n === 'excesso' ? 'Excesso (estoque)' : 'Falta (ruptura)']}
+                          labelFormatter={(l: any, p: any) => p?.[0]?.payload?.desc || l} />
+                        <ReferenceLine y={0} stroke="#cbd5e1" />
+                        <Bar dataKey="excesso" stackId="a" fill="#e11d48" radius={[3, 3, 0, 0]} />
+                        <Bar dataKey="falta"   stackId="a" fill="#2563eb" radius={[0, 0, 3, 3]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-[13px] border-collapse">
+                    <thead>
+                      <tr className="border-b-2 border-slate-100">
+                        {[nivel === 'sku' ? 'SKU' : 'Categoria', nivel === 'sku' ? 'Descrição' : '',
+                          'Diagnóstico', 'Ação recomendada', 'Viés', 'Persist.', 'WMAPE',
+                          'Vendido', 'Exposição', 'Tend.', ''].map((h, i) => (
+                          <th key={i} className={`py-2.5 px-3 text-[10px] font-black uppercase tracking-wider text-slate-400
+                            ${['Viés','Persist.','WMAPE','Vendido','Exposição','Tend.'].includes(h) ? 'text-right' : 'text-left'}`}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {itens.map((i: any, idx: number) => {
+                        const chave = i.sku || i.categoria;
+                        const e = est(i.classe);
+                        return (
+                          <React.Fragment key={chave}>
+                            <tr onClick={() => abrir(chave)}
+                              className={`border-b border-slate-50 cursor-pointer hover:bg-slate-50/70 transition-colors ${idx % 2 ? 'bg-slate-50/30' : ''}`}>
+                              <td className="py-2.5 px-3 font-mono text-[11px] text-slate-500">{chave}</td>
+                              {nivel === 'sku' && (
+                                <td className="py-2.5 px-3 max-w-[210px] truncate font-medium" title={i.descricao}>{i.descricao}</td>
+                              )}
+                              <td className="py-2.5 px-3">
+                                <span className={`inline-flex items-center gap-1.5 ${e.bg} ${e.txt} rounded-full px-2.5 py-1 text-[11px] font-bold border ${e.borda}`}>
+                                  <e.Icone className="w-3 h-3" />{i.classe}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 text-[12px] text-slate-600 font-medium">{i.acao}</td>
+                              <td className="py-2.5 px-3 text-right font-bold tabular-nums"
+                                style={{ color: Math.abs(i.vies) < 0.05 ? '#64748b' : i.vies > 0 ? '#e11d48' : '#2563eb' }}>
+                                {pctSinal(i.vies)}
+                              </td>
+                              <td className="py-2.5 px-3 text-right tabular-nums text-slate-500">
+                                {Math.round(i.persistencia * 100)}%
+                              </td>
+                              <td className={`py-2.5 px-3 text-right font-bold tabular-nums ${clsWmape(i.wmape)}`}>{pct(i.wmape)}</td>
+                              <td className="py-2.5 px-3 text-right tabular-nums text-slate-500">{cx(i.vol_real)}</td>
+                              <td className="py-2.5 px-3 text-right tabular-nums font-bold text-violet-700">{rs(i.erro_abs_rs)}</td>
+                              <td className="py-2.5 px-3 text-right tabular-nums text-[11px]"
+                                style={{ color: i.tendencia < 0 ? '#059669' : '#e11d48' }}>
+                                {i.tendencia < 0 ? '↓' : '↑'} {pct(Math.abs(i.tendencia))}
+                              </td>
+                              <td className="py-2.5 px-2 text-slate-300">
+                                {aberto === chave ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                              </td>
+                            </tr>
+
+                            {aberto === chave && (
+                              <tr>
+                                <td colSpan={11} className="bg-indigo-50/30 p-0">
+                                  <div className="p-5">
+                                    {nivel === 'sku' && hist?.serie ? (
+                                      <>
+                                        <div className="flex flex-wrap gap-6 mb-4 text-[12px]">
+                                          <div><span className="text-slate-400">Vendido</span><div className="font-bold">{cx(i.vol_real)}</div></div>
+                                          <div><span className="text-slate-400">Planejado</span><div className="font-bold">{cx(i.vol_previsto)}</div></div>
+                                          <div><span className="text-slate-400">Excesso</span><div className="font-bold text-rose-600">{rsFull(i.excesso_rs)}</div></div>
+                                          <div><span className="text-slate-400">Falta</span><div className="font-bold text-blue-600">{rsFull(i.falta_rs)}</div></div>
+                                          {i.fva != null && (
+                                            <div><span className="text-slate-400">FVA vs IA</span>
+                                              <div className={`font-bold ${i.fva >= 0 ? 'text-emerald-600' : 'text-indigo-600'}`}>
+                                                {pctSinal(i.fva)} {i.fva >= 0 ? '(humano melhor)' : '(IA melhor)'}
+                                              </div>
+                                            </div>
+                                          )}
+                                        </div>
+                                        <ResponsiveContainer width="100%" height={190}>
+                                          <LineChart data={hist.serie} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                                            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                                            <XAxis dataKey="mes" tick={{ fontSize: 9, fill: '#94a3b8' }} />
+                                            <YAxis tick={{ fontSize: 9, fill: '#94a3b8' }} />
+                                            <Tooltip formatter={(v: any) => cx(v)} />
+                                            <Line dataKey="vol_real"   name="Vendido"   stroke="#0f172a" strokeWidth={2} dot={false} />
+                                            <Line dataKey="vol_humano" name="Plano"     stroke="#f59e0b" strokeWidth={2} strokeDasharray="4 3" dot={false} />
+                                            <Line dataKey="vol_ia"     name="IA"        stroke="#10b981" strokeWidth={1.5} dot={{ r: 2 }} connectNulls />
+                                          </LineChart>
+                                        </ResponsiveContainer>
+                                      </>
+                                    ) : (
+                                      <p className="text-[12px] text-slate-400">
+                                        {nivel === 'sku' ? 'Carregando histórico…' : 'Alterne para o nível SKU para ver o detalhe mês a mês.'}
+                                      </p>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </React.Fragment>
+                        );
+                      })}
+                      {itens.length === 0 && !load && (
+                        <tr><td colSpan={11} className="py-14 text-center text-slate-400 text-[13px]">
+                          Nenhum item para os filtros selecionados.
+                        </td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+
+            {/* ─── EVOLUÇÃO ────────────────────────────────────────────── */}
+            {aba === 'evolucao' && (
+              <>
+                <div className="grid lg:grid-cols-2 gap-6">
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-3">Volume: vendido vs planejado</p>
+                    <ResponsiveContainer width="100%" height={280}>
+                      <LineChart data={serie} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                        <XAxis dataKey="mes" tick={{ fontSize: 9, fill: '#94a3b8' }} />
+                        <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={v => `${(v / 1000).toFixed(0)}k`} />
+                        <Tooltip formatter={(v: any) => cx(v)} />
+                        <Line dataKey="vol_real"   name="Vendido" stroke="#0f172a" strokeWidth={2.5} dot={false} />
+                        <Line dataKey="vol_humano" name="Plano"   stroke="#f59e0b" strokeWidth={2} strokeDasharray="5 3" dot={false} />
+                        {temIA && <Line dataKey="vol_ia" name="IA" stroke="#10b981" strokeWidth={2} dot={{ r: 2 }} connectNulls />}
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-3">Viés mensal — acima de zero é excesso</p>
+                    <ResponsiveContainer width="100%" height={280}>
+                      <BarChart data={serie} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                        <XAxis dataKey="mes" tick={{ fontSize: 9, fill: '#94a3b8' }} />
+                        <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={v => `${(v * 100).toFixed(0)}%`} />
+                        <Tooltip formatter={(v: any) => pctSinal(v)} />
+                        <ReferenceLine y={0} stroke="#94a3b8" />
+                        <ReferenceLine y={0.1}  stroke="#e11d48" strokeDasharray="3 3" />
+                        <ReferenceLine y={-0.1} stroke="#2563eb" strokeDasharray="3 3" />
+                        <Bar dataKey="bias_humano" name="Viés" radius={[3, 3, 0, 0]}>
+                          {serie.map((s, i) => (
+                            <Cell key={i} fill={(s.bias_humano || 0) > 0 ? '#e11d48' : '#2563eb'} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-4">
+                  As linhas tracejadas marcam ±10%, o limite a partir do qual o viés passa a ser material para o plano.
+                  Meses fechados apenas — o mês corrente não entra em nenhuma métrica.
+                </p>
+              </>
+            )}
+
+            {/* ─── AGENTE ──────────────────────────────────────────────── */}
+            {aba === 'agente' && <Agente filtros={f} />}
+
+          </div>
+        </div>
+
+        <div className="mt-4 text-[11px] text-slate-400 leading-relaxed">
+          <strong>Viés</strong> é a direção média do erro · <strong>Persistência</strong> é em quantos meses o erro foi na mesma direção —
+          acima de 70% indica padrão sistemático, e só aí faz sentido corrigir o nível do plano ·
+          <strong> Exposição</strong> valoriza o desvio pelo PMV do mês: excesso é capital parado, falta é venda em risco ·
+          Plano humano: arquivo histórico até mai/26 e <span className="font-mono">vol_final</span> do ciclo M+2 a partir de 04/26
+        </div>
+
+      </div>
     </div>
   );
 }
