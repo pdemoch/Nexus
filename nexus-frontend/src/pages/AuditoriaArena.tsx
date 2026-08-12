@@ -2,34 +2,53 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import axios from 'axios';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine, Legend
+  ResponsiveContainer, ReferenceLine, Legend, Label,
 } from 'recharts';
-import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, TrendingUp, TrendingDown, AlertTriangle } from 'lucide-react';
 
-const COR = { humano: '#2563eb', ia: '#10b981', ref: '#f59e0b' };
+// ─── Paleta ───────────────────────────────────────────────────────────────────
+const COR = { humano: '#2563eb', ia: '#10b981', over: '#e11d48', under: '#2563eb', neutro: '#94a3b8' };
+
+// ─── Formatadores ─────────────────────────────────────────────────────────────
 const NOMES_MES = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
-const labelMes = (m: string) => {
-  const [a, mm] = m.split('-');
-  return `${NOMES_MES[parseInt(mm) - 1]}/${a.slice(2)}`;
+const lMes  = (m: string) => { const [a,mm] = m.split('-'); return `${NOMES_MES[+mm-1]}/${a.slice(2)}`; };
+const pct   = (v: any, d = 1) => v == null ? '—' : `${Number(v).toFixed(d).replace('.',',')}%`;
+const sinal  = (v: any) => { if (v==null) return '—'; const n=Number(v); return `${n>0?'+':''}${n.toFixed(1).replace('.',',')}%`; };
+const num   = (v: any)  => v == null ? '—' : Math.round(Number(v)).toLocaleString('pt-BR');
+const corWmape = (v: number|null) => v==null?COR.neutro:v<=20?'#059669':v<=35?'#d97706':'#e11d48';
+const corBias  = (v: number|null) => {
+  if (v==null) return COR.neutro;
+  if (v >  10) return COR.over;
+  if (v < -10) return COR.under;
+  return '#059669';
 };
-const pct = (v: any, dec = 1) =>
-  v == null ? '—' : `${Number(v).toFixed(dec).replace('.', ',')}%`;
-const corWmape = (v: number | null) =>
-  v == null ? '#94a3b8' : v <= 20 ? '#059669' : v <= 35 ? '#d97706' : '#e11d48';
 
-// ─── Tooltip ─────────────────────────────────────────────────────────────────
+// ─── Tooltip customizado ──────────────────────────────────────────────────────
 const TT = ({ active, payload, label }: any) => {
   if (!active || !payload?.length) return null;
   return (
-    <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10, padding: '10px 14px', fontSize: 12 }}>
-      <div style={{ fontWeight: 700, marginBottom: 6 }}>{labelMes(label)}</div>
+    <div style={{ background:'#fff', border:'1px solid #e2e8f0', borderRadius:10, padding:'10px 14px', fontSize:12, boxShadow:'0 4px 12px rgba(0,0,0,.08)' }}>
+      <div style={{ fontWeight:700, marginBottom:6, color:'#0f172a' }}>{lMes(label)}</div>
       {payload.map((p: any) => p.value != null && (
-        <div key={p.name} style={{ color: p.color, display: 'flex', justifyContent: 'space-between', gap: 16, marginBottom: 2 }}>
+        <div key={p.name} style={{ color:p.color, display:'flex', justifyContent:'space-between', gap:16, marginBottom:2 }}>
           <span>{p.name}</span>
-          <span style={{ fontWeight: 700 }}>{pct(p.value)}</span>
+          <span style={{ fontWeight:700 }}>{pct(p.value)}</span>
         </div>
       ))}
     </div>
+  );
+};
+
+// ─── Rótulo de dado na linha ─────────────────────────────────────────────────
+const RoituloLinha = (cor: string, total: number) => (props: any) => {
+  const { x, y, value } = props;
+  if (value == null || total > 20) return null; // omite se muitos pontos
+  const salto = total > 12 ? 2 : 1;
+  if (props.index % salto !== 0) return null;
+  return (
+    <text x={x} y={y - 9} fill={cor} fontSize={9} textAnchor="middle" fontWeight={700}>
+      {Number(value).toFixed(1).replace('.',',')}
+    </text>
   );
 };
 
@@ -41,99 +60,71 @@ function SeletorDatas({ calendario, mesesSel, setMesesSel }: any) {
   const [open, setOpen] = useState(false);
 
   const toggleAno = (ano: string) =>
-    setAbertos(p => { const n = new Set(p); n.has(ano) ? n.delete(ano) : n.add(ano); return n; });
+    setAbertos(p => { const n = new Set(p); n.has(ano)?n.delete(ano):n.add(ano); return n; });
 
   const toggleMes = (m: string) =>
-    setMesesSel((p: string[]) => p.includes(m) ? p.filter(x => x !== m) : [...p, m]);
+    setMesesSel((p: string[]) => p.includes(m) ? p.filter(x=>x!==m) : [...p, m]);
 
   const toggleAnoTudo = (ano: string, meses: string[]) => {
     const todos = meses.map(m => `${ano}-${m}`);
-    const temTodos = todos.every(m => mesesSel.includes(m));
-    setMesesSel((p: string[]) =>
-      temTodos ? p.filter(m => !todos.includes(m)) : [...new Set([...p, ...todos])]);
+    const tudo  = todos.every(m => mesesSel.includes(m));
+    setMesesSel((p: string[]) => tudo ? p.filter(m=>!todos.includes(m)) : [...new Set([...p,...todos])]);
   };
 
-  const anos = Object.keys(calendario).sort((a, b) => Number(b) - Number(a));
+  const todos = Object.entries(calendario as Record<string,string[]>)
+    .sort(([a],[b])=>+a - +b).flatMap(([ano,ms])=>ms.map(m=>`${ano}-${m}`));
 
   return (
-    <div style={{ position: 'relative' }}>
-      <button onClick={() => setOpen(o => !o)} style={{
-        display: 'flex', alignItems: 'center', gap: 8, border: '1px solid #d1d5db',
-        borderRadius: 10, padding: '8px 14px', background: '#fff', cursor: 'pointer',
-        fontSize: 13, fontWeight: 600, color: '#374151',
+    <div style={{ position:'relative' }}>
+      <button onClick={()=>setOpen(o=>!o)} style={{
+        display:'flex', alignItems:'center', gap:8, border:'1px solid #d1d5db',
+        borderRadius:10, padding:'8px 14px', background:'#fff', cursor:'pointer',
+        fontSize:13, fontWeight:600, color:'#374151',
       }}>
-        📅 {mesesSel.length === 0 ? 'Período' : `${mesesSel.length} mês${mesesSel.length > 1 ? 'es' : ''}`}
-        <ChevronDown style={{ width: 14, color: '#9ca3af' }} />
+        📅 {mesesSel.length===0?'Período':`${mesesSel.length} mês${mesesSel.length>1?'es':''}`}
+        <ChevronDown style={{ width:14, color:'#9ca3af' }} />
       </button>
 
       {open && (
         <div style={{
-          position: 'absolute', top: 46, left: 0, zIndex: 200,
-          background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12,
-          boxShadow: '0 8px 24px rgba(0,0,0,.12)', padding: 12,
-          minWidth: 280, maxHeight: 420, overflowY: 'auto',
+          position:'absolute', top:46, left:0, zIndex:200, background:'#fff',
+          border:'1px solid #e2e8f0', borderRadius:12, boxShadow:'0 8px 24px rgba(0,0,0,.12)',
+          padding:12, minWidth:290, maxHeight:430, overflowY:'auto',
         }}>
-          <div style={{ display: 'flex', gap: 12, marginBottom: 8, paddingBottom: 8, borderBottom: '1px solid #f1f5f9' }}>
-            <button onClick={() => setMesesSel(
-              Object.entries(calendario).flatMap(([a, ms]: any) => ms.map((m: string) => `${a}-${m}`))
-            )} style={{ fontSize: 11, color: '#2563eb', fontWeight: 700, background: 'none', border: 'none', cursor: 'pointer' }}>
-              Todos
-            </button>
-            <button onClick={() => setMesesSel([])}
-              style={{ fontSize: 11, color: '#64748b', background: 'none', border: 'none', cursor: 'pointer' }}>
-              Limpar
-            </button>
-            <button onClick={() => {
-              const todos = Object.entries(calendario)
-                .flatMap(([a, ms]: any) => ms.map((m: string) => `${a}-${m}`));
-              setMesesSel(todos.slice(-12));
-            }} style={{ fontSize: 11, color: '#7c3aed', fontWeight: 700, background: 'none', border: 'none', cursor: 'pointer' }}>
-              Últimos 12
-            </button>
+          <div style={{ display:'flex', gap:10, marginBottom:8, paddingBottom:8, borderBottom:'1px solid #f1f5f9', fontSize:11 }}>
+            <button onClick={()=>setMesesSel(todos)} style={{ color:'#2563eb', fontWeight:700, background:'none', border:'none', cursor:'pointer' }}>Todos</button>
+            <button onClick={()=>setMesesSel([])}  style={{ color:'#64748b', background:'none', border:'none', cursor:'pointer' }}>Limpar</button>
+            <button onClick={()=>setMesesSel(todos.slice(-12))} style={{ color:'#7c3aed', fontWeight:700, background:'none', border:'none', cursor:'pointer' }}>Últ. 12</button>
+            <button onClick={()=>setMesesSel(todos.slice(-6))}  style={{ color:'#7c3aed', background:'none', border:'none', cursor:'pointer' }}>Últ. 6</button>
           </div>
 
-          {anos.map(ano => {
-            const meses: string[] = calendario[ano];
-            const todos = meses.map(m => `${ano}-${m}`);
-            const qtd = todos.filter(m => mesesSel.includes(m)).length;
-            const ab = abertos.has(ano);
-
+          {Object.keys(calendario as Record<string,string[]>).sort((a,b)=>+b - +a).map(ano => {
+            const meses: string[] = (calendario as any)[ano];
+            const chaves = meses.map(m=>`${ano}-${m}`);
+            const qtd    = chaves.filter(m=>mesesSel.includes(m)).length;
+            const ab     = abertos.has(ano);
             return (
-              <div key={ano} style={{ marginBottom: 2 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 4px',
-                  cursor: 'pointer', borderRadius: 8,
-                  background: ab ? '#f8fafc' : 'transparent' }}>
-                  <button onClick={() => toggleAno(ano)}
-                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: '#64748b' }}>
-                    {ab ? <ChevronDown style={{ width: 13 }} /> : <ChevronRight style={{ width: 13 }} />}
+              <div key={ano}>
+                <div style={{ display:'flex', alignItems:'center', gap:6, padding:'5px 4px', cursor:'pointer', borderRadius:8 }}>
+                  <button onClick={()=>toggleAno(ano)} style={{ background:'none', border:'none', cursor:'pointer', padding:0, color:'#64748b' }}>
+                    {ab?<ChevronDown style={{width:13}}/>:<ChevronRight style={{width:13}}/>}
                   </button>
-                  <input type="checkbox" checked={qtd === todos.length}
-                    ref={el => { if (el) el.indeterminate = qtd > 0 && qtd < todos.length; }}
-                    onChange={() => toggleAnoTudo(ano, meses)}
-                    style={{ accentColor: '#2563eb' }} />
-                  <span style={{ fontWeight: 700, fontSize: 13, color: '#0f172a' }}>{ano}</span>
-                  <span style={{ fontSize: 10, color: '#94a3b8', marginLeft: 'auto' }}>
-                    {qtd}/{todos.length}
-                  </span>
+                  <input type="checkbox" checked={qtd===chaves.length}
+                    ref={el=>{ if(el) el.indeterminate=qtd>0&&qtd<chaves.length; }}
+                    onChange={()=>toggleAnoTudo(ano,meses)} style={{ accentColor:'#2563eb' }} />
+                  <span style={{ fontWeight:700, fontSize:13, color:'#0f172a' }}>{ano}</span>
+                  <span style={{ fontSize:10, color:'#94a3b8', marginLeft:'auto' }}>{qtd}/{chaves.length}</span>
                 </div>
-
                 {ab && (
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
-                    gap: 4, padding: '4px 4px 8px 28px' }}>
+                  <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:4, padding:'4px 4px 8px 28px' }}>
                     {meses.map(m => {
-                      const chave = `${ano}-${m}`;
-                      const sel = mesesSel.includes(chave);
+                      const chave=`${ano}-${m}`; const sel=mesesSel.includes(chave);
                       return (
-                        <label key={m} style={{
-                          display: 'flex', alignItems: 'center', gap: 3,
-                          fontSize: 11, cursor: 'pointer',
-                          color: sel ? '#2563eb' : '#374151', fontWeight: sel ? 700 : 400,
-                          padding: '2px 4px', borderRadius: 5,
-                          background: sel ? '#eff6ff' : 'transparent',
-                        }}>
-                          <input type="checkbox" checked={sel} onChange={() => toggleMes(chave)}
-                            style={{ accentColor: '#2563eb', width: 11, height: 11 }} />
-                          {NOMES_MES[parseInt(m) - 1]}
+                        <label key={m} style={{ display:'flex', alignItems:'center', gap:3, fontSize:11, cursor:'pointer',
+                          color:sel?'#2563eb':'#374151', fontWeight:sel?700:400,
+                          padding:'2px 4px', borderRadius:5, background:sel?'#eff6ff':'transparent' }}>
+                          <input type="checkbox" checked={sel} onChange={()=>toggleMes(chave)} style={{ accentColor:'#2563eb', width:11, height:11 }} />
+                          {NOMES_MES[+m-1]}
                         </label>
                       );
                     })}
@@ -149,253 +140,412 @@ function SeletorDatas({ calendario, mesesSel, setMesesSel }: any) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// GRÁFICO DE LINHA
+// GRÁFICO COM RÓTULOS E LINHAS SUAVIZADAS
 // ═══════════════════════════════════════════════════════════════════════════
-function Grafico({ dados, chaveH, chaveIA, titulo, descricao, refZero = false, refBands }: any) {
-  const temIA = dados.some((d: any) => d[chaveIA] != null);
+function Grafico({ dados, chaveH, chaveIA, titulo, refZero=false, legendaRefs, yDomain }: any) {
+  const temIA = dados.some((d: any) => d[chaveIA]!=null);
+  const n     = dados.length;
+
   return (
-    <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #f1f5f9', padding: '16px 18px' }}>
-      <div style={{ marginBottom: 10 }}>
-        <span style={{ fontWeight: 700, fontSize: 13, color: '#0f172a' }}>{titulo}</span>
-        <span style={{ fontSize: 11, color: '#94a3b8', marginLeft: 8 }}>{descricao}</span>
-      </div>
-      <ResponsiveContainer width="100%" height={195}>
-        <LineChart data={dados} margin={{ top: 4, right: 12, bottom: 0, left: -8 }}>
+    <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', padding:'16px 18px' }}>
+      <div style={{ fontWeight:700, fontSize:13, color:'#0f172a', marginBottom:12 }}>{titulo}</div>
+
+      <ResponsiveContainer width="100%" height={210}>
+        <LineChart data={dados} margin={{ top:14, right:16, bottom:0, left:-8 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-          <XAxis dataKey="mes" tick={{ fontSize: 10, fill: '#94a3b8' }}
-            tickFormatter={labelMes} interval="preserveStartEnd" />
-          <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={v => `${v}%`} />
+          <XAxis dataKey="mes" tick={{ fontSize:10, fill:'#94a3b8' }}
+            tickFormatter={lMes} interval="preserveStartEnd" />
+          <YAxis tick={{ fontSize:10, fill:'#94a3b8' }} tickFormatter={v=>`${v}%`}
+            domain={yDomain || ['auto','auto']} />
           <Tooltip content={<TT />} />
-          {refZero && <ReferenceLine y={0} stroke="#94a3b8" strokeWidth={1.5} />}
-          {(refBands || []).map(({ y, cor, label: lb }: any) => (
-            <ReferenceLine key={y} y={y} stroke={cor || COR.ref} strokeDasharray="4 2"
-              label={{ value: lb || `${y}%`, fill: cor || COR.ref, fontSize: 9, position: 'right' }} />
+
+          {refZero && <ReferenceLine y={0} stroke="#cbd5e1" strokeWidth={1.5} />}
+
+          {/* Linhas de referência com explicações embutidas */}
+          {(legendaRefs||[]).map(({ y, cor, pos='insideTopRight' }: any) => (
+            <ReferenceLine key={y} y={y} stroke={cor} strokeDasharray="5 3" strokeWidth={1.5}>
+              <Label value={`${y}%`} position={pos} fill={cor} fontSize={9} fontWeight={700} />
+            </ReferenceLine>
           ))}
+
           {chaveH && (
-            <Line dataKey={chaveH} name="Humano" stroke={COR.humano} strokeWidth={2.5}
-              dot={{ r: 2.5, fill: COR.humano }} activeDot={{ r: 5 }} connectNulls={false} />
+            <Line type="monotone" dataKey={chaveH} name="Humano" stroke={COR.humano} strokeWidth={2.5}
+              dot={{ r:3, fill:COR.humano, strokeWidth:2, stroke:'#fff' }}
+              activeDot={{ r:5 }} connectNulls={false}
+              label={chaveH ? RoituloLinha(COR.humano, n) : false} />
           )}
           {temIA && chaveIA && (
-            <Line dataKey={chaveIA} name="IA (Nexus)" stroke={COR.ia} strokeWidth={2.5}
-              dot={{ r: 5, fill: COR.ia, strokeWidth: 2, stroke: '#fff' }}
-              activeDot={{ r: 6 }} connectNulls={false} />
+            <Line type="monotone" dataKey={chaveIA} name="IA (Nexus)" stroke={COR.ia} strokeWidth={2.5}
+              dot={{ r:5, fill:COR.ia, strokeWidth:2, stroke:'#fff' }}
+              activeDot={{ r:6 }} connectNulls={false}
+              label={RoituloLinha(COR.ia, n)} />
           )}
-          <Legend iconType="line" wrapperStyle={{ fontSize: 11, paddingTop: 4 }} />
+          <Legend iconType="line" wrapperStyle={{ fontSize:11, paddingTop:6 }} />
         </LineChart>
       </ResponsiveContainer>
+
+      {/* Legenda das linhas de referência */}
+      {legendaRefs && (
+        <div style={{ display:'flex', flexWrap:'wrap', gap:16, marginTop:10, paddingTop:8, borderTop:'1px solid #f8fafc' }}>
+          {legendaRefs.map(({ y, cor, label }: any) => (
+            <div key={y} style={{ display:'flex', alignItems:'center', gap:6, fontSize:10, color:'#64748b' }}>
+              <svg width={20} height={3}><line x1={0} y1={1.5} x2={20} y2={1.5} stroke={cor} strokeWidth={1.5} strokeDasharray="4 2"/></svg>
+              <span style={{ color:cor, fontWeight:700 }}>{y}%</span>
+              <span>{label}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CARD NUMÉRICO
+// CARD KPI
 // ═══════════════════════════════════════════════════════════════════════════
 function Card({ label, valor, cor, sub }: any) {
   return (
-    <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #f1f5f9', padding: '14px 18px', flex: 1, minWidth: 140 }}>
-      <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.06em', color: '#94a3b8', marginBottom: 8 }}>
-        {label}
-      </div>
-      <div style={{ fontSize: 24, fontWeight: 900, color: cor || '#4f46e5', lineHeight: 1 }}>
-        {valor == null ? '—' : pct(valor)}
-      </div>
-      {sub && <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 6 }}>{sub}</div>}
+    <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', padding:'14px 18px', flex:1, minWidth:130 }}>
+      <div style={{ fontSize:10, fontWeight:800, textTransform:'uppercase', letterSpacing:'.06em', color:'#94a3b8', marginBottom:8 }}>{label}</div>
+      <div style={{ fontSize:24, fontWeight:900, color:cor||'#4f46e5', lineHeight:1 }}>{valor==null?'—':pct(valor)}</div>
+      {sub && <div style={{ fontSize:11, color:'#94a3b8', marginTop:6 }}>{sub}</div>}
     </div>
   );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TELA
+// TABELAS DE BIAS
+// ═══════════════════════════════════════════════════════════════════════════
+const styleTab = (ativo: boolean): React.CSSProperties => ({
+  padding:'10px 18px', border:'none', background:'none', cursor:'pointer',
+  fontSize:13, fontWeight:ativo?700:400,
+  color:ativo?'#0f172a':'#64748b',
+  borderBottom: ativo?'2px solid #2563eb':'2px solid transparent',
+  marginBottom:-1,
+});
+const Th = ({ children, right }: any) => (
+  <th style={{ padding:'8px 10px', textAlign:right?'right':'left', fontSize:10, fontWeight:800,
+    textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8', borderBottom:'2px solid #f1f5f9',
+    whiteSpace:'nowrap' }}>
+    {children}
+  </th>
+);
+const Td = ({ children, right, bold, cor }: any) => (
+  <td style={{ padding:'8px 10px', textAlign:right?'right':'left', fontWeight:bold?700:400,
+    color:cor||'#374151', fontSize:13, fontVariantNumeric:'tabular-nums' }}>
+    {children}
+  </td>
+);
+
+function TabelaBias({ itens, modo }: { itens: any[], modo: 'super'|'sub' }) {
+  const filtrados = itens
+    .filter(i => modo==='super' ? (i.bias_h||0) > 5 : (i.bias_h||0) < -5)
+    .sort((a,b) => modo==='super'
+      ? (b.vol_previsto-b.vol_real) - (a.vol_previsto-a.vol_real)
+      : (a.vol_real-a.vol_previsto) - (b.vol_real-b.vol_previsto));
+
+  if (!filtrados.length)
+    return <div style={{ padding:32, textAlign:'center', color:'#94a3b8', fontSize:13 }}>Nenhum SKU nesta categoria.</div>;
+
+  const corD   = modo==='super' ? '#e11d48' : '#2563eb';
+  const label  = modo==='super' ? 'Excesso (cx)' : 'Falta (cx)';
+  const ícone  = modo==='super' ? '▲' : '▼';
+
+  return (
+    <div style={{ overflowX:'auto' }}>
+      <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13 }}>
+        <thead>
+          <tr>
+            <Th>SKU</Th>
+            <Th>Descrição</Th>
+            <Th>Categoria</Th>
+            <Th right>Real (cx)</Th>
+            <Th right>Previsto (cx)</Th>
+            <Th right>{label}</Th>
+            <Th right>BIAS</Th>
+            <Th right>Frequência</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {filtrados.map((it, idx) => {
+            const delta = Math.round(it.vol_previsto - it.vol_real);
+            const abs   = Math.abs(delta);
+            const freq  = `${Math.round((it.persistencia||0) * (it.meses||1))}/${it.meses||'—'} meses`;
+            return (
+              <tr key={it.sku} style={{ background: idx%2?'#f9fafb':'#fff', borderBottom:'1px solid #f1f5f9' }}>
+                <Td><code style={{ fontSize:11, color:'#64748b' }}>{it.sku}</code></Td>
+                <Td><span title={it.descricao} style={{ display:'block', maxWidth:220, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{it.descricao}</span></Td>
+                <Td><span style={{ fontSize:11, color:'#64748b' }}>{it.categoria}</span></Td>
+                <Td right>{num(it.vol_real)}</Td>
+                <Td right>{num(it.vol_previsto)}</Td>
+                <Td right bold cor={corD}>{ícone} {num(abs)}</Td>
+                <Td right bold cor={corD}>{sinal(it.bias_h)}</Td>
+                <Td right>
+                  <span style={{ fontSize:12, background:(it.persistencia||0)>=0.7?'#fef2f2':'#f0f9ff',
+                    color:(it.persistencia||0)>=0.7?'#e11d48':'#0284c7',
+                    borderRadius:5, padding:'2px 6px', fontWeight:700 }}>
+                    {freq}
+                  </span>
+                </Td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function TabelaWmape({ itens }: { itens: any[] }) {
+  const sorted = [...itens].sort((a,b) => (b.wmape_h||0)-(a.wmape_h||0));
+  if (!sorted.length) return <div style={{ padding:32, textAlign:'center', color:'#94a3b8', fontSize:13 }}>Sem dados.</div>;
+
+  return (
+    <div style={{ overflowX:'auto' }}>
+      <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13 }}>
+        <thead>
+          <tr>
+            <Th>SKU</Th>
+            <Th>Descrição</Th>
+            <Th>Categoria</Th>
+            <Th right>Real (cx)</Th>
+            <Th right>Previsto (cx)</Th>
+            <Th right>Δ (cx)</Th>
+            <Th right>WMAPE</Th>
+            <Th right>BIAS</Th>
+            <Th right>Meses</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((it, idx) => {
+            const delta = Math.round(it.vol_previsto - it.vol_real);
+            const wc = corWmape(it.wmape_h);
+            const bc = corBias(it.bias_h);
+            return (
+              <tr key={it.sku} style={{ background:idx%2?'#f9fafb':'#fff', borderBottom:'1px solid #f1f5f9' }}>
+                <Td><code style={{ fontSize:11, color:'#64748b' }}>{it.sku}</code></Td>
+                <Td><span title={it.descricao} style={{ display:'block', maxWidth:220, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{it.descricao}</span></Td>
+                <Td><span style={{ fontSize:11, color:'#64748b' }}>{it.categoria}</span></Td>
+                <Td right>{num(it.vol_real)}</Td>
+                <Td right>{num(it.vol_previsto)}</Td>
+                <Td right bold cor={delta>0?'#e11d48':delta<0?'#2563eb':'#64748b'}>
+                  {delta>0?'▲':delta<0?'▼':''} {num(Math.abs(delta))}
+                </Td>
+                <Td right bold cor={wc}>{pct(it.wmape_h)}</Td>
+                <Td right bold cor={bc}>{sinal(it.bias_h)}</Td>
+                <Td right><span style={{ color:'#94a3b8' }}>{it.meses}</span></Td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TELA PRINCIPAL
 // ═══════════════════════════════════════════════════════════════════════════
 export default function AuditoriaArena() {
-  const [opts, setOpts]           = useState<any>({ categorias: [], skus: [], calendario: {} });
+  const [opts, setOpts]           = useState<any>({ categorias:[], skus:[], calendario:{} });
   const [mesesSel, setMesesSel]   = useState<string[]>([]);
   const [categoria, setCategoria] = useState('');
   const [sku, setSku]             = useState('');
-  const [dados, setDados]         = useState<any>(null);
+  const [evolucao, setEvolucao]   = useState<any>(null);
+  const [diag, setDiag]           = useState<any[]>([]);
   const [loading, setLoading]     = useState(false);
   const [erro, setErro]           = useState('');
+  const [abaTabela, setAbaTabela] = useState<'wmape'|'super'|'sub'>('wmape');
 
   useEffect(() => {
     axios.get('/api/v1/kpis/filtros').then(r => {
       setOpts(r.data);
-      const cal: Record<string, string[]> = r.data.calendario || {};
-      const todos = Object.entries(cal)
-        .sort(([a], [b]) => Number(a) - Number(b))
-        .flatMap(([ano, ms]) => (ms as string[]).map(m => `${ano}-${m}`));
+      const cal: Record<string,string[]> = r.data.calendario || {};
+      const todos = Object.entries(cal).sort(([a],[b])=>+a - +b)
+        .flatMap(([ano,ms])=>(ms as string[]).map(m=>`${ano}-${m}`));
       setMesesSel(todos.slice(-12));
-    }).catch(() => {});
+    }).catch(()=>{});
   }, []);
 
-  const qs = useMemo(() => {
+  const qs = useMemo(()=>{
     const p = new URLSearchParams();
-    mesesSel.forEach(m => p.append('meses', m));
-    if (categoria) p.set('categoria', categoria);
-    if (sku) p.set('sku', sku);
+    mesesSel.forEach(m=>p.append('meses',m));
+    if (categoria) p.set('categoria',categoria);
+    if (sku) p.set('sku',sku);
     return p.toString();
   }, [mesesSel, categoria, sku]);
 
   const carregar = useCallback(async () => {
-    if (!mesesSel.length) { setDados(null); return; }
+    if (!mesesSel.length) { setEvolucao(null); setDiag([]); return; }
     setLoading(true); setErro('');
     try {
-      const r = await axios.get(`/api/v1/kpis/evolucao?${qs}`);
-      setDados(r.data);
-    } catch (e: any) {
+      const [ev, dg] = await Promise.all([
+        axios.get(`/api/v1/kpis/evolucao?${qs}`),
+        axios.get(`/api/v1/kpis/diagnostico?${qs}&nivel=sku`),
+      ]);
+      setEvolucao(ev.data);
+      setDiag(dg.data?.itens || []);
+    } catch(e: any) {
       setErro(e?.response?.data?.detail || 'Erro ao carregar.');
-      setDados(null);
+      setEvolucao(null); setDiag([]);
     } finally { setLoading(false); }
   }, [qs]);
 
-  useEffect(() => { carregar(); }, [carregar]);
+  useEffect(()=>{ carregar(); }, [carregar]);
 
-  const serie  = dados?.serie  || [];
-  const resumo = dados?.resumo || {};
-  const temIA  = serie.some((d: any) => d.wmape_ia != null);
-  const skusFilt = opts.skus.filter((s: any) => !categoria || s.categoria === categoria);
+  const serie  = evolucao?.serie  || [];
+  const resumo = evolucao?.resumo || {};
+  const temIA  = serie.some((d: any)=>d.wmape_ia!=null);
+  const skusFilt = opts.skus.filter((s: any)=>!categoria||s.categoria===categoria);
+  const ctx = sku?`SKU ${sku}`:categoria?`Categoria: ${categoria}`:'Portfólio completo';
 
-  const ctx = sku ? `SKU ${sku}` : categoria ? `Categoria: ${categoria}` : 'Portfólio completo';
+  const nSuper = diag.filter(i=>(i.bias_h||0)>5).length;
+  const nSub   = diag.filter(i=>(i.bias_h||0)<-5).length;
 
   return (
-    <div style={{ minHeight: '100vh', background: '#f8fafc', padding: '24px 28px' }}>
-      <div style={{ maxWidth: 1400, margin: '0 auto' }}>
+    <div style={{ minHeight:'100vh', background:'#f8fafc', padding:'24px 28px', fontFamily:'system-ui,sans-serif' }}>
+      <div style={{ maxWidth:1440, margin:'0 auto' }}>
 
         {/* CABEÇALHO */}
-        <div style={{ marginBottom: 20 }}>
-          <h1 style={{ fontSize: 20, fontWeight: 900, color: '#0f172a', margin: 0 }}>
-            Acurácia do S&OP
-          </h1>
-          <p style={{ fontSize: 12, color: '#64748b', margin: '4px 0 0' }}>
+        <div style={{ marginBottom:18 }}>
+          <h1 style={{ fontSize:20, fontWeight:900, color:'#0f172a', margin:0 }}>Acurácia do S&OP</h1>
+          <p style={{ fontSize:12, color:'#64748b', margin:'4px 0 0' }}>
             Previsão vs realizado em caixas · Meses fechados · {ctx}
           </p>
         </div>
 
         {/* FILTROS */}
-        <div style={{
-          background: '#fff', borderRadius: 14, border: '1px solid #f1f5f9',
-          padding: '14px 18px', marginBottom: 18,
-          display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-end',
-        }}>
+        <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', padding:'14px 18px',
+          marginBottom:16, display:'flex', flexWrap:'wrap', gap:12, alignItems:'flex-end' }}>
           <SeletorDatas calendario={opts.calendario} mesesSel={mesesSel} setMesesSel={setMesesSel} />
 
-          {[
-            { label: 'Categoria', val: categoria, set: (v: string) => { setCategoria(v); setSku(''); },
-              opts: opts.categorias.map((c: string) => ({ v: c, l: c })) },
-          ].map(({ label, val, set, opts: op }) => (
-            <label key={label} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <span style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em', color: '#94a3b8' }}>
-                {label}
-              </span>
-              <select value={val} onChange={e => set(e.target.value)}
-                style={{ border: '1px solid #d1d5db', borderRadius: 10, padding: '8px 12px', fontSize: 13, background: '#fff', minWidth: 150 }}>
-                <option value="">Todas</option>
-                {op.map(({ v, l }: any) => <option key={v} value={v}>{l}</option>)}
-              </select>
-            </label>
-          ))}
+          <label style={{ display:'flex', flexDirection:'column', gap:4 }}>
+            <span style={{ fontSize:10, fontWeight:800, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8' }}>Categoria</span>
+            <select value={categoria} onChange={e=>{ setCategoria(e.target.value); setSku(''); }}
+              style={{ border:'1px solid #d1d5db', borderRadius:10, padding:'8px 12px', fontSize:13, background:'#fff', minWidth:160 }}>
+              <option value="">Todas</option>
+              {opts.categorias.map((c: string)=><option key={c} value={c}>{c}</option>)}
+            </select>
+          </label>
 
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <span style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em', color: '#94a3b8' }}>
-              SKU
-            </span>
-            <select value={sku} onChange={e => setSku(e.target.value)}
-              style={{ border: '1px solid #d1d5db', borderRadius: 10, padding: '8px 12px', fontSize: 13, background: '#fff', minWidth: 260 }}>
+          <label style={{ display:'flex', flexDirection:'column', gap:4 }}>
+            <span style={{ fontSize:10, fontWeight:800, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8' }}>SKU</span>
+            <select value={sku} onChange={e=>setSku(e.target.value)}
+              style={{ border:'1px solid #d1d5db', borderRadius:10, padding:'8px 12px', fontSize:13, background:'#fff', minWidth:260 }}>
               <option value="">Todos</option>
-              {skusFilt.map((s: any) => (
+              {skusFilt.map((s: any)=>(
                 <option key={s.sku} value={s.sku}>{s.sku} — {s.descricao}</option>
               ))}
             </select>
           </label>
 
-          {loading && <Loader2 style={{ width: 16, color: '#94a3b8', alignSelf: 'center' }} className="animate-spin" />}
-          {erro && <span style={{ color: '#e11d48', fontSize: 12, alignSelf: 'center' }}>{erro}</span>}
+          {loading && <Loader2 style={{ width:16, color:'#94a3b8', alignSelf:'center' }} className="animate-spin"/>}
+          {erro && <span style={{ color:'#e11d48', fontSize:12, alignSelf:'center' }}>{erro}</span>}
         </div>
 
         {/* CARDS */}
         {resumo.wmape_h != null && (
-          <div style={{ display: 'flex', gap: 12, marginBottom: 18, flexWrap: 'wrap' }}>
+          <div style={{ display:'flex', gap:12, marginBottom:16, flexWrap:'wrap' }}>
             <Card label="WMAPE Humano" valor={resumo.wmape_h} cor={corWmape(resumo.wmape_h)}
-              sub={`Acurácia ${pct(100 - resumo.wmape_h)}`} />
-            <Card label="MAPE Humano" valor={resumo.mape_h} cor={corWmape(resumo.mape_h)}
-              sub="Média por SKU" />
-            <Card label="Bias Humano" valor={resumo.bias_h}
-              cor={Math.abs(resumo.bias_h || 0) < 5 ? '#059669' : (resumo.bias_h || 0) > 0 ? '#e11d48' : '#2563eb'}
-              sub={(resumo.bias_h || 0) > 5 ? '▲ Superestimando' : (resumo.bias_h || 0) < -5 ? '▼ Subestimando' : '✓ Equilibrado'} />
+              sub={`Acurácia ${pct(100-resumo.wmape_h)}`} />
+            <Card label="Bias Humano" valor={resumo.bias_h} cor={corBias(resumo.bias_h)}
+              sub={(resumo.bias_h||0)>5?'▲ Superestimando':(resumo.bias_h||0)<-5?'▼ Subestimando':'✓ Equilibrado'} />
             {temIA && (
               <>
                 <Card label="WMAPE IA" valor={resumo.wmape_ia} cor={corWmape(resumo.wmape_ia)}
-                  sub={`${resumo.meses_com_ia || 0} meses`} />
+                  sub={`${resumo.meses_com_ia||0} meses`} />
                 <Card label="FVA" valor={resumo.fva}
-                  cor={(resumo.fva || 0) < 0 ? '#059669' : (resumo.fva || 0) > 0 ? '#e11d48' : '#94a3b8'}
-                  sub={(resumo.fva || 0) < 0 ? 'IA mais precisa' : (resumo.fva || 0) > 0 ? 'Humano mais preciso' : '—'} />
+                  cor={(resumo.fva||0)<0?'#059669':(resumo.fva||0)>0?'#e11d48':'#94a3b8'}
+                  sub={(resumo.fva||0)<0?'IA mais precisa':(resumo.fva||0)>0?'Humano mais preciso':'—'} />
               </>
             )}
-            <div style={{
-              background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 14,
-              padding: '14px 18px', flex: 1, minWidth: 160,
-            }}>
-              <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.06em', color: '#0284c7', marginBottom: 6 }}>
-                Período
-              </div>
-              <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>
-                {mesesSel.length} meses
-              </div>
-              {mesesSel.length > 0 && (
-                <div style={{ fontSize: 11, color: '#64748b', marginTop: 3 }}>
-                  {labelMes(mesesSel[0])} → {labelMes(mesesSel[mesesSel.length - 1])}
+            <div style={{ background:'#f0f9ff', border:'1px solid #bae6fd', borderRadius:14,
+              padding:'14px 18px', flex:1, minWidth:160 }}>
+              <div style={{ fontSize:10, fontWeight:800, textTransform:'uppercase', letterSpacing:'.06em', color:'#0284c7', marginBottom:6 }}>Período</div>
+              <div style={{ fontSize:13, fontWeight:700 }}>{mesesSel.length} meses</div>
+              {mesesSel.length>0 && (
+                <div style={{ fontSize:11, color:'#64748b', marginTop:3 }}>
+                  {lMes(mesesSel[0])} → {lMes(mesesSel[mesesSel.length-1])}
                 </div>
               )}
-              {!temIA && (
-                <div style={{ fontSize: 10, color: '#d97706', marginTop: 6 }}>
-                  IA disponível a partir de Jun/26
-                </div>
-              )}
+              {!temIA && <div style={{ fontSize:10, color:'#d97706', marginTop:6 }}>⚠ IA disponível a partir de Jun/26</div>}
             </div>
           </div>
         )}
 
         {/* GRÁFICOS */}
         {serie.length > 0 ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <Grafico dados={serie} chaveH="wmape_h" chaveIA="wmape_ia"
-              titulo="WMAPE (%)" descricao="Ponderado por volume — quanto do volume total foi mal previsto"
-              refBands={[{ y: 20, cor: '#10b981', label: 'Meta 20%' }, { y: 35, cor: '#e11d48', label: 'Crítico 35%' }]} />
+          <div style={{ display:'flex', flexDirection:'column', gap:14, marginBottom:20 }}>
 
-            <Grafico dados={serie} chaveH="mape_h" chaveIA="mape_ia"
-              titulo="MAPE (%)" descricao="Média por SKU — cada produto com peso igual, exclui real = 0"
-              refBands={[{ y: 20, cor: '#10b981', label: '20%' }]} />
+            <Grafico dados={serie} chaveH="wmape_h" chaveIA="wmape_ia" titulo="WMAPE (%)"
+              legendaRefs={[
+                { y:20, cor:'#059669', label:'Meta — abaixo de 20% a acurácia é adequada para o plano tático' },
+                { y:35, cor:'#e11d48', label:'Crítico — acima de 35% o plano não tem base confiável de previsão' },
+              ]} />
 
-            <Grafico dados={serie} chaveH="bias_h" chaveIA="bias_ia"
-              titulo="BIAS (%)" descricao="Positivo = plano acima do vendido · Negativo = plano abaixo"
+            <Grafico dados={serie} chaveH="bias_h" chaveIA="bias_ia" titulo="BIAS (%)"
               refZero
-              refBands={[{ y: 10, cor: '#d97706', label: '+10%' }, { y: -10, cor: '#2563eb', label: '-10%' }]} />
+              legendaRefs={[
+                { y: 10, cor:'#e11d48', label:'Limite de atenção positivo — acima de +10% há superestimativa sistemática, risco de sobra de estoque' },
+                { y:-10, cor:'#2563eb', label:'Limite de atenção negativo — abaixo de -10% há subestimativa sistemática, risco de ruptura' },
+              ]} />
 
             {temIA && (
-              <Grafico dados={serie} chaveH={undefined} chaveIA="fva"
-                titulo="FVA — Forecast Value Added (%)"
-                descricao="Negativo = IA foi mais precisa que o humano · Positivo = humano foi mais preciso"
-                refZero />
+              <Grafico dados={serie} chaveH={undefined} chaveIA="fva" titulo="FVA — Forecast Value Added (%)"
+                refZero
+                legendaRefs={[
+                  { y:0, cor:'#94a3b8', label:'Zero — FVA negativo significa que a IA foi mais precisa que o ajuste humano; positivo, que o humano melhorou o plano' },
+                ]} />
             )}
-
-            <div style={{ fontSize: 11, color: '#94a3b8', lineHeight: 1.8, padding: '2px 4px' }}>
-              <b>WMAPE</b> = SUM(|previsão−real|) / SUM(real): ponderado por volume, o indicador principal para portfólio.&nbsp;
-              <b>MAPE</b> = Média de |previsão−real| / real por SKU: cada item com peso igual, mostra spread de erros, exclui meses com real = 0.&nbsp;
-              <b>BIAS</b> = (SUM(previsão) − SUM(real)) / SUM(real): direção sistemática, ±10% é a zona de atenção.&nbsp;
-              <b>FVA</b> = WMAPE_IA − WMAPE_Humano: disponível somente para ciclos Nexus (M+2 congelado, a partir de jun/26).&nbsp;
-              Meta humana jan/23–mai/26 via arquivo histórico, jun/26+ via vol_final do ciclo M+2.&nbsp;
-              Portfólio ativo, a partir da primeira venda de cada SKU.
-            </div>
           </div>
         ) : !loading && (
-          <div style={{
-            background: '#fff', borderRadius: 14, border: '1px solid #f1f5f9',
-            padding: 48, textAlign: 'center', color: '#94a3b8', fontSize: 13,
-          }}>
-            {mesesSel.length === 0
-              ? 'Selecione pelo menos um mês no seletor de período.'
-              : 'Nenhum dado encontrado para os filtros selecionados.'}
+          <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9',
+            padding:48, textAlign:'center', color:'#94a3b8', fontSize:13, marginBottom:20 }}>
+            {mesesSel.length===0?'Selecione pelo menos um mês.':'Sem dados para os filtros selecionados.'}
           </div>
         )}
+
+        {/* TABELAS */}
+        {diag.length > 0 && (
+          <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
+            <div style={{ display:'flex', borderBottom:'1px solid #f1f5f9', padding:'0 18px', background:'#fafafa' }}>
+              <button style={styleTab(abaTabela==='wmape')} onClick={()=>setAbaTabela('wmape')}>
+                Ranking WMAPE ({diag.length})
+              </button>
+              <button style={styleTab(abaTabela==='super')} onClick={()=>setAbaTabela('super')}>
+                <TrendingUp style={{ width:13, display:'inline', marginRight:4, color:abaTabela==='super'?'#e11d48':'#94a3b8' }}/>
+                Superestimando ({nSuper})
+              </button>
+              <button style={styleTab(abaTabela==='sub')} onClick={()=>setAbaTabela('sub')}>
+                <TrendingDown style={{ width:13, display:'inline', marginRight:4, color:abaTabela==='sub'?'#2563eb':'#94a3b8' }}/>
+                Subestimando ({nSub})
+              </button>
+            </div>
+
+            {/* Legenda da aba */}
+            <div style={{ padding:'10px 18px', background:'#fafafa', borderBottom:'1px solid #f1f5f9', fontSize:11, color:'#64748b' }}>
+              {abaTabela==='wmape' && '↑ Ordenado do maior erro para o menor. Δ = Previsto − Real: ▲ excesso de caixas planejadas, ▼ falta de caixas planejadas.'}
+              {abaTabela==='super' && '↑ Ordenado por excesso absoluto em caixas. Frequência em vermelho quando o erro ocorre em ≥ 70% dos meses — indica padrão sistemático, não acaso.'}
+              {abaTabela==='sub'   && '↑ Ordenado por falta absoluta em caixas. Frequência em vermelho quando o erro ocorre em ≥ 70% dos meses — risco de ruptura recorrente.'}
+            </div>
+
+            <div style={{ padding:'0 0 4px' }}>
+              {abaTabela==='wmape' && <TabelaWmape itens={diag} />}
+              {abaTabela==='super' && <TabelaBias  itens={diag} modo="super" />}
+              {abaTabela==='sub'   && <TabelaBias  itens={diag} modo="sub" />}
+            </div>
+          </div>
+        )}
+
+        {/* Rodapé metodológico */}
+        <div style={{ fontSize:10, color:'#94a3b8', lineHeight:1.8, padding:'12px 4px' }}>
+          <b>WMAPE</b> = SUM(|prev−real|)/SUM(real): ponderado por volume, adequado para portfólio e categoria. &nbsp;
+          <b>BIAS</b> = (SUM(prev)−SUM(real))/SUM(real): positivo = superestimou, negativo = subestimou. &nbsp;
+          <b>Frequência</b> = meses onde o erro foi na mesma direção do BIAS médio (≥ 70% = padrão sistemático). &nbsp;
+          <b>FVA</b> = WMAPE_IA − WMAPE_Humano (disponível somente para ciclos Nexus, M+2 congelado, a partir de jun/26). &nbsp;
+          Meta humana jan/23–mai/26 via arquivo histórico · jun/26+ via vol_final do ciclo M+2 · portfólio ativo, a partir da primeira venda de cada SKU.
+        </div>
+
       </div>
     </div>
   );
