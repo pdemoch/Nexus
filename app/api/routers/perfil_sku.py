@@ -1040,7 +1040,9 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
         if mes_d >= mes_atual_local:
             continue   # mês corrente ainda em andamento
         vendido = entrada.get("vendido_cx") or 0
-        meta    = entrada.get("final_cx")
+        meta    = entrada.get("final_cx")           # Nexus M-2 congelado
+        if meta is None:
+            meta = entrada.get("humano_hist_cx")    # arquivo histórico jan/23-mai/26
         if not vendido or vendido <= 0 or meta is None:
             continue
         delta_cx  = meta - vendido

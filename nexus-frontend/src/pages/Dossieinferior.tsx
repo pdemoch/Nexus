@@ -4,8 +4,8 @@ import {
   X, TrendingUp, TrendingDown, Minus, AlertTriangle, Loader2,
 } from 'lucide-react';
 import {
-  ComposedChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
-  CartesianGrid, ReferenceLine,
+  ComposedChart, Bar, Line, Cell, XAxis, YAxis,
+  Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine,
 } from 'recharts';
 
 /* =====================================================================
@@ -28,10 +28,59 @@ const tendIcon = (t: string) =>
   t === 'DECLINIO'    ? <TrendingDown className="w-4 h-4 text-rose-600" /> :
   <Minus className="w-4 h-4 text-slate-400" />;
 
+// ── Tooltip do gráfico principal ──────────────────────────────────────────
+const TooltipPrincipal = ({ active, payload, label }: any) => {
+  if (!active || !payload?.length) return null;
+  const items = payload.filter((p: any) => p.value != null && !isNaN(p.value));
+  if (!items.length) return null;
+  const bias = (() => {
+    const v = items.find((p: any) => p.dataKey === 'vendido');
+    const m = items.find((p: any) => p.dataKey === 'meta');
+    if (v?.value && m?.value && v.value > 0)
+      return (m.value - v.value) / v.value * 100;
+    return null;
+  })();
+  return (
+    <div style={{ background: '#fff', border: '1px solid #cbd5e1', borderRadius: 8, padding: '10px 14px', fontSize: 11 }}>
+      <div style={{ fontWeight: 700, marginBottom: 6, color: '#0f172a' }}>{label}</div>
+      {items.map((p: any) => (
+        <div key={p.dataKey} style={{ color: p.color, display: 'flex', justifyContent: 'space-between', gap: 16, marginBottom: 2 }}>
+          <span>{p.name}</span>
+          <span style={{ fontWeight: 700 }}>{fmtCx(p.value)} cx</span>
+        </div>
+      ))}
+      {bias != null && (
+        <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid #f1f5f9', fontSize: 10,
+          fontWeight: 800, color: bias > 15 ? '#e11d48' : bias < -15 ? '#2563eb' : '#059669' }}>
+          BIAS: {bias >= 0 ? '+' : ''}{bias.toFixed(1)}%
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── Tooltip do gráfico de barras BIAS ────────────────────────────────────
+const TooltipBias = ({ active, payload, label }: any) => {
+  if (!active || !payload?.length || payload[0].value == null) return null;
+  const v = payload[0].value;
+  const cor = v > 15 ? '#e11d48' : v < -15 ? '#2563eb' : '#059669';
+  return (
+    <div style={{ background: '#fff', border: '1px solid #cbd5e1', borderRadius: 8, padding: '8px 12px', fontSize: 11 }}>
+      <div style={{ fontWeight: 700, marginBottom: 4, color: '#0f172a' }}>{label}</div>
+      <div style={{ fontWeight: 800, color: cor }}>
+        BIAS: {v >= 0 ? '+' : ''}{v.toFixed(1)}%
+      </div>
+      <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 2 }}>
+        {v > 0 ? 'Meta acima do vendido' : v < 0 ? 'Meta abaixo do vendido' : 'No alvo'}
+      </div>
+    </div>
+  );
+};
+
 export default function DossieInferior({
   prefixoApi, tipo, id, titulo, onFechar, paramsExtra, subtitulo
 }: any) {
-  const [d, setD]         = useState<any>(null);
+  const [d, setD]             = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -51,48 +100,30 @@ export default function DossieInferior({
       .finally(() => setLoading(false));
   }, [prefixoApi, tipo, id, JSON.stringify(paramsExtra || {})]);
 
-  // ── Meta unificada: junta humano_hist_cx + final_cx em UMA linha contínua ──
-  // Prioridade: final_cx (S&OP / Nexus) → humano_hist_cx (arquivo jan/23-mai/26)
-  // Meses com vendido mas sem meta: aparece como 0 (não gap) — backend já preenche
+  // ── Meta unificada: final_cx (Nexus) → humano_hist_cx (histórico) → 0 ──
   const dadosGrafico = (d?.serie || []).map((x: any) => {
     const meta =
-      x.final_cx        != null ? x.final_cx         :
-      x.humano_hist_cx  != null ? x.humano_hist_cx   :
-      (x.vendido_cx != null ? 0 : null);              // mês com venda, sem plano = 0
+      x.final_cx        != null ? x.final_cx       :
+      x.humano_hist_cx  != null ? x.humano_hist_cx :
+      (x.vendido_cx != null ? 0 : null);
+
+    // BIAS em % para o gráfico de barras (só onde há vendido e meta)
+    const bias = (meta != null && x.vendido_cx && x.vendido_cx > 0)
+      ? (meta - x.vendido_cx) / x.vendido_cx * 100
+      : null;
+
     return {
       mes:      mesCurto(x.mes),
       vendido:  x.vendido_cx,
       meta,
       ia:       x.ia_cx,
+      bias,
       ehFuturo: x.eh_futuro,
     };
   });
 
   const marcoHoje = d?.marco_hoje ? mesCurto(d.marco_hoje) : null;
   const comps     = d?.comparacoes_por_mes || (d?.comparacoes ? [d.comparacoes] : []);
-
-  // ── Rótulo de variação % (meta vs vendido) ────────────────────────────────
-  // Aparece: meses futuros sempre + a cada 6 meses históricos
-  const renderLabelMeta = (props: any) => {
-    const { x, y, value, index } = props;
-    if (value == null) return null;
-    const ponto = dadosGrafico[index];
-    if (!ponto?.vendido || ponto.vendido <= 0) return null;
-
-    const ehFuturo  = ponto.ehFuturo;
-    const intervalo = dadosGrafico.length > 24 ? 6 : dadosGrafico.length > 12 ? 3 : 2;
-    if (!ehFuturo && index % intervalo !== 0) return null;
-
-    const pct = (value - ponto.vendido) / ponto.vendido * 100;
-    if (!isFinite(pct) || Math.abs(pct) < 1) return null;
-
-    const cor = pct > 15 ? '#e11d48' : pct < -15 ? '#2563eb' : '#64748b';
-    return (
-      <text x={x} y={y - 9} textAnchor="middle" fontSize={8} fill={cor} fontWeight={800}>
-        {pct >= 0 ? '+' : ''}{pct.toFixed(0)}%
-      </text>
-    );
-  };
 
   return (
     <div
@@ -142,61 +173,92 @@ export default function DossieInferior({
                 <span className="inline-block" style={{ width: 20, height: 2, background: 'repeating-linear-gradient(90deg,#8b5cf6 0 4px,transparent 4px 7px)' }} />
                 IA
               </span>
-              <span className="flex items-center gap-1.5 text-[9px] text-slate-400">
-                <span className="font-black">%</span> rótulo = variação meta vs vendido
-              </span>
             </div>
           </div>
 
-          {/* GRÁFICO */}
-          <div style={{ height: 300 }} className="mb-4">
-            <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={dadosGrafico} margin={{ top: 18, right: 12, bottom: 0, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis dataKey="mes" tick={{ fontSize: 10, fill: '#64748b' }} interval={2} />
-                <YAxis tick={{ fontSize: 10, fill: '#64748b' }} width={52}
-                  tickFormatter={(v: any) => v == null || isNaN(v) ? '' : new Intl.NumberFormat('pt-BR').format(v)} />
-                <Tooltip
-                  contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #cbd5e1' }}
-                  formatter={(v: any, name: any) => {
-                    if (v == null || isNaN(v)) return ['—', name];
-                    return [`${fmtCx(v)} cx`, name];
-                  }}
-                />
-                {marcoHoje && (
-                  <ReferenceLine x={marcoHoje} stroke="#f59e0b" strokeDasharray="4 4"
-                    label={{ value: 'hoje', fontSize: 9, fill: '#b45309', position: 'insideTopRight' }} />
-                )}
-                {/* Realizado */}
-                <Line type="monotone" dataKey="vendido" name="Vendido"
-                  stroke="#4338ca" strokeWidth={3} dot={false} connectNulls={false} />
-                {/* Meta unificada (histórica jan/23-mai/26 + S&OP jun/26+) — UMA linha */}
-                <Line type="monotone" dataKey="meta" name="Meta"
-                  stroke="#059669" strokeWidth={2.5} strokeDasharray="6 4"
-                  dot={{ r: 3, fill: '#059669' }}
-                  connectNulls={false}
-                  label={renderLabelMeta} />
-                {/* IA */}
-                <Line type="monotone" dataKey="ia" name="IA"
-                  stroke="#8b5cf6" strokeWidth={1.5} strokeDasharray="3 3"
-                  dot={false} connectNulls={false} />
-              </ComposedChart>
-            </ResponsiveContainer>
+          {/* GRÁFICO ÚNICO — linhas (eixo esq.) + barras BIAS % (eixo dir.) */}
+          {(() => {
+            const biasVals = dadosGrafico.map((d: any) => d.bias).filter((v: any) => v != null) as number[];
+            const bMin = biasVals.length ? Math.min(...biasVals, -20) : -20;
+            const bMax = biasVals.length ? Math.max(...biasVals,  20) : 20;
+            const bDom: [number, number] = [Math.floor(bMin * 1.25), Math.ceil(bMax * 1.25)];
+            return (
+              <div style={{ height: 300 }} className="mb-3">
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={dadosGrafico} margin={{ top: 8, right: 52, bottom: 0, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                    <XAxis dataKey="mes" tick={{ fontSize: 10, fill: '#64748b' }} interval={2} />
+
+                    {/* Eixo esquerdo — caixas */}
+                    <YAxis yAxisId="vol" orientation="left" width={52}
+                      tick={{ fontSize: 10, fill: '#64748b' }}
+                      tickFormatter={(v: any) => v == null || isNaN(v) ? '' : new Intl.NumberFormat('pt-BR').format(v)} />
+
+                    {/* Eixo direito — BIAS % */}
+                    <YAxis yAxisId="bias" orientation="right" width={38}
+                      domain={bDom}
+                      tick={{ fontSize: 9, fill: '#94a3b8' }}
+                      tickFormatter={(v: any) => `${Number(v).toFixed(0)}%`} />
+
+                    <Tooltip content={<TooltipPrincipal />} />
+
+                    {/* Barras BIAS primeiro (atrás das linhas) */}
+                    <Bar yAxisId="bias" dataKey="bias" name="BIAS"
+                      maxBarSize={12} opacity={0.55} radius={[2, 2, 0, 0]}>
+                      {dadosGrafico.map((entry: any, index: number) => (
+                        <Cell key={index} fill={
+                          entry.bias == null ? 'transparent' :
+                          entry.bias > 20    ? '#e11d48' :
+                          entry.bias > 0     ? '#fca5a5' :
+                          entry.bias < -20   ? '#2563eb' :
+                          entry.bias < 0     ? '#93c5fd' : '#94a3b8'
+                        } />
+                      ))}
+                    </Bar>
+
+                    {/* Linhas de referência BIAS */}
+                    <ReferenceLine yAxisId="bias" y={0}   stroke="#94a3b8" strokeWidth={1} />
+                    <ReferenceLine yAxisId="bias" y={20}  stroke="#fca5a5" strokeDasharray="4 2" />
+                    <ReferenceLine yAxisId="bias" y={-20} stroke="#93c5fd" strokeDasharray="4 2" />
+
+                    {/* Marco hoje */}
+                    {marcoHoje && (
+                      <ReferenceLine x={marcoHoje} stroke="#f59e0b" strokeDasharray="4 4"
+                        label={{ value: 'hoje', fontSize: 9, fill: '#b45309', position: 'insideTopRight' }} />
+                    )}
+
+                    {/* Linhas por cima das barras */}
+                    <Line yAxisId="vol" type="monotone" dataKey="vendido" name="Vendido"
+                      stroke="#4338ca" strokeWidth={3} dot={false} activeDot={{ r: 4 }} connectNulls={false} />
+                    <Line yAxisId="vol" type="monotone" dataKey="meta" name="Meta"
+                      stroke="#059669" strokeWidth={2} strokeDasharray="6 4"
+                      dot={false} activeDot={{ r: 4 }} connectNulls={false} />
+                    <Line yAxisId="vol" type="monotone" dataKey="ia" name="IA"
+                      stroke="#8b5cf6" strokeWidth={1.5} strokeDasharray="3 3"
+                      dot={false} activeDot={{ r: 3 }} connectNulls={false} />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
+            );
+          })()}
+
+          <div className="text-[9px] text-slate-400 mb-4 text-center">
+            Barras = BIAS % (meta − vendido) / vendido ·
+            <span className="text-rose-400 font-bold"> vermelho</span> = meta acima do vendido ·
+            <span className="text-blue-400 font-bold"> azul</span> = meta abaixo · tracejado em ±20%
           </div>
 
-          {/* ── ACURÁCIA DOS ÚLTIMOS 6 MESES — logo abaixo do gráfico ── */}
+          {/* ── ACURÁCIA DOS ÚLTIMOS 6 MESES ── */}
           {tipo !== 'categoria' && (d.historico_12m || []).length > 0 && (
             <div className="rounded-xl bg-white border border-slate-100 overflow-hidden mb-5">
-              <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
-                <div>
-                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
-                    Acurácia — últimos {d.historico_12m.length} meses fechados
-                  </div>
-                  <div className="text-[10px] text-slate-400">
-                    BIAS = (meta − vendido) / vendido ·
-                    <span className="text-rose-500 font-bold"> vermelho</span> = meta acima do vendido ·
-                    <span className="text-blue-500 font-bold"> azul</span> = meta abaixo do vendido
-                  </div>
+              <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-100">
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                  Acurácia — últimos {d.historico_12m.length} meses fechados
+                </div>
+                <div className="text-[10px] text-slate-400">
+                  BIAS = (meta − vendido) / vendido ·
+                  <span className="text-rose-500 font-bold"> vermelho</span> = meta acima do vendido ·
+                  <span className="text-blue-500 font-bold"> azul</span> = meta abaixo do vendido
                 </div>
               </div>
               <div className="overflow-x-auto">
@@ -214,9 +276,9 @@ export default function DossieInferior({
                   </thead>
                   <tbody>
                     {(d.historico_12m || []).map((row: any, idx: number) => {
-                      const b = row.delta_pct;
-                      const corBias  = b > 15 ? '#e11d48' : b < -15 ? '#2563eb' : '#059669';
-                      const corWmape = row.wmape_pct <= 20 ? '#059669' : row.wmape_pct <= 35 ? '#d97706' : '#e11d48';
+                      const b  = row.delta_pct;
+                      const corB = b > 15 ? '#e11d48' : b < -15 ? '#2563eb' : '#059669';
+                      const corW = row.wmape_pct <= 20 ? '#059669' : row.wmape_pct <= 35 ? '#d97706' : '#e11d48';
                       return (
                         <tr key={row.mes} style={{ background: idx % 2 ? '#f9fafb' : '#fff', borderBottom: '1px solid #f1f5f9' }}>
                           <td style={{ padding: '7px 12px', fontWeight: 700, color: '#334155' }}>{row.mes_label}</td>
@@ -231,10 +293,10 @@ export default function DossieInferior({
                             {row.delta_cx > 0 ? '▲ ' : row.delta_cx < 0 ? '▼ ' : ''}
                             {new Intl.NumberFormat('pt-BR').format(Math.abs(row.delta_cx))}
                           </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corBias }}>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corB }}>
                             {b >= 0 ? '+' : ''}{b?.toFixed(1).replace('.', ',')}%
                           </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corWmape }}>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corW }}>
                             {row.wmape_pct?.toFixed(1).replace('.', ',')}%
                           </td>
                         </tr>
@@ -284,13 +346,13 @@ export default function DossieInferior({
           {/* ── 3 BLOCOS ── */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
 
-            {/* BLOCO A — Plano vs Ano anterior · MÊS A MÊS */}
+            {/* BLOCO A — Plano vs Ano anterior · mês a mês */}
             {comps.length > 0 && (
               <div className="rounded-xl bg-white border border-slate-100 p-4">
                 <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-3">
                   Plano vs ano anterior
                 </div>
-                <div className="space-y-0">
+                <div>
                   {comps.map((comp: any, idx: number) => {
                     const delta = comp.ano_ant_cx > 0
                       ? (comp.final_cx - comp.ano_ant_cx) / comp.ano_ant_cx * 100
