@@ -23,19 +23,20 @@ const mesCurto = (iso: string) => {
   const nomes = ['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez'];
   return `${nomes[parseInt(m) - 1]}/${y.slice(2)}`;
 };
-
 const tendIcon = (t: string) =>
   t === 'CRESCIMENTO' ? <TrendingUp className="w-4 h-4 text-emerald-600" /> :
   t === 'DECLINIO'    ? <TrendingDown className="w-4 h-4 text-rose-600" /> :
   <Minus className="w-4 h-4 text-slate-400" />;
 
-export default function DossieInferior({ prefixoApi, tipo, id, titulo, onFechar, paramsExtra, subtitulo }: any) {
-  const [d, setD] = useState<any>(null);
+export default function DossieInferior({
+  prefixoApi, tipo, id, titulo, onFechar, paramsExtra, subtitulo
+}: any) {
+  const [d, setD]         = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     setLoading(true);
-    const rota = tipo === 'categoria' ? 'dossie-categoria' : 'dossie';
+    const rota  = tipo === 'categoria' ? 'dossie-categoria' : 'dossie';
     const param = tipo === 'categoria'
       ? `categoria=${encodeURIComponent(id)}`
       : `sku=${encodeURIComponent(id)}`;
@@ -50,21 +51,48 @@ export default function DossieInferior({ prefixoApi, tipo, id, titulo, onFechar,
       .finally(() => setLoading(false));
   }, [prefixoApi, tipo, id, JSON.stringify(paramsExtra || {})]);
 
-  const dadosGrafico = (d?.serie || []).map((x: any) => ({
-    mes:        mesCurto(x.mes),
-    vendido:    x.vendido_cx,
-    meta:       x.final_cx,
-    ia:         x.ia_cx,
-    humanoHist: x.humano_hist_cx,  // meta histórica do arquivo jan/23–mai/26
-  }));
+  // ── Meta unificada: junta humano_hist_cx + final_cx em UMA linha contínua ──
+  // Prioridade: final_cx (S&OP / Nexus) → humano_hist_cx (arquivo jan/23-mai/26)
+  // Meses com vendido mas sem meta: aparece como 0 (não gap) — backend já preenche
+  const dadosGrafico = (d?.serie || []).map((x: any) => {
+    const meta =
+      x.final_cx        != null ? x.final_cx         :
+      x.humano_hist_cx  != null ? x.humano_hist_cx   :
+      (x.vendido_cx != null ? 0 : null);              // mês com venda, sem plano = 0
+    return {
+      mes:      mesCurto(x.mes),
+      vendido:  x.vendido_cx,
+      meta,
+      ia:       x.ia_cx,
+      ehFuturo: x.eh_futuro,
+    };
+  });
 
   const marcoHoje = d?.marco_hoje ? mesCurto(d.marco_hoje) : null;
+  const comps     = d?.comparacoes_por_mes || (d?.comparacoes ? [d.comparacoes] : []);
 
-  // ── Comparação agregada vs Ano anterior ──────────────────────────────────
-  const comps = d?.comparacoes_por_mes || (d?.comparacoes ? [d.comparacoes] : []);
-  const totalMeta   = comps.reduce((s: number, c: any) => s + (c.final_cx   || 0), 0);
-  const totalAnoAnt = comps.reduce((s: number, c: any) => s + (c.ano_ant_cx || 0), 0);
-  const deltaAnoAnt = totalAnoAnt > 0 ? (totalMeta - totalAnoAnt) / totalAnoAnt * 100 : null;
+  // ── Rótulo de variação % (meta vs vendido) ────────────────────────────────
+  // Aparece: meses futuros sempre + a cada 6 meses históricos
+  const renderLabelMeta = (props: any) => {
+    const { x, y, value, index } = props;
+    if (value == null) return null;
+    const ponto = dadosGrafico[index];
+    if (!ponto?.vendido || ponto.vendido <= 0) return null;
+
+    const ehFuturo  = ponto.ehFuturo;
+    const intervalo = dadosGrafico.length > 24 ? 6 : dadosGrafico.length > 12 ? 3 : 2;
+    if (!ehFuturo && index % intervalo !== 0) return null;
+
+    const pct = (value - ponto.vendido) / ponto.vendido * 100;
+    if (!isFinite(pct) || Math.abs(pct) < 1) return null;
+
+    const cor = pct > 15 ? '#e11d48' : pct < -15 ? '#2563eb' : '#64748b';
+    return (
+      <text x={x} y={y - 9} textAnchor="middle" fontSize={8} fill={cor} fontWeight={800}>
+        {pct >= 0 ? '+' : ''}{pct.toFixed(0)}%
+      </text>
+    );
+  };
 
   return (
     <div
@@ -96,37 +124,37 @@ export default function DossieInferior({ prefixoApi, tipo, id, titulo, onFechar,
       ) : (
         <div className="px-5 py-4">
 
-          {/* LEGENDA + GRÁFICO */}
+          {/* LEGENDA */}
           <div className="mb-2 flex items-center justify-between flex-wrap gap-2">
             <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
               Realizado vs previsto · caixas · últimos 36 meses
             </div>
             <div className="flex items-center gap-4 text-[10px] font-bold text-slate-500 flex-wrap">
               <span className="flex items-center gap-1.5">
-                <span className="w-5 h-0.5 bg-indigo-600 inline-block rounded-full" style={{ height: 3 }} />
+                <span className="inline-block rounded-full" style={{ width: 20, height: 3, background: '#4338ca' }} />
                 vendido
               </span>
               <span className="flex items-center gap-1.5">
-                <span className="w-5 inline-block" style={{ height: 2, background: 'repeating-linear-gradient(90deg,#059669 0 6px,transparent 6px 10px)' }} />
-                Meta (S&OP)
+                <span className="inline-block" style={{ width: 20, height: 2, background: 'repeating-linear-gradient(90deg,#059669 0 6px,transparent 6px 10px)' }} />
+                meta
               </span>
               <span className="flex items-center gap-1.5">
-                <span className="w-5 inline-block" style={{ height: 2, background: 'repeating-linear-gradient(90deg,#0ea5e9 0 5px,transparent 5px 8px)' }} />
-                Meta histórica
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-5 inline-block" style={{ height: 2, background: 'repeating-linear-gradient(90deg,#8b5cf6 0 4px,transparent 4px 7px)' }} />
+                <span className="inline-block" style={{ width: 20, height: 2, background: 'repeating-linear-gradient(90deg,#8b5cf6 0 4px,transparent 4px 7px)' }} />
                 IA
+              </span>
+              <span className="flex items-center gap-1.5 text-[9px] text-slate-400">
+                <span className="font-black">%</span> rótulo = variação meta vs vendido
               </span>
             </div>
           </div>
 
-          <div style={{ height: 300 }} className="mb-6">
+          {/* GRÁFICO */}
+          <div style={{ height: 300 }} className="mb-4">
             <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={dadosGrafico} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
+              <ComposedChart data={dadosGrafico} margin={{ top: 18, right: 12, bottom: 0, left: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                 <XAxis dataKey="mes" tick={{ fontSize: 10, fill: '#64748b' }} interval={2} />
-                <YAxis tick={{ fontSize: 10, fill: '#64748b' }} width={50}
+                <YAxis tick={{ fontSize: 10, fill: '#64748b' }} width={52}
                   tickFormatter={(v: any) => v == null || isNaN(v) ? '' : new Intl.NumberFormat('pt-BR').format(v)} />
                 <Tooltip
                   contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #cbd5e1' }}
@@ -137,16 +165,18 @@ export default function DossieInferior({ prefixoApi, tipo, id, titulo, onFechar,
                 />
                 {marcoHoje && (
                   <ReferenceLine x={marcoHoje} stroke="#f59e0b" strokeDasharray="4 4"
-                    label={{ value: 'hoje', fontSize: 9, fill: '#b45309', position: 'top' }} />
+                    label={{ value: 'hoje', fontSize: 9, fill: '#b45309', position: 'insideTopRight' }} />
                 )}
+                {/* Realizado */}
                 <Line type="monotone" dataKey="vendido" name="Vendido"
                   stroke="#4338ca" strokeWidth={3} dot={false} connectNulls={false} />
-                <Line type="monotone" dataKey="meta" name="Meta (S&OP)"
+                {/* Meta unificada (histórica jan/23-mai/26 + S&OP jun/26+) — UMA linha */}
+                <Line type="monotone" dataKey="meta" name="Meta"
                   stroke="#059669" strokeWidth={2.5} strokeDasharray="6 4"
-                  dot={{ r: 3, fill: '#059669' }} connectNulls={false} />
-                <Line type="monotone" dataKey="humanoHist" name="Meta histórica"
-                  stroke="#0ea5e9" strokeWidth={1.5} strokeDasharray="4 3"
-                  dot={false} connectNulls={false} />
+                  dot={{ r: 3, fill: '#059669' }}
+                  connectNulls={false}
+                  label={renderLabelMeta} />
+                {/* IA */}
                 <Line type="monotone" dataKey="ia" name="IA"
                   stroke="#8b5cf6" strokeWidth={1.5} strokeDasharray="3 3"
                   dot={false} connectNulls={false} />
@@ -154,34 +184,146 @@ export default function DossieInferior({ prefixoApi, tipo, id, titulo, onFechar,
             </ResponsiveContainer>
           </div>
 
-          {/* 3 BLOCOS */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-5">
+          {/* ── ACURÁCIA DOS ÚLTIMOS 6 MESES — logo abaixo do gráfico ── */}
+          {tipo !== 'categoria' && (d.historico_12m || []).length > 0 && (
+            <div className="rounded-xl bg-white border border-slate-100 overflow-hidden mb-5">
+              <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+                <div>
+                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                    Acurácia — últimos {d.historico_12m.length} meses fechados
+                  </div>
+                  <div className="text-[10px] text-slate-400">
+                    BIAS = (meta − vendido) / vendido ·
+                    <span className="text-rose-500 font-bold"> vermelho</span> = meta acima do vendido ·
+                    <span className="text-blue-500 font-bold"> azul</span> = meta abaixo do vendido
+                  </div>
+                </div>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full" style={{ borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead>
+                    <tr className="border-b border-slate-100">
+                      {['Mês','Vendido (cx)','Meta (cx)','Δ (cx)','BIAS %','WMAPE %'].map(h => (
+                        <th key={h} style={{
+                          padding: '7px 12px', textAlign: h === 'Mês' ? 'left' : 'right',
+                          fontSize: 10, fontWeight: 800, textTransform: 'uppercase',
+                          letterSpacing: '.05em', color: '#94a3b8', whiteSpace: 'nowrap',
+                        }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(d.historico_12m || []).map((row: any, idx: number) => {
+                      const b = row.delta_pct;
+                      const corBias  = b > 15 ? '#e11d48' : b < -15 ? '#2563eb' : '#059669';
+                      const corWmape = row.wmape_pct <= 20 ? '#059669' : row.wmape_pct <= 35 ? '#d97706' : '#e11d48';
+                      return (
+                        <tr key={row.mes} style={{ background: idx % 2 ? '#f9fafb' : '#fff', borderBottom: '1px solid #f1f5f9' }}>
+                          <td style={{ padding: '7px 12px', fontWeight: 700, color: '#334155' }}>{row.mes_label}</td>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', color: '#475569' }}>
+                            {new Intl.NumberFormat('pt-BR').format(row.vendido_cx)}
+                          </td>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', color: '#475569' }}>
+                            {new Intl.NumberFormat('pt-BR').format(row.meta_cx)}
+                          </td>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 700,
+                            color: row.delta_cx > 0 ? '#e11d48' : row.delta_cx < 0 ? '#2563eb' : '#64748b' }}>
+                            {row.delta_cx > 0 ? '▲ ' : row.delta_cx < 0 ? '▼ ' : ''}
+                            {new Intl.NumberFormat('pt-BR').format(Math.abs(row.delta_cx))}
+                          </td>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corBias }}>
+                            {b >= 0 ? '+' : ''}{b?.toFixed(1).replace('.', ',')}%
+                          </td>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corWmape }}>
+                            {row.wmape_pct?.toFixed(1).replace('.', ',')}%
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  {/* Totalizador */}
+                  {(() => {
+                    const rows  = d.historico_12m || [];
+                    const totV  = rows.reduce((s: number, r: any) => s + r.vendido_cx, 0);
+                    const totM  = rows.reduce((s: number, r: any) => s + r.meta_cx, 0);
+                    const totD  = rows.reduce((s: number, r: any) => s + r.delta_cx, 0);
+                    const biasT = totV > 0 ? totD / totV * 100 : 0;
+                    const wmT   = totV > 0 ? Math.abs(totD) / totV * 100 : 0;
+                    const corBT = biasT > 15 ? '#e11d48' : biasT < -15 ? '#2563eb' : '#059669';
+                    const corWT = wmT <= 20 ? '#059669' : wmT <= 35 ? '#d97706' : '#e11d48';
+                    return (
+                      <tfoot>
+                        <tr style={{ background: '#f0f9ff', borderTop: '2px solid #bae6fd' }}>
+                          <td style={{ padding: '7px 12px', fontWeight: 800, fontSize: 11, color: '#0284c7' }}>Acumulado</td>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800 }}>
+                            {new Intl.NumberFormat('pt-BR').format(totV)}
+                          </td>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800 }}>
+                            {new Intl.NumberFormat('pt-BR').format(totM)}
+                          </td>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800,
+                            color: totD > 0 ? '#e11d48' : totD < 0 ? '#2563eb' : '#64748b' }}>
+                            {totD > 0 ? '▲ ' : totD < 0 ? '▼ ' : ''}
+                            {new Intl.NumberFormat('pt-BR').format(Math.abs(totD))}
+                          </td>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corBT }}>
+                            {biasT >= 0 ? '+' : ''}{biasT.toFixed(1).replace('.', ',')}%
+                          </td>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corWT }}>
+                            {wmT.toFixed(1).replace('.', ',')}%
+                          </td>
+                        </tr>
+                      </tfoot>
+                    );
+                  })()}
+                </table>
+              </div>
+            </div>
+          )}
 
-            {/* BLOCO A — Comparação 1 cartão vs ano anterior */}
+          {/* ── 3 BLOCOS ── */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+
+            {/* BLOCO A — Plano vs Ano anterior · MÊS A MÊS */}
             {comps.length > 0 && (
               <div className="rounded-xl bg-white border border-slate-100 p-4">
                 <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-3">
                   Plano vs ano anterior
                 </div>
-                <div className="space-y-3">
-                  <div>
-                    <div className="text-[10px] text-slate-400 font-bold mb-0.5">Meta total da janela</div>
-                    <div className="text-xl font-black text-slate-900">{fmtCx(totalMeta)} cx</div>
-                  </div>
-                  <div className="border-t border-slate-100 pt-3">
-                    <div className="text-[10px] text-slate-400 font-bold mb-0.5">Mesmo período ano anterior</div>
-                    <div className="text-base font-bold text-slate-600">{fmtCx(totalAnoAnt)} cx</div>
-                    {deltaAnoAnt != null && (
-                      <div className={`text-sm font-black mt-1 ${deltaAnoAnt >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
-                        {sinal(deltaAnoAnt)} vs ano anterior
+                <div className="space-y-0">
+                  {comps.map((comp: any, idx: number) => {
+                    const delta = comp.ano_ant_cx > 0
+                      ? (comp.final_cx - comp.ano_ant_cx) / comp.ano_ant_cx * 100
+                      : null;
+                    return (
+                      <div key={comp.mes_foco || idx}
+                        className={`py-2.5 ${idx < comps.length - 1 ? 'border-b border-slate-100' : ''}`}>
+                        <div className="text-[10px] font-black text-indigo-600 mb-1">{comp.mes_label}</div>
+                        <div className="flex items-baseline justify-between gap-2">
+                          <div>
+                            <div className="text-[9px] text-slate-400 font-bold">Meta</div>
+                            <div className="text-base font-black text-slate-900">{fmtCx(comp.final_cx)} cx</div>
+                          </div>
+                          {comp.ano_ant_cx > 0 && (
+                            <div className="text-right">
+                              <div className="text-[9px] text-slate-400 font-bold">Ano ant.</div>
+                              <div className="text-sm font-bold text-slate-500">{fmtCx(comp.ano_ant_cx)} cx</div>
+                              {delta != null && (
+                                <div className={`text-[11px] font-black ${delta >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
+                                  {sinal(delta)}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       </div>
-                    )}
-                  </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
 
-            {/* BLOCO B — Humano vs IA · somente mês a mês */}
+            {/* BLOCO B — Humano vs IA · mês a mês */}
             {d.fva ? (
               <div className="rounded-xl bg-white border border-slate-100 p-4">
                 <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
@@ -274,101 +416,6 @@ export default function DossieInferior({ prefixoApi, tipo, id, titulo, onFechar,
               </div>
             )}
           </div>
-
-          {/* TABELA HISTÓRICA — últimos 12 meses (vendido / meta / BIAS / WMAPE) */}
-          {tipo !== 'categoria' && (d.historico_12m || []).length > 0 && (
-            <div className="rounded-xl bg-white border border-slate-100 overflow-hidden">
-              <div className="px-4 py-3 bg-slate-50 border-b border-slate-100">
-                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
-                  Acurácia · últimos {d.historico_12m.length} meses fechados
-                </div>
-                <div className="text-[10px] text-slate-400 mt-0.5">
-                  BIAS = (meta − vendido) / vendido · WMAPE = |BIAS| ·
-                  <span className="text-rose-500 font-bold"> vermelho</span> &gt; 15% superestimado ·
-                  <span className="text-blue-500 font-bold"> azul</span> &gt; 15% subestimado
-                </div>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full" style={{ borderCollapse: 'collapse', fontSize: 12 }}>
-                  <thead>
-                    <tr className="border-b border-slate-100">
-                      {['Mês','Vendido (cx)','Meta (cx)','Δ (cx)','BIAS %','WMAPE %'].map(h => (
-                        <th key={h} style={{
-                          padding: '8px 12px', textAlign: h === 'Mês' ? 'left' : 'right',
-                          fontSize: 10, fontWeight: 800, textTransform: 'uppercase',
-                          letterSpacing: '.05em', color: '#94a3b8', whiteSpace: 'nowrap',
-                        }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(d.historico_12m || []).map((row: any, idx: number) => {
-                      const b = row.delta_pct;
-                      const corBias = b > 15 ? '#e11d48' : b < -15 ? '#2563eb' : '#059669';
-                      const corWmape = row.wmape_pct <= 20 ? '#059669' : row.wmape_pct <= 35 ? '#d97706' : '#e11d48';
-                      return (
-                        <tr key={row.mes} style={{ background: idx % 2 ? '#f9fafb' : '#fff', borderBottom: '1px solid #f1f5f9' }}>
-                          <td style={{ padding: '7px 12px', fontWeight: 700, color: '#334155' }}>{row.mes_label}</td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', color: '#475569' }}>
-                            {new Intl.NumberFormat('pt-BR').format(row.vendido_cx)}
-                          </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', color: '#475569' }}>
-                            {new Intl.NumberFormat('pt-BR').format(row.meta_cx)}
-                          </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 700,
-                            color: row.delta_cx > 0 ? '#e11d48' : row.delta_cx < 0 ? '#2563eb' : '#64748b' }}>
-                            {row.delta_cx > 0 ? '▲ ' : row.delta_cx < 0 ? '▼ ' : ''}
-                            {new Intl.NumberFormat('pt-BR').format(Math.abs(row.delta_cx))}
-                          </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corBias }}>
-                            {b >= 0 ? '+' : ''}{b?.toFixed(1).replace('.', ',')}%
-                          </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corWmape }}>
-                            {row.wmape_pct?.toFixed(1).replace('.', ',')}%
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                  {/* Linha de total */}
-                  {(() => {
-                    const rows = d.historico_12m || [];
-                    const totV = rows.reduce((s: number, r: any) => s + r.vendido_cx, 0);
-                    const totM = rows.reduce((s: number, r: any) => s + r.meta_cx, 0);
-                    const totD = rows.reduce((s: number, r: any) => s + r.delta_cx, 0);
-                    const biasT = totV > 0 ? totD / totV * 100 : 0;
-                    const wmapeT = totV > 0 ? Math.abs(totD) / totV * 100 : 0;
-                    const corBT = biasT > 15 ? '#e11d48' : biasT < -15 ? '#2563eb' : '#059669';
-                    const corWT = wmapeT <= 20 ? '#059669' : wmapeT <= 35 ? '#d97706' : '#e11d48';
-                    return (
-                      <tfoot>
-                        <tr style={{ background: '#f0f9ff', borderTop: '2px solid #bae6fd' }}>
-                          <td style={{ padding: '8px 12px', fontWeight: 800, fontSize: 11, color: '#0284c7' }}>Total período</td>
-                          <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 800, color: '#0f172a' }}>
-                            {new Intl.NumberFormat('pt-BR').format(totV)}
-                          </td>
-                          <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 800, color: '#0f172a' }}>
-                            {new Intl.NumberFormat('pt-BR').format(totM)}
-                          </td>
-                          <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 800,
-                            color: totD > 0 ? '#e11d48' : totD < 0 ? '#2563eb' : '#64748b' }}>
-                            {totD > 0 ? '▲ ' : totD < 0 ? '▼ ' : ''}
-                            {new Intl.NumberFormat('pt-BR').format(Math.abs(totD))}
-                          </td>
-                          <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 800, color: corBT }}>
-                            {biasT >= 0 ? '+' : ''}{biasT.toFixed(1).replace('.', ',')}%
-                          </td>
-                          <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 800, color: corWT }}>
-                            {wmapeT.toFixed(1).replace('.', ',')}%
-                          </td>
-                        </tr>
-                      </tfoot>
-                    );
-                  })()}
-                </table>
-              </div>
-            </div>
-          )}
 
         </div>
       )}

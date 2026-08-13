@@ -728,12 +728,21 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
         GROUP BY 1
     """), {"sku": sku}).fetchall()
     for rh in hist_hum:
-        if rh.mes in mapa:
+        if rh.mes in mapa:          # só popula meses com realizado — não cria fantasmas
             mapa[rh.mes]["humano_hist_cx"] = int(rh.hcx or 0)
-        else:
-            linha = _novo(rh.mes)
-            linha["humano_hist_cx"] = int(rh.hcx or 0)
-            mapa[rh.mes] = linha
+
+    # Meses com realizado dentro do intervalo do arquivo histórico (jan/23-mai/26)
+    # mas sem meta cadastrada (meta era 0 no Excel, excluída no load) → aparece como 0
+    # em vez de gap, para não quebrar a linha do gráfico.
+    _hist_ini = datetime.date(2023, 1, 1)
+    _hist_fim = datetime.date(2026, 5, 1)
+    for _mes_key, _linha in mapa.items():
+        try:
+            _d = datetime.datetime.strptime(_mes_key, "%Y-%m-%d").date()
+            if _hist_ini <= _d <= _hist_fim and _linha.get("humano_hist_cx") is None:
+                _linha["humano_hist_cx"] = 0
+        except (ValueError, KeyError):
+            pass
 
     # 2) Meses futuros do ciclo ativo (só previsão).
     if meses_futuros:
@@ -918,7 +927,7 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
                                   razao_social=razao_social, ciclo_ativo=ciclo_ativo)
     # FVA acumulado: últimos 3 meses fechados (piso junho/2026).
     # Agrega humano vs IA no total do período — mais robusto que avaliar 1 mês.
-    fva = fva_sku_janela(db, sku, n_meses=3, razao_social=razao_social)
+    fva = fva_sku_janela(db, sku, n_meses=6, razao_social=razao_social)
 
     ciclo_ant = get_previous_cycle_str(ciclo_ativo)
 
@@ -1045,7 +1054,7 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
             "delta_pct":  round(delta_pct, 1),   # = BIAS individual do mês
             "wmape_pct":  round(abs(delta_pct), 1),  # para SKU, WMAPE = |BIAS|
         })
-        if len(historico_12m) >= 12:
+        if len(historico_12m) >= 6:
             break
 
     return {
