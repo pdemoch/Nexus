@@ -31,15 +31,19 @@ const tendIcon = (t: string) =>
 // ── Tooltip do gráfico principal ──────────────────────────────────────────
 const TooltipPrincipal = ({ active, payload, label }: any) => {
   if (!active || !payload?.length) return null;
-  const items = payload.filter((p: any) => p.value != null && !isNaN(p.value));
+  // Excluir a Bar de BIAS do loop de linhas — ela é eixo direito (%) e não
+  // deve aparecer como "BIAS X cx" junto com as linhas de volume.
+  const items = payload.filter((p: any) =>
+    p.value != null && !isNaN(p.value) && p.dataKey !== 'bias'
+  );
   if (!items.length) return null;
-  const bias = (() => {
-    const v = items.find((p: any) => p.dataKey === 'vendido');
-    const m = items.find((p: any) => p.dataKey === 'meta');
-    if (v?.value && m?.value && v.value > 0)
-      return (m.value - v.value) / v.value * 100;
-    return null;
-  })();
+  // BIAS calculado a partir dos valores de volume (vendido e meta) —
+  // só exibe se o ponto de dados já tem bias calculado (mês fechado).
+  // Usa o valor da Bar de bias do payload para saber se o mês está fechado.
+  const biasEntry = payload.find((p: any) => p.dataKey === 'bias');
+  const bias = biasEntry?.value != null && !isNaN(biasEntry.value)
+    ? biasEntry.value
+    : null;
   return (
     <div style={{ background: '#fff', border: '1px solid #cbd5e1', borderRadius: 8, padding: '10px 14px', fontSize: 11 }}>
       <div style={{ fontWeight: 700, marginBottom: 6, color: '#0f172a' }}>{label}</div>
@@ -266,15 +270,13 @@ export default function DossieInferior({
                 <table className="w-full" style={{ borderCollapse: 'collapse', fontSize: 12 }}>
                   <thead>
                     <tr className="border-b border-slate-100">
-                      {/* Grupo Humano */}
-                      <th colSpan={3} style={{ padding: '4px 12px', textAlign: 'center', fontSize: 9,
-                        fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em',
-                        color: '#6366f1', borderBottom: '1px solid #e0e7ff', background: '#f5f3ff' }} />
+                      {/* células vazias: Mês + Vendido + Meta H + Meta IA */}
+                      <th colSpan={4} style={{ padding: '4px 12px', background: '#fff', borderBottom: '1px solid #f1f5f9' }} />
                       <th colSpan={2} style={{ padding: '4px 12px', textAlign: 'center', fontSize: 9,
                         fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em',
                         color: '#6366f1', borderBottom: '1px solid #e0e7ff', background: '#f5f3ff',
                         whiteSpace: 'nowrap' }}>Humano</th>
-                      <th colSpan={2} style={{ padding: '4px 12px', textAlign: 'center', fontSize: 9,
+                      <th colSpan={3} style={{ padding: '4px 12px', textAlign: 'center', fontSize: 9,
                         fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em',
                         color: '#7c3aed', borderBottom: '1px solid #ede9fe', background: '#f5f3ff',
                         whiteSpace: 'nowrap' }}>IA</th>
@@ -285,14 +287,15 @@ export default function DossieInferior({
                     </tr>
                     <tr className="border-b border-slate-100">
                       {[
-                        { h: 'Mês',         align: 'left'  },
-                        { h: 'Vendido (cx)', align: 'right' },
-                        { h: 'Meta (cx)',    align: 'right' },
-                        { h: 'BIAS %',       align: 'right' },
-                        { h: 'WMAPE %',      align: 'right' },
-                        { h: 'BIAS IA %',    align: 'right' },
-                        { h: 'WMAPE IA %',   align: 'right' },
-                        { h: 'FVA pp',       align: 'right' },
+                        { h: 'Mês',           align: 'left'  },
+                        { h: 'Vendido (cx)',   align: 'right' },
+                        { h: 'Meta H (cx)',    align: 'right' },
+                        { h: 'Meta IA (cx)',   align: 'right' },
+                        { h: 'BIAS %',         align: 'right' },
+                        { h: 'WMAPE %',        align: 'right' },
+                        { h: 'BIAS IA %',      align: 'right' },
+                        { h: 'WMAPE IA %',     align: 'right' },
+                        { h: 'FVA pp',         align: 'right' },
                       ].map(({ h, align }) => (
                         <th key={h} style={{
                           padding: '5px 12px', textAlign: align as any,
@@ -311,7 +314,6 @@ export default function DossieInferior({
                       const corBIA = bIA == null ? '#94a3b8' : bIA > 15 ? '#e11d48' : bIA < -15 ? '#2563eb' : '#059669';
                       const wIA  = row.wmape_ia_pct;
                       const corWIA = wIA == null ? '#94a3b8' : wIA <= 20 ? '#059669' : wIA <= 35 ? '#d97706' : '#e11d48';
-                      // FVA: >0 humano ganhou, <0 IA ganhou
                       const fva  = row.fva_pct;
                       const corFVA = fva == null ? '#94a3b8' : fva > 0 ? '#6366f1' : fva < 0 ? '#7c3aed' : '#64748b';
                       return (
@@ -322,6 +324,12 @@ export default function DossieInferior({
                           </td>
                           <td style={{ padding: '7px 12px', textAlign: 'right', color: '#475569' }}>
                             {new Intl.NumberFormat('pt-BR').format(row.meta_cx)}
+                          </td>
+                          {/* Meta IA (cx) — só disponível a partir de jun/26 */}
+                          <td style={{ padding: '7px 12px', textAlign: 'right', color: '#7c3aed', fontWeight: 600 }}>
+                            {row.ia_cx != null
+                              ? new Intl.NumberFormat('pt-BR').format(row.ia_cx)
+                              : '—'}
                           </td>
                           <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corB }}>
                             {b >= 0 ? '+' : ''}{b?.toFixed(1).replace('.', ',')}%
@@ -335,8 +343,7 @@ export default function DossieInferior({
                           <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corWIA }}>
                             {wIA == null ? '—' : `${wIA.toFixed(1).replace('.', ',')}%`}
                           </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corFVA,
-                            fontSize: 10 }}>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corFVA, fontSize: 10 }}>
                             {fva == null ? '—' : `${fva >= 0 ? '+' : ''}${fva.toFixed(1).replace('.', ',')} pp`}
                           </td>
                         </tr>
@@ -353,7 +360,7 @@ export default function DossieInferior({
                     const wmT   = totV > 0 ? Math.abs(totD) / totV * 100 : 0;
                     const corBT = biasT > 15 ? '#e11d48' : biasT < -15 ? '#2563eb' : '#059669';
                     const corWT = wmT <= 20 ? '#059669' : wmT <= 35 ? '#d97706' : '#e11d48';
-                    // Acumulado IA
+                    // Acumulado IA — só sobre meses com dado de IA
                     const rowsIA = rows.filter((r: any) => r.ia_cx != null);
                     const totIA  = rowsIA.reduce((s: number, r: any) => s + (r.ia_cx || 0), 0);
                     const totVIA = rowsIA.reduce((s: number, r: any) => s + r.vendido_cx, 0);
@@ -376,6 +383,9 @@ export default function DossieInferior({
                           </td>
                           <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800 }}>
                             {new Intl.NumberFormat('pt-BR').format(totM)}
+                          </td>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: '#7c3aed' }}>
+                            {rowsIA.length > 0 ? new Intl.NumberFormat('pt-BR').format(Math.round(totIA)) : '—'}
                           </td>
                           <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corBT }}>
                             {biasT >= 0 ? '+' : ''}{biasT.toFixed(1).replace('.', ',')}%

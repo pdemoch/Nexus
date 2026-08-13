@@ -715,6 +715,15 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
             "vendido_rs": round(float(r.vendido_rs or 0), 2),
             "faturado_rs": round(float(r.faturado_rs or 0), 2),
         })
+        # Mes corrente tem venda parcial mas ainda esta em andamento.
+        # Marca eh_futuro=True para o front nao calcular BIAS nem incluir
+        # na tabela de acuracia (mes aberto nao tem dado real fechado).
+        try:
+            _md = datetime.datetime.strptime(r.mes, "%Y-%m-%d").date()
+            if _md >= mes_atual:
+                linha["eh_futuro"] = True
+        except (ValueError, TypeError):
+            pass
         mapa[r.mes] = linha
 
     # 1b) Meta humana histórica (fato_previsao_humana: jan/23 → mai/26)
