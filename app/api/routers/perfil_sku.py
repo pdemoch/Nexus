@@ -694,7 +694,7 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
                SUM(qt_pedido) AS vendido_cx, SUM(qtfatura) AS faturado_cx,
                SUM(vl_pedido) AS vendido_rs, SUM(vlfatura) AS faturado_rs
         FROM fato_vendas
-        WHERE sku = :sku AND data_pedido >= (CURRENT_DATE - INTERVAL '24 months')
+        WHERE sku = :sku AND data_pedido >= (CURRENT_DATE - INTERVAL '36 months')
         """ + f_vendas + """
         GROUP BY 1
     """), {"sku": sku, **p_cgc}).fetchall()
@@ -706,7 +706,7 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
                 "ia_rs": None, "final_rs": None,
                 "final_ciclo_ant_cx": None, "final_ciclo_ant_rs": None,
                 "orcamento_rs": None, "ano_ant_cx": None, "ano_ant_rs": None,
-                "eh_futuro": False}
+                "eh_futuro": False, "humano_hist_cx": None}
 
     for r in realizado:
         linha = _novo(r.mes)
@@ -716,6 +716,24 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
             "faturado_rs": round(float(r.faturado_rs or 0), 2),
         })
         mapa[r.mes] = linha
+
+    # 1b) Meta humana histórica (fato_previsao_humana: jan/23 → mai/26)
+    #     Aparece no gráfico como linha tracejada fina, distinguindo o plano
+    #     feito pelo humano no arquivo Excel do vol_final do ciclo Nexus.
+    hist_hum = db.execute(text("""
+        SELECT TO_CHAR(mes_projetado,'YYYY-MM-01') AS mes,
+               SUM(vol_humano) AS hcx
+        FROM fato_previsao_humana
+        WHERE sku = :sku AND fonte = 'HISTORICO'
+        GROUP BY 1
+    """), {"sku": sku}).fetchall()
+    for rh in hist_hum:
+        if rh.mes in mapa:
+            mapa[rh.mes]["humano_hist_cx"] = int(rh.hcx or 0)
+        else:
+            linha = _novo(rh.mes)
+            linha["humano_hist_cx"] = int(rh.hcx or 0)
+            mapa[rh.mes] = linha
 
     # 2) Meses futuros do ciclo ativo (só previsão).
     if meses_futuros:
@@ -1001,6 +1019,35 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
     # para o bloco de comparações; comparacoes_por_mes expõe todos os meses)
     comparacoes = comparacoes_por_mes[0] if comparacoes_por_mes else None
 
+    # ── Histórico de acurácia: últimos 12 meses fechados (vendido vs meta) ──
+    hoje_local = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
+    mes_atual_local = hoje_local.replace(day=1)
+    historico_12m = []
+    for entrada in sorted(serie["serie"], key=lambda x: x["mes"], reverse=True):
+        try:
+            mes_d = datetime.datetime.strptime(entrada["mes"], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if mes_d >= mes_atual_local:
+            continue   # mês corrente ainda em andamento
+        vendido = entrada.get("vendido_cx") or 0
+        meta    = entrada.get("final_cx")
+        if not vendido or vendido <= 0 or meta is None:
+            continue
+        delta_cx  = meta - vendido
+        delta_pct = delta_cx / vendido * 100
+        historico_12m.append({
+            "mes":        entrada["mes"],
+            "mes_label":  f"{entrada['mes'][5:7]}/{entrada['mes'][2:4]}",
+            "vendido_cx": int(vendido),
+            "meta_cx":    int(meta),
+            "delta_cx":   int(delta_cx),
+            "delta_pct":  round(delta_pct, 1),   # = BIAS individual do mês
+            "wmape_pct":  round(abs(delta_pct), 1),  # para SKU, WMAPE = |BIAS|
+        })
+        if len(historico_12m) >= 12:
+            break
+
     return {
         "sku": sku,
         "descricao": descricao or sku,
@@ -1013,6 +1060,7 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
         "insights": insights,
         "plurianual": plur,
         "fva": fva,
+        "historico_12m": historico_12m,
     }
 
 

@@ -81,7 +81,7 @@ function SeletorDatas({ calendario, mesesSel, setMesesSel }: any) {
         borderRadius:10, padding:'8px 14px', background:'#fff', cursor:'pointer',
         fontSize:13, fontWeight:600, color:'#374151',
       }}>
-        📅 {mesesSel.length===0?'Período':`${mesesSel.length} mês${mesesSel.length>1?'es':''}`}
+        📅 {mesesSel.length===0?'Período':`${mesesSel.length} mes${mesesSel.length>1?'es':''}`}
         <ChevronDown style={{ width:14, color:'#9ca3af' }} />
       </button>
 
