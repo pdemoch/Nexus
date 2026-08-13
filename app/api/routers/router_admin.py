@@ -52,6 +52,40 @@ async def iniciar_pipeline(background_tasks: BackgroundTasks, db: Session = Depe
     return {"status": "success", "message": f"Pipeline de Engenharia de Dados iniciado para o ciclo {ciclo_atual}!"}
 
 
+@router.post("/pipeline/recarga-total")
+async def iniciar_recarga_total(background_tasks: BackgroundTasks, db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
+    """
+    RECARGA TOTAL DA FATO_VENDAS — uso único / operação destrutiva.
+
+    Apaga TODA a fato_vendas (TRUNCATE) e reinsere o histórico completo
+    desde jan/2023, sem nenhum filtro de canal. Após concluir, o pipeline
+    volta automaticamente ao modo normal de 5 meses nas próximas execuções.
+
+    Restrito a Administrador. Requer que o pipeline não esteja em execução.
+    """
+    if usuario_logado.get('funcao') != 'Administrador':
+        raise HTTPException(status_code=403, detail="Acesso negado. Apenas Administradores podem rodar a recarga total.")
+
+    if AppState.pipeline_rodando:
+        raise HTTPException(status_code=400, detail="O pipeline já está em execução. Aguarde a conclusão.")
+
+    ciclo_atual = get_current_cycle(db)
+
+    AppState.pipeline_rodando = True
+    AppState.logs = []
+
+    background_tasks.add_task(executar_pipeline_nexus, ciclo_atual, print, True)
+
+    return {
+        "status": "success",
+        "message": (
+            f"🔴 RECARGA TOTAL iniciada para o ciclo {ciclo_atual}. "
+            "Toda a fato_vendas será apagada e recarregada desde jan/2023. "
+            "Acompanhe os logs no painel."
+        )
+    }
+
+
 # =====================================================================
 # ROTAS DA MÁQUINA DO TEMPO
 # =====================================================================

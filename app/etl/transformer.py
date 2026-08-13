@@ -69,11 +69,15 @@ class NexusTransformer:
         print(f"   -> Janela: pedidos a partir de {data_inicio_str}")
 
         # 1. Tratamento da Tabela de Vendas (150)
+        # FILTROS REMOVIDOS PERMANENTEMENTE em 2026-08:
+        #   - operacao != "51"  (bonificações/transferências internas)
+        #   - regional FIFEIRO  (canal informal)
+        #   - regional EIC      (exportações/intercompany)
+        # Decisão: base unificada sem exclusões de canal — todo o volume do ERP
+        # entra na fato_vendas. Análises de canal são feitas por filtro no front,
+        # não na camada de carga.
         lf_vendas = lf_150.filter(
-            (pl.col("dtapedido") >= data_inicio_str) &  # <-- BLINDAGEM TEMPORAL
-            (pl.col("operacao").cast(pl.Utf8).str.strip_chars() != "51") & 
-            (~pl.col("regional").cast(pl.Utf8).str.to_uppercase().str.contains("FIFEIRO")) &
-            (~pl.col("regional").cast(pl.Utf8).str.to_uppercase().str.contains("EIC"))
+            (pl.col("dtapedido") >= data_inicio_str)   # <-- BLINDAGEM TEMPORAL (única barreira)
         ).with_columns([
             pl.col("produto").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars(),
             pl.col("cliente").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars(),

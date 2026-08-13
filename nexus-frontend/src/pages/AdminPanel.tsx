@@ -15,6 +15,7 @@ export default function AdminPanel() {
   // ESTADOS DO MOTOR E PIPELINE
   const [logs, setLogs] = useState<string[]>([]);
   const [isPipelineRunning, setIsPipelineRunning] = useState(false);
+  const [isRecargaTotal, setIsRecargaTotal] = useState(false);
   const terminalScrollRef = useRef<HTMLDivElement>(null);
 
   // ESTADOS DE ACESSOS E USUÁRIOS
@@ -45,7 +46,9 @@ export default function AdminPanel() {
       try {
         const statusRes = await axios.get('/api/v1/admin/pipeline/status');
         setLogs(statusRes.data.logs || []);
-        setIsPipelineRunning(statusRes.data.is_running);
+        const running = statusRes.data.is_running;
+        setIsPipelineRunning(running);
+        if (!running) setIsRecargaTotal(false);  // limpa flag ao terminar
       } catch(e) {}
 
       // 2. Usuários
@@ -108,6 +111,48 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
     } catch (e: any) {
       alert(e.response?.data?.detail || "Erro ao iniciar o pipeline.");
       setIsPipelineRunning(false);
+    }
+  };
+
+  const handleRecargaTotal = async () => {
+    const confirm1 = window.confirm(
+`🔴 RECARGA TOTAL DA BASE DE VENDAS
+
+Esta operação vai:
+1. APAGAR toda a tabela fato_vendas (TRUNCATE)
+2. Recarregar o histórico completo desde jan/2023
+3. Remover permanentemente os filtros de Operação 51, Fifeiro e EIC
+
+⏱ Tempo estimado: 30–60 minutos (3+ anos de dados dia a dia).
+
+Tem certeza que deseja continuar?`
+    );
+    if (!confirm1) return;
+
+    const confirm2 = window.confirm(
+`⚠️ CONFIRMAÇÃO FINAL
+
+Esta é uma operação IRREVERSÍVEL e DESTRUTIVA.
+Toda a fato_vendas será apagada antes da reinserção.
+
+Se o pipeline falhar no meio, a base ficará vazia até uma nova recarga.
+
+Digite OK para confiruar.
+
+Confirma a RECARGA TOTAL?`
+    );
+    if (!confirm2) return;
+
+    setIsPipelineRunning(true);
+    setIsRecargaTotal(true);
+    setLogs(["[RECARGA TOTAL] 🔴 Iniciando recarga histórica completa desde jan/2023..."]);
+
+    try {
+      await axios.post('/api/v1/admin/pipeline/recarga-total');
+    } catch (e: any) {
+      alert(e.response?.data?.detail || "Erro ao iniciar a recarga total.");
+      setIsPipelineRunning(false);
+      setIsRecargaTotal(false);
     }
   };
 
@@ -359,24 +404,55 @@ O robô ignorará o ciclo selecionado na 'Máquina do Tempo' para garantir a int
                             </h2>
                             <p className="text-xs font-medium text-slate-400 mt-1">Carga de Vendas Delta e Processamento de Redes Neurais S&OP.</p>
                         </div>
-                        <button onClick={handleRunPipeline} disabled={isPipelineRunning} className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-white px-6 py-3 rounded-xl text-xs font-black tracking-widest uppercase transition-all shadow-[0_0_20px_rgba(16,185,129,0.3)] disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap">
-                            {isPipelineRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                            {isPipelineRunning ? 'Processando...' : 'Run Pipeline'}
-                        </button>
+                        <div className="flex items-center gap-3 flex-wrap">
+                            {/* RECARGA TOTAL — botão destrutivo */}
+                            <button
+                                onClick={handleRecargaTotal}
+                                disabled={isPipelineRunning}
+                                title="Apaga toda a fato_vendas e recarrega o histórico completo desde jan/2023 sem filtros de canal. Operação longa e irreversível."
+                                className="flex items-center gap-2 bg-rose-600 hover:bg-rose-500 text-white px-5 py-3 rounded-xl text-xs font-black tracking-widest uppercase transition-all shadow-[0_0_20px_rgba(225,29,72,0.25)] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap border border-rose-500"
+                            >
+                                <ShieldAlert className="w-4 h-4" />
+                                Recarga Total
+                            </button>
+                            {/* RUN PIPELINE — operação normal */}
+                            <button onClick={handleRunPipeline} disabled={isPipelineRunning} className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-white px-6 py-3 rounded-xl text-xs font-black tracking-widest uppercase transition-all shadow-[0_0_20px_rgba(16,185,129,0.3)] disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap">
+                                {isPipelineRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                                {isPipelineRunning ? 'Processando...' : 'Run Pipeline'}
+                            </button>
+                        </div>
                     </div>
 
                     <div className="flex-1 bg-slate-950 p-6 flex flex-col overflow-hidden relative">
                         <div className="flex items-center gap-2 mb-4 pb-4 border-b border-slate-800 flex-shrink-0">
                             <Terminal className="w-5 h-5 text-slate-500" />
                             <span className="text-xs font-black text-slate-500 uppercase tracking-widest">NEXUS SERVER // CONSOLE OUTPUT</span>
-                            {isPipelineRunning && <span className="ml-auto flex items-center gap-2 text-[10px] font-black text-emerald-400 uppercase tracking-widest animate-pulse"><div className="w-2 h-2 bg-emerald-400 rounded-full"></div> RUNNING</span>}
+                            {isPipelineRunning && !isRecargaTotal && (
+                                <span className="ml-auto flex items-center gap-2 text-[10px] font-black text-emerald-400 uppercase tracking-widest animate-pulse">
+                                    <div className="w-2 h-2 bg-emerald-400 rounded-full"></div> RUNNING
+                                </span>
+                            )}
+                            {isPipelineRunning && isRecargaTotal && (
+                                <span className="ml-auto flex items-center gap-2 text-[10px] font-black text-rose-400 uppercase tracking-widest animate-pulse">
+                                    <div className="w-2 h-2 bg-rose-400 rounded-full animate-ping"></div> RECARGA TOTAL EM CURSO
+                                </span>
+                            )}
                         </div>
+                        {/* Banner de aviso durante recarga total */}
+                        {isRecargaTotal && (
+                            <div className="mb-4 flex items-center gap-3 bg-rose-950/60 border border-rose-800 rounded-xl px-4 py-3 flex-shrink-0">
+                                <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
+                                <p className="text-[11px] font-bold text-rose-300 leading-snug">
+                                    Recarga total em andamento — toda a fato_vendas foi apagada e está sendo reinserida desde jan/2023. Não feche esta janela.
+                                </p>
+                            </div>
+                        )}
                         <div ref={terminalScrollRef} className="flex-1 overflow-y-auto font-mono text-xs md:text-sm text-emerald-400/90 pr-2 space-y-1 custom-scrollbar">
                             {logs.length === 0 ? (
                                 <div className="h-full flex items-center justify-center text-slate-800 font-bold uppercase tracking-widest">Aguardando Execução...</div>
                             ) : (
                                 logs.map((log, i) => (
-                                    <div key={i} className={`${log.includes('ERRO') || log.includes('❌') ? 'text-rose-400' : log.includes('✅') ? 'text-cyan-400' : 'text-emerald-400/80'} py-0.5 border-l-2 border-slate-800 pl-3 break-words`}>
+                                    <div key={i} className={`${log.includes('ERRO') || log.includes('❌') ? 'text-rose-400' : log.includes('✅') ? 'text-cyan-400' : log.includes('🔴') || log.includes('RECARGA TOTAL') || log.includes('TRUNCATE') ? 'text-rose-300' : 'text-emerald-400/80'} py-0.5 border-l-2 border-slate-800 pl-3 break-words`}>
                                     {log}
                                     </div>
                                 ))

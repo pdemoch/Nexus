@@ -65,7 +65,17 @@ def _auditar_pmv_zerado(ciclo_alvo: str, log_callback=print):
         log_callback(f"⚠️ [PMV-AUDIT] Falha ao auditar PMV: {e}")
 
 
-async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print):
+async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print,
+                                  modo_recarga_total: bool = False):
+    """
+    modo_recarga_total=True  →  uso único para reprocessamento histórico completo.
+        - data_inicio forçada para jan/2023 (início do histórico disponível na API 150)
+        - fato_vendas inteira é apagada via TRUNCATE antes da reinserção
+        - trava de segurança elevada para 50.000 linhas (volume esperado em 3+ anos)
+        - após executar, voltar para modo_recarga_total=False (padrão)
+
+    modo_recarga_total=False →  comportamento normal, janela deslizante de 5 meses.
+    """
     extrator = GobiExtractor()
     transformer = NexusTransformer()
     loader = NexusLoader()
@@ -79,12 +89,31 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print):
         # ====================================================================
         log_callback("⏳ [EXTRACT/TRANSFORM] Sincronizando ERP...")
 
-        # Janela deslizante — ver JANELA_MESES no topo do arquivo
         data_fim = date.today()
-        data_inicio = (data_fim - relativedelta(months=JANELA_MESES)).replace(day=1)
-        log_callback(f"🗓️ [JANELA] Recarga de {JANELA_MESES} meses: "
-                     f"{data_inicio} até {data_fim}. Tudo a partir de {data_inicio} "
-                     f"será APAGADO da fato_vendas e reinserido do ERP.")
+
+        if modo_recarga_total:
+            # ----------------------------------------------------------------
+            # MODO RECARGA TOTAL — uso único, janeiro/2023 → hoje
+            # Apaga TODA a fato_vendas e reinsere o histórico completo sem
+            # nenhum filtro de canal (op.51 / fifeiro / EIC já foram removidos
+            # do transformer permanentemente em 2026-08).
+            # ----------------------------------------------------------------
+            data_inicio = date(2023, 1, 1)
+            trava_minima = 50_000
+            log_callback(
+                f"🔴 [RECARGA TOTAL] Modo histórico completo ativado. "
+                f"Extraindo jan/2023 → {data_fim}. "
+                f"TODA a fato_vendas será apagada (TRUNCATE) e reinserida."
+            )
+        else:
+            # ----------------------------------------------------------------
+            # MODO NORMAL — janela deslizante de JANELA_MESES meses
+            # ----------------------------------------------------------------
+            data_inicio = (data_fim - relativedelta(months=JANELA_MESES)).replace(day=1)
+            trava_minima = 1_000
+            log_callback(f"🗓️ [JANELA] Recarga de {JANELA_MESES} meses: "
+                         f"{data_inicio} até {data_fim}. Tudo a partir de {data_inicio} "
+                         f"será APAGADO da fato_vendas e reinserido do ERP.")
 
         # A. Extração Original
         lf_150, lf_188, df_seg, df_orc = await extrator.extrair_tudo(data_inicio, data_fim)
@@ -110,17 +139,20 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print):
             # nunca falhe. O produto nasce da venda; o Segmentos so enriquece.
             loader.executar_carga_produtos(df_silver_coletado, df_seg, log_callback=log_callback)
             loader.executar_carga_clientes(df_clientes_coletado, log_callback=log_callback)
-            # TRAVA DE SEGURANÇA: o DELETE do loader é irreversível. Se a
-            # extração voltou vazia ou quase vazia, abortar é melhor que apagar
-            # 5 meses de venda e reinserir um punhado de linhas.
+
+            # TRAVA DE SEGURANÇA: o DELETE/TRUNCATE do loader é irreversível.
+            # trava_minima é 1.000 no modo normal (5 meses) e 50.000 na recarga
+            # total (3+ anos) — escala com o volume esperado de cada modo.
             linhas_silver = df_silver_coletado.height
-            if linhas_silver < 1000:
+            if linhas_silver < trava_minima:
                 raise ValueError(
-                    f"[SEGURANÇA] Só {linhas_silver} linhas de venda vieram do ERP para "
-                    f"uma janela de {JANELA_MESES} meses. Carga abortada para não apagar "
-                    f"a fato_vendas a partir de {data_inicio}. Verifique a API 150."
+                    f"[SEGURANÇA] Só {linhas_silver} linhas de venda vieram do ERP "
+                    f"(mínimo esperado: {trava_minima}). Carga abortada para não "
+                    f"destruir a fato_vendas com dados incompletos. Verifique a API 150."
                 )
-            loader.executar_carga_silver(df_silver_coletado, data_inicio, log_callback=log_callback)
+            loader.executar_carga_silver(df_silver_coletado, data_inicio,
+                                         log_callback=log_callback,
+                                         recarga_total=modo_recarga_total)
             loader.executar_carga_orcamento(df_orc_final, log_callback=log_callback)
 
             # E. Carga de Estoque

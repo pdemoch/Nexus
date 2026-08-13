@@ -182,8 +182,12 @@ class NexusLoader:
             log_callback(f"⚠️ [LOAD] Erro ao sincronizar dim_produtos: {e}")
             # Defensivo: nao derruba o pipeline. O filtro no loader de vendas protege a FK.
 
-    def executar_carga_silver(self, df_silver: pl.DataFrame, data_inicio: date, log_callback=print):
-        log_callback(f"⏳ [LOAD] Apagando vendas a partir de {data_inicio} e substituindo pelos dados extraídos...")
+    def executar_carga_silver(self, df_silver: pl.DataFrame, data_inicio: date,
+                              log_callback=print, recarga_total: bool = False):
+        if recarga_total:
+            log_callback("⏳ [LOAD] RECARGA TOTAL — apagando TODA a fato_vendas (TRUNCATE) e reinserindo...")
+        else:
+            log_callback(f"⏳ [LOAD] Apagando vendas a partir de {data_inicio} e substituindo pelos dados extraídos...")
         try:
             # 🔥 FILTRO DE INTEGRALIDADE: Garante apenas os campos existentes na fato_vendas
             colunas_vendas = ["pedido", "data_pedido", "sku", "cgc", "vendedor_nome", "qt_pedido", "vl_pedido", "qtfatura", "qtcorte", "vlfatura", "vlcorte"]
@@ -217,8 +221,14 @@ class NexusLoader:
                     log_callback("⚠️ [LOAD] Apos filtro de portfolio, nenhuma venda restou para carga.")
                     return
 
-                # 1. Deleção massiva do período exato que foi extraído
-                db.execute(text("DELETE FROM fato_vendas WHERE data_pedido >= :dt"), {"dt": data_inicio})
+                # 1. Deleção — TRUNCATE na recarga total, DELETE janelado no modo normal
+                if recarga_total:
+                    # TRUNCATE é ordens de magnitude mais rápido que DELETE total
+                    # e reseta os índices. CASCADE cobre FKs dependentes se houver.
+                    db.execute(text("TRUNCATE TABLE fato_vendas"))
+                    log_callback("🗑️ [LOAD] TRUNCATE executado — fato_vendas limpa.")
+                else:
+                    db.execute(text("DELETE FROM fato_vendas WHERE data_pedido >= :dt"), {"dt": data_inicio})
 
                 # 2. Inserção direta e bruta (bulk insert) muito mais rápida que o UPSERT
                 lote_size = 5000
@@ -227,7 +237,8 @@ class NexusLoader:
                     db.bulk_insert_mappings(FatoVendas, lote)
 
                 db.commit()
-            log_callback(f"✅ [LOAD] Histórico recente recarregado (Drop & Replace) — {len(df_vendas)} vendas.")
+            modo_label = "RECARGA TOTAL" if recarga_total else "Drop & Replace"
+            log_callback(f"✅ [LOAD] Histórico recarregado ({modo_label}) — {len(df_vendas)} vendas.")
         except Exception as e:
             log_callback(f"❌ [LOAD] Erro na carga de histórico: {e}")
             raise e
