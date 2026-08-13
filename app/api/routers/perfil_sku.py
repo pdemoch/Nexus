@@ -1031,6 +1031,13 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
     # ── Histórico de acurácia: últimos 12 meses fechados (vendido vs meta) ──
     hoje_local = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
     mes_atual_local = hoje_local.replace(day=1)
+
+    # Índice do fva.detalhe_por_mes para cruzamento rápido por mês (chave "YYYY-MM")
+    fva_idx: Dict[str, Any] = {}
+    if fva and fva.get("detalhe_por_mes"):
+        for det in fva["detalhe_por_mes"]:
+            fva_idx[det["mes"]] = det  # chave já vem como "YYYY-MM"
+
     historico_12m = []
     for entrada in sorted(serie["serie"], key=lambda x: x["mes"], reverse=True):
         try:
@@ -1047,14 +1054,39 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
             continue
         delta_cx  = meta - vendido
         delta_pct = delta_cx / vendido * 100
+
+        # Dados de IA — cruzados com fva.detalhe_por_mes quando disponível
+        chave_fva = mes_d.strftime("%Y-%m")
+        det = fva_idx.get(chave_fva)
+        ia_cx         = float(det["ia_cx"])    if det and det.get("ia_cx")    is not None else None
+        ad_humano_det = float(det["aderencia_humano"]) if det and det.get("aderencia_humano") is not None else None
+        ad_ia_det     = float(det["aderencia_ia"])     if det and det.get("aderencia_ia")     is not None else None
+
+        # WMAPE e BIAS da IA (mesma lógica do humano, mas com ia_cx vs vendido)
+        if ia_cx is not None and vendido > 0:
+            bias_ia  = (ia_cx - vendido) / vendido * 100
+            wmape_ia = abs(bias_ia)
+        else:
+            bias_ia  = None
+            wmape_ia = None
+
+        # FVA = aderência_humano − aderência_IA  (>0: humano melhor; <0: IA melhor)
+        fva_pct = None
+        if ad_humano_det is not None and ad_ia_det is not None:
+            fva_pct = round((ad_humano_det - ad_ia_det) * 100, 1)
+
         historico_12m.append({
-            "mes":        entrada["mes"],
-            "mes_label":  f"{entrada['mes'][5:7]}/{entrada['mes'][2:4]}",
-            "vendido_cx": int(vendido),
-            "meta_cx":    int(meta),
-            "delta_cx":   int(delta_cx),
-            "delta_pct":  round(delta_pct, 1),   # = BIAS individual do mês
-            "wmape_pct":  round(abs(delta_pct), 1),  # para SKU, WMAPE = |BIAS|
+            "mes":          entrada["mes"],
+            "mes_label":    f"{entrada['mes'][5:7]}/{entrada['mes'][2:4]}",
+            "vendido_cx":   int(vendido),
+            "meta_cx":      int(meta),
+            "delta_cx":     int(delta_cx),
+            "delta_pct":    round(delta_pct, 1),        # BIAS Humano %
+            "wmape_pct":    round(abs(delta_pct), 1),   # WMAPE Humano % (= |BIAS| no nível SKU)
+            "ia_cx":        int(ia_cx) if ia_cx is not None else None,
+            "bias_ia_pct":  round(bias_ia, 1)  if bias_ia  is not None else None,  # BIAS IA %
+            "wmape_ia_pct": round(wmape_ia, 1) if wmape_ia is not None else None,  # WMAPE IA %
+            "fva_pct":      fva_pct,  # FVA = ad_humano − ad_ia em pp (>0: humano venceu)
         })
         if len(historico_12m) >= 6:
             break

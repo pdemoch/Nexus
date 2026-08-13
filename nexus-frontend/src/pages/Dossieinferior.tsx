@@ -107,8 +107,9 @@ export default function DossieInferior({
       x.humano_hist_cx  != null ? x.humano_hist_cx :
       (x.vendido_cx != null ? 0 : null);
 
-    // BIAS em % para o gráfico de barras (só onde há vendido e meta)
-    const bias = (meta != null && x.vendido_cx && x.vendido_cx > 0)
+    // BIAS em % para o gráfico de barras (só meses fechados com vendido real)
+    // eh_futuro cobre tanto meses futuros quanto o mês corrente (em andamento)
+    const bias = (!x.eh_futuro && meta != null && x.vendido_cx && x.vendido_cx > 0)
       ? (meta - x.vendido_cx) / x.vendido_cx * 100
       : null;
 
@@ -265,9 +266,36 @@ export default function DossieInferior({
                 <table className="w-full" style={{ borderCollapse: 'collapse', fontSize: 12 }}>
                   <thead>
                     <tr className="border-b border-slate-100">
-                      {['Mês','Vendido (cx)','Meta (cx)','Δ (cx)','BIAS %','WMAPE %'].map(h => (
+                      {/* Grupo Humano */}
+                      <th colSpan={3} style={{ padding: '4px 12px', textAlign: 'center', fontSize: 9,
+                        fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em',
+                        color: '#6366f1', borderBottom: '1px solid #e0e7ff', background: '#f5f3ff' }} />
+                      <th colSpan={2} style={{ padding: '4px 12px', textAlign: 'center', fontSize: 9,
+                        fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em',
+                        color: '#6366f1', borderBottom: '1px solid #e0e7ff', background: '#f5f3ff',
+                        whiteSpace: 'nowrap' }}>Humano</th>
+                      <th colSpan={2} style={{ padding: '4px 12px', textAlign: 'center', fontSize: 9,
+                        fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em',
+                        color: '#7c3aed', borderBottom: '1px solid #ede9fe', background: '#f5f3ff',
+                        whiteSpace: 'nowrap' }}>IA</th>
+                      <th style={{ padding: '4px 12px', textAlign: 'center', fontSize: 9,
+                        fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em',
+                        color: '#0891b2', borderBottom: '1px solid #cffafe', background: '#ecfeff',
+                        whiteSpace: 'nowrap' }}>FVA</th>
+                    </tr>
+                    <tr className="border-b border-slate-100">
+                      {[
+                        { h: 'Mês',         align: 'left'  },
+                        { h: 'Vendido (cx)', align: 'right' },
+                        { h: 'Meta (cx)',    align: 'right' },
+                        { h: 'BIAS %',       align: 'right' },
+                        { h: 'WMAPE %',      align: 'right' },
+                        { h: 'BIAS IA %',    align: 'right' },
+                        { h: 'WMAPE IA %',   align: 'right' },
+                        { h: 'FVA pp',       align: 'right' },
+                      ].map(({ h, align }) => (
                         <th key={h} style={{
-                          padding: '7px 12px', textAlign: h === 'Mês' ? 'left' : 'right',
+                          padding: '5px 12px', textAlign: align as any,
                           fontSize: 10, fontWeight: 800, textTransform: 'uppercase',
                           letterSpacing: '.05em', color: '#94a3b8', whiteSpace: 'nowrap',
                         }}>{h}</th>
@@ -276,9 +304,16 @@ export default function DossieInferior({
                   </thead>
                   <tbody>
                     {(d.historico_12m || []).map((row: any, idx: number) => {
-                      const b  = row.delta_pct;
+                      const b    = row.delta_pct;
                       const corB = b > 15 ? '#e11d48' : b < -15 ? '#2563eb' : '#059669';
                       const corW = row.wmape_pct <= 20 ? '#059669' : row.wmape_pct <= 35 ? '#d97706' : '#e11d48';
+                      const bIA  = row.bias_ia_pct;
+                      const corBIA = bIA == null ? '#94a3b8' : bIA > 15 ? '#e11d48' : bIA < -15 ? '#2563eb' : '#059669';
+                      const wIA  = row.wmape_ia_pct;
+                      const corWIA = wIA == null ? '#94a3b8' : wIA <= 20 ? '#059669' : wIA <= 35 ? '#d97706' : '#e11d48';
+                      // FVA: >0 humano ganhou, <0 IA ganhou
+                      const fva  = row.fva_pct;
+                      const corFVA = fva == null ? '#94a3b8' : fva > 0 ? '#6366f1' : fva < 0 ? '#7c3aed' : '#64748b';
                       return (
                         <tr key={row.mes} style={{ background: idx % 2 ? '#f9fafb' : '#fff', borderBottom: '1px solid #f1f5f9' }}>
                           <td style={{ padding: '7px 12px', fontWeight: 700, color: '#334155' }}>{row.mes_label}</td>
@@ -288,16 +323,21 @@ export default function DossieInferior({
                           <td style={{ padding: '7px 12px', textAlign: 'right', color: '#475569' }}>
                             {new Intl.NumberFormat('pt-BR').format(row.meta_cx)}
                           </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 700,
-                            color: row.delta_cx > 0 ? '#e11d48' : row.delta_cx < 0 ? '#2563eb' : '#64748b' }}>
-                            {row.delta_cx > 0 ? '▲ ' : row.delta_cx < 0 ? '▼ ' : ''}
-                            {new Intl.NumberFormat('pt-BR').format(Math.abs(row.delta_cx))}
-                          </td>
                           <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corB }}>
                             {b >= 0 ? '+' : ''}{b?.toFixed(1).replace('.', ',')}%
                           </td>
                           <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corW }}>
                             {row.wmape_pct?.toFixed(1).replace('.', ',')}%
+                          </td>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corBIA }}>
+                            {bIA == null ? '—' : `${bIA >= 0 ? '+' : ''}${bIA.toFixed(1).replace('.', ',')}%`}
+                          </td>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corWIA }}>
+                            {wIA == null ? '—' : `${wIA.toFixed(1).replace('.', ',')}%`}
+                          </td>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corFVA,
+                            fontSize: 10 }}>
+                            {fva == null ? '—' : `${fva >= 0 ? '+' : ''}${fva.toFixed(1).replace('.', ',')} pp`}
                           </td>
                         </tr>
                       );
@@ -313,6 +353,20 @@ export default function DossieInferior({
                     const wmT   = totV > 0 ? Math.abs(totD) / totV * 100 : 0;
                     const corBT = biasT > 15 ? '#e11d48' : biasT < -15 ? '#2563eb' : '#059669';
                     const corWT = wmT <= 20 ? '#059669' : wmT <= 35 ? '#d97706' : '#e11d48';
+                    // Acumulado IA
+                    const rowsIA = rows.filter((r: any) => r.ia_cx != null);
+                    const totIA  = rowsIA.reduce((s: number, r: any) => s + (r.ia_cx || 0), 0);
+                    const totVIA = rowsIA.reduce((s: number, r: any) => s + r.vendido_cx, 0);
+                    const biasIA = totVIA > 0 ? (totIA - totVIA) / totVIA * 100 : null;
+                    const wmIA   = biasIA != null ? Math.abs(biasIA) : null;
+                    const corBIA = biasIA == null ? '#94a3b8' : biasIA > 15 ? '#e11d48' : biasIA < -15 ? '#2563eb' : '#059669';
+                    const corWIA = wmIA == null ? '#94a3b8' : wmIA <= 20 ? '#059669' : wmIA <= 35 ? '#d97706' : '#e11d48';
+                    // FVA acumulado (média simples dos meses com dado)
+                    const fvaRows = rows.filter((r: any) => r.fva_pct != null);
+                    const fvaAcc  = fvaRows.length > 0
+                      ? fvaRows.reduce((s: number, r: any) => s + r.fva_pct, 0) / fvaRows.length
+                      : null;
+                    const corFVA = fvaAcc == null ? '#94a3b8' : fvaAcc > 0 ? '#6366f1' : fvaAcc < 0 ? '#7c3aed' : '#64748b';
                     return (
                       <tfoot>
                         <tr style={{ background: '#f0f9ff', borderTop: '2px solid #bae6fd' }}>
@@ -323,16 +377,20 @@ export default function DossieInferior({
                           <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800 }}>
                             {new Intl.NumberFormat('pt-BR').format(totM)}
                           </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800,
-                            color: totD > 0 ? '#e11d48' : totD < 0 ? '#2563eb' : '#64748b' }}>
-                            {totD > 0 ? '▲ ' : totD < 0 ? '▼ ' : ''}
-                            {new Intl.NumberFormat('pt-BR').format(Math.abs(totD))}
-                          </td>
                           <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corBT }}>
                             {biasT >= 0 ? '+' : ''}{biasT.toFixed(1).replace('.', ',')}%
                           </td>
                           <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corWT }}>
                             {wmT.toFixed(1).replace('.', ',')}%
+                          </td>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corBIA }}>
+                            {biasIA == null ? '—' : `${biasIA >= 0 ? '+' : ''}${biasIA.toFixed(1).replace('.', ',')}%`}
+                          </td>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corWIA }}>
+                            {wmIA == null ? '—' : `${wmIA.toFixed(1).replace('.', ',')}%`}
+                          </td>
+                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corFVA, fontSize: 10 }}>
+                            {fvaAcc == null ? '—' : `${fvaAcc >= 0 ? '+' : ''}${fvaAcc.toFixed(1).replace('.', ',')} pp`}
                           </td>
                         </tr>
                       </tfoot>
