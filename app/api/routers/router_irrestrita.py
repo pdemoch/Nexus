@@ -154,7 +154,11 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_irrestrita))
                SUM(f.vol_ia)                           AS ia,
                SUM(f.vol_topdown)                      AS topdown,
                SUM(f.vol_bottomup)                     AS bottomup,
-               AVG(f.pmv_aplicado)                     AS pmv
+               COALESCE(
+                   SUM(f.vol_bottomup * f.pmv_aplicado)
+                   / NULLIF(SUM(f.vol_bottomup), 0),
+                   AVG(f.pmv_aplicado)
+               )                                       AS pmv
         FROM fato_ibp_granular f
         LEFT JOIN dim_produtos p ON p.sku = f.sku
         WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)

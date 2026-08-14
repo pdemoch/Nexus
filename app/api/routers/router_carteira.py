@@ -208,13 +208,7 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
                 COALESCE(SUM(f.vol_bottomup),0)                               AS bottomup,
                 COALESCE(SUM(f.vol_ia),0)                                     AS ia,
                 COALESCE(SUM(f.pmv_aplicado * f.vol_bottomup)
-                         / NULLIF(SUM(f.vol_bottomup),0), 0)                  AS pmv,
-                COALESCE((
-                    SELECT SUM(v2.qt_pedido)
-                    FROM fato_vendas v2
-                    WHERE v2.cgc = f.cgc AND v2.sku = f.sku
-                      AND v2.data_pedido >= CURRENT_DATE - INTERVAL '4 months'
-                ), 0)                                                          AS peso_historico
+                         / NULLIF(SUM(f.vol_bottomup),0), 0)                  AS pmv
             FROM fato_ibp_granular f
             JOIN dim_clientes c  ON f.cgc  = c.cgc
             JOIN dim_produtos p  ON f.sku  = p.sku
@@ -225,7 +219,28 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
             ORDER BY gerente, coordenador, vendedor, razao_social, p.descricao, f.mes_projetado
         """), params).fetchall()
 
-        # Monta árvore em Python
+
+        # Peso historico por (razao_social, sku) — ultimos 4 meses de vendas reais.
+        # Agrupa por razao_social (via dim_clientes) para casar exatamente com a
+        # chave da arvore, evitando subquery correlacionada invalida no PostgreSQL.
+        pesos_raw = db.execute(text(f"""
+            SELECT COALESCE(NULLIF(TRIM(c.razaosocial),''),'SEM RAZAO SOCIAL') AS razao_social,
+                   TRIM(f.sku) AS sku,
+                   COALESCE(SUM(v.qt_pedido), 0) AS peso
+            FROM fato_ibp_granular f
+            JOIN dim_clientes c ON f.cgc = c.cgc
+            LEFT JOIN fato_vendas v
+                ON v.cgc = f.cgc AND v.sku = f.sku
+               AND v.data_pedido >= CURRENT_DATE - INTERVAL '4 months'
+            WHERE f.ciclo_sop = :ciclo AND f.mes_projetado = ANY(:meses)
+              AND f.sku IS NOT NULL AND f.sku != ''
+              {filtro_resp}
+            GROUP BY c.razaosocial, f.sku
+        """), params).fetchall()
+        # (razao_social, sku) -> peso
+        peso_map: dict = {(r.razao_social, r.sku): float(r.peso or 0) for r in pesos_raw}
+
+        # Monta arvore em Python
         tree: dict = {}
         for r in rows:
             g  = r.gerente; co = r.coordenador; v = r.vendedor
@@ -239,10 +254,10 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
                 "sku": sk, "descricao": r.descricao, "tipo": "produto", "meses": {}
             })
             prod["meses"][r.mes] = {
-                "meta":          int(r.meta or 0),
-                "ia":            int(r.ia or 0),
-                "pmv":           round(float(r.pmv or 0), 2),
-                "peso_historico": float(r.peso_historico or 0),
+                "meta":           int(r.meta or 0),
+                "ia":             int(r.ia or 0),
+                "pmv":            round(float(r.pmv or 0), 2),
+                "peso_historico": peso_map.get((rz, sk), 0.0),
             }
 
         def _serializar_arvore(node_dict: dict) -> list:
