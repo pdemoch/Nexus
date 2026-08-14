@@ -277,26 +277,82 @@ function PreenchimentoIrrestrita() {
               Total da carteira
             </div>
             {meses.map(m => {
-              const dIA = delta(totaisVivos.ia[m], totaisVivos.vol[m]);
-              const dTD = delta(totaisVivos.td[m], totaisVivos.vol[m]);
+              const bu  = totaisVivos.vol[m];
+              const fat = totaisVivos.fat[m];
+              const ia  = totaisVivos.ia[m];
+              const td  = totaisVivos.td[m];
+              const ap  = totaisVivos.ap[m];
+              // Receita do ano anterior: soma de (realizado_ap × pmv) por SKU
+              const fatAP = categoriasFlatadas.reduce((acc: number, cat: any) =>
+                acc + cat.skus.reduce((a: number, s: any) => {
+                  const cel = s.meses[m]; if (!cel || !cel.realizado_ap) return a;
+                  return a + (cel.realizado_ap * (cel.pmv || 0));
+                }, 0), 0);
+              // Receita do orçamento: soma de cel.orcamento
+              const fatOrc = categoriasFlatadas.reduce((acc: number, cat: any) =>
+                acc + cat.skus.reduce((a: number, s: any) => {
+                  const cel = s.meses[m]; if (!cel || !cel.orcamento) return a;
+                  return a + cel.orcamento;
+                }, 0), 0);
+
+              const dIA = delta(ia, bu);
+              const dTD = delta(td, bu);
+              const dAP = ap > 0 ? delta(ap, bu) : null;
               return (
-                <div key={m} className="bg-slate-50 rounded-xl px-3 py-2">
-                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">{mesLabel(m)}</div>
-                  {/* Referências resumidas */}
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="flex items-center gap-0.5 text-[10px] font-bold text-violet-500">
-                      <Zap className="w-3 h-3" /> {fmtCx(totaisVivos.ia[m])}
-                      {dIA && <span style={{ color: dIA.cor }} className="ml-0.5">{dIA.sinal}</span>}
-                    </span>
-                    <span className="text-slate-200">·</span>
-                    <span className="flex items-center gap-0.5 text-[10px] font-bold text-indigo-400">
-                      <TrendingUp className="w-3 h-3" /> {fmtCx(totaisVivos.td[m])}
-                      {dTD && <span style={{ color: dTD.cor }} className="ml-0.5">{dTD.sinal}</span>}
-                    </span>
+                <div key={m} className="bg-slate-50 rounded-xl px-3 py-2 space-y-2">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">{mesLabel(m)}</div>
+
+                  {/* Linha de referências em caixas */}
+                  <div className="grid grid-cols-3 gap-1">
+                    {/* IA */}
+                    <div className="flex flex-col items-center bg-violet-50 rounded-lg px-1 py-1.5">
+                      <span className="text-[8px] font-black uppercase tracking-wider text-violet-400 flex items-center gap-0.5 mb-0.5"><Zap className="w-2 h-2"/>IA</span>
+                      <span className="text-[11px] font-black text-slate-700">{fmtCx(ia)}</span>
+                      {dIA && <span className="text-[9px] font-black" style={{ color: dIA.cor }}>{dIA.sinal}</span>}
+                    </div>
+                    {/* Mkt */}
+                    <div className="flex flex-col items-center bg-indigo-50 rounded-lg px-1 py-1.5">
+                      <span className="text-[8px] font-black uppercase tracking-wider text-indigo-400 flex items-center gap-0.5 mb-0.5"><TrendingUp className="w-2 h-2"/>Mkt</span>
+                      <span className="text-[11px] font-black text-slate-700">{fmtCx(td)}</span>
+                      {dTD && <span className="text-[9px] font-black" style={{ color: dTD.cor }}>{dTD.sinal}</span>}
+                    </div>
+                    {/* Ano anterior */}
+                    <div className="flex flex-col items-center bg-slate-100 rounded-lg px-1 py-1.5">
+                      <span className="text-[8px] font-black uppercase tracking-wider text-slate-400 flex items-center gap-0.5 mb-0.5"><History className="w-2 h-2"/>Ant.</span>
+                      <span className="text-[11px] font-black text-slate-600">{ap > 0 ? fmtCx(ap) : '—'}</span>
+                      {dAP && ap > 0 && <span className="text-[9px] font-black" style={{ color: dAP.cor }}>{dAP.sinal}</span>}
+                    </div>
                   </div>
-                  {/* Comercial — o que conta */}
-                  <div className="text-sm font-black text-slate-900">{fmtCx(totaisVivos.vol[m])} <span className="text-[10px] font-bold text-slate-400">cx</span></div>
-                  <div className="text-[10px] font-bold text-emerald-600">{fmtRs(totaisVivos.fat[m])}</div>
+
+                  {/* Divisor */}
+                  <div className="h-px bg-slate-200" />
+
+                  {/* Comercial — volume decidido */}
+                  <div>
+                    <div className="text-[8px] font-black uppercase tracking-wider text-emerald-500 flex items-center gap-0.5 mb-0.5">
+                      <ShoppingCart className="w-2 h-2" /> Comercial
+                    </div>
+                    <div className="text-sm font-black text-slate-900">{fmtCx(bu)} <span className="text-[10px] font-bold text-slate-400">cx</span></div>
+                    <div className="text-[10px] font-bold text-emerald-600">{fmtRs(fat)}</div>
+                  </div>
+
+                  {/* Referências de receita */}
+                  {(fatAP > 0 || fatOrc > 0) && (
+                    <div className="space-y-0.5 pt-0.5 border-t border-slate-100">
+                      {fatAP > 0 && (
+                        <div className="flex items-center justify-between text-[9px] font-bold text-slate-400">
+                          <span className="flex items-center gap-0.5"><History className="w-2.5 h-2.5" /> real. ano ant.</span>
+                          <span>{fmtRs(fatAP)}</span>
+                        </div>
+                      )}
+                      {fatOrc > 0 && (
+                        <div className="flex items-center justify-between text-[9px] font-bold text-amber-500">
+                          <span>orçamento</span>
+                          <span>{fmtRs(fatOrc)}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}

@@ -370,13 +370,15 @@ export default function DossieInferior({
                   {/* Totalizador */}
                   {(() => {
                     const rows  = d.historico_12m || [];
-                    // Exclui meses sem plano dos totalizadores (evita distorção)
+                    // Vendido total = TODOS os meses (incluindo sem_meta)
+                    const totV  = rows.reduce((s: number, r: any) => s + (r.vendido_cx || 0), 0);
+                    // Métricas de acurácia só sobre meses com meta válida
                     const rowsComMeta = rows.filter((r: any) => !r.sem_meta && r.meta_cx != null && r.meta_cx > 0);
-                    const totV  = rowsComMeta.reduce((s: number, r: any) => s + r.vendido_cx, 0);
                     const totM  = rowsComMeta.reduce((s: number, r: any) => s + r.meta_cx, 0);
                     const totD  = rowsComMeta.reduce((s: number, r: any) => s + r.delta_cx, 0);
-                    const biasT = totV > 0 ? totD / totV * 100 : 0;
-                    const wmT   = totV > 0 ? Math.abs(totD) / totV * 100 : 0;
+                    const totVMeta = rowsComMeta.reduce((s: number, r: any) => s + r.vendido_cx, 0);
+                    const biasT = totVMeta > 0 ? totD / totVMeta * 100 : 0;
+                    const wmT   = totVMeta > 0 ? Math.abs(totD) / totVMeta * 100 : 0;
                     const corBT = biasT > 15 ? '#e11d48' : biasT < -15 ? '#2563eb' : '#059669';
                     const corWT = wmT <= 20 ? '#059669' : wmT <= 35 ? '#d97706' : '#e11d48';
                     // Acumulado IA — só sobre meses com dado de IA E com meta
