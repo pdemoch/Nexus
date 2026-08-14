@@ -612,7 +612,7 @@ class NexusLoader:
                 # 1. Apaga a fotografia anterior inteira
                 db.execute(text("DELETE FROM fato_estoque_d0"))
 
-                # 2. Insere o novo cenário real
+                # 2. Insere o novo cenário real.
                 lote_size = 5000
                 for i in range(0, len(registros), lote_size):
                     lote = registros[i:i+lote_size]

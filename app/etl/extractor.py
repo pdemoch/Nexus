@@ -26,7 +26,7 @@ class GobiExtractor:
         """
         Extrai a fotografia atual (D0) do estoque através da API 90 do Gobi.
         """
-        # A sua classe já tem self.base_url apontada para os relatórios do Gobi
+        # A sua classe já tem self.base_url apontada para os relatórios do Gobi.
         url = f"{self.base_url}/90" 
         
         print("📦 [EXTRACTOR] A puxar a fotografia de Estoque D0 (API 90)...")
@@ -344,4 +344,3 @@ class MtrixExtractor:
                 erro_detalhado = traceback.format_exc()
                 log_callback(f"❌ [MTRIX] Erro crítico no pipeline de ingestão: {str(e)}")
                 print(f"Detalhes do erro MTRIX: \n{erro_detalhado}")
-        

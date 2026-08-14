@@ -423,9 +423,8 @@ def dossie(sku: str, razao_social: str = None, vendedor_nome: str = None,
            db: Session = Depends(get_db), _: dict = Depends(require_metas)):
     """
     Dossie do SKU para Metas Comercial.
-    - razao_social: filtra por aquela razao social (nivel cliente, tem prioridade).
-    - vendedor_nome: nivel executivo — dossie agrega todos os clientes do executivo.
-      Busca os CGCs do executivo e retorna o total deles para aquele SKU.
+    - razao_social: filtra por aquela razao social (nivel cliente).
+    - vendedor_nome: nivel executivo — agrega todos os CGCs dos clientes daquele executivo.
     Se nenhum for passado, retorna o total geral do SKU.
     """
     try:
@@ -434,29 +433,110 @@ def dossie(sku: str, razao_social: str = None, vendedor_nome: str = None,
         meses = get_working_window_months(db)
         desc  = db.execute(text("SELECT descricao FROM dim_produtos WHERE sku=:s"), {"s": sku}).scalar()
 
-        # Nivel cliente: filtra por razao_social (um cliente especifico).
-        # Nivel executivo: razao_social vem None, vendedor_nome preenchido.
-        #   Buscamos a primeira razao_social do executivo como proxy — o montar_dossie
-        #   ja agrega todos os CNPJs da razao_social. Para o nivel executivo o ideal
-        #   seria passar multiplas razoes, mas como solucao pragmatica passamos
-        #   razao_social=None (total do SKU) quando e nivel executivo, pois o
-        #   coordenador precisa ver o comportamento geral do SKU nos clientes do executivo.
-        razao_filtro = razao_social  # nivel cliente tem prioridade
-        if not razao_filtro and vendedor_nome:
-            # Busca todas as razoes sociais distintas do executivo para exibir
-            # o historico agregado. Passamos a primeira como referencia.
-            # TODO: evoluir para suportar lista de razoes no montar_dossie.
-            razao_filtro = None  # sem filtro = total do SKU
+        cgcs_override = None
+
+        if razao_social:
+            # Nivel cliente: filtra pelos CGCs daquela razao social
+            pass  # montar_dossie ja faz isso internamente via razao_social
+
+        elif vendedor_nome:
+            # Nivel executivo: busca todos os CGCs dos clientes do executivo
+            # via dim_clientes (completo) E fato_vendas (histórico real)
+            # União das duas fontes garante que não perde clientes sem plano no ciclo
+            cgcs_rows = db.execute(text("""
+                SELECT DISTINCT cgc FROM dim_clientes
+                WHERE TRIM(COALESCE(vendedor_nome,'')) = :vend
+                  AND UPPER(TRIM(COALESCE(bloqueado,'ATIVO'))) != 'INATIVO'
+                UNION
+                SELECT DISTINCT f.cgc
+                FROM fato_ibp_granular f
+                WHERE f.ciclo_sop = :ciclo
+                  AND f.sku = :sku
+                  AND COALESCE(NULLIF(TRIM(f.vendedor_nome),''), 'SEM VENDEDOR') = :vend
+            """), {"ciclo": ciclo, "sku": sku, "vend": vendedor_nome}).fetchall()
+            cgcs_override = [r[0] for r in cgcs_rows] or ["__SEM_CLIENTE__"]
 
         return montar_dossie(db, sku, ciclo, meses, descricao=desc,
-                             coluna_meta="vol_meta", razao_social=razao_filtro)
+                             coluna_meta="vol_meta",
+                             razao_social=razao_social,
+                             cgcs_override=cgcs_override)
     except Exception as e:
         raise HTTPException(500, repr(e))
 
 
 # ---------------------------------------------------------------------------
-# POST /congelar / POST /reabrir  — controle de etapa (Admin)
+# GET /consolidado  — visão gerencial somente leitura
+# Compara vol_meta (coordenadores) vs vol_bottomup (Demanda Comercial) vs vol_ia
+# por categoria → SKU, sem filtro de RLS (visão da empresa toda)
 # ---------------------------------------------------------------------------
+@router.get("/consolidado")
+def consolidado(db: Session = Depends(get_db), _: dict = Depends(require_metas)):
+    try:
+        ciclo = get_current_cycle(db)
+        meses = get_working_window_months(db)
+        meses_iso = [m.strftime("%Y-%m-%d") for m in meses]
+
+        rows = db.execute(text("""
+            SELECT
+                COALESCE(p.categoria, 'SEM CATEGORIA') AS categoria,
+                COALESCE(p.segmento,  'SEM SEGMENTO')  AS segmento,
+                f.sku,
+                COALESCE(p.descricao, 'SEM DESCRICAO') AS descricao,
+                TO_CHAR(f.mes_projetado, 'YYYY-MM-DD')  AS mes,
+                SUM(f.vol_meta)     AS meta,
+                SUM(f.vol_bottomup) AS bu,
+                SUM(f.vol_ia)       AS ia,
+                COALESCE(
+                    SUM(f.vol_meta * f.pmv_aplicado) / NULLIF(SUM(f.vol_meta), 0),
+                    AVG(f.pmv_aplicado)
+                )                   AS pmv
+            FROM fato_ibp_granular f
+            LEFT JOIN dim_produtos p ON p.sku = f.sku
+            WHERE f.ciclo_sop = :ciclo AND f.mes_projetado = ANY(:meses)
+            GROUP BY p.categoria, p.segmento, f.sku, p.descricao, f.mes_projetado
+            ORDER BY p.categoria, p.segmento, p.descricao, f.mes_projetado
+        """), {"ciclo": ciclo, "meses": meses}).fetchall()
+
+        # Monta árvore categoria → SKUs (segmento oculto na visualização)
+        tree: dict = {}
+        for r in rows:
+            cat = tree.setdefault(r.categoria, {"nome": r.categoria, "skus": {}})
+            sk  = cat["skus"].setdefault(r.sku, {
+                "sku": r.sku, "descricao": r.descricao, "meses": {}
+            })
+            meta = int(r.meta or 0)
+            bu   = int(r.bu   or 0)
+            ia   = int(r.ia   or 0)
+            pmv  = round(float(r.pmv or 0), 2)
+            delta_cx  = meta - bu
+            delta_pct = round(delta_cx / bu * 100, 1) if bu > 0 else None
+            sk["meses"][r.mes] = {
+                "meta":      meta,
+                "bu":        bu,
+                "ia":        ia,
+                "pmv":       pmv,
+                "delta_cx":  delta_cx,
+                "delta_pct": delta_pct,
+            }
+
+        categorias = [
+            {
+                "nome": cat["nome"],
+                "skus": sorted(cat["skus"].values(), key=lambda s: s["descricao"])
+            }
+            for cat in sorted(tree.values(), key=lambda c: c["nome"])
+        ]
+
+        return {
+            "ciclo":      ciclo,
+            "meses":      meses_iso,
+            "categorias": categorias,
+        }
+    except Exception as e:
+        raise HTTPException(500, repr(e))
+
+
+
 @router.post("/congelar")
 def congelar(db: Session = Depends(get_db), _: dict = Depends(require_admin)):
     try:
@@ -545,3 +625,76 @@ def reabrir_cadeado_ep(payload: PayloadBloquear, db: Session = Depends(get_db),
     except HTTPException: raise
     except Exception as e:
         db.rollback(); raise HTTPException(500, repr(e))
+
+# ---------------------------------------------------------------------------
+# GET /consolidado  — visão somente leitura: vol_meta vs vol_bu por categoria/SKU
+# ---------------------------------------------------------------------------
+@router.get("/consolidado")
+def consolidado(db: Session = Depends(get_db), _: dict = Depends(require_metas)):
+    """
+    Visão de consenso somente leitura.
+    Compara o vol_meta acumulado pelos coordenadores com o vol_bu que veio
+    da Demanda Comercial — por categoria e SKU, para todos os meses da janela.
+    Permite identificar divergências entre o plano dos coordenadores e comercial.
+    """
+    try:
+        ciclo = get_current_cycle(db)
+        meses = get_working_window_months(db)
+        meses_iso = [m.strftime("%Y-%m-%d") for m in meses]
+
+        rows = db.execute(text("""
+            SELECT
+                COALESCE(p.categoria, 'SEM CATEGORIA') AS categoria,
+                COALESCE(p.segmento,  'SEM SEGMENTO')  AS segmento,
+                f.sku,
+                COALESCE(p.descricao, 'SEM DESCRICAO') AS descricao,
+                TO_CHAR(f.mes_projetado, 'YYYY-MM-DD')  AS mes,
+                SUM(f.vol_meta)                          AS meta,
+                SUM(f.vol_bottomup)                      AS bu,
+                SUM(f.vol_ia)                            AS ia,
+                COALESCE(
+                    SUM(f.vol_meta * f.pmv_aplicado) / NULLIF(SUM(f.vol_meta), 0),
+                    AVG(f.pmv_aplicado)
+                )                                        AS pmv
+            FROM fato_ibp_granular f
+            LEFT JOIN dim_produtos p ON p.sku = f.sku
+            WHERE f.ciclo_sop = :ciclo AND f.mes_projetado = ANY(:meses)
+            GROUP BY p.categoria, p.segmento, f.sku, p.descricao, f.mes_projetado
+            ORDER BY p.categoria, p.descricao, f.mes_projetado
+        """), {"ciclo": ciclo, "meses": meses}).fetchall()
+
+        # Monta árvore categoria → SKU (achata segmento, igual à Irrestrita)
+        tree: dict = {}
+        for r in rows:
+            cat = tree.setdefault(r.categoria, {"nome": r.categoria, "skus": {}})
+            sk  = cat["skus"].setdefault(r.sku, {
+                "sku": r.sku, "descricao": r.descricao, "meses": {}
+            })
+            meta = int(r.meta or 0)
+            bu   = int(r.bu or 0)
+            ia   = int(r.ia or 0)
+            pmv  = round(float(r.pmv or 0), 2)
+            sk["meses"][r.mes] = {
+                "meta":      meta,
+                "bu":        bu,
+                "ia":        ia,
+                "pmv":       pmv,
+                "delta_cx":  meta - bu,
+                "delta_pct": round((meta - bu) / bu * 100, 1) if bu else None,
+            }
+
+        categorias = [
+            {
+                "nome": cat["nome"],
+                "skus": sorted(cat["skus"].values(), key=lambda s: s["descricao"])
+            }
+            for cat in sorted(tree.values(), key=lambda c: c["nome"])
+        ]
+
+        return {
+            "ciclo":      ciclo,
+            "meses":      meses_iso,
+            "categorias": categorias,
+        }
+    except Exception as e:
+        raise HTTPException(500, repr(e))

@@ -51,7 +51,7 @@ class NexusTransformer:
         #
         # POR QUE: antes esta janela era calculada de forma INDEPENDENTE da do
         # pipeline, com um segundo `months=3` escrito neste arquivo. O loader
-        # apaga a partir da data do PIPELINE
+        # apaga a partir da data do PIPELINE.
         # (DELETE FROM fato_vendas WHERE data_pedido >= :dt) e reinsere só o que
         # este filtro deixa passar. Se as duas janelas divergirem — por exemplo
         # pipeline em 5 meses e transformer em 3 — o loader apaga 5 meses e

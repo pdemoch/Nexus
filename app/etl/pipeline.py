@@ -213,7 +213,7 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print,
     finally:
         # GARANTIA DE DESTRAVAMENTO: o flag global e desligado em QUALQUER
         # caminho de saida — sucesso completo, abort do ciclo existente (return
-        # antecipado) ou excecao. Sem isto, o painel fica preso em "PROCESSANDO"
+        # antecipado) ou excecao. Sem isto, o painel fica preso em "PROCESSANDO".
         # para sempre e o front faz polling infinito (era o bug do trave).
         AppState.pipeline_rodando = False
         log_callback("🏁 [PIPELINE] Execução encerrada — sistema liberado.")
