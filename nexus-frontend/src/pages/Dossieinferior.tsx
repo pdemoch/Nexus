@@ -453,42 +453,8 @@ export default function DossieInferior({
               </div>
             )}
 
-            {/* BLOCO B — Humano vs IA · mês a mês */}
-            {d.fva ? (
-              <div className="rounded-xl bg-white border border-slate-100 p-4">
-                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
-                  Humano vs IA · mês a mês
-                </div>
-                {(d.fva.detalhe_por_mes || []).length > 0 ? (
-                  <div className="space-y-1.5">
-                    <div className="grid grid-cols-3 gap-1 text-[9px] font-black uppercase tracking-widest text-slate-300 mb-1">
-                      <span>Mês</span>
-                      <span className="text-right">Humano</span>
-                      <span className="text-right">IA</span>
-                    </div>
-                    {d.fva.detalhe_por_mes.map((m: any) => {
-                      const hM = m.aderencia_humano != null && m.aderencia_ia != null && m.aderencia_humano >= m.aderencia_ia;
-                      const iM = m.aderencia_humano != null && m.aderencia_ia != null && m.aderencia_ia > m.aderencia_humano;
-                      return (
-                        <div key={m.mes} className="grid grid-cols-3 gap-1 text-[11px]">
-                          <span className="font-bold text-slate-500">{m.mes_label}</span>
-                          <span className={`text-right font-black ${hM ? 'text-indigo-600' : 'text-slate-400'}`}>
-                            H: {m.aderencia_humano != null ? fmtPct(m.aderencia_humano) : '—'}
-                          </span>
-                          <span className={`text-right font-black ${iM ? 'text-violet-600' : 'text-slate-400'}`}>
-                            IA: {m.aderencia_ia != null ? fmtPct(m.aderencia_ia) : '—'}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="text-[11px] text-slate-400">
-                    Dados de comparação IA/Humano disponíveis a partir de Jun/26.
-                  </div>
-                )}
-              </div>
-            ) : d.composicao ? (
+            {/* BLOCO B — Top SKUs da categoria */}
+            {d.composicao ? (
               <div className="rounded-xl bg-white border border-slate-100 p-4">
                 <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
                   Top SKUs da categoria

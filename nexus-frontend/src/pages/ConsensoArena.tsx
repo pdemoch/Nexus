@@ -2,38 +2,53 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import axios from 'axios';
 import {
   ChevronRight, ChevronDown, Save, Download, X, Lock, Unlock, ShieldCheck,
-  TrendingUp, TrendingDown, Minus, Bot, AlertTriangle, Loader2,
-  LineChart as LineIcon, LayoutGrid, ClipboardList, Search,
+  Loader2, LineChart as LineIcon, LayoutGrid, ClipboardList, Search,
 } from 'lucide-react';
 import VisaoGeralMarketing from './VisaoGeralMarketing';
 import DossieInferior from './Dossieinferior';
 
 /* =====================================================================
-   METAS COMERCIAL — duas abas:
-   1) Visão Geral: mesma visão analítica das outras telas.
-   2) Preenchimento: árvore de 5 níveis (gerente→coordenador→vendedor→
-      cliente/razão→produto). Cadeados por responsável. Dossiê em gaveta.
-
-   Particularidades vs outras telas:
-   • Árvore recursiva de 5 níveis com RLS (cada um vê sua carteira).
-   • Chave de edits: razao||sku||mes (inclui razão social do cliente).
-   • Cadeado individual: cada vendedor bloqueia sua carteira + Admin
-     pode reabrir. Congelar a ETAPA é separado.
-   • Dossiê: gaveta lateral (não inline) — a árvore já é muito densa.
-   • Referência da IA exibida como "IA X cx" (vol_ia).
+   METAS COMERCIAL
+   Hierarquia: Gerente → Coordenador → Executivo → SKU → Cliente/Razão
+   Quem preenche: Coordenador (edita no nível SKU, rateio automático
+                  para clientes em tempo real; pode também editar cliente
+                  individualmente como override).
+   Quem trava: Gerente ou Administrador (trancam os coordenadores).
+   Dossiê: gaveta lateral, vinculado ao SKU (com filtro por executivo
+           no nível SKU, ou por razão social no nível cliente).
    ===================================================================== */
 
 const fmtCx = (n: number) => new Intl.NumberFormat('pt-BR').format(Math.round(n || 0));
-const fmtRs = (n: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(Math.round(n || 0));
-const fmtPct = (n: number | null) => n == null ? '—' : `${((n) * 100).toFixed(1)}%`;
+const fmtRs = (n: number) => new Intl.NumberFormat('pt-BR', {
+  style: 'currency', currency: 'BRL', maximumFractionDigits: 0,
+}).format(Math.round(n || 0));
 const mesLabel = (iso: string) => {
   const [y, m] = iso.split('-');
-  const nomes = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
-  return `${nomes[parseInt(m) - 1]}/${y.slice(2)}`;
+  const nomes = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+  return `${nomes[parseInt(m)-1]}/${y.slice(2)}`;
 };
 
+/* Rateio por maior resto — igual ao backend */
+function ratearMaiorResto(total: number, pesos: number[]): number[] {
+  const soma = pesos.reduce((a, b) => a + b, 0);
+  if (soma === 0 || total === 0) {
+    // distribuição uniforme quando sem histórico
+    const base = Math.floor(total / pesos.length);
+    const resto = total - base * pesos.length;
+    return pesos.map((_, i) => base + (i < resto ? 1 : 0));
+  }
+  const exatos = pesos.map(p => (p / soma) * total);
+  const inteiros = exatos.map(Math.floor);
+  const sobra = total - inteiros.reduce((a, b) => a + b, 0);
+  const restos = exatos.map((e, i) => ({ idx: i, r: e - inteiros[i] }))
+    .sort((a, b) => b.r - a.r);
+  for (let i = 0; i < sobra; i++) inteiros[restos[i].idx]++;
+  return inteiros;
+}
+
 const INDENT: Record<string, string> = {
-  gerente: 'pl-0', coordenador: 'pl-4', vendedor: 'pl-8', cliente: 'pl-12', produto: 'pl-16',
+  gerente: 'pl-0', coordenador: 'pl-4', executivo: 'pl-8',
+  cliente: 'pl-12', produto: 'pl-16',
 };
 
 /* ── COMPONENTE RAIZ ─────────────────────────────────────────────── */
@@ -70,8 +85,11 @@ function PreenchimentoMetas() {
   const [loading,        setLoading]        = useState(true);
   const [salvando,       setSalvando]       = useState(false);
   const [abertas,        setAbertas]        = useState<Set<string>>(new Set());
+  // edits: chave razao||sku||mes → volume (nível cliente, sempre)
   const [edits,          setEdits]          = useState<Record<string, number>>({});
-  const [dossieAlvo,     setDossieAlvo]     = useState<{sku: string; razao: string; descricao: string} | null>(null);
+  const [dossieAlvo,     setDossieAlvo]     = useState<{
+    sku: string; descricao: string; razao?: string; vendedor?: string;
+  } | null>(null);
   const [painelCadeados, setPainelCadeados] = useState(false);
   const [busca,          setBusca]          = useState('');
 
@@ -84,36 +102,67 @@ function PreenchimentoMetas() {
   }, []);
   useEffect(() => { carregar(); }, [carregar]);
 
-  const meses: string[]       = dados?.meses || [];
-  const congeladaEtapa        = Boolean(dados?.etapa_congelada);
-  const minhaCongelada        = Boolean(dados?.minha_carteira_congelada);
-  const aguardandoUpstream    = Boolean(dados?.aguardando_upstream);
-  const souAdmin              = Boolean(dados?.sou_admin);
-  const bloqueado             = congeladaEtapa || minhaCongelada || aguardandoUpstream;
+  const meses: string[]    = dados?.meses || [];
+  const congeladaEtapa     = Boolean(dados?.etapa_congelada);
+  const minhaCongelada     = Boolean(dados?.minha_carteira_congelada);
+  const aguardandoUpstream = Boolean(dados?.aguardando_upstream);
+  const souAdmin           = dados?.sou_admin === true;
+  // funcao vem como campo extra — precisamos dela para controle de cadeado
+  const funcao: string     = dados?.funcao || '';
+  const bloqueado          = congeladaEtapa || minhaCongelada || aguardandoUpstream;
 
+  /* Chave de edição: sempre no nível razão social */
   const keyOf       = (razao: string, sku: string, mes: string) => `${razao}||${sku}||${mes}`;
-  const valorCelula = (razao: string, sku: string, mes: string, original: number) => {
+  const valorCliente = (razao: string, sku: string, mes: string, original: number) => {
     const k = keyOf(razao, sku, mes);
     return k in edits ? edits[k] : (original || 0);
   };
-  const setCelula = (razao: string, sku: string, mes: string, v: number) =>
-    setEdits(e => ({ ...e, [keyOf(razao, sku, mes)]: Math.max(0, Math.round(v || 0)) }));
 
-  /* Totalizadores — percorre árvore recursivamente */
+  /* Edição no nível SKU do executivo: rateia pelos clientes proporcionalmente */
+  const setSkuExecutivo = (
+    clientesDoSku: Array<{ razao: string; mes: string; pesoHist: number; original: number }>,
+    sku: string, mes: string, novoTotal: number
+  ) => {
+    const pesos = clientesDoSku.map(c => c.pesoHist);
+    const partes = ratearMaiorResto(Math.max(0, Math.round(novoTotal)), pesos);
+    setEdits(prev => {
+      const next = { ...prev };
+      clientesDoSku.forEach((c, i) => {
+        next[keyOf(c.razao, sku, mes)] = partes[i];
+      });
+      return next;
+    });
+  };
+
+  /* Edição direta no nível cliente (override manual) */
+  const setCliente = (razao: string, sku: string, mes: string, v: number) =>
+    setEdits(prev => ({ ...prev, [keyOf(razao, sku, mes)]: Math.max(0, Math.round(v || 0)) }));
+
+  /* Soma de um SKU de um executivo num mês (para exibir no input do SKU) */
+  const somaSkuExecutivo = (clientes: any[], sku: string, mes: string): number => {
+    return clientes.reduce((s, cli) => {
+      const prods = cli.subRows || [];
+      const prod  = prods.find((p: any) => p.sku === sku);
+      if (!prod || !prod.meses[mes]) return s;
+      return s + valorCliente(cli.nome, sku, mes, prod.meses[mes].meta);
+    }, 0);
+  };
+
+  /* Totalizadores globais */
   const totaisVivos = useMemo(() => {
     const vol: Record<string, number> = {};
     const fat: Record<string, number> = {};
     meses.forEach(m => { vol[m] = 0; fat[m] = 0; });
+    const walkProd = (prod: any, razao: string) => {
+      meses.forEach(m => {
+        const cel = prod.meses[m]; if (!cel) return;
+        const v = valorCliente(razao, prod.sku, m, cel.meta);
+        vol[m] += v;
+        fat[m] += v * (cel.pmv || 0);
+      });
+    };
     const walk = (node: any, razaoCtx: string | null) => {
-      if (node.tipo === 'produto') {
-        meses.forEach(m => {
-          const cel = node.meses[m]; if (!cel) return;
-          const v = valorCelula(razaoCtx || '', node.sku, m, cel.meta);
-          vol[m] += v;
-          fat[m] += v * (cel.pmv || 0);
-        });
-        return;
-      }
+      if (node.tipo === 'produto') { walkProd(node, razaoCtx || ''); return; }
       const novoCtx = node.tipo === 'cliente' ? node.nome : razaoCtx;
       (node.subRows || []).forEach((f: any) => walk(f, novoCtx));
     };
@@ -123,6 +172,7 @@ function PreenchimentoMetas() {
 
   const temEdicoes = Object.keys(edits).length > 0;
 
+  /* Salvar: envia por razão social (contrato do backend) — só a carteira do coordenador */
   const salvar = async () => {
     if (!temEdicoes) return;
     setSalvando(true);
@@ -136,14 +186,6 @@ function PreenchimentoMetas() {
     } catch (e: any) {
       alert(e?.response?.data?.detail || 'Falha ao salvar.');
     } finally { setSalvando(false); }
-  };
-
-  const bloquearMinha = async () => {
-    if (!confirm('Bloquear sua carteira? Você não poderá mais editar suas metas neste ciclo.')) return;
-    try {
-      await axios.post('/api/v1/carteira/bloquear', {});
-      await carregar();
-    } catch (e: any) { alert(e?.response?.data?.detail || 'Falha ao bloquear.'); }
   };
 
   const congelarEtapa = async () => {
@@ -166,28 +208,22 @@ function PreenchimentoMetas() {
   const toggle = (id: string) =>
     setAbertas(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
-  /* Filtro de busca — percorre árvore e retorna só nós com match */
+  /* Filtro de busca */
   const arvoreVisivelOuCompleta = useMemo(() => {
     const q = busca.trim().toLowerCase();
     if (!q) return dados?.arvore || [];
-
-    const filtraNos = (nodes: any[]): any[] =>
+    const filtra = (nodes: any[]): any[] =>
       nodes.map(node => {
         if (node.tipo === 'produto') {
-          return (
-            node.sku.toLowerCase().includes(q) ||
-            node.descricao.toLowerCase().includes(q)
-          ) ? node : null;
+          return (node.sku.toLowerCase().includes(q) || node.descricao.toLowerCase().includes(q))
+            ? node : null;
         }
-        const matchNome = node.nome.toLowerCase().includes(q);
-        const subFiltrados = filtraNos(node.subRows || []);
-        if (matchNome || subFiltrados.length > 0) {
-          return { ...node, subRows: matchNome ? (node.subRows || []) : subFiltrados };
-        }
+        const match = node.nome.toLowerCase().includes(q);
+        const sub   = filtra(node.subRows || []);
+        if (match || sub.length > 0) return { ...node, subRows: match ? (node.subRows || []) : sub };
         return null;
       }).filter(Boolean);
-
-    return filtraNos(dados?.arvore || []);
+    return filtra(dados?.arvore || []);
   }, [dados, busca]);
 
   const exportarExcel = async () => {
@@ -228,7 +264,7 @@ function PreenchimentoMetas() {
             <div className="relative">
               <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
               <input type="text" value={busca} onChange={e => setBusca(e.target.value)}
-                placeholder="Buscar cliente, SKU ou produto…"
+                placeholder="Buscar executivo, SKU ou cliente…"
                 className="pl-8 pr-7 py-2 text-xs rounded-xl border border-slate-200 bg-white text-slate-700 placeholder:text-slate-300 focus:outline-none focus:border-indigo-400 w-56" />
               {busca && (
                 <button onClick={() => setBusca('')}
@@ -237,11 +273,13 @@ function PreenchimentoMetas() {
                 </button>
               )}
             </div>
-            {/* Cadeados */}
-            <button onClick={() => setPainelCadeados(true)}
-              className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-black bg-white border border-slate-200 text-slate-600 hover:bg-slate-50">
-              <ShieldCheck className="w-4 h-4" /> Cadeados
-            </button>
+            {/* Cadeados — só Gerente e Admin */}
+            {(souAdmin || funcao === 'Gerente') && (
+              <button onClick={() => setPainelCadeados(true)}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-black bg-white border border-slate-200 text-slate-600 hover:bg-slate-50">
+                <ShieldCheck className="w-4 h-4" /> Cadeados
+              </button>
+            )}
             {/* Salvar */}
             <button onClick={salvar} disabled={!temEdicoes || salvando || bloqueado}
               className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all
@@ -249,8 +287,8 @@ function PreenchimentoMetas() {
               {salvando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
               Salvar{temEdicoes ? ` (${Object.keys(edits).length})` : ''}
             </button>
-            {/* Bloquear minha carteira */}
-            {souAdmin && (
+            {/* Congelar/Reabrir etapa — só Gerente e Admin */}
+            {(souAdmin || funcao === 'Gerente') && (
               congeladaEtapa ? (
                 <button onClick={reabrirEtapa}
                   className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-amber-500 text-white hover:bg-amber-600">
@@ -264,13 +302,7 @@ function PreenchimentoMetas() {
                 </button>
               )
             )}
-            {!minhaCongelada && !dados?.sou_admin && (
-              <button onClick={bloquearMinha}
-                className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-emerald-600 text-white hover:bg-emerald-700">
-                <Lock className="w-4 h-4" /> Bloquear minha carteira
-              </button>
-            )}
-            {/* Excel */}
+            {/* Excel — somente a carteira do coordenador logado */}
             <button onClick={exportarExcel}
               className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-black bg-white border border-slate-200 text-slate-600 hover:bg-slate-50">
               <Download className="w-4 h-4" /> Excel
@@ -295,7 +327,7 @@ function PreenchimentoMetas() {
             <div className="w-2 h-2 rounded-full bg-orange-400 shrink-0 animate-pulse" />
             <div>
               <div className="text-xs font-black text-orange-700">Preenchimento bloqueado</div>
-              <div className="text-[11px] font-medium text-orange-600">Demanda Comercial ainda não congelou o plano deste ciclo. Sua carteira fica visível, mas não editável até o bastão ser passado.</div>
+              <div className="text-[11px] font-medium text-orange-600">Demanda Comercial ainda não congelou o plano deste ciclo.</div>
             </div>
           </div>
         )}
@@ -303,8 +335,8 @@ function PreenchimentoMetas() {
         {/* Cabeçalho da tabela */}
         <div className="px-6 pb-1">
           <div className="grid gap-2 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400"
-            style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(120px, 1fr)) 40px` }}>
-            <div>Hierarquia / Cliente / SKU</div>
+            style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(130px, 1fr)) 40px` }}>
+            <div>Hierarquia / Executivo / SKU / Cliente</div>
             {meses.map(m => <div key={m} className="text-right">{mesLabel(m)}</div>)}
             <div />
           </div>
@@ -317,15 +349,14 @@ function PreenchimentoMetas() {
           <div className="flex flex-col items-center justify-center py-16 text-slate-400">
             <Search className="w-8 h-8 mb-2 opacity-30" />
             <div className="text-sm font-bold">Nenhum resultado para "{busca}"</div>
-            <button onClick={() => setBusca('')} className="mt-3 text-xs font-black text-indigo-500 hover:underline">
-              Limpar busca
-            </button>
+            <button onClick={() => setBusca('')} className="mt-3 text-xs font-black text-indigo-500 hover:underline">Limpar busca</button>
           </div>
         ) : (
           arvoreVisivelOuCompleta.map((g: any) => (
-            <NoArvore key={g.nome} node={g} razaoCtx={null} nivel={0}
+            <NoArvore key={g.nome} node={g} nivel={0}
               meses={meses} abertas={abertas} toggle={toggle}
-              valorCelula={valorCelula} setCelula={setCelula}
+              valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setCliente={setCliente}
+              somaSkuExecutivo={somaSkuExecutivo}
               bloqueado={bloqueado} edits={edits}
               setDossieAlvo={setDossieAlvo}
               idPath={g.nome}
@@ -348,92 +379,225 @@ function PreenchimentoMetas() {
 }
 
 /* ── NÓ RECURSIVO DA ÁRVORE ──────────────────────────────────────── */
-function NoArvore({ node, razaoCtx, nivel, meses, abertas, toggle, valorCelula, setCelula,
+function NoArvore({ node, nivel, meses, abertas, toggle,
+  valorCliente, setSkuExecutivo, setCliente, somaSkuExecutivo,
   bloqueado, edits, setDossieAlvo, idPath, buscaAtiva }: any) {
 
-  if (node.tipo === 'produto') {
-    const razao = razaoCtx || '';
+  const buscaAtv = buscaAtiva;
+  const aberta   = buscaAtv || abertas.has(idPath);
+
+  /* ── NÓ PRODUTO — renderizado dentro do nível EXECUTIVO (vendedor) ── */
+  /* Este nó representa um SKU agregado dos clientes do executivo.       */
+  /* O input edita o total do SKU e rateia para os clientes abaixo.      */
+  if (node.tipo === 'produto_executivo') {
+    const { sku, descricao, clientes } = node;
     return (
-      <div className="grid gap-2 px-3 py-1.5 items-center hover:bg-white rounded-lg group"
-        style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(120px, 1fr)) 40px` }}>
-        <div className={`min-w-0 ${INDENT.produto}`}>
-          <div className="text-xs font-bold text-slate-700 truncate">{node.descricao}</div>
-          <div className="text-[10px] font-bold text-slate-300">{node.sku}</div>
-        </div>
-        {meses.map((m: string) => {
-          const cel = node.meses[m];
-          if (!cel) return <div key={m} />;
-          const val    = valorCelula(razao, node.sku, m, cel.meta);
-          const editado = `${razao}||${node.sku}||${m}` in edits;
-          const fatPrev = val && cel.pmv ? val * cel.pmv : null;
-          return (
-            <div key={m} className="text-right">
-              <div className="text-[9px] font-bold text-indigo-400 pr-2 mb-0.5">
-                {fatPrev != null ? fmtRs(fatPrev) : '—'}
+      <div className="mb-0.5">
+        {/* Linha do SKU — input editável, dispara rateio */}
+        <div className="grid gap-2 px-3 py-1.5 items-center hover:bg-indigo-50/40 rounded-lg group"
+          style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(130px, 1fr)) 40px` }}>
+          <div className={`min-w-0 ${INDENT.produto}`}>
+            <div className="text-xs font-bold text-slate-700 truncate">{descricao}</div>
+            <div className="text-[10px] font-bold text-slate-300">{sku}</div>
+          </div>
+          {meses.map((m: string) => {
+            const totalSku  = somaSkuExecutivo(clientes, sku, m);
+            const cel0      = clientes[0]?.subRows?.find((p: any) => p.sku === sku)?.meses[m];
+            const pmv       = cel0?.pmv || 0;
+            const ia        = clientes.reduce((s: number, cli: any) => {
+              const p = (cli.subRows || []).find((pr: any) => pr.sku === sku);
+              return s + (p?.meses[m]?.ia || 0);
+            }, 0);
+            const temEdit   = clientes.some((cli: any) =>
+              `${cli.nome}||${sku}||${m}` in edits
+            );
+            const clientesInfo = clientes.map((cli: any) => {
+              const prod = (cli.subRows || []).find((p: any) => p.sku === sku);
+              return {
+                razao: cli.nome,
+                mes: m,
+                pesoHist: prod?.meses[m]?.peso_historico ?? 0,
+                original: prod?.meses[m]?.meta ?? 0,
+              };
+            });
+            return (
+              <div key={m} className="text-right">
+                <div className="text-[9px] font-bold text-indigo-400 pr-2 mb-0.5">
+                  {pmv ? fmtRs(totalSku * pmv) : '—'}
+                </div>
+                <input
+                  type="number"
+                  value={totalSku}
+                  disabled={bloqueado}
+                  onChange={e => setSkuExecutivo(clientesInfo, sku, m, parseInt(e.target.value) || 0)}
+                  className={`w-full text-right text-sm font-bold rounded-md px-2 py-1 border transition-colors
+                    ${temEdit ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-transparent bg-transparent text-slate-700'}
+                    ${bloqueado ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
+                />
+                <div className="text-[9px] font-bold text-slate-300 pr-2">IA {fmtCx(ia)} cx</div>
               </div>
-              <input type="number" value={val} disabled={bloqueado}
-                onChange={e => setCelula(razao, node.sku, m, parseInt(e.target.value))}
-                className={`w-full text-right text-sm font-bold rounded-md px-2 py-1 border transition-colors
-                  ${editado ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-transparent bg-transparent text-slate-700'}
-                  ${bloqueado ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`} />
-              <div className="text-[9px] font-bold text-slate-300 pr-2">IA {fmtCx(cel.ia)} cx</div>
+            );
+          })}
+          {/* Botão dossiê — nível executivo */}
+          <button
+            onClick={() => setDossieAlvo({ sku, descricao, vendedor: node.executivoNome })}
+            className="justify-self-center p-1.5 rounded-lg text-slate-300 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
+            title="Ver dossiê do SKU">
+            <LineIcon className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Linhas dos clientes — somente leitura com rateio calculado + override manual */}
+        {aberta && clientes.map((cli: any) => {
+          const prod = (cli.subRows || []).find((p: any) => p.sku === sku);
+          if (!prod) return null;
+          return (
+            <div key={cli.nome}
+              className="grid gap-2 px-3 py-1 items-center hover:bg-slate-50 rounded-lg"
+              style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(130px, 1fr)) 40px` }}>
+              <div className={`min-w-0 ${INDENT.cliente}`}>
+                <div className="text-[11px] font-bold text-slate-500 truncate">{cli.nome}</div>
+                <div className="text-[9px] font-bold text-slate-300">razão social</div>
+              </div>
+              {meses.map((m: string) => {
+                const cel     = prod.meses[m];
+                if (!cel) return <div key={m} />;
+                const val     = valorCliente(cli.nome, sku, m, cel.meta);
+                const editado = `${cli.nome}||${sku}||${m}` in edits;
+                return (
+                  <div key={m} className="text-right">
+                    <input
+                      type="number"
+                      value={val}
+                      disabled={bloqueado}
+                      onChange={e => setCliente(cli.nome, sku, m, parseInt(e.target.value) || 0)}
+                      className={`w-full text-right text-xs font-bold rounded-md px-2 py-1 border transition-colors
+                        ${editado ? 'border-violet-300 bg-violet-50 text-violet-700' : 'border-transparent bg-transparent text-slate-500'}
+                        ${bloqueado ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-100 focus:border-violet-400 focus:bg-white focus:outline-none'}`}
+                    />
+                  </div>
+                );
+              })}
+              {/* Botão dossiê nível cliente */}
+              <button
+                onClick={() => setDossieAlvo({ sku, descricao: prod.descricao, razao: cli.nome })}
+                className="justify-self-center p-1.5 rounded-lg text-slate-200 hover:bg-violet-50 hover:text-violet-600 transition-colors"
+                title="Ver dossiê por cliente">
+                <LineIcon className="w-3.5 h-3.5" />
+              </button>
             </div>
           );
         })}
-        <button onClick={() => setDossieAlvo({ sku: node.sku, razao, descricao: node.descricao })}
-          className="justify-self-center p-1.5 rounded-lg text-slate-300 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
-          title="Ver dossiê do SKU">
-          <LineIcon className="w-4 h-4" />
-        </button>
       </div>
     );
   }
 
-  /* Nó de agrupamento (gerente, coordenador, vendedor, cliente) */
-  const aberta    = buscaAtiva || abertas.has(idPath);
-  const novoCtx   = node.tipo === 'cliente' ? node.nome : razaoCtx;
+  /* ── NÓ EXECUTIVO (vendedor) — agrupa SKUs e expande clientes abaixo ── */
+  if (node.tipo === 'vendedor') {
+    // Agrupa os SKUs de todos os clientes deste executivo
+    const skuMap: Record<string, { sku: string; descricao: string; clientes: any[] }> = {};
+    (node.subRows || []).forEach((cli: any) => {
+      (cli.subRows || []).forEach((prod: any) => {
+        if (!skuMap[prod.sku]) {
+          skuMap[prod.sku] = { sku: prod.sku, descricao: prod.descricao, clientes: [] };
+        }
+        if (!skuMap[prod.sku].clientes.find((c: any) => c.nome === cli.nome)) {
+          skuMap[prod.sku].clientes.push(cli);
+        }
+      });
+    });
+    const skusAgrupados = Object.values(skuMap);
+
+    const somaMes = (m: string) =>
+      (node.subRows || []).reduce((s: number, cli: any) =>
+        s + (cli.subRows || []).reduce((ss: number, p: any) =>
+          ss + valorCliente(cli.nome, p.sku, m, p.meses[m]?.meta || 0), 0), 0);
+    const fatMes = (m: string) =>
+      (node.subRows || []).reduce((s: number, cli: any) =>
+        s + (cli.subRows || []).reduce((ss: number, p: any) => {
+          const cel = p.meses[m]; if (!cel) return ss;
+          return ss + valorCliente(cli.nome, p.sku, m, cel.meta) * (cel.pmv || 0);
+        }, 0), 0);
+
+    return (
+      <div className="mb-0.5">
+        <button onClick={() => !buscaAtv && toggle(idPath)}
+          className="w-full grid gap-2 px-3 py-2 items-center rounded-lg hover:bg-white transition-colors"
+          style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(130px, 1fr)) 40px` }}>
+          <div className={`flex items-center gap-1.5 min-w-0 ${INDENT.executivo}`}>
+            {aberta ? <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                     : <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
+            <span className="truncate font-bold text-slate-600 text-xs">{node.nome}</span>
+            <span className="text-[9px] font-black uppercase tracking-wider text-slate-300 ml-1 shrink-0">executivo</span>
+          </div>
+          {meses.map((m: string) => (
+            <div key={m} className="text-right">
+              <div className="text-[9px] font-bold text-indigo-400">{fmtRs(fatMes(m))}</div>
+              <div className="text-xs font-bold text-slate-500">{fmtCx(somaMes(m))} cx</div>
+            </div>
+          ))}
+          <div />
+        </button>
+        {aberta && skusAgrupados.map(skuNode => (
+          <NoArvore
+            key={skuNode.sku}
+            node={{ ...skuNode, tipo: 'produto_executivo', executivoNome: node.nome }}
+            nivel={nivel + 1}
+            meses={meses} abertas={abertas} toggle={toggle}
+            valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setCliente={setCliente}
+            somaSkuExecutivo={somaSkuExecutivo}
+            bloqueado={bloqueado} edits={edits}
+            setDossieAlvo={setDossieAlvo}
+            idPath={`${idPath}>${skuNode.sku}`}
+            buscaAtiva={buscaAtv}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  /* ── NÓ DE AGRUPAMENTO (gerente, coordenador) ── */
+  const tipoLabel: Record<string, string> = { gerente: 'gerente', coordenador: 'coordenador' };
 
   const somaMes = (m: string): number => {
     let s = 0;
     const walk = (n: any, rz: string | null) => {
-      if (n.tipo === 'produto') {
-        s += valorCelula(rz || '', n.sku, m, n.meses[m]?.meta || 0); return;
-      }
+      if (n.tipo === 'produto') { s += valorCliente(rz || '', n.sku, m, n.meses[m]?.meta || 0); return; }
       const c = n.tipo === 'cliente' ? n.nome : rz;
       (n.subRows || []).forEach((f: any) => walk(f, c));
     };
-    walk(node, razaoCtx);
+    walk(node, null);
     return s;
   };
-
   const fatMes = (m: string): number => {
     let f = 0;
     const walk = (n: any, rz: string | null) => {
       if (n.tipo === 'produto') {
         const cel = n.meses[m]; if (!cel) return;
-        f += valorCelula(rz || '', n.sku, m, cel.meta || 0) * (cel.pmv || 0); return;
+        f += valorCliente(rz || '', n.sku, m, cel.meta || 0) * (cel.pmv || 0); return;
       }
       const c = n.tipo === 'cliente' ? n.nome : rz;
       (n.subRows || []).forEach((sub: any) => walk(sub, c));
     };
-    walk(node, razaoCtx);
+    walk(node, null);
     return f;
   };
 
   return (
     <div className="mb-0.5">
-      <button onClick={() => !buscaAtiva && toggle(idPath)}
+      <button onClick={() => !buscaAtv && toggle(idPath)}
         className={`w-full grid gap-2 px-3 py-2 items-center rounded-lg transition-colors
           ${nivel === 0 ? 'bg-white border border-slate-100 hover:border-slate-200' : 'hover:bg-white'}`}
-        style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(120px, 1fr)) 40px` }}>
+        style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(130px, 1fr)) 40px` }}>
         <div className={`flex items-center gap-1.5 min-w-0 ${INDENT[node.tipo] || ''}`}>
-          {aberta
-            ? <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-            : <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
-          <span className={`truncate ${nivel === 0 ? 'font-black text-slate-800 text-sm' : node.tipo === 'cliente' ? 'font-bold text-slate-600 text-xs' : 'font-bold text-slate-500 text-xs'}`}>
+          {aberta ? <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                   : <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
+          <span className={`truncate ${nivel === 0 ? 'font-black text-slate-800 text-sm' : 'font-bold text-slate-600 text-xs'}`}>
             {node.nome}
           </span>
-          <span className="text-[9px] font-black uppercase tracking-wider text-slate-300 ml-1 shrink-0">{node.tipo}</span>
+          <span className="text-[9px] font-black uppercase tracking-wider text-slate-300 ml-1 shrink-0">
+            {tipoLabel[node.tipo] || node.tipo}
+          </span>
         </div>
         {meses.map((m: string) => (
           <div key={m} className="text-right">
@@ -444,20 +608,34 @@ function NoArvore({ node, razaoCtx, nivel, meses, abertas, toggle, valorCelula, 
         <div />
       </button>
       {aberta && (node.subRows || []).map((f: any, i: number) => (
-        <NoArvore key={(f.nome || f.sku) + i} node={f} razaoCtx={novoCtx} nivel={nivel + 1}
+        <NoArvore key={(f.nome || f.sku) + i} node={f} nivel={nivel + 1}
           meses={meses} abertas={abertas} toggle={toggle}
-          valorCelula={valorCelula} setCelula={setCelula}
+          valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setCliente={setCliente}
+          somaSkuExecutivo={somaSkuExecutivo}
           bloqueado={bloqueado} edits={edits}
           setDossieAlvo={setDossieAlvo}
           idPath={`${idPath}>${f.nome || f.sku}`}
-          buscaAtiva={buscaAtiva} />
+          buscaAtiva={buscaAtv} />
       ))}
     </div>
   );
 }
 
-/* ── GAVETA DE DOSSIÊ (lateral, não inline — árvore já é densa) ──── */
-function GavetaDossie({ alvo, fechar }: { alvo: {sku: string; razao: string; descricao: string}; fechar: () => void }) {
+/* ── GAVETA DE DOSSIÊ ────────────────────────────────────────────── */
+function GavetaDossie({ alvo, fechar }: {
+  alvo: { sku: string; descricao: string; razao?: string; vendedor?: string };
+  fechar: () => void;
+}) {
+  const paramsExtra: Record<string, string> = {};
+  if (alvo.razao)    paramsExtra.razao_social   = alvo.razao;
+  if (alvo.vendedor) paramsExtra.vendedor_nome  = alvo.vendedor;
+
+  const subtitulo = alvo.razao
+    ? `${alvo.sku} · ${alvo.razao}`
+    : alvo.vendedor
+    ? `${alvo.sku} · executivo: ${alvo.vendedor}`
+    : alvo.sku;
+
   return (
     <>
       <div className="fixed inset-0 bg-slate-900/20 z-30" onClick={fechar} />
@@ -467,8 +645,8 @@ function GavetaDossie({ alvo, fechar }: { alvo: {sku: string; razao: string; des
           tipo="sku"
           id={alvo.sku}
           titulo={alvo.descricao || alvo.sku}
-          subtitulo={`${alvo.sku} · ${alvo.razao}`}
-          paramsExtra={{ razao_social: alvo.razao }}
+          subtitulo={subtitulo}
+          paramsExtra={Object.keys(paramsExtra).length ? paramsExtra : undefined}
           onFechar={fechar}
         />
       </div>
@@ -480,12 +658,21 @@ function GavetaDossie({ alvo, fechar }: { alvo: {sku: string; razao: string; des
 function PainelCadeados({ fechar, recarregar }: { fechar: () => void; recarregar: () => void }) {
   const [d, setD]         = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [novoAlvo, setNovoAlvo] = useState('');
 
   const carregar = () => {
     setLoading(true);
     axios.get('/api/v1/carteira/cadeados').then(r => setD(r.data)).finally(() => setLoading(false));
   };
   useEffect(() => { carregar(); }, []);
+
+  const travar = async (nome: string) => {
+    if (!confirm(`Bloquear a carteira de ${nome}? O coordenador não poderá mais editar suas metas.`)) return;
+    try {
+      await axios.post('/api/v1/carteira/bloquear', { nome_alvo: nome });
+      carregar(); recarregar();
+    } catch (e: any) { alert(e?.response?.data?.detail || 'Falha ao bloquear.'); }
+  };
 
   const reabrir = async (nome: string) => {
     if (!confirm(`Reabrir a carteira de ${nome}?`)) return;
@@ -500,7 +687,7 @@ function PainelCadeados({ fechar, recarregar }: { fechar: () => void; recarregar
       <div className="fixed inset-0 bg-slate-900/20 z-30" onClick={fechar} />
       <div className="fixed right-0 top-0 bottom-0 w-full max-w-sm bg-white z-40 shadow-2xl overflow-y-auto">
         <div className="sticky top-0 bg-white border-b border-slate-100 px-5 py-4 flex items-center justify-between">
-          <div className="text-sm font-black text-slate-900">Cadeados da equipe</div>
+          <div className="text-sm font-black text-slate-900">Cadeados dos coordenadores</div>
           <button onClick={fechar} className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100">
             <X className="w-4 h-4" />
           </button>
@@ -510,25 +697,49 @@ function PainelCadeados({ fechar, recarregar }: { fechar: () => void; recarregar
             <Loader2 className="w-5 h-5 animate-spin" />
           </div>
         ) : (
-          <div className="p-5">
+          <div className="p-5 space-y-4">
+            {/* Travar novo coordenador */}
+            <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
+                Travar coordenador
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={novoAlvo}
+                  onChange={e => setNovoAlvo(e.target.value)}
+                  placeholder="Nome do coordenador…"
+                  className="flex-1 text-xs rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus:border-indigo-400"
+                />
+                <button
+                  onClick={() => { if (novoAlvo.trim()) travar(novoAlvo.trim()); }}
+                  disabled={!novoAlvo.trim()}
+                  className="flex items-center gap-1 text-[11px] font-black bg-rose-600 text-white px-3 py-2 rounded-lg hover:bg-rose-700 disabled:opacity-40">
+                  <Lock className="w-3 h-3" /> Travar
+                </button>
+              </div>
+            </div>
+
+            {/* Lista de cadeados ativos */}
+            <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+              Carteiras travadas
+            </div>
             {(d?.cadeados || []).length === 0 && (
-              <div className="text-center text-slate-400 text-sm py-8">Nenhuma carteira bloqueada ainda.</div>
+              <div className="text-center text-slate-400 text-sm py-4">Nenhuma carteira bloqueada.</div>
             )}
             <div className="space-y-2">
               {(d?.cadeados || []).map((c: any) => (
                 <div key={c.nome} className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 px-3 py-2.5">
                   <div className="min-w-0">
                     <div className="text-xs font-bold text-slate-700 truncate flex items-center gap-1.5">
-                      <Lock className="w-3 h-3 text-emerald-600" /> {c.nome}
+                      <Lock className="w-3 h-3 text-rose-500" /> {c.nome}
                     </div>
                     <div className="text-[10px] font-bold text-slate-400">{c.nivel} · por {c.por}</div>
                   </div>
-                  {(d?.sou_admin || c.nome === d?.meu_nome) && (
-                    <button onClick={() => reabrir(c.nome)}
-                      className="flex items-center gap-1 text-[11px] font-bold text-slate-500 hover:text-rose-600 px-2 py-1 rounded-lg hover:bg-white">
-                      <Unlock className="w-3 h-3" /> Reabrir
-                    </button>
-                  )}
+                  <button onClick={() => reabrir(c.nome)}
+                    className="flex items-center gap-1 text-[11px] font-bold text-slate-500 hover:text-emerald-600 px-2 py-1 rounded-lg hover:bg-white">
+                    <Unlock className="w-3 h-3" /> Reabrir
+                  </button>
                 </div>
               ))}
             </div>

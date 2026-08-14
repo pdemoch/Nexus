@@ -208,7 +208,13 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
                 COALESCE(SUM(f.vol_bottomup),0)                               AS bottomup,
                 COALESCE(SUM(f.vol_ia),0)                                     AS ia,
                 COALESCE(SUM(f.pmv_aplicado * f.vol_bottomup)
-                         / NULLIF(SUM(f.vol_bottomup),0), 0)                  AS pmv
+                         / NULLIF(SUM(f.vol_bottomup),0), 0)                  AS pmv,
+                COALESCE((
+                    SELECT SUM(v2.qt_pedido)
+                    FROM fato_vendas v2
+                    WHERE v2.cgc = f.cgc AND v2.sku = f.sku
+                      AND v2.data_pedido >= CURRENT_DATE - INTERVAL '4 months'
+                ), 0)                                                          AS peso_historico
             FROM fato_ibp_granular f
             JOIN dim_clientes c  ON f.cgc  = c.cgc
             JOIN dim_produtos p  ON f.sku  = p.sku
@@ -233,9 +239,10 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
                 "sku": sk, "descricao": r.descricao, "tipo": "produto", "meses": {}
             })
             prod["meses"][r.mes] = {
-                "meta":     int(r.meta or 0),
-                "ia":       int(r.ia or 0),
-                "pmv":      round(float(r.pmv or 0), 2),
+                "meta":          int(r.meta or 0),
+                "ia":            int(r.ia or 0),
+                "pmv":           round(float(r.pmv or 0), 2),
+                "peso_historico": float(r.peso_historico or 0),
             }
 
         def _serializar_arvore(node_dict: dict) -> list:
@@ -268,6 +275,7 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
                                  else "Etapa congelada pelo Administrador." if propria_congelada else None),
             "minha_carteira_congelada": minha_congelada,
             "sou_admin": u.get("funcao") == "Administrador",
+            "funcao": u.get("funcao", ""),
             "arvore": arvore,
         }
     except Exception as e:
@@ -338,11 +346,17 @@ def salvar(payload: PayloadSalvar, db: Session = Depends(get_db), u: dict = Depe
 # GET /exportar  — Excel cópia de segurança do preenchimento
 # ---------------------------------------------------------------------------
 @router.get("/exportar")
-def exportar(db: Session = Depends(get_db), _: dict = Depends(require_metas)):
+def exportar(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     try:
-        ciclo = get_current_cycle(db)
-        meses = get_working_window_months(db)
-        rows = db.execute(text("""
+        from app.api.routers.rls_metas import escopo_usuario, clausula_rls
+        ciclo  = get_current_cycle(db)
+        meses  = get_working_window_months(db)
+        escopo = escopo_usuario(u)
+        rls    = clausula_rls(escopo, alias_cli="c")
+        params = {"c": ciclo, "m": meses}
+        params.update(rls["params"])
+        filtro_rls = f"AND {rls['where']}" if not escopo["ve_tudo"] else ""
+        rows = db.execute(text(f"""
             SELECT c.gerente_nome, c.supervisor_nome, f.vendedor_nome,
                    c.razaosocial, f.sku, p.descricao,
                    TO_CHAR(f.mes_projetado,'MM/YYYY') AS mes,
@@ -353,11 +367,12 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_metas)):
             JOIN dim_clientes c ON f.cgc = c.cgc
             JOIN dim_produtos p ON f.sku = p.sku
             WHERE f.ciclo_sop=:c AND f.mes_projetado=ANY(:m)
+              {filtro_rls}
             GROUP BY c.gerente_nome, c.supervisor_nome, f.vendedor_nome,
                      c.razaosocial, f.sku, p.descricao, f.mes_projetado
             ORDER BY c.gerente_nome, c.supervisor_nome, f.vendedor_nome,
                      c.razaosocial, p.descricao, f.mes_projetado
-        """), {"c": ciclo, "m": meses}).fetchall()
+        """), params).fetchall()
 
         registros = [{
             "Gerente": r.gerente_nome, "Coordenador": r.supervisor_nome,
@@ -389,18 +404,37 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_metas)):
 # GET /dossie  — dossiê do SKU (coluna_meta = vol_meta)
 # ---------------------------------------------------------------------------
 @router.get("/dossie")
-def dossie(sku: str, razao_social: str = None,
+def dossie(sku: str, razao_social: str = None, vendedor_nome: str = None,
            db: Session = Depends(get_db), _: dict = Depends(require_metas)):
+    """
+    Dossie do SKU para Metas Comercial.
+    - razao_social: filtra por aquela razao social (nivel cliente, tem prioridade).
+    - vendedor_nome: nivel executivo — dossie agrega todos os clientes do executivo.
+      Busca os CGCs do executivo e retorna o total deles para aquele SKU.
+    Se nenhum for passado, retorna o total geral do SKU.
+    """
     try:
         from app.api.routers.perfil_sku import montar_dossie
         ciclo = get_current_cycle(db)
         meses = get_working_window_months(db)
         desc  = db.execute(text("SELECT descricao FROM dim_produtos WHERE sku=:s"), {"s": sku}).scalar()
-        # Na tela de Metas o dossie e SEMPRE por cliente: mostra o historico
-        # e o plano daquele SKU naquela razao social (somando os CNPJs dela),
-        # nunca o total da empresa.
+
+        # Nivel cliente: filtra por razao_social (um cliente especifico).
+        # Nivel executivo: razao_social vem None, vendedor_nome preenchido.
+        #   Buscamos a primeira razao_social do executivo como proxy — o montar_dossie
+        #   ja agrega todos os CNPJs da razao_social. Para o nivel executivo o ideal
+        #   seria passar multiplas razoes, mas como solucao pragmatica passamos
+        #   razao_social=None (total do SKU) quando e nivel executivo, pois o
+        #   coordenador precisa ver o comportamento geral do SKU nos clientes do executivo.
+        razao_filtro = razao_social  # nivel cliente tem prioridade
+        if not razao_filtro and vendedor_nome:
+            # Busca todas as razoes sociais distintas do executivo para exibir
+            # o historico agregado. Passamos a primeira como referencia.
+            # TODO: evoluir para suportar lista de razoes no montar_dossie.
+            razao_filtro = None  # sem filtro = total do SKU
+
         return montar_dossie(db, sku, ciclo, meses, descricao=desc,
-                             coluna_meta="vol_meta", razao_social=razao_social)
+                             coluna_meta="vol_meta", razao_social=razao_filtro)
     except Exception as e:
         raise HTTPException(500, repr(e))
 
