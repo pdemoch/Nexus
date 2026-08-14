@@ -281,18 +281,21 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_gerenciament
         GROUP BY f.sku, p.descricao, p.categoria, p.segmento, f.mes_projetado
     """), {"c": ciclo, "meses": meses}).fetchall()
 
-    # Realizado do ANO PASSADO (mesmo mês), por SKU — âncora anti-otimismo.
+    # Realizado do ANO PASSADO (mesmo mês), por SKU — cx E rs reais, sem re-precificação.
     realizado_ap = defaultdict(dict)
     for m in meses:
         m_ap = (m - relativedelta(years=1))
         rows = db.execute(text("""
-            SELECT sku, SUM(qt_pedido) AS cx
+            SELECT sku, SUM(qt_pedido) AS cx, SUM(vl_pedido) AS rs
             FROM fato_vendas
             WHERE TO_CHAR(data_pedido,'YYYY-MM') = :ym
             GROUP BY sku
         """), {"ym": m_ap.strftime("%Y-%m")}).fetchall()
         for r in rows:
-            realizado_ap[r.sku][m.strftime("%Y-%m-%d")] = int(r.cx or 0)
+            realizado_ap[r.sku][m.strftime("%Y-%m-%d")] = {
+                "cx": int(r.cx or 0),
+                "rs": round(float(r.rs or 0), 2),
+            }
 
     # Orçamento por SKU x mês (receita em R$ para o período planejado).
     orc_idx: dict = {}

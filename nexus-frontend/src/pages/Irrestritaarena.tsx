@@ -98,7 +98,9 @@ function PreenchimentoIrrestrita() {
   const adotarFonte = (sku: string, fonte: 'ia' | 'topdown' | 'realizado_ap', skuData: any) => {
     const novo: Record<string, number> = {};
     meses.forEach(m => {
-      const val = skuData.meses[m]?.[fonte];
+      const cel = skuData.meses[m];
+      if (!cel) return;
+      const val = fonte === 'realizado_ap' ? cel.realizado_ap?.cx : cel[fonte];
       if (val != null) novo[`${sku}|${m}`] = Math.round(val);
     });
     setEdits(p => ({ ...p, ...novo }));
@@ -137,7 +139,7 @@ function PreenchimentoIrrestrita() {
           fat[m] += bu * (cel.pmv || 0);
           ia[m]  += cel.ia || 0;
           td[m]  += cel.topdown || 0;
-          ap[m]  += cel.realizado_ap || 0;
+          ap[m]  += cel.realizado_ap?.cx || 0;
         })
       )
     );
@@ -281,12 +283,12 @@ function PreenchimentoIrrestrita() {
               const fat = totaisVivos.fat[m];
               const ia  = totaisVivos.ia[m];
               const td  = totaisVivos.td[m];
-              const ap  = totaisVivos.ap[m];
-              // Receita do ano anterior: soma de (realizado_ap × pmv) por SKU
+              const ap  = totaisVivos.ap[m];  // ja em .cx via somacat
+              // Receita do ano anterior: vl_pedido real da fato_vendas (nao re-precificado)
               const fatAP = categoriasFlatadas.reduce((acc: number, cat: any) =>
                 acc + cat.skus.reduce((a: number, s: any) => {
-                  const cel = s.meses[m]; if (!cel || !cel.realizado_ap) return a;
-                  return a + (cel.realizado_ap * (cel.pmv || 0));
+                  const cel = s.meses[m]; if (!cel || !cel.realizado_ap?.rs) return a;
+                  return a + cel.realizado_ap.rs;
                 }, 0), 0);
               // Receita do orçamento: soma de cel.orcamento
               const fatOrc = categoriasFlatadas.reduce((acc: number, cat: any) =>
@@ -392,7 +394,9 @@ function PreenchimentoIrrestrita() {
             const somacat = (m: string, campo: string) =>
               cat.skus.reduce((acc: number, s: any) => {
                 const cel = s.meses[m]; if (!cel) return acc;
-                return acc + (campo === 'bu' ? valBU(s.sku, m, cel.bottomup) : (cel[campo] || 0));
+                if (campo === 'bu') return acc + valBU(s.sku, m, cel.bottomup);
+                if (campo === 'realizado_ap') return acc + (cel.realizado_ap?.cx || 0);
+                return acc + (cel[campo] || 0);
               }, 0);
 
             return (
@@ -516,7 +520,9 @@ function PreenchimentoIrrestrita() {
                           const editado = `${s.sku}|${m}` in edits;
                           const dIA    = delta(cel.ia || 0, bu);
                           const dTD    = delta(cel.topdown || 0, bu);
-                          const dAP    = cel.realizado_ap ? delta(cel.realizado_ap, bu) : null;
+                          const apCx   = cel.realizado_ap?.cx ?? null;
+                          const apRs   = cel.realizado_ap?.rs ?? null;
+                          const dAP    = apCx ? delta(apCx, bu) : null;
 
                           return (
                             <div key={m} className="space-y-1">
@@ -543,14 +549,14 @@ function PreenchimentoIrrestrita() {
                                     : <span className="text-[9px] text-slate-300">—</span>}
                                 </button>
                                 {/* Ano anterior */}
-                                <button disabled={congelada || !cel.realizado_ap}
-                                  onClick={() => cel.realizado_ap && setCelula(s.sku, m, cel.realizado_ap)}
+                                <button disabled={congelada || !apCx}
+                                  onClick={() => apCx && setCelula(s.sku, m, apCx)}
                                   className="flex flex-col items-center py-1 px-1 rounded-lg bg-slate-50 hover:bg-slate-100 hover:ring-1 hover:ring-slate-300 transition-all disabled:cursor-not-allowed"
                                   title="Adotar Ano Anterior neste mês">
                                   <span className="text-[10px] font-black text-slate-500">
-                                    {cel.realizado_ap ? fmtCx(cel.realizado_ap) : '—'}
+                                    {apCx ? fmtCx(apCx) : '—'}
                                   </span>
-                                  {dAP && cel.realizado_ap
+                                  {dAP && apCx
                                     ? <span className="text-[9px] font-black" style={{ color: dAP.cor }}>{dAP.sinal}</span>
                                     : <span className="text-[9px] text-slate-300">—</span>}
                                 </button>

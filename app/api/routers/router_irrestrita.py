@@ -166,18 +166,21 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_irrestrita))
         ORDER BY p.categoria, p.segmento, p.descricao, f.mes_projetado
     """), {"c": ciclo, "meses": meses}).fetchall()
 
-    # ── Realizado ano passado (mesmo mês) ──────────────────────────────────
+    # Realizado ano passado (mesmo mês) — cx E rs reais, sem re-precificação
     realizado_ap: dict = defaultdict(dict)
     for m in meses:
         m_ap = m - relativedelta(years=1)
         rows = db.execute(text("""
-            SELECT sku, SUM(qt_pedido) AS cx
+            SELECT sku, SUM(qt_pedido) AS cx, SUM(vl_pedido) AS rs
             FROM fato_vendas
             WHERE TO_CHAR(data_pedido, 'YYYY-MM') = :ym
             GROUP BY sku
         """), {"ym": m_ap.strftime("%Y-%m")}).fetchall()
         for r in rows:
-            realizado_ap[r.sku][m.strftime("%Y-%m-%d")] = int(r.cx or 0)
+            realizado_ap[r.sku][m.strftime("%Y-%m-%d")] = {
+                "cx": int(r.cx or 0),
+                "rs": round(float(r.rs or 0), 2),
+            }
 
     # ── Orçamento por SKU/mês ──────────────────────────────────────────────
     orc_idx: dict = {}
@@ -212,6 +215,7 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_irrestrita))
             "pmv":         round(pmv, 2),
             "orcamento":   orc_idx.get(r.sku, {}).get(r.mes),
             "realizado_ap": realizado_ap.get(r.sku, {}).get(r.mes),
+            # realizado_ap = {"cx": int, "rs": float} — valor real do ano passado
         }
         tot[r.mes]["ia"]       += ia
         tot[r.mes]["topdown"]  += td
