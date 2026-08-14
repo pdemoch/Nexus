@@ -307,6 +307,23 @@ export default function DossieInferior({
                   </thead>
                   <tbody>
                     {(d.historico_12m || []).map((row: any, idx: number) => {
+                      // Mês com venda mas sem plano registrado — exibe mas sem métricas
+                      if (row.sem_meta) {
+                        return (
+                          <tr key={row.mes} style={{ background: idx % 2 ? '#f9fafb' : '#fff', borderBottom: '1px solid #f1f5f9' }}>
+                            <td style={{ padding: '7px 12px', fontWeight: 700, color: '#334155' }}>{row.mes_label}</td>
+                            <td style={{ padding: '7px 12px', textAlign: 'right', color: '#475569' }}>
+                              {new Intl.NumberFormat('pt-BR').format(row.vendido_cx)}
+                            </td>
+                            <td colSpan={7} style={{ padding: '7px 12px', textAlign: 'center' }}>
+                              <span style={{ fontSize: 10, fontWeight: 700, color: '#94a3b8',
+                                background: '#f1f5f9', borderRadius: 6, padding: '2px 8px' }}>
+                                sem plano registrado
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      }
                       const b    = row.delta_pct;
                       const corB = b > 15 ? '#e11d48' : b < -15 ? '#2563eb' : '#059669';
                       const corW = row.wmape_pct <= 20 ? '#059669' : row.wmape_pct <= 35 ? '#d97706' : '#e11d48';
@@ -353,23 +370,25 @@ export default function DossieInferior({
                   {/* Totalizador */}
                   {(() => {
                     const rows  = d.historico_12m || [];
-                    const totV  = rows.reduce((s: number, r: any) => s + r.vendido_cx, 0);
-                    const totM  = rows.reduce((s: number, r: any) => s + r.meta_cx, 0);
-                    const totD  = rows.reduce((s: number, r: any) => s + r.delta_cx, 0);
+                    // Exclui meses sem plano dos totalizadores (evita distorção)
+                    const rowsComMeta = rows.filter((r: any) => !r.sem_meta && r.meta_cx != null && r.meta_cx > 0);
+                    const totV  = rowsComMeta.reduce((s: number, r: any) => s + r.vendido_cx, 0);
+                    const totM  = rowsComMeta.reduce((s: number, r: any) => s + r.meta_cx, 0);
+                    const totD  = rowsComMeta.reduce((s: number, r: any) => s + r.delta_cx, 0);
                     const biasT = totV > 0 ? totD / totV * 100 : 0;
                     const wmT   = totV > 0 ? Math.abs(totD) / totV * 100 : 0;
                     const corBT = biasT > 15 ? '#e11d48' : biasT < -15 ? '#2563eb' : '#059669';
                     const corWT = wmT <= 20 ? '#059669' : wmT <= 35 ? '#d97706' : '#e11d48';
-                    // Acumulado IA — só sobre meses com dado de IA
-                    const rowsIA = rows.filter((r: any) => r.ia_cx != null);
+                    // Acumulado IA — só sobre meses com dado de IA E com meta
+                    const rowsIA = rowsComMeta.filter((r: any) => r.ia_cx != null);
                     const totIA  = rowsIA.reduce((s: number, r: any) => s + (r.ia_cx || 0), 0);
                     const totVIA = rowsIA.reduce((s: number, r: any) => s + r.vendido_cx, 0);
                     const biasIA = totVIA > 0 ? (totIA - totVIA) / totVIA * 100 : null;
                     const wmIA   = biasIA != null ? Math.abs(biasIA) : null;
                     const corBIA = biasIA == null ? '#94a3b8' : biasIA > 15 ? '#e11d48' : biasIA < -15 ? '#2563eb' : '#059669';
                     const corWIA = wmIA == null ? '#94a3b8' : wmIA <= 20 ? '#059669' : wmIA <= 35 ? '#d97706' : '#e11d48';
-                    // FVA acumulado (média simples dos meses com dado)
-                    const fvaRows = rows.filter((r: any) => r.fva_pct != null);
+                    // FVA acumulado (media simples dos meses com dado)
+                    const fvaRows = rowsComMeta.filter((r: any) => r.fva_pct != null);
                     const fvaAcc  = fvaRows.length > 0
                       ? fvaRows.reduce((s: number, r: any) => s + r.fva_pct, 0) / fvaRows.length
                       : null;

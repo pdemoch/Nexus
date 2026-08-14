@@ -8,6 +8,7 @@ import LoginArena from './pages/LoginArena';
 // Telas de consenso (mantidos os NOMES de arquivo antigos; conteúdo reconstruído).
 import TopDownArena from './pages/TopDownArena';            // -> Demanda Marketing
 import GerenciamentoArena from './pages/GerenciamentoArena'; // -> Demanda Comercial
+import IrrestritaArena from './pages/Irrestritaarena';       // -> Demanda Irrestrita
 import ConsensoArena from './pages/ConsensoArena';           // -> Metas Comercial
 import SupplyReviewArena from './pages/SupplyReviewArena';   // -> Supply Review
 import GlobalDashboard from './pages/GlobalDashboard';       // -> Demanda Final
@@ -80,6 +81,7 @@ export default function App() {
       case 'dashboard': return <GlobalDashboard />;
       case 'topdown': return <TopDownArena />;
       case 'gerenciamento': return <GerenciamentoArena />;
+      case 'irrestrita': return <IrrestritaArena />;
       case 'consenso': return <ConsensoArena />;
       case 'supply': return <SupplyReviewArena />;
       case 'npd': return <NPDArena />;

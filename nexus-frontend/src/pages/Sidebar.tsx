@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { 
   BarChart3, Users, LayoutDashboard, Settings, Rocket, LogOut, 
   UserCircle, ShieldAlert, Factory, Activity, Crosshair, Database, 
-  ChevronLeft, ChevronRight, Landmark
+  ChevronLeft, ChevronRight, Landmark, Zap
 } from 'lucide-react';
 
 export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout }: any) {
@@ -13,10 +13,11 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
     { id: 'dashboard', label: 'Demanda Final', icon: LayoutDashboard, roles: ['Administrador', 'Gerente', 'Supply Chain', 'Marketing', 'C-Level'] },
     { id: 'auditoria', label: 'KPIs', icon: Crosshair, roles: ['Administrador', 'C-Level', 'Gerente', 'Supply Chain','Marketing'] },
     { id: 'topdown', label: 'Demanda Marketing', icon: BarChart3, roles: ['Administrador', 'Marketing'] },
+    { id: 'gerenciamento', label: 'Demanda Comercial', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },
+    { id: 'irrestrita', label: 'Demanda Irrestrita', icon: Zap, roles: ['Administrador'] },
+    { id: 'consenso', label: 'Metas Comercial', icon: Users, roles: ['Administrador', 'Gerente', 'Coordenador'] },
     { id: 'npd', label: 'Inovações', icon: Rocket, roles: ['Administrador', 'Marketing'] },
     { id: 'supply', label: 'Supply Review', icon: Factory, roles: ['Administrador', 'Supply Chain'] },
-    { id: 'consenso', label: 'Metas Comercial', icon: Users, roles: ['Administrador', 'Gerente', 'Coordenador'] },
-    { id: 'gerenciamento', label: 'Demanda Comercial', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },
     { id: 'admin', label: 'Painel Admin', icon: Settings, roles: ['Administrador'] },
   ];
 

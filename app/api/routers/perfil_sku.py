@@ -1059,7 +1059,29 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
         meta    = entrada.get("final_cx")           # Nexus M-2 congelado
         if meta is None:
             meta = entrada.get("humano_hist_cx")    # arquivo histórico jan/23-mai/26
-        if not vendido or vendido <= 0 or meta is None:
+        # Sem venda real: nada a calcular
+        if not vendido or vendido <= 0:
+            continue
+        # Meta None ou zero: houve venda mas sem plano registrado.
+        # Inclui na tabela marcado como sem_meta=True para o front
+        # exibir a venda sem calcular BIAS (evita -100% sem sentido).
+        if meta is None or meta <= 0:
+            historico_12m.append({
+                "mes":          entrada["mes"],
+                "mes_label":    f"{entrada['mes'][5:7]}/{entrada['mes'][2:4]}",
+                "vendido_cx":   int(vendido),
+                "meta_cx":      None,
+                "delta_cx":     None,
+                "delta_pct":    None,
+                "wmape_pct":    None,
+                "ia_cx":        None,
+                "bias_ia_pct":  None,
+                "wmape_ia_pct": None,
+                "fva_pct":      None,
+                "sem_meta":     True,
+            })
+            if len(historico_12m) >= 6:
+                break
             continue
         delta_cx  = meta - vendido
         delta_pct = delta_cx / vendido * 100
