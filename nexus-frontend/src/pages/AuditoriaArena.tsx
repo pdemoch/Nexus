@@ -270,7 +270,8 @@ function TabelaBias({ itens, modo }: { itens: any[], modo: 'super'|'sub' }) {
           {filtrados.map((it, idx) => {
             const delta = Math.round(it.vol_previsto - it.vol_real);
             const abs   = Math.abs(delta);
-            const freq  = `${Math.round((it.persistencia||0) * (it.meses||1))}/${it.meses||'—'} meses`;
+            const freqMeses = Math.round(((it.persistencia||0) / 100) * (it.meses||1));
+            const freq  = `${freqMeses}/${it.meses||'—'} meses`;
             return (
               <tr key={it.sku} style={{ background: idx%2?'#f9fafb':'#fff', borderBottom:'1px solid #f1f5f9' }}>
                 <Td><code style={{ fontSize:11, color:'#64748b' }}>{it.sku}</code></Td>
@@ -281,8 +282,8 @@ function TabelaBias({ itens, modo }: { itens: any[], modo: 'super'|'sub' }) {
                 <Td right bold cor={corD}>{ícone} {num(abs)}</Td>
                 <Td right bold cor={corD}>{sinal(it.bias_h)}</Td>
                 <Td right>
-                  <span style={{ fontSize:12, background:(it.persistencia||0)>=0.7?'#fef2f2':'#f0f9ff',
-                    color:(it.persistencia||0)>=0.7?'#e11d48':'#0284c7',
+                  <span style={{ fontSize:12, background:(it.persistencia||0)>=70?'#fef2f2':'#f0f9ff',
+                    color:(it.persistencia||0)>=70?'#e11d48':'#0284c7',
                     borderRadius:5, padding:'2px 6px', fontWeight:700 }}>
                     {freq}
                   </span>

@@ -206,7 +206,9 @@ def _serie_metricas(df: pd.DataFrame) -> pd.DataFrame:
                 row["mape_ia"] = None
             row["n_skus_ia"] = int(len(ok_ia))
             if row["wmape_h"] is not None and row["wmape_ia"] is not None:
-                row["fva"] = round(row["wmape_ia"] - row["wmape_h"], 2)
+                # FVA = WMAPE_Humano - WMAPE_IA
+                # Positivo: humano piorou (IA era melhor); Negativo: humano agregou valor
+                row["fva"] = round(row["wmape_h"] - row["wmape_ia"], 2)
         else:
             row["wmape_ia"] = row["mape_ia"] = row["bias_ia"] = row["fva"] = None
             row["n_skus_ia"] = 0
@@ -315,7 +317,8 @@ async def evolucao(
             if resumo["wmape_ia"] is not None: resumo["wmape_ia"] = round(resumo["wmape_ia"], 2)
             if resumo["bias_ia"]  is not None: resumo["bias_ia"]  = round(resumo["bias_ia"],  2)
             if resumo.get("wmape_h") is not None and resumo.get("wmape_ia") is not None:
-                resumo["fva"] = round(resumo["wmape_ia"] - resumo["wmape_h"], 2)
+                # FVA = WMAPE_Humano - WMAPE_IA
+                resumo["fva"] = round(resumo["wmape_h"] - resumo["wmape_ia"], 2)
             ok_ia = df_ia[df_ia.vol_real > 0].copy()
             if len(ok_ia):
                 ok_ia["ape"] = (ok_ia.vol_ia - ok_ia.vol_real).abs() / ok_ia.vol_real * 100
@@ -376,9 +379,9 @@ async def diagnostico(
                     mape = float(ok.ape.mean())
 
                 gm = g_h.groupby("mes").agg(r=("vol_real","sum"), p=("vol_humano","sum")).reset_index()
-                gm = gm[gm.r > 0].copy()
+                gm = gm[gm.r > 0].dropna(subset=["r", "p"]).copy()
                 if len(gm):
-                    gm["er"] = (gm.p - gm.r) / gm.r  # pandas division — seguro
+                    gm["er"] = (gm.p - gm.r) / gm.r  # pandas division — seguro após dropna
                     persist = float((gm.er > 0.02).mean() if bias >= 0 else (gm.er < -0.02).mean())
                 else:
                     persist = 0.0
@@ -414,7 +417,10 @@ async def diagnostico(
                 item["wmape_ia"] = round(_sdiv((g_ia.vol_ia - g_ia.vol_real).abs().sum(), ri, 100) or 0, 2)
                 item["bias_ia"]  = round(_sdiv(float(g_ia.vol_ia.sum()) - ri, ri, 100) or 0, 2)
                 if item.get("wmape_h") is not None:
-                    item["fva"] = round(item["wmape_ia"] - item["wmape_h"], 2)
+                    # FVA = WMAPE_Humano - WMAPE_IA
+                    # Positivo: humano piorou em relação à IA (IA era melhor)
+                    # Negativo: humano melhorou em relação à IA (humano agregou valor)
+                    item["fva"] = round(item["wmape_h"] - item["wmape_ia"], 2)
 
             itens.append(item)
 
