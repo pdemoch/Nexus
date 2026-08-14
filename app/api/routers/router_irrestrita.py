@@ -197,6 +197,16 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_irrestrita))
     tree: dict = {}
     tot: dict = {mi: {"ia": 0, "topdown": 0, "bottomup": 0, "fat_bu": 0.0} for mi in meses_iso}
 
+    # Totais do ano anterior por mês — soma direta de realizado_ap (todos os SKUs)
+    for m in meses:
+        mi = m.strftime("%Y-%m-%d")
+        tot[mi]["cx_ap"] = sum(
+            v[mi]["cx"] for v in realizado_ap.values() if mi in v
+        )
+        tot[mi]["rs_ap"] = round(sum(
+            v[mi]["rs"] for v in realizado_ap.values() if mi in v
+        ), 2)
+
     for r in plano:
         ia  = int(r.ia or 0)
         td  = int(r.topdown or 0)

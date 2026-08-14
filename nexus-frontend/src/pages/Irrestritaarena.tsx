@@ -283,13 +283,10 @@ function PreenchimentoIrrestrita() {
               const fat = totaisVivos.fat[m];
               const ia  = totaisVivos.ia[m];
               const td  = totaisVivos.td[m];
-              const ap  = totaisVivos.ap[m];  // ja em .cx via somacat
-              // Receita do ano anterior: vl_pedido real da fato_vendas (nao re-precificado)
-              const fatAP = categoriasFlatadas.reduce((acc: number, cat: any) =>
-                acc + cat.skus.reduce((a: number, s: any) => {
-                  const cel = s.meses[m]; if (!cel || !cel.realizado_ap?.rs) return a;
-                  return a + cel.realizado_ap.rs;
-                }, 0), 0);
+              // Totais do ano anterior: vêm do backend (soma direta da fato_vendas)
+              // Nunca re-precificado pelo PMV atual — é o valor real que aconteceu.
+              const ap    = dados?.totais?.[m]?.cx_ap ?? 0;
+              const fatAP = dados?.totais?.[m]?.rs_ap ?? 0;
               // Receita do orçamento: soma de cel.orcamento
               const fatOrc = categoriasFlatadas.reduce((acc: number, cat: any) =>
                 acc + cat.skus.reduce((a: number, s: any) => {
