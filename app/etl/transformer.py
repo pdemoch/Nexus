@@ -215,32 +215,29 @@ class NexusTransformer:
         lf_silver = lf_silver.with_columns(pl.col("cliente").alias("cod_cliente"))
         lf_final = lf_silver.with_columns(pl.col("2026").alias("curva_2026"))
         
-        # --- A GRANDE CORREÇÃO (O FUNIL): Agora os Reais (R$) passam aqui! ---
-        lf_final = lf_final.group_by(["pedido", "produto", "cgc"]).agg([
-            pl.col("qtpedido").sum().alias("qt_pedido"), # <-- Ajustado
-            pl.col("vlpedido").sum().alias("vl_pedido"), # <-- Ajustado
-            pl.col("qtfatura").sum().alias("qtfatura"),
-            pl.col("qtcorte").sum().alias("qtcorte"),
-            pl.col("vlfatura").sum().alias("vlfatura"), 
-            pl.col("vlcorte").sum().alias("vlcorte"),   
-            
-            # 🔴 CORREÇÃO 1: Renomear dtapedido para data_pedido
-            pl.col("dtapedido").first().alias("data_pedido"),
-            
-            pl.col("cod_cliente").first().alias("cod_cliente"),
-            pl.col("loja").first().alias("loja"),
-            pl.col("cliente_razaosocial").first().alias("cliente_razaosocial"),
-            pl.col("regional").first().alias("regional"),
-            pl.col("descricao").first().alias("descricao"),
-            pl.col("vendedor_nome").first().alias("vendedor_nome"),
-            pl.col("gerente_nome").first().alias("gerente_nome"),
-            pl.col("supervisor_nome").first().alias("supervisor_nome"),
-            pl.col("bu").first().alias("bu"),
-            pl.col("categoria").first().alias("categoria"),
-            pl.col("segmento").first().alias("segmento"),
-            pl.col("bloqueado").first().alias("bloqueado"),
-            pl.col("curva_2026").first().alias("curva_2026")
-        ])
+        # --- RENOMEAÇÃO FINAL DAS COLUNAS ---
+        # O group_by foi REMOVIDO. Motivo:
+        #
+        # O único caso que precisava de agregação era o DE-PARA de SKU (418→410):
+        # se um pedido tivesse o SKU origem E o destino na mesma nota, o join
+        # anterior já colapsa ambos para o mesmo produto destino — e o DE-PARA
+        # só existe para ~5 SKUs COPA, não para o portfólio inteiro.
+        #
+        # O group_by genérico em (pedido, produto, cgc) causava inflação de volume
+        # porque clientes sem cadastro na 188 recebem cgc="SEM_CGC": pedidos distintos
+        # para clientes diferentes (todos com SEM_CGC) do mesmo SKU eram somados
+        # numa única linha, duplicando volumes (confirmado em 2025-11-25: +31.737 cx).
+        #
+        # Solução: preservar a granularidade original da API 150. Cada linha já é
+        # única por (id_pedido, produto, cliente, loja). Apenas renomeamos as colunas.
+        lf_final = lf_final.rename({
+            "produto":    "sku",
+            "qtpedido":   "qt_pedido",
+            "vlpedido":   "vl_pedido",
+            "dtapedido":  "data_pedido",
+            "cod_cliente": "cod_cliente",
+            "cliente_razaosocial": "cliente_razaosocial",
+        })
 
         # 5. Transformação do Orçamento (Blindada e Agrupada)
         df_orc_final = pl.DataFrame()
@@ -278,9 +275,7 @@ class NexusTransformer:
                     pl.col("receita_orcamento").sum().alias("receita_orcamento")
                 ]).select(["sku", "mes_projetado", "receita_orcamento"])
 
-        # 🔴 CORREÇÃO 2: Renomear produto para sku, converter data_pedido e barrar Nulos
-        lf_final = lf_final.rename({"produto": "sku"})
-        
+        # Converter data_pedido de string YYYYMMDD para Date e barrar nulos
         lf_final = lf_final.with_columns(
             pl.col("data_pedido").str.to_date("%Y%m%d", strict=False)
         ).filter(pl.col("data_pedido").is_not_null())
