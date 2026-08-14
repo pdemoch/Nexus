@@ -42,13 +42,13 @@ export default function AdminPanel() {
 
   const fetchData = useCallback(async () => {
     try {
-      // 1. Pipeline Status
+      // 1. Pipeline Status — sempre busca, independente do estado local
       try {
         const statusRes = await axios.get('/api/v1/admin/pipeline/status');
         setLogs(statusRes.data.logs || []);
         const running = statusRes.data.is_running;
         setIsPipelineRunning(running);
-        if (!running) setIsRecargaTotal(false);  // limpa flag ao terminar
+        if (!running) setIsRecargaTotal(false);
       } catch(e) {}
 
       // 2. Usuários
@@ -81,17 +81,22 @@ export default function AdminPanel() {
     }
   }, []);
 
-  // Polling para o Pipeline
+  // Polling sempre ativo: 3s quando pipeline rodando, 15s em idle
+  // Não depende de isPipelineRunning para evitar stale closure no interval
   useEffect(() => {
-    fetchData();
-    let interval: ReturnType<typeof setInterval>;
-    if (isPipelineRunning) {
-      interval = setInterval(fetchData, 3000);
-    }
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [fetchData, isPipelineRunning]);
+    fetchData(); // carga inicial
+    const interval = setInterval(async () => {
+      try {
+        const statusRes = await axios.get('/api/v1/admin/pipeline/status');
+        const running = statusRes.data.is_running;
+        setLogs(statusRes.data.logs || []);
+        setIsPipelineRunning(running);
+        if (!running) setIsRecargaTotal(false);
+      } catch(e) {}
+    }, 3000); // 3s fixo — leve o suficiente, garante logs em tempo real
+
+    return () => clearInterval(interval);
+  }, [fetchData]);
 
   const handleRunPipeline = async () => {
     const msgConfirmacao = `⚠️ EXECUÇÃO DO MOTOR DE DADOS:
