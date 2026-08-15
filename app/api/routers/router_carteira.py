@@ -435,8 +435,20 @@ def dossie(sku: str, razao_social: str = None, vendedor_nome: str = None,
 
         cgcs_override = None
 
-        if razao_social:
-            # Nivel cliente: filtra pelos CGCs daquela razao social
+        if razao_social and vendedor_nome:
+            # Nivel cliente dentro de um executivo: filtra pelos CGCs que pertencem
+            # a essa razao_social E estao sob esse executivo.
+            # Evita mostrar filiais do mesmo cliente atendidas por outros executivos.
+            cgcs_rows = db.execute(text("""
+                SELECT DISTINCT cgc FROM dim_clientes
+                WHERE TRIM(COALESCE(razaosocial,'')) = :rz
+                  AND TRIM(COALESCE(vendedor_nome,'')) = :vend
+                  AND UPPER(TRIM(COALESCE(bloqueado,'ATIVO'))) != 'INATIVO'
+            """), {"rz": razao_social.strip(), "vend": vendedor_nome.strip()}).fetchall()
+            cgcs_override = [r[0] for r in cgcs_rows] or ["__SEM_CLIENTE__"]
+
+        elif razao_social:
+            # Nivel cliente sem filtro de executivo: todos os CGCs da razao social
             pass  # montar_dossie ja faz isso internamente via razao_social
 
         elif vendedor_nome:
@@ -458,7 +470,7 @@ def dossie(sku: str, razao_social: str = None, vendedor_nome: str = None,
 
         return montar_dossie(db, sku, ciclo, meses, descricao=desc,
                              coluna_meta="vol_meta",
-                             razao_social=razao_social,
+                             razao_social=razao_social if not cgcs_override else None,
                              cgcs_override=cgcs_override)
     except Exception as e:
         raise HTTPException(500, repr(e))

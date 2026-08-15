@@ -524,7 +524,7 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
                 id={sku}
                 titulo={prod?.descricao || descricao}
                 subtitulo={`${sku} · ${dossieAlvo.razao}`}
-                paramsExtra={{ razao_social: dossieAlvo.razao }}
+                paramsExtra={{ razao_social: dossieAlvo.razao, vendedor_nome: node.executivoNome }}
                 onFechar={() => setDossieAlvo(null)}
               />
             </div>
