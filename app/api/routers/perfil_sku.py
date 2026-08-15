@@ -293,7 +293,8 @@ def _classificar_tendencia(valores_por_ano: list) -> str:
 
 def comparativo_plurianual(db: Session, sku: str, mes_referencia=None, razao_social=None,
                            exigir_no_plano: bool = True,
-                           ciclo_ativo: Optional[str] = None) -> Dict[str, Any]:
+                           ciclo_ativo: Optional[str] = None,
+                           cgcs_override: list = None) -> Dict[str, Any]:
     """
     Trajetória plurianual do SKU sobre fato_vendas, agrupando cliente por
     RAZAO SOCIAL. Mostra só os anos em que o SKU existiu (ausência NAO vira
@@ -309,9 +310,17 @@ def comparativo_plurianual(db: Session, sku: str, mes_referencia=None, razao_soc
     """
     # Escopo por cliente (tela de Metas): a trajetoria plurianual passa a ser
     # a daquele SKU naquela razao social, nao o total da empresa.
-    _fpl = ("AND v.cgc = ANY(SELECT cgc FROM dim_clientes "
-            "WHERE TRIM(razaosocial) = TRIM(:rz))") if razao_social else ""
-    _ppl = {"rz": razao_social} if razao_social else {}
+    # cgcs_override (nivel executivo) tem prioridade sobre razao_social
+    if cgcs_override:
+        _fpl = "AND v.cgc = ANY(:_cgcs_plur)"
+        _ppl = {"_cgcs_plur": cgcs_override}
+    elif razao_social:
+        _fpl = ("AND v.cgc = ANY(SELECT cgc FROM dim_clientes "
+                "WHERE TRIM(razaosocial) = TRIM(:rz))")
+        _ppl = {"rz": razao_social}
+    else:
+        _fpl = ""
+        _ppl = {}
 
     # Guarda: o SKU está no plano do ciclo ativo?
     no_plano = True
@@ -426,7 +435,8 @@ def comparativo_plurianual(db: Session, sku: str, mes_referencia=None, razao_soc
 # BLOCO FVA — humano vs IA vs naive, no grão (o loop de aprendizado)
 # =====================================================================
 def fva_sku_janela(db: Session, sku: str, n_meses: int = 3,
-                   razao_social: str = None) -> Dict[str, Any]:
+                   razao_social: str = None,
+                   cgcs_override: list = None) -> Dict[str, Any]:
     """
     Versão acumulada do FVA: avalia os últimos N meses FECHADOS com dado real
     (M-2 legítimo, piso = junho/2026). Agrega volume por ciclo-fonte de cada
@@ -440,9 +450,11 @@ def fva_sku_janela(db: Session, sku: str, n_meses: int = 3,
     mes_atual = hoje.replace(day=1)
     piso_forecast = CICLO_PISO + relativedelta(months=DEFASAGEM_MESES)  # 06/2026
 
-    # Escopo por cliente (Metas): avalia acuracia so naquela razao social
+    # Escopo por CGC: cgcs_override tem prioridade (nivel executivo)
     cgcs = None
-    if razao_social:
+    if cgcs_override:
+        cgcs = cgcs_override
+    elif razao_social:
         cgcs = [r[0] for r in db.execute(text(
             "SELECT cgc FROM dim_clientes WHERE TRIM(razaosocial) = TRIM(:rz)"
         ), {"rz": razao_social}).fetchall()] or ["__SEM_CLIENTE__"]
@@ -655,7 +667,8 @@ def fva_sku_janela(db: Session, sku: str, n_meses: int = 3,
 # =====================================================================
 def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
                  coluna_meta: str = "vol_final",
-                 razao_social: str = None) -> Dict[str, Any]:
+                 razao_social: str = None,
+                 cgcs_override: list = None) -> Dict[str, Any]:
     """
     Série unificada do gráfico do dossiê.
 
@@ -676,8 +689,12 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
     # todo o dossie passa a enxergar SOMENTE aquele SKU naquela razao social.
     # Como uma razao social agrega varios CNPJs (ex.: Atacadao S.A. com 10 lojas),
     # o filtro busca todos os CNPJs dela e restringe as queries a esse conjunto.
+    # Escopo por CGC: cgcs_override tem prioridade (nível executivo — lista de CGCs
+    # dos clientes do executivo). razao_social é o caminho normal (nível cliente).
     cgcs = None
-    if razao_social:
+    if cgcs_override:
+        cgcs = cgcs_override
+    elif razao_social:
         cgcs = [r[0] for r in db.execute(text("""
             SELECT cgc FROM dim_clientes WHERE TRIM(razaosocial) = TRIM(:rz)
         """), {"rz": razao_social}).fetchall()]
@@ -761,6 +778,21 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
                 mapa[key] = _novo(key)
                 mapa[key]["eh_futuro"] = md >= mes_atual
 
+    # 2b) Meses adicionais com dados no ciclo ativo que não estão na janela
+    # (ex: set/26 no ciclo 08/2026 — M+5, aparece no fato_ibp_granular mas
+    # não é editável. Deve aparecer no gráfico como previsão futura.)
+    meses_com_previsao = db.execute(text("""
+        SELECT DISTINCT TO_CHAR(mes_projetado,'YYYY-MM-01') AS mes
+        FROM fato_ibp_granular
+        WHERE sku = :sku AND ciclo_sop = :ciclo
+          AND mes_projetado > CURRENT_DATE
+        ORDER BY 1
+    """), {"sku": sku, "ciclo": ciclo_ativo}).fetchall()
+    for r in meses_com_previsao:
+        if r.mes not in mapa:
+            mapa[r.mes] = _novo(r.mes)
+            mapa[r.mes]["eh_futuro"] = True
+
     # 3) Previsão — TODO o forecast relevante numa query (todos os ciclos).
     #    Traz todas as colunas de planejamento para que coluna_meta possa ser
     #    qualquer uma delas sem precisar de query extra.
@@ -826,16 +858,30 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
                 linha["ia_rs"]    = round(float(p_ativo.ia_rs or 0), 2)
                 linha["final_rs"] = _meta_rs(p_ativo, coluna_meta)
         else:
-            # Meses passados: M-2 histórico (vol_final — o compromisso original)
-            cf = ciclo_fonte_do_mes(md)
-            p_hist = prev_idx.get((cf, key))
-            if p_hist and p_hist.ia is not None:
-                linha["ia_cx"] = int(p_hist.ia or 0)
-                linha["ia_rs"] = round(float(p_hist.ia_rs or 0), 2)
-                linha["ciclo_fonte"] = cf
-            if p_hist and p_hist.final is not None:
-                linha["final_cx"] = int(p_hist.final or 0)
-                linha["final_rs"] = round(float(p_hist.final_rs or 0), 2)
+            # Meses passados ou futuros fora da janela ativa:
+            # Para meses PASSADOS: usa ciclo_fonte_do_mes (M-2 histórico)
+            # Para meses FUTUROS fora da janela (ex: set/26 no ciclo 08/2026):
+            # usa o ciclo ativo mesmo — são previsões válidas para visualização,
+            # mas não entram em BIAS nem acurácia (eh_futuro=True).
+            if md >= mes_atual:
+                # Mês futuro fora da janela ativa — tenta ciclo ativo
+                p_fut = prev_idx.get((ciclo_ativo, key))
+                if p_fut and (p_fut.ia is not None or p_fut.final is not None):
+                    linha["ia_cx"]    = int(p_fut.ia or 0)
+                    linha["final_cx"] = _meta_cx(p_fut, coluna_meta)
+                    linha["ia_rs"]    = round(float(p_fut.ia_rs or 0), 2)
+                    linha["final_rs"] = _meta_rs(p_fut, coluna_meta)
+            else:
+                # Mês passado: M-2 histórico (vol_final — o compromisso original)
+                cf = ciclo_fonte_do_mes(md)
+                p_hist = prev_idx.get((cf, key))
+                if p_hist and p_hist.ia is not None:
+                    linha["ia_cx"] = int(p_hist.ia or 0)
+                    linha["ia_rs"] = round(float(p_hist.ia_rs or 0), 2)
+                    linha["ciclo_fonte"] = cf
+                if p_hist and p_hist.final is not None:
+                    linha["final_cx"] = int(p_hist.final or 0)
+                    linha["final_rs"] = round(float(p_hist.final_rs or 0), 2)
 
         # LINHA B — ciclo ANTERIOR como referência.
         # Regra: só mostra nos meses da JANELA ATIVA do ciclo corrente
@@ -916,7 +962,8 @@ def _pct(x):
 def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
                   descricao: str = None,
                   coluna_meta: str = "vol_final",
-                  razao_social: str = None) -> Dict[str, Any]:
+                  razao_social: str = None,
+                  cgcs_override: list = None) -> Dict[str, Any]:
     """
     Empacota o dossie COMPLETO de um SKU: serie do grafico + plurianual + FVA +
     comparacoes do mes-foco + insights em texto. Consumido pelos 5 routers.
@@ -928,27 +975,27 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
       - Consenso / default → 'vol_final'
     """
     serie = serie_dossie(db, sku, ciclo_ativo, meses_futuros=meses_janela,
-                         coluna_meta=coluna_meta, razao_social=razao_social)
+                         coluna_meta=coluna_meta, razao_social=razao_social,
+                         cgcs_override=cgcs_override)
     hoje = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
     mes_fechado = (hoje.replace(day=1) - relativedelta(months=1))
 
     plur = comparativo_plurianual(db, sku, mes_referencia=mes_fechado.strftime("%Y-%m-%d"),
-                                  razao_social=razao_social, ciclo_ativo=ciclo_ativo)
-    # FVA acumulado: últimos 3 meses fechados (piso junho/2026).
-    # Agrega humano vs IA no total do período — mais robusto que avaliar 1 mês.
-    fva = fva_sku_janela(db, sku, n_meses=6, razao_social=razao_social)
+                                  razao_social=razao_social, ciclo_ativo=ciclo_ativo,
+                                  cgcs_override=cgcs_override)
+    fva = fva_sku_janela(db, sku, n_meses=6, razao_social=razao_social,
+                         cgcs_override=cgcs_override)
 
     ciclo_ant = get_previous_cycle_str(ciclo_ativo)
 
-    # Comparações e insights para TODOS os meses da janela (não só o primeiro).
-    # Cada mês gera um bloco de comparação independente e seus próprios insights.
-    # coluna_meta decide qual volume usar como "Meta" (vol_topdown na Marketing,
-    # vol_bottomup no Gerenciamento, vol_supply no Supply, vol_final default).
-    col_sql = coluna_meta  # ex: 'vol_topdown'
+    col_sql = coluna_meta
 
-    # Escopo por cliente nas comparacoes (tela de Metas)
+    # Escopo por cliente nas comparações
     _cgcs = None
-    if razao_social:
+    if cgcs_override:
+        # Nível executivo: CGCs passados diretamente pelo router
+        _cgcs = cgcs_override
+    elif razao_social:
         _cgcs = [r[0] for r in db.execute(text(
             "SELECT cgc FROM dim_clientes WHERE TRIM(razaosocial) = TRIM(:rz)"
         ), {"rz": razao_social}).fetchall()] or ["__SEM_CLIENTE__"]

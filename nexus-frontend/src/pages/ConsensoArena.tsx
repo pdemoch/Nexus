@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import axios from 'axios';
 import {
   ChevronRight, ChevronDown, Save, Download, X, Lock, Unlock, ShieldCheck,
-  Loader2, LineChart as LineIcon, LayoutGrid, ClipboardList, Search,
+  Loader2, LineChart as LineIcon, LayoutGrid, ClipboardList, Search, BarChart2,
 } from 'lucide-react';
 import VisaoGeralMarketing from './VisaoGeralMarketing';
 import DossieInferior from './Dossieinferior';
@@ -53,7 +53,7 @@ const INDENT: Record<string, string> = {
 
 /* ── COMPONENTE RAIZ ─────────────────────────────────────────────── */
 export default function MetasComercial() {
-  const [aba, setAba] = useState<'geral' | 'preenchimento'>('geral');
+  const [aba, setAba] = useState<'geral' | 'preenchimento' | 'consolidado'>('geral');
   return (
     <div className="h-screen flex flex-col bg-slate-50">
       <div className="shrink-0 bg-white border-b border-slate-200 px-6 pt-3">
@@ -68,12 +68,17 @@ export default function MetasComercial() {
               ${aba === 'preenchimento' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>
             <ClipboardList className="w-4 h-4" /> Preenchimento
           </button>
+          <button onClick={() => setAba('consolidado')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-xs font-black rounded-t-lg border-b-2 transition-colors
+              ${aba === 'consolidado' ? 'border-violet-600 text-violet-600' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>
+            <BarChart2 className="w-4 h-4" /> Consolidado
+          </button>
         </div>
       </div>
       <div className="flex-1 min-h-0">
-        {aba === 'geral'
-          ? <VisaoGeralMarketing prefixoApi="/api/v1/carteira" />
-          : <PreenchimentoMetas />}
+        {aba === 'geral' && <VisaoGeralMarketing prefixoApi="/api/v1/carteira" />}
+      {aba === 'preenchimento' && <PreenchimentoMetas />}
+      {aba === 'consolidado' && <ConsolidadoMetas />}
       </div>
     </div>
   );
@@ -359,6 +364,7 @@ function PreenchimentoMetas() {
               somaSkuExecutivo={somaSkuExecutivo}
               bloqueado={bloqueado} edits={edits}
               setDossieAlvo={setDossieAlvo}
+              dossieAlvo={dossieAlvo}
               idPath={g.nome}
               buscaAtiva={!!busca.trim()} />
           ))
@@ -366,9 +372,7 @@ function PreenchimentoMetas() {
       </div>
 
       {/* GAVETA DOSSIÊ */}
-      {dossieAlvo && (
-        <GavetaDossie alvo={dossieAlvo} fechar={() => setDossieAlvo(null)} />
-      )}
+
 
       {/* PAINEL DE CADEADOS */}
       {painelCadeados && (
@@ -381,7 +385,7 @@ function PreenchimentoMetas() {
 /* ── NÓ RECURSIVO DA ÁRVORE ──────────────────────────────────────── */
 function NoArvore({ node, nivel, meses, abertas, toggle,
   valorCliente, setSkuExecutivo, setCliente, somaSkuExecutivo,
-  bloqueado, edits, setDossieAlvo, idPath, buscaAtiva }: any) {
+  bloqueado, edits, setDossieAlvo, dossieAlvo, idPath, buscaAtiva }: any) {
 
   const buscaAtv = buscaAtiva;
   const aberta   = buscaAtv || abertas.has(idPath);
@@ -440,8 +444,11 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
           })}
           {/* Botão dossiê — nível executivo */}
           <button
-            onClick={() => setDossieAlvo({ sku, descricao, vendedor: node.executivoNome })}
-            className="justify-self-center p-1.5 rounded-lg text-slate-300 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
+            onClick={() => setDossieAlvo(prev =>
+              prev?.sku === sku && !prev?.razao ? null : { sku, descricao, vendedor: node.executivoNome }
+            )}
+            className={`justify-self-center p-1.5 rounded-lg transition-colors
+              ${dossieAlvo?.sku === sku && !dossieAlvo?.razao ? 'bg-indigo-100 text-indigo-600' : 'text-slate-300 hover:bg-indigo-50 hover:text-indigo-600'}`}
             title="Ver dossiê do SKU">
             <LineIcon className="w-4 h-4" />
           </button>
@@ -480,14 +487,52 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
               })}
               {/* Botão dossiê nível cliente */}
               <button
-                onClick={() => setDossieAlvo({ sku, descricao: prod.descricao, razao: cli.nome })}
-                className="justify-self-center p-1.5 rounded-lg text-slate-200 hover:bg-violet-50 hover:text-violet-600 transition-colors"
+                onClick={() => setDossieAlvo(prev =>
+                  prev?.sku === sku && prev?.razao === cli.nome ? null : { sku, descricao: prod.descricao, razao: cli.nome }
+                )}
+                className={`justify-self-center p-1.5 rounded-lg transition-colors
+                  ${dossieAlvo?.sku === sku && dossieAlvo?.razao === cli.nome ? 'bg-violet-100 text-violet-600' : 'text-slate-200 hover:bg-violet-50 hover:text-violet-600'}`}
                 title="Ver dossiê por cliente">
                 <LineIcon className="w-3.5 h-3.5" />
               </button>
             </div>
           );
         })}
+
+        {/* Dossiê inline — nível cliente (abre abaixo da linha do cliente selecionado) */}
+        {dossieAlvo?.sku === sku && dossieAlvo?.razao && (() => {
+          const cliAlvo = clientes.find((c: any) => c.nome === dossieAlvo.razao);
+          if (!cliAlvo) return null;
+          const prod = (cliAlvo.subRows || []).find((p: any) => p.sku === sku);
+          return (
+            <div className="ml-12 mr-2 mb-2">
+              <DossieInferior
+                prefixoApi="/api/v1/carteira"
+                tipo="sku"
+                id={sku}
+                titulo={prod?.descricao || descricao}
+                subtitulo={`${sku} · ${dossieAlvo.razao}`}
+                paramsExtra={{ razao_social: dossieAlvo.razao }}
+                onFechar={() => setDossieAlvo(null)}
+              />
+            </div>
+          );
+        })()}
+
+        {/* Dossiê inline — nível executivo */}
+        {dossieAlvo?.sku === sku && !dossieAlvo?.razao && (
+          <div className="ml-4 mr-2 mb-2">
+            <DossieInferior
+              prefixoApi="/api/v1/carteira"
+              tipo="sku"
+              id={sku}
+              titulo={descricao}
+              subtitulo={`${sku} · executivo: ${node.executivoNome}`}
+              paramsExtra={{ vendedor_nome: node.executivoNome }}
+              onFechar={() => setDossieAlvo(null)}
+            />
+          </div>
+        )}
       </div>
     );
   }
@@ -548,6 +593,7 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
             somaSkuExecutivo={somaSkuExecutivo}
             bloqueado={bloqueado} edits={edits}
             setDossieAlvo={setDossieAlvo}
+            dossieAlvo={dossieAlvo}
             idPath={`${idPath}>${skuNode.sku}`}
             buscaAtiva={buscaAtv}
           />
@@ -614,6 +660,7 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
           somaSkuExecutivo={somaSkuExecutivo}
           bloqueado={bloqueado} edits={edits}
           setDossieAlvo={setDossieAlvo}
+          dossieAlvo={dossieAlvo}
           idPath={`${idPath}>${f.nome || f.sku}`}
           buscaAtiva={buscaAtv} />
       ))}
@@ -747,5 +794,210 @@ function PainelCadeados({ fechar, recarregar }: { fechar: () => void; recarregar
         )}
       </div>
     </>
+  );
+}
+
+/* ── CONSOLIDADO — visão somente leitura: Meta Coordenadores vs Comercial ── */
+function ConsolidadoMetas() {
+  const [dados,   setDados]   = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [abertas, setAbertas] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    axios.get('/api/v1/carteira/consolidado')
+      .then(r => setDados(r.data))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const meses: string[] = dados?.meses || [];
+  const mesLabel = (iso: string) => {
+    const [y, m] = iso.split('-');
+    const n = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+    return `${n[parseInt(m)-1]}/${y.slice(2)}`;
+  };
+  const fmtCx = (n: number) => new Intl.NumberFormat('pt-BR').format(Math.round(n || 0));
+  const fmtRs = (n: number) =>
+    new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 })
+      .format(Math.round(n || 0));
+
+  const toggle = (id: string) =>
+    setAbertas(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  if (loading) return (
+    <div className="min-h-screen flex items-center justify-center text-slate-400">
+      <Loader2 className="w-6 h-6 animate-spin mr-2" /> Carregando consolidado…
+    </div>
+  );
+
+  // Totais globais por mês
+  const totais = meses.reduce((acc: any, m) => {
+    let meta = 0, bu = 0, ia = 0, fatMeta = 0, fatBu = 0;
+    (dados?.categorias || []).forEach((cat: any) =>
+      cat.skus.forEach((s: any) => {
+        const cel = s.meses[m]; if (!cel) return;
+        meta   += cel.meta || 0;
+        bu     += cel.bu   || 0;
+        ia     += cel.ia   || 0;
+        fatMeta += (cel.meta || 0) * (cel.pmv || 0);
+        fatBu   += (cel.bu   || 0) * (cel.pmv || 0);
+      })
+    );
+    acc[m] = { meta, bu, ia, fatMeta, fatBu };
+    return acc;
+  }, {});
+
+  const colGrid = `240px repeat(${meses.length}, minmax(200px, 1fr))`;
+
+  return (
+    <div className="h-full flex flex-col bg-slate-50" style={{ fontVariantNumeric: 'tabular-nums' }}>
+      <div className="flex-1 min-h-0 overflow-y-auto">
+
+        {/* CABEÇALHO */}
+        <div className="sticky top-0 z-20 bg-white border-b border-slate-200">
+          <div className="px-6 pt-5 pb-3">
+            <h1 className="text-lg font-black text-slate-900 tracking-tight">Consolidado de Metas</h1>
+            <p className="text-xs font-medium text-slate-400">
+              Ciclo {dados?.ciclo} · somente leitura · compara o plano dos coordenadores com a Demanda Comercial
+            </p>
+          </div>
+
+          {/* Totais por mês */}
+          <div className="px-6 pb-3 grid gap-2" style={{ gridTemplateColumns: colGrid }}>
+            <div className="text-[10px] font-black uppercase tracking-widest text-slate-300 flex items-end pb-1">Total</div>
+            {meses.map(m => {
+              const t = totais[m] || {};
+              const dPct = t.bu > 0 ? ((t.meta - t.bu) / t.bu * 100) : null;
+              const dCor = dPct == null ? '#94a3b8' : Math.abs(dPct) >= 15 ? '#e11d48' : Math.abs(dPct) >= 5 ? '#d97706' : '#059669';
+              return (
+                <div key={m} className="bg-slate-50 rounded-xl px-3 py-2 space-y-1.5">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">{mesLabel(m)}</div>
+                  {/* Coordenadores */}
+                  <div>
+                    <div className="text-[9px] font-black uppercase text-violet-500 mb-0.5">Coordenadores (meta)</div>
+                    <div className="text-sm font-black text-slate-900">{fmtCx(t.meta)} cx</div>
+                    <div className="text-[10px] font-bold text-violet-600">{fmtRs(t.fatMeta)}</div>
+                  </div>
+                  <div className="h-px bg-slate-200" />
+                  {/* Comercial */}
+                  <div>
+                    <div className="text-[9px] font-black uppercase text-indigo-500 mb-0.5">Comercial (bu)</div>
+                    <div className="text-sm font-black text-slate-700">{fmtCx(t.bu)} cx</div>
+                    <div className="text-[10px] font-bold text-indigo-600">{fmtRs(t.fatBu)}</div>
+                  </div>
+                  {/* Delta */}
+                  {dPct != null && (
+                    <div className="flex items-center justify-between rounded-lg px-2 py-1"
+                      style={{ background: Math.abs(dPct) >= 5 ? '#fff7ed' : '#f0fdf4' }}>
+                      <span className="text-[9px] font-black text-slate-400">Δ meta vs bu</span>
+                      <span className="text-[11px] font-black" style={{ color: dCor }}>
+                        {dPct >= 0 ? '+' : ''}{dPct.toFixed(1)}%
+                      </span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Cabeçalho da tabela */}
+          <div className="px-6 pb-1">
+            <div className="grid gap-2 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400"
+              style={{ gridTemplateColumns: colGrid }}>
+              <div>Categoria / SKU</div>
+              {meses.map(m => (
+                <div key={m} className="grid grid-cols-3 gap-1 text-center">
+                  <span className="text-violet-400">Meta</span>
+                  <span className="text-indigo-400">BU</span>
+                  <span className="text-slate-400">Δ%</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* CORPO */}
+        <div className="px-6 pb-8">
+          {(dados?.categorias || []).map((cat: any) => {
+            const catAberta = abertas.has(cat.nome);
+
+            // Totais da categoria
+            const somaCat = (m: string, campo: 'meta' | 'bu' | 'ia') =>
+              cat.skus.reduce((a: number, s: any) => a + (s.meses[m]?.[campo] || 0), 0);
+
+            return (
+              <div key={cat.nome} className="mb-1">
+                {/* Linha categoria */}
+                <button onClick={() => toggle(cat.nome)}
+                  className="w-full grid gap-2 px-3 py-3 items-center bg-white rounded-xl border border-slate-100 hover:border-slate-200 transition-colors"
+                  style={{ gridTemplateColumns: colGrid }}>
+                  <div className="flex items-center gap-2 min-w-0">
+                    {catAberta ? <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />
+                               : <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />}
+                    <div className="min-w-0">
+                      <div className="font-black text-slate-800 text-sm truncate">{cat.nome}</div>
+                      <div className="text-[10px] font-bold text-slate-400">{cat.skus.length} SKUs</div>
+                    </div>
+                  </div>
+                  {meses.map(m => {
+                    const meta = somaCat(m, 'meta');
+                    const bu   = somaCat(m, 'bu');
+                    const d    = bu > 0 ? ((meta - bu) / bu * 100) : null;
+                    const cor  = d == null ? '#94a3b8' : Math.abs(d) >= 15 ? '#e11d48' : Math.abs(d) >= 5 ? '#d97706' : '#059669';
+                    return (
+                      <div key={m} className="grid grid-cols-3 gap-1 items-center">
+                        <div className="text-center text-[11px] font-black text-violet-600">{fmtCx(meta)}</div>
+                        <div className="text-center text-[11px] font-black text-indigo-500">{fmtCx(bu)}</div>
+                        <div className="text-center text-[11px] font-black" style={{ color: cor }}>
+                          {d == null ? '—' : `${d >= 0 ? '+' : ''}${d.toFixed(0)}%`}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </button>
+
+                {/* Linhas SKU */}
+                {catAberta && cat.skus.map((s: any) => (
+                  <div key={s.sku}
+                    className="grid gap-2 px-3 py-2 items-center ml-3 mt-0.5 rounded-xl hover:bg-white"
+                    style={{ gridTemplateColumns: colGrid }}>
+                    <div className="min-w-0 pl-2">
+                      <div className="text-xs font-bold text-slate-700 truncate">{s.descricao}</div>
+                      <div className="text-[10px] font-bold text-slate-300">{s.sku}</div>
+                    </div>
+                    {meses.map(m => {
+                      const cel  = s.meses[m];
+                      if (!cel) return <div key={m} />;
+                      const meta = cel.meta || 0;
+                      const bu   = cel.bu   || 0;
+                      const d    = cel.delta_pct;
+                      const cor  = d == null ? '#94a3b8' : Math.abs(d) >= 15 ? '#e11d48' : Math.abs(d) >= 5 ? '#d97706' : '#059669';
+                      const editado = meta !== bu;
+                      return (
+                        <div key={m} className={`grid grid-cols-3 gap-1 items-center px-1 py-1 rounded-lg ${editado ? 'bg-violet-50' : ''}`}>
+                          <div className="text-center">
+                            <div className="text-[11px] font-black text-violet-700">{fmtCx(meta)}</div>
+                            {cel.pmv > 0 && <div className="text-[9px] text-violet-400">{fmtRs(meta * cel.pmv)}</div>}
+                          </div>
+                          <div className="text-center">
+                            <div className="text-[11px] font-bold text-indigo-500">{fmtCx(bu)}</div>
+                            {cel.pmv > 0 && <div className="text-[9px] text-indigo-300">{fmtRs(bu * cel.pmv)}</div>}
+                          </div>
+                          <div className="text-center">
+                            <div className="text-[11px] font-black" style={{ color: cor }}>
+                              {d == null ? '—' : `${d >= 0 ? '+' : ''}${d.toFixed(0)}%`}
+                            </div>
+                            {d != null && <div className="text-[9px] text-slate-300">{fmtCx(Math.abs(cel.delta_cx))} cx</div>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
   );
 }
