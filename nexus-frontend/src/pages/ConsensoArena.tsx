@@ -395,14 +395,26 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
   /* O input edita o total do SKU e rateia para os clientes abaixo.      */
   if (node.tipo === 'produto_executivo') {
     const { sku, descricao, clientes } = node;
+    const clientesAbertos = buscaAtv || abertas.has(idPath);
     return (
       <div className="mb-0.5">
         {/* Linha do SKU — input editável, dispara rateio */}
         <div className="grid gap-2 px-3 py-1.5 items-center hover:bg-indigo-50/40 rounded-lg group"
           style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(130px, 1fr)) 40px` }}>
           <div className={`min-w-0 ${INDENT.produto}`}>
-            <div className="text-xs font-bold text-slate-700 truncate">{descricao}</div>
-            <div className="text-[10px] font-bold text-slate-300">{sku}</div>
+            {/* Botão expandir clientes */}
+            <button
+              onClick={() => toggle(idPath)}
+              className="flex items-center gap-1 w-full text-left"
+            >
+              {clientesAbertos
+                ? <ChevronDown className="w-3 h-3 text-slate-300 shrink-0" />
+                : <ChevronRight className="w-3 h-3 text-slate-300 shrink-0" />}
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-slate-700 truncate">{descricao}</div>
+                <div className="text-[10px] font-bold text-slate-300">{sku} · {clientes.length} cliente{clientes.length !== 1 ? 's' : ''}</div>
+              </div>
+            </button>
           </div>
           {meses.map((m: string) => {
             const totalSku  = somaSkuExecutivo(clientes, sku, m);
@@ -455,7 +467,7 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
         </div>
 
         {/* Linhas dos clientes — somente leitura com rateio calculado + override manual */}
-        {aberta && clientes.map((cli: any) => {
+        {clientesAbertos && clientes.map((cli: any) => {
           const prod = (cli.subRows || []).find((p: any) => p.sku === sku);
           if (!prod) return null;
           return (
