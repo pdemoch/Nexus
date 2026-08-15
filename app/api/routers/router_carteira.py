@@ -1,5 +1,5 @@
 """
-router_carteira_novo.py  —  Metas Comercial (nova API)
+router_carteira_novo.py  —  Metas Comercial (nova API).
 
 Contrato alinhado com MetasComercial.tsx:
   • GET  /tabela              → árvore 5 níveis + meses como dict ISO

@@ -5,7 +5,7 @@ PERFIL DO SKU — SERVIÇO CENTRAL DE ANÁLISE (o pilar de todo o sistema)
 O SKU e o pilar. Toda analise — Auditoria, dossies das telas de decisao,
 aberturas do dashboard — consome ESTE modulo. Fonte unica, calculo unico.
 
-Passo 1 (este arquivo): NUCLEO DE DIAGNOSTICO DE TRES EIXOS.
+Passo 1 (este arquivo): NUCLEO DE DIAGNOSTICO DE TRES EIXOS
 Responde, para um SKU num mes fechado, a pergunta central:
   "Onde estamos perdendo dinheiro — no planejamento ou na execucao?"
 

@@ -852,7 +852,7 @@ function ConsolidadoMetas() {
     <div className="h-full flex flex-col bg-slate-50" style={{ fontVariantNumeric: 'tabular-nums' }}>
       <div className="flex-1 min-h-0 overflow-y-auto">
 
-        {/* CABEÇALHO */}
+        {/* CABEÇALHO. */}
         <div className="sticky top-0 z-20 bg-white border-b border-slate-200">
           <div className="px-6 pt-5 pb-3">
             <h1 className="text-lg font-black text-slate-900 tracking-tight">Consolidado de Metas</h1>
