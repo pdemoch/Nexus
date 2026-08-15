@@ -5,7 +5,7 @@ PERFIL DO SKU — SERVIÇO CENTRAL DE ANÁLISE (o pilar de todo o sistema)
 O SKU e o pilar. Toda analise — Auditoria, dossies das telas de decisao,
 aberturas do dashboard — consome ESTE modulo. Fonte unica, calculo unico.
 
-Passo 1 (este arquivo): NUCLEO DE DIAGNOSTICO DE TRES EIXOS
+Passo 1 (este arquivo): NUCLEO DE DIAGNOSTICO DE TRES EIXOS.
 Responde, para um SKU num mes fechado, a pergunta central:
   "Onde estamos perdendo dinheiro — no planejamento ou na execucao?"
 
@@ -848,7 +848,14 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
     for key, linha in mapa.items():
         md = datetime.datetime.strptime(key, "%Y-%m-%d").date()
         if md < primeiro_mes_forecast:
-            continue  # antes do primeiro ciclo: sem forecast M-2 real
+            # Antes do primeiro ciclo: sem forecast M-2 real.
+            # Se coluna_meta="vol_meta", também zera final_cx para que o front
+            # não calcule BIAS com dados históricos irrelevantes para Metas Comercial.
+            if coluna_meta == "vol_meta":
+                linha["final_cx"] = None
+                linha["final_rs"] = None
+                linha["ia_cx"]    = None
+            continue  # pula populacao de forecast para meses anteriores ao piso
 
         # LINHA A — Meta nos meses da JANELA ATIVA: usa coluna_meta (ex:
         # vol_topdown quando chamado pela Demanda Marketing). Para meses
