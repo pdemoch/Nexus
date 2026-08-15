@@ -746,29 +746,33 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
     # 1b) Meta humana histórica (fato_previsao_humana: jan/23 → mai/26)
     #     Aparece no gráfico como linha tracejada fina, distinguindo o plano
     #     feito pelo humano no arquivo Excel do vol_final do ciclo Nexus.
-    hist_hum = db.execute(text("""
-        SELECT TO_CHAR(mes_projetado,'YYYY-MM-01') AS mes,
-               SUM(vol_humano) AS hcx
-        FROM fato_previsao_humana
-        WHERE sku = :sku AND fonte = 'HISTORICO'
-        GROUP BY 1
-    """), {"sku": sku}).fetchall()
-    for rh in hist_hum:
-        if rh.mes in mapa:          # só popula meses com realizado — não cria fantasmas
-            mapa[rh.mes]["humano_hist_cx"] = int(rh.hcx or 0)
+    #     NÃO exibida quando coluna_meta="vol_meta" (Metas Comercial):
+    #     nesse contexto, a meta relevante é o vol_meta do Nexus (a partir
+    #     de jun/2026) e o histórico do Excel não é comparável.
+    if coluna_meta != "vol_meta":
+        hist_hum = db.execute(text("""
+            SELECT TO_CHAR(mes_projetado,'YYYY-MM-01') AS mes,
+                   SUM(vol_humano) AS hcx
+            FROM fato_previsao_humana
+            WHERE sku = :sku AND fonte = 'HISTORICO'
+            GROUP BY 1
+        """), {"sku": sku}).fetchall()
+        for rh in hist_hum:
+            if rh.mes in mapa:          # só popula meses com realizado — não cria fantasmas
+                mapa[rh.mes]["humano_hist_cx"] = int(rh.hcx or 0)
 
-    # Meses com realizado dentro do intervalo do arquivo histórico (jan/23-mai/26)
-    # mas sem meta cadastrada (meta era 0 no Excel, excluída no load) → aparece como 0
-    # em vez de gap, para não quebrar a linha do gráfico.
-    _hist_ini = datetime.date(2023, 1, 1)
-    _hist_fim = datetime.date(2026, 5, 1)
-    for _mes_key, _linha in mapa.items():
-        try:
-            _d = datetime.datetime.strptime(_mes_key, "%Y-%m-%d").date()
-            if _hist_ini <= _d <= _hist_fim and _linha.get("humano_hist_cx") is None:
-                _linha["humano_hist_cx"] = 0
-        except (ValueError, KeyError):
-            pass
+        # Meses com realizado dentro do intervalo do arquivo histórico (jan/23-mai/26)
+        # mas sem meta cadastrada (meta era 0 no Excel, excluída no load) → aparece como 0
+        # em vez de gap, para não quebrar a linha do gráfico.
+        _hist_ini = datetime.date(2023, 1, 1)
+        _hist_fim = datetime.date(2026, 5, 1)
+        for _mes_key, _linha in mapa.items():
+            try:
+                _d = datetime.datetime.strptime(_mes_key, "%Y-%m-%d").date()
+                if _hist_ini <= _d <= _hist_fim and _linha.get("humano_hist_cx") is None:
+                    _linha["humano_hist_cx"] = 0
+            except (ValueError, KeyError):
+                pass
 
     # 2) Meses futuros do ciclo ativo (só previsão).
     if meses_futuros:
@@ -1088,6 +1092,17 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
     hoje_local = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
     mes_atual_local = hoje_local.replace(day=1)
 
+    # Piso de validade da coluna_meta:
+    # - vol_meta (Metas Comercial): só existe a partir de jun/2026 (primeiro ciclo Nexus)
+    # - vol_final / vol_topdown / etc: usa humano_hist_cx como fallback para períodos anteriores
+    PISO_VOL_META = datetime.date(2026, 6, 1)
+    usa_piso_meta = (coluna_meta == "vol_meta")
+
+    # Mapeamento coluna_meta → campo na série do dossiê
+    # final_cx é o campo genérico que recebe qualquer coluna_meta via _meta_cx()
+    # Para vol_meta especificamente, não há campo próprio na série — usa final_cx
+    # (que foi populado com vol_meta quando coluna_meta="vol_meta")
+
     # Índice do fva.detalhe_por_mes para cruzamento rápido por mês (chave "YYYY-MM")
     fva_idx: Dict[str, Any] = {}
     if fva and fva.get("detalhe_por_mes"):
@@ -1102,10 +1117,15 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
             continue
         if mes_d >= mes_atual_local:
             continue   # mês corrente ainda em andamento
+
+        # Piso de jun/2026 para vol_meta: antes disso não há meta de coordenadores
+        if usa_piso_meta and mes_d < PISO_VOL_META:
+            continue
+
         vendido = entrada.get("vendido_cx") or 0
-        meta    = entrada.get("final_cx")           # Nexus M-2 congelado
-        if meta is None:
-            meta = entrada.get("humano_hist_cx")    # arquivo histórico jan/23-mai/26
+        meta    = entrada.get("final_cx")           # Nexus M-2 congelado (ou vol_meta quando coluna_meta="vol_meta")
+        if meta is None and not usa_piso_meta:
+            meta = entrada.get("humano_hist_cx")    # arquivo histórico jan/23-mai/26 — só para outras colunas
         # Sem venda real: nada a calcular
         if not vendido or vendido <= 0:
             continue
