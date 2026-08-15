@@ -47,7 +47,11 @@ async def iniciar_pipeline(background_tasks: BackgroundTasks, db: Session = Depe
     AppState.pipeline_rodando = True
     AppState.logs = []
 
-    background_tasks.add_task(executar_pipeline_nexus, ciclo_atual)
+    def _log(msg: str):
+        AppState.logs.append(msg)
+        print(msg)
+
+    background_tasks.add_task(executar_pipeline_nexus, ciclo_atual, _log)
 
     return {"status": "success", "message": f"Pipeline de Engenharia de Dados iniciado para o ciclo {ciclo_atual}!"}
 
@@ -74,7 +78,11 @@ async def iniciar_recarga_total(background_tasks: BackgroundTasks, db: Session =
     AppState.pipeline_rodando = True
     AppState.logs = []
 
-    background_tasks.add_task(executar_pipeline_nexus, ciclo_atual, print, True)
+    def _log(msg: str):
+        AppState.logs.append(msg)
+        print(msg)
+
+    background_tasks.add_task(executar_pipeline_nexus, ciclo_atual, _log, True)
 
     return {
         "status": "success",

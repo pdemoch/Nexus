@@ -230,11 +230,28 @@ class NexusLoader:
                 else:
                     db.execute(text("DELETE FROM fato_vendas WHERE data_pedido >= :dt"), {"dt": data_inicio})
 
-                # 2. Inserção direta e bruta (bulk insert) muito mais rápida que o UPSERT
+                # 2. Inserção com ON CONFLICT: se (pedido, sku, cgc) já existe
+                # (mesmo item em lojas diferentes, ou DE-PARA COPA colapsando dois SKUs),
+                # soma os volumes em vez de rejeitar. Preserva a granularidade original
+                # da API 150 sem perder nenhum volume.
                 lote_size = 5000
                 for i in range(0, len(df_vendas), lote_size):
                     lote = df_vendas[i:i+lote_size]
-                    db.bulk_insert_mappings(FatoVendas, lote)
+                    db.execute(text("""
+                        INSERT INTO fato_vendas
+                            (pedido, data_pedido, sku, cgc, vendedor_nome,
+                             qt_pedido, vl_pedido, qtfatura, qtcorte, vlfatura, vlcorte)
+                        VALUES
+                            (:pedido, :data_pedido, :sku, :cgc, :vendedor_nome,
+                             :qt_pedido, :vl_pedido, :qtfatura, :qtcorte, :vlfatura, :vlcorte)
+                        ON CONFLICT (pedido, sku, cgc) DO UPDATE SET
+                            qt_pedido   = fato_vendas.qt_pedido   + EXCLUDED.qt_pedido,
+                            vl_pedido   = fato_vendas.vl_pedido   + EXCLUDED.vl_pedido,
+                            qtfatura    = fato_vendas.qtfatura    + EXCLUDED.qtfatura,
+                            qtcorte     = fato_vendas.qtcorte    + EXCLUDED.qtcorte,
+                            vlfatura    = fato_vendas.vlfatura    + EXCLUDED.vlfatura,
+                            vlcorte     = fato_vendas.vlcorte    + EXCLUDED.vlcorte
+                    """), lote)
 
                 db.commit()
             modo_label = "RECARGA TOTAL" if recarga_total else "Drop & Replace"
@@ -612,7 +629,7 @@ class NexusLoader:
                 # 1. Apaga a fotografia anterior inteira
                 db.execute(text("DELETE FROM fato_estoque_d0"))
 
-                # 2. Insere o novo cenário real.
+                # 2. Insere o novo cenário real
                 lote_size = 5000
                 for i in range(0, len(registros), lote_size):
                     lote = registros[i:i+lote_size]
