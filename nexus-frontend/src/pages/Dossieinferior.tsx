@@ -107,9 +107,9 @@ export default function DossieInferior({
   // ── Meta unificada: final_cx (Nexus) → humano_hist_cx (histórico) → 0 ──
   const dadosGrafico = (d?.serie || []).map((x: any) => {
     const meta =
-      x.final_cx        != null ? x.final_cx       :
-      x.humano_hist_cx  != null ? x.humano_hist_cx :
-      (x.vendido_cx != null ? 0 : null);
+      (x.final_cx != null && x.final_cx > 0) ? x.final_cx       :
+      (x.humano_hist_cx != null && x.humano_hist_cx > 0) ? x.humano_hist_cx :
+      (x.vendido_cx != null ? null : null);
 
     // BIAS em % para o gráfico de barras (só meses fechados com vendido real)
     // eh_futuro cobre tanto meses futuros quanto o mês corrente (em andamento)

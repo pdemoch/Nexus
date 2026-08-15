@@ -705,7 +705,7 @@ function GavetaDossie({ alvo, fechar }: {
 function PainelCadeados({ fechar, recarregar }: { fechar: () => void; recarregar: () => void }) {
   const [d, setD]         = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [novoAlvo, setNovoAlvo] = useState('');
+  const [em_acao, setEmAcao] = useState<string | null>(null);
 
   const carregar = () => {
     setLoading(true);
@@ -713,85 +713,91 @@ function PainelCadeados({ fechar, recarregar }: { fechar: () => void; recarregar
   };
   useEffect(() => { carregar(); }, []);
 
-  const travar = async (nome: string) => {
-    if (!confirm(`Bloquear a carteira de ${nome}? O coordenador não poderá mais editar suas metas.`)) return;
+  const toggle = async (nome: string, bloqueado: boolean) => {
+    const acao = bloqueado ? 'reabrir' : 'bloquear';
+    const msg  = bloqueado
+      ? `Reabrir a carteira de ${nome}?`
+      : `Bloquear a carteira de ${nome}? O coordenador não poderá mais editar.`;
+    if (!confirm(msg)) return;
+    setEmAcao(nome);
     try {
-      await axios.post('/api/v1/carteira/bloquear', { nome_alvo: nome });
+      if (bloqueado) {
+        await axios.post('/api/v1/carteira/reabrir-cadeado', { nome_alvo: nome });
+      } else {
+        await axios.post('/api/v1/carteira/bloquear', { nome_alvo: nome });
+      }
       carregar(); recarregar();
-    } catch (e: any) { alert(e?.response?.data?.detail || 'Falha ao bloquear.'); }
-  };
-
-  const reabrir = async (nome: string) => {
-    if (!confirm(`Reabrir a carteira de ${nome}?`)) return;
-    try {
-      await axios.post('/api/v1/carteira/reabrir-cadeado', { nome_alvo: nome });
-      carregar(); recarregar();
-    } catch (e: any) { alert(e?.response?.data?.detail || 'Falha ao reabrir.'); }
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || `Falha ao ${acao}.`);
+    } finally { setEmAcao(null); }
   };
 
   return (
     <>
       <div className="fixed inset-0 bg-slate-900/20 z-30" onClick={fechar} />
-      <div className="fixed right-0 top-0 bottom-0 w-full max-w-sm bg-white z-40 shadow-2xl overflow-y-auto">
-        <div className="sticky top-0 bg-white border-b border-slate-100 px-5 py-4 flex items-center justify-between">
-          <div className="text-sm font-black text-slate-900">Cadeados dos coordenadores</div>
+      <div className="fixed right-0 top-0 bottom-0 w-full max-w-sm bg-white z-40 shadow-2xl flex flex-col">
+        <div className="shrink-0 border-b border-slate-100 px-5 py-4 flex items-center justify-between">
+          <div>
+            <div className="text-sm font-black text-slate-900">Cadeados dos coordenadores</div>
+            <div className="text-[10px] font-bold text-slate-400 mt-0.5">
+              Clique no botão para bloquear ou reabrir
+            </div>
+          </div>
           <button onClick={fechar} className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100">
             <X className="w-4 h-4" />
           </button>
         </div>
-        {loading ? (
-          <div className="p-16 flex items-center justify-center text-slate-400">
-            <Loader2 className="w-5 h-5 animate-spin" />
-          </div>
-        ) : (
-          <div className="p-5 space-y-4">
-            {/* Travar novo coordenador */}
-            <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
-              <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
-                Travar coordenador
-              </div>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={novoAlvo}
-                  onChange={e => setNovoAlvo(e.target.value)}
-                  placeholder="Nome do coordenador…"
-                  className="flex-1 text-xs rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus:border-indigo-400"
-                />
-                <button
-                  onClick={() => { if (novoAlvo.trim()) travar(novoAlvo.trim()); }}
-                  disabled={!novoAlvo.trim()}
-                  className="flex items-center gap-1 text-[11px] font-black bg-rose-600 text-white px-3 py-2 rounded-lg hover:bg-rose-700 disabled:opacity-40">
-                  <Lock className="w-3 h-3" /> Travar
-                </button>
-              </div>
-            </div>
 
-            {/* Lista de cadeados ativos */}
-            <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
-              Carteiras travadas
+        <div className="flex-1 overflow-y-auto p-5">
+          {loading ? (
+            <div className="flex items-center justify-center py-16 text-slate-400">
+              <Loader2 className="w-5 h-5 animate-spin" />
             </div>
-            {(d?.cadeados || []).length === 0 && (
-              <div className="text-center text-slate-400 text-sm py-4">Nenhuma carteira bloqueada.</div>
-            )}
+          ) : (
             <div className="space-y-2">
-              {(d?.cadeados || []).map((c: any) => (
-                <div key={c.nome} className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 px-3 py-2.5">
+              {(d?.coordenadores || []).length === 0 && (
+                <div className="text-center text-slate-400 text-sm py-8">
+                  Nenhum coordenador encontrado.
+                </div>
+              )}
+              {(d?.coordenadores || []).map((c: any) => (
+                <div key={c.nome}
+                  className={`flex items-center justify-between rounded-xl px-4 py-3 border transition-colors
+                    ${c.bloqueado
+                      ? 'bg-rose-50 border-rose-200'
+                      : 'bg-white border-slate-100 hover:border-slate-200'}`}>
                   <div className="min-w-0">
                     <div className="text-xs font-bold text-slate-700 truncate flex items-center gap-1.5">
-                      <Lock className="w-3 h-3 text-rose-500" /> {c.nome}
+                      {c.bloqueado
+                        ? <Lock className="w-3 h-3 text-rose-500 shrink-0" />
+                        : <Unlock className="w-3 h-3 text-slate-300 shrink-0" />}
+                      {c.nome}
                     </div>
-                    <div className="text-[10px] font-bold text-slate-400">{c.nivel} · por {c.por}</div>
+                    {c.bloqueado && c.por && (
+                      <div className="text-[10px] font-bold text-rose-400 mt-0.5">
+                        bloqueado por {c.por}
+                      </div>
+                    )}
                   </div>
-                  <button onClick={() => reabrir(c.nome)}
-                    className="flex items-center gap-1 text-[11px] font-bold text-slate-500 hover:text-emerald-600 px-2 py-1 rounded-lg hover:bg-white">
-                    <Unlock className="w-3 h-3" /> Reabrir
+                  <button
+                    onClick={() => toggle(c.nome, c.bloqueado)}
+                    disabled={em_acao === c.nome}
+                    className={`ml-3 shrink-0 flex items-center gap-1.5 text-[11px] font-black px-3 py-1.5 rounded-lg transition-colors
+                      ${c.bloqueado
+                        ? 'bg-white text-emerald-600 border border-emerald-200 hover:bg-emerald-50'
+                        : 'bg-rose-600 text-white hover:bg-rose-700'}
+                      disabled:opacity-40`}>
+                    {em_acao === c.nome
+                      ? <Loader2 className="w-3 h-3 animate-spin" />
+                      : c.bloqueado
+                        ? <><Unlock className="w-3 h-3" /> Reabrir</>
+                        : <><Lock className="w-3 h-3" /> Travar</>}
                   </button>
                 </div>
               ))}
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
     </>
   );
@@ -852,7 +858,7 @@ function ConsolidadoMetas() {
     <div className="h-full flex flex-col bg-slate-50" style={{ fontVariantNumeric: 'tabular-nums' }}>
       <div className="flex-1 min-h-0 overflow-y-auto">
 
-        {/* CABEÇALHO. */}
+        {/* CABEÇALHO */}
         <div className="sticky top-0 z-20 bg-white border-b border-slate-200">
           <div className="px-6 pt-5 pb-3">
             <h1 className="text-lg font-black text-slate-900 tracking-tight">Consolidado de Metas</h1>

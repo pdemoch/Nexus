@@ -817,11 +817,13 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
     """), {"sku": sku, **p_cgc}).fetchall()
     prev_idx = {(p.ciclo_sop, p.mes): p for p in prev_rows}
 
-    def _meta_cx(p: any, coluna: str) -> int:
-        """Retorna o volume da coluna_meta, com fallback para vol_final."""
+    def _meta_cx(p: any, coluna: str):
+        """Retorna o volume da coluna_meta, com fallback para vol_final. None = sem meta."""
         val = getattr(p, coluna.replace("vol_", ""), None)
         if val is None:
             val = p.final  # fallback seguro
+        if val is None:
+            return None
         return int(val or 0)
 
     def _meta_rs(p: any, coluna: str) -> float:
@@ -865,7 +867,7 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
             p_ativo = prev_idx.get((ciclo_ativo, key))
             if p_ativo and (p_ativo.ia is not None or p_ativo.final is not None):
                 linha["ia_cx"]    = int(p_ativo.ia or 0)
-                linha["final_cx"] = _meta_cx(p_ativo, coluna_meta)
+                linha["final_cx"] = _meta_cx(p_ativo, coluna_meta)  # pode ser None
                 linha["ia_rs"]    = round(float(p_ativo.ia_rs or 0), 2)
                 linha["final_rs"] = _meta_rs(p_ativo, coluna_meta)
         else:
@@ -879,7 +881,7 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
                 p_fut = prev_idx.get((ciclo_ativo, key))
                 if p_fut and (p_fut.ia is not None or p_fut.final is not None):
                     linha["ia_cx"]    = int(p_fut.ia or 0)
-                    linha["final_cx"] = _meta_cx(p_fut, coluna_meta)
+                    linha["final_cx"] = _meta_cx(p_fut, coluna_meta)  # pode ser None
                     linha["ia_rs"]    = round(float(p_fut.ia_rs or 0), 2)
                     linha["final_rs"] = _meta_rs(p_fut, coluna_meta)
             else:
@@ -891,7 +893,7 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
                     linha["ia_rs"] = round(float(p_hist.ia_rs or 0), 2)
                     linha["ciclo_fonte"] = cf
                 if p_hist and p_hist.final is not None:
-                    linha["final_cx"] = int(p_hist.final or 0)
+                    linha["final_cx"] = int(p_hist.final) if p_hist.final is not None else None
                     linha["final_rs"] = round(float(p_hist.final_rs or 0), 2)
 
         # LINHA B — ciclo ANTERIOR como referência.

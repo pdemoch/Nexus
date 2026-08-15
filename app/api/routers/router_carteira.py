@@ -1,5 +1,5 @@
 """
-router_carteira_novo.py  —  Metas Comercial (nova API).
+router_carteira_novo.py  —  Metas Comercial (nova API)
 
 Contrato alinhado com MetasComercial.tsx:
   • GET  /tabela              → árvore 5 níveis + meses como dict ISO
@@ -567,18 +567,52 @@ def reabrir(db: Session = Depends(get_db), _: dict = Depends(require_admin)):
 @router.get("/cadeados")
 def cadeados(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     try:
-        ciclo = get_current_cycle(db)
-        rows  = db.execute(text("""
+        ciclo  = get_current_cycle(db)
+        escopo = u.get("funcao", "")
+        is_admin = escopo == "Administrador"
+        gerente_nome = u.get("gerente_nome") or u.get("nome") or ""
+
+        # Cadeados ativos
+        rows = db.execute(text("""
             SELECT nome_responsavel AS nome, nivel, congelado_por AS por,
                    data_congelamento AS quando
             FROM controle_metas_responsavel
             WHERE ciclo_sop=:c AND status='CONGELADO'
             ORDER BY data_congelamento
         """), {"c": ciclo}).fetchall()
+        cadeados_ativos = {r.nome for r in rows}
+
+        # Todos os coordenadores sob controle — Admin vê todos, Gerente vê os seus
+        if is_admin:
+            coord_rows = db.execute(text("""
+                SELECT DISTINCT TRIM(supervisor_nome) AS coordenador
+                FROM dim_clientes
+                WHERE supervisor_nome IS NOT NULL AND TRIM(supervisor_nome) != ''
+                ORDER BY 1
+            """)).fetchall()
+        else:
+            coord_rows = db.execute(text("""
+                SELECT DISTINCT TRIM(supervisor_nome) AS coordenador
+                FROM dim_clientes
+                WHERE TRIM(gerente_nome) = :g
+                  AND supervisor_nome IS NOT NULL AND TRIM(supervisor_nome) != ''
+                ORDER BY 1
+            """), {"g": gerente_nome}).fetchall()
+
+        coordenadores = [
+            {
+                "nome":      r.coordenador,
+                "bloqueado": r.coordenador in cadeados_ativos,
+                "por":       next((c.por for c in rows if c.nome == r.coordenador), None),
+            }
+            for r in coord_rows
+        ]
+
         return {
-            "sou_admin": u.get("funcao") == "Administrador",
-            "meu_nome":  (u.get("gerente_nome") or u.get("supervisor_nome") or u.get("nome")),
-            "cadeados":  [{"nome": r.nome, "nivel": r.nivel, "por": r.por} for r in rows],
+            "sou_admin":    is_admin,
+            "meu_nome":     gerente_nome,
+            "cadeados":     [{"nome": r.nome, "nivel": r.nivel, "por": r.por} for r in rows],
+            "coordenadores": coordenadores,
         }
     except Exception as e:
         raise HTTPException(500, repr(e))
