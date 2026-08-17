@@ -395,32 +395,51 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_supply)):
 
         registros = []
         for r in rows:
-            td = int(r.supply or 0)
+            td      = int(r.supply or 0)
             receita = float(r.receita_td or 0)
-            pmv = (receita / td) if td > 0 else 0.0
+            pmv     = round(receita / td, 2) if td > 0 else 0.0
             registros.append({
-                "Categoria":           r.categoria,
-                "Segmento":            r.segmento,
-                "SKU":                 r.sku,
-                "Descrição":           r.descricao,
-                "Mês":                 r.mes,
-                "IA (cx)":             int(r.ia or 0),
-                "Vol. Supply (cx)":   td,
-                "PMV (R$)":            round(pmv, 2),
-                "Receita Prevista (R$)": round(receita, 2),
-                "Orçamento (R$)":      round(float(r.orcamento or 0), 2),
+                "categoria": r.categoria,
+                "segmento":  r.segmento,
+                "sku":       r.sku,
+                "descricao": r.descricao,
+                "mes":       r.mes,
+                "supply":    td,
+                "receita":   receita,
             })
 
-        df = pd.DataFrame(registros)
+        df_long = pd.DataFrame(registros)
+        meses_labels = sorted(df_long["mes"].unique())
+
+        # Dimensões fixas por SKU
+        dims = df_long.drop_duplicates("sku")[["categoria","segmento","sku","descricao"]].copy()
+        dims.columns = ["Categoria","Segmento","SKU","Descrição"]
+
+        # Uma coluna por mês com volume Supply (cx)
+        for m in meses_labels:
+            sub = df_long[df_long["mes"] == m].set_index("sku")
+            dims[f"{m}"] = dims["SKU"].map(sub["supply"]).fillna(0).astype(int)
+
+        # PMV médio do SKU (receita total / supply total)
+        pmv_sku = df_long.groupby("sku").apply(
+            lambda g: round(g["receita"].sum() / g["supply"].sum(), 2)
+            if g["supply"].sum() > 0 else 0.0
+        ).reset_index(name="PMV Médio (R$)")
+        dims = dims.merge(pmv_sku, left_on="SKU", right_on="sku", how="left").drop(columns="sku")
+
+        df = dims.sort_values(["Categoria","Segmento","Descrição"]).reset_index(drop=True)
+
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="Plano Supply")
-            # Rodapé informativo
+            ws = writer.sheets["Plano Supply"]
+            for col in ws.columns:
+                max_len = max((len(str(c.value or "")) for c in col), default=8)
+                ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 40)
             notas = pd.DataFrame([
                 [f"Ciclo: {ciclo}"],
                 [f"Meses: {', '.join(m.strftime('%m/%Y') for m in meses)}"],
-                ["Receita Prevista = Vol. Supply × PMV aplicado"],
-                ["Gerado pelo Nexus S&OP — cópia de segurança do preenchimento"],
+                ["Gerado pelo Nexus S&OP"],
             ], columns=["Nota"])
             notas.to_excel(writer, index=False, sheet_name="Plano Supply",
                            startrow=len(df) + 2, header=False)
