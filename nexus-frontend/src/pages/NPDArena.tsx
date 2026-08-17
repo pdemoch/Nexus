@@ -76,12 +76,15 @@ export default function NPDArena() {
 
   const mesesDinamicos = useMemo(() => {
     const nomesMeses = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
-    const getMesProj = (addOffset: number) => {
+    const getMes = (addOffset: number) => {
       const d = new Date();
+      d.setDate(1);
       d.setMonth(d.getMonth() + addOffset);
-      return `${nomesMeses[d.getMonth()]}/${d.getFullYear().toString().slice(2)}`;
+      const iso   = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
+      const label = `${nomesMeses[d.getMonth()]}/${d.getFullYear().toString().slice(2)}`;
+      return { iso, label };
     };
-    return [getMesProj(2), getMesProj(3), getMesProj(4)];
+    return [getMes(2), getMes(3), getMes(4)];
   }, []);
 
   const [rampUp, setRampUp] = useState<number[]>([20, 50, 100]); 
@@ -112,9 +115,9 @@ export default function NPDArena() {
     const base = Number(baseline) || 0;
     const preco = Number(pmv) || 0;
     
-    return mesesDinamicos.map((mes, i) => {
+    return mesesDinamicos.map((m, i) => {
       const volumeCalculado = Math.round(base * (rampUp[i] / 100));
-      return { mes, percentual: rampUp[i], volume: volumeCalculado, receita: volumeCalculado * preco };
+      return { mes: m.iso, label: m.label, percentual: rampUp[i], volume: volumeCalculado, receita: volumeCalculado * preco };
     });
   }, [baseline, pmv, rampUp, mesesDinamicos]);
 
@@ -122,7 +125,7 @@ export default function NPDArena() {
     if (!codigoNPD || !nomeNPD || !skuEspelho || !categoria || !segmento || !baseline || !pmv) {
         return alert("Preencha todos os campos obrigatórios.");
     }
-    if (!window.confirm(`Injetar o lançamento [${codigoNPD}] - ${nomeNPD} na janela de S&OP (${mesesDinamicos.join(', ')})?`)) return;
+    if (!window.confirm(`Injetar o lançamento [${codigoNPD}] - ${nomeNPD} na janela de S&OP (${mesesDinamicos.map(m => m.label).join(', ')})?`)) return;
     
     try {
       const payload = {
@@ -239,9 +242,9 @@ export default function NPDArena() {
               <h2 className="text-sm font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 pb-4 mb-6">2. Ramp-Up (% de Aceleração S&OP)</h2>
               
               <div className="grid grid-cols-3 gap-6">
-                {mesesDinamicos.map((mes, idx) => (
+                {mesesDinamicos.map((m, idx) => (
                   <div key={idx} className="flex flex-col items-center">
-                    <span className="text-xs font-black text-slate-800 mb-3 uppercase tracking-widest">{mes}</span>
+                    <span className="text-xs font-black text-slate-800 mb-3 uppercase tracking-widest">{m.label}</span>
                     <div className="relative w-full">
                       <input 
                         type="number" 
@@ -263,7 +266,7 @@ export default function NPDArena() {
               <div className="grid grid-cols-3 gap-4 mb-8">
                  {projecao.map((p, idx) => (
                    <div key={idx} className="bg-slate-50 rounded-2xl p-5 text-center border border-slate-100">
-                     <p className="text-[10px] font-bold text-slate-400 uppercase mb-2">Volume {p.mes}</p>
+                     <p className="text-[10px] font-bold text-slate-400 uppercase mb-2">Volume {p.label || p.mes}</p>
                      <p className="text-2xl font-black text-slate-800 leading-none">{p.volume.toLocaleString('pt-BR')} <span className="text-[10px] opacity-50">CX</span></p>
                      <div className="h-px w-full bg-slate-200 my-3"></div>
                      <p className="text-xs font-black text-emerald-600 truncate">{formatarMoeda(p.receita)}</p>
@@ -281,7 +284,7 @@ export default function NPDArena() {
                       </linearGradient>
                     </defs>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                    <XAxis dataKey="mes" tick={{fontSize: 10, fontWeight: 900}} axisLine={false} tickLine={false} />
+                    <XAxis dataKey="label" tick={{fontSize: 10, fontWeight: 900}} axisLine={false} tickLine={false} />
                     <YAxis tick={{fontSize: 10}} axisLine={false} tickLine={false} />
                     <Tooltip contentStyle={{borderRadius: '20px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)'}} />
                     <Area type="monotone" dataKey="volume" name="Volume" stroke="#4f46e5" strokeWidth={4} fillOpacity={1} fill="url(#colorVolume)" dot={{r: 6, fill: '#4f46e5', strokeWidth: 2, stroke: '#fff'}} />
