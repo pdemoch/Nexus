@@ -27,9 +27,10 @@ services:
     env_file:
       - .env
     environment:
-      - AWS_ACCESS_KEY_ID=AKIA4VPN43D6KCHKRYM5
-      - AWS_SECRET_ACCESS_KEY=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
-      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     dns:
       - 8.8.8.8
       - 8.8.4.4
