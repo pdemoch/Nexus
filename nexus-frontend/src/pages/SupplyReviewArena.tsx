@@ -197,9 +197,9 @@ function PreenchimentoSupply() {
       <div className="sticky top-0 z-20 bg-white border-b border-slate-200">
         <div className="px-6 pt-5 pb-3 flex items-center justify-between">
           <div>
-            <h1 className="text-lg font-black text-slate-900 tracking-tight">Demanda Marketing</h1>
+            <h1 className="text-lg font-black text-slate-900 tracking-tight">Supply Review</h1>
             <p className="text-xs font-medium text-slate-400">
-              Ciclo {dados?.ciclo} · defina o Vol. Supply por SKU
+              Ciclo {dados?.ciclo} · defina os volumes de Supply SKU a SKU para o próximo ciclo.
               {aguardandoUpstream && <span className="ml-2 text-orange-500 font-bold">· aguardando Metas Comercial congelar</span>}
               {!aguardandoUpstream && congelada && <span className="ml-2 text-amber-600 font-bold">· etapa congelada</span>}
             </p>
