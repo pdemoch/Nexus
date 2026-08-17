@@ -318,7 +318,10 @@ function PreenchimentoSupply() {
                 </div>
                 {meses.map((m) => {
                   const soma = cat.segmentos.reduce((acc: number, seg: any) =>
-                    acc + seg.skus.reduce((a: number, s: any) => a + valorCelula(s.sku, m, s.meses[m]?.topdown || 0), 0), 0);
+                    acc + seg.skus.reduce((a: number, s: any) => {
+                      const cel = s.meses[m]; if (!cel) return a;
+                      return a + valorCelula(s.sku, m, cel.supply || 0);
+                    }, 0), 0);
                   const fatCat = cat.segmentos.reduce((acc: number, seg: any) =>
                     acc + seg.skus.reduce((a: number, s: any) => {
                       const cel = s.meses[m]; if (!cel) return a;
