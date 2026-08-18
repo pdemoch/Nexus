@@ -599,6 +599,10 @@ REGRAS DE REDACAO - obrigatorias:
 - Declare limitacoes de amostra quando existirem.
 - Nao trate de descontos comerciais nem de politica de preco. O escopo e
   exclusivamente a acuracia da previsao de demanda.
+- NUNCA atribua variacao de resultado a mudanca de sistema, plataforma,
+  ferramenta ou metodologia de registro. Nao especule sobre causas que nao
+  estejam demonstradas nos dados. Quando a causa nao for identificavel,
+  declare isso de forma direta.
 
 {METODOLOGIA}
 
@@ -614,7 +618,13 @@ ESTRUTURA (700 a 900 palavras, prosa densa, sem tabelas, sem markdown):
 3. EVOLUCAO ANO A ANO
    Compare cada ano isoladamente, usando os mesmos meses do calendario.
    Informe se o erro aumentou, diminuiu ou permaneceu estavel, e quanto.
-   Trate a mudanca de origem do plano como contexto, nao como causa provada.
+   PROIBIDO atribuir variacao de indicador a mudanca de sistema, de ferramenta,
+   de plataforma ou de metodologia de registro. Nao mencione troca de origem
+   do plano como explicacao para nenhum resultado. Se um mes ou periodo destoa,
+   descreva o que os dados mostram (direcao do erro, categorias que
+   concentraram o desvio, itens com maior contribuicao) e, quando a causa nao
+   estiver nos dados, diga apenas que a causa nao e identificavel pelo recorte
+   disponivel.
 
 4. CONCENTRACAO DO ERRO
    Onde o erro absoluto se concentra, em categorias e SKUs. Distinga o item que
@@ -689,6 +699,7 @@ def _chamar_claude(system: str, mensagens: List[Dict[str, str]],
         try:
             resp = client.messages.create(
                 model=modelo, max_tokens=max_tokens,
+                temperature=0,          # determinismo: mesma entrada, mesma saida
                 system=system, messages=mensagens,
             )
             return "".join(b.text for b in resp.content
@@ -700,11 +711,124 @@ def _chamar_claude(system: str, mensagens: List[Dict[str, str]],
     raise RuntimeError(f"Nenhum modelo disponivel. Ultimo erro: {erro}")
 
 
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CACHE — o relatorio de um ciclo e gerado uma vez e vale para todos
+# ═══════════════════════════════════════════════════════════════════════════
+import hashlib
+
+DDL_CACHE = """
+CREATE TABLE IF NOT EXISTS agente_relatorio_cache (
+    id             SERIAL PRIMARY KEY,
+    ciclo_sop      VARCHAR(10)  NOT NULL,
+    chave          VARCHAR(80)  NOT NULL,
+    meses          TEXT         NOT NULL,
+    base           VARCHAR(20)  NOT NULL,
+    unidade        VARCHAR(10)  NOT NULL,
+    relatorio      TEXT         NOT NULL,
+    gerado_por     VARCHAR(120),
+    gerado_em      TIMESTAMP    NOT NULL DEFAULT now(),
+    CONSTRAINT uix_agente_rel UNIQUE (ciclo_sop, chave)
+);
+CREATE TABLE IF NOT EXISTS agente_chat_cache (
+    id           SERIAL PRIMARY KEY,
+    ciclo_sop    VARCHAR(10)  NOT NULL,
+    chave        VARCHAR(80)  NOT NULL,
+    pergunta     TEXT         NOT NULL,
+    resposta     TEXT         NOT NULL,
+    criado_em    TIMESTAMP    NOT NULL DEFAULT now(),
+    CONSTRAINT uix_agente_chat UNIQUE (ciclo_sop, chave)
+);
+"""
+
+
+def _garantir_tabelas(db: Session) -> None:
+    for stmt in [s.strip() for s in DDL_CACHE.split(";") if s.strip()]:
+        db.execute(text(stmt))
+    db.commit()
+
+
+def _normalizar(txt: str) -> str:
+    """Normaliza texto para chave de cache: minusculas, sem acento, sem pontuacao."""
+    import unicodedata, re
+    t = unicodedata.normalize("NFKD", txt or "")
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    t = re.sub(r"[^a-z0-9 ]", " ", t.lower())
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _chave(*partes) -> str:
+    bruto = "|".join(str(p) for p in partes)
+    return hashlib.sha256(bruto.encode("utf-8")).hexdigest()[:40]
+
+
+def _ciclo_atual(db: Session) -> str:
+    try:
+        from app.api.routers.shared_ibp import get_current_cycle
+        return get_current_cycle(db)
+    except Exception:
+        return _hoje_br().strftime("%m/%Y")
+
+
+def relatorio_existente(db: Session, meses: List[str],
+                        base: str, unidade: str) -> Optional[Dict[str, Any]]:
+    """Retorna o relatorio ja gerado para este ciclo e recorte, se houver."""
+    _garantir_tabelas(db)
+    ciclo = _ciclo_atual(db)
+    ch    = _chave(sorted(meses), base, unidade)
+    r = db.execute(text("""
+        SELECT relatorio, gerado_por, gerado_em
+        FROM agente_relatorio_cache
+        WHERE ciclo_sop = :c AND chave = :k
+    """), {"c": ciclo, "k": ch}).fetchone()
+    if not r:
+        return None
+    return {
+        "relatorio":  r.relatorio,
+        "gerado_por": r.gerado_por,
+        "gerado_em":  r.gerado_em.isoformat() if r.gerado_em else None,
+        "ciclo":      ciclo,
+        "do_cache":   True,
+    }
+
+
+def salvar_relatorio(db: Session, meses: List[str], base: str, unidade: str,
+                     texto: str, usuario: str) -> None:
+    _garantir_tabelas(db)
+    ciclo = _ciclo_atual(db)
+    ch    = _chave(sorted(meses), base, unidade)
+    db.execute(text("""
+        INSERT INTO agente_relatorio_cache
+            (ciclo_sop, chave, meses, base, unidade, relatorio, gerado_por)
+        VALUES (:c, :k, :m, :b, :u, :r, :p)
+        ON CONFLICT (ciclo_sop, chave) DO UPDATE SET
+            relatorio  = EXCLUDED.relatorio,
+            gerado_por = EXCLUDED.gerado_por,
+            gerado_em  = now()
+    """), {"c": ciclo, "k": ch, "m": ",".join(sorted(meses)),
+           "b": base, "u": unidade, "r": texto, "p": usuario})
+    db.commit()
+
+
 def gerar_relatorio(db: Session, meses: List[str],
-                    base: str = "pedido", unidade: str = "cx") -> Dict[str, Any]:
+                    base: str = "pedido", unidade: str = "cx",
+                    usuario: str = "-", forcar: bool = False) -> Dict[str, Any]:
+    """
+    Gera o relatorio do ciclo. Se ja existe um relatorio para este ciclo e
+    recorte, devolve o mesmo texto — garante que todos os usuarios leem
+    exatamente a mesma analise durante o mes.
+    forcar=True (somente Administrador) refaz a analise e substitui a anterior.
+    """
     ds = montar_dataset(db, meses, base, unidade)
     if ds.get("erro"):
         return ds
+
+    if not forcar:
+        cache = relatorio_existente(db, meses, base, unidade)
+        if cache:
+            return {**cache, "dataset": ds}
+
     texto = _chamar_claude(
         SYSTEM_PROMPT,
         [{"role": "user",
@@ -712,8 +836,11 @@ def gerar_relatorio(db: Session, meses: List[str],
                      + _contexto_modelo(ds)}],
         max_tokens=8000,
     )
+    salvar_relatorio(db, meses, base, unidade, texto, usuario)
     return {"relatorio": texto, "dataset": ds,
-            "gerado_em": datetime.datetime.utcnow().isoformat()}
+            "gerado_por": usuario,
+            "gerado_em": datetime.datetime.utcnow().isoformat(),
+            "do_cache": False}
 
 
 def responder_pergunta(db: Session, pergunta: str, meses: List[str],
@@ -753,6 +880,9 @@ Regras:
 - Nao cite nomes de tabelas de banco. Use "planejamento anterior ao Nexus"
   e "planejamento no Nexus".
 - Nao trate de descontos comerciais.
+- NUNCA atribua variacao de resultado a mudanca de sistema, plataforma ou
+  metodologia de registro. Se a causa nao estiver nos dados, diga que nao e
+  identificavel pelo recorte disponivel e aponte o que os dados mostram.
 - Seja conciso e cite os numeros que fundamentam a resposta.
 - Sempre conclua o raciocinio. Nunca interrompa a resposta no meio de
   uma frase ou de uma lista. Se a resposta for longa, priorize os itens
@@ -761,9 +891,34 @@ Regras:
 Dados do recorte:
 {ctx}"""
 
+    # Cache por pergunta normalizada + recorte: mesma pergunta, mesma resposta
+    # para qualquer usuario dentro do mesmo ciclo.
+    usa_cache = not historico          # so cacheia pergunta isolada, nao follow-up
+    ch = _chave(_normalizar(pergunta), sorted(meses), base, unidade)
+    ciclo = _ciclo_atual(db)
+
+    if usa_cache:
+        _garantir_tabelas(db)
+        r = db.execute(text("""
+            SELECT resposta FROM agente_chat_cache
+            WHERE ciclo_sop = :c AND chave = :k
+        """), {"c": ciclo, "k": ch}).fetchone()
+        if r:
+            return r.resposta
+
     msgs = list(historico or [])
     msgs.append({"role": "user", "content": pergunta})
-    return _chamar_claude(system, msgs, max_tokens=3000)
+    resposta = _chamar_claude(system, msgs, max_tokens=3000)
+
+    if usa_cache:
+        db.execute(text("""
+            INSERT INTO agente_chat_cache (ciclo_sop, chave, pergunta, resposta)
+            VALUES (:c, :k, :p, :r)
+            ON CONFLICT (ciclo_sop, chave) DO NOTHING
+        """), {"c": ciclo, "k": ch, "p": pergunta, "r": resposta})
+        db.commit()
+
+    return resposta
 
 
 def gerar_pdf(relatorio: str, ds: Dict[str, Any]) -> bytes:
@@ -897,7 +1052,7 @@ def gerar_pdf(relatorio: str, ds: Dict[str, Any]) -> bytes:
         lc3.valueAxis.valueMin = 0
         lc3.valueAxis.valueMax = 100
         lc3.valueAxis.labels.fontSize = 7
-        lc3.lines[0].strokeColor = colors.HexColor("#f59e0b")
+        lc3.lines[0].strokeColor = ambar = colors.HexColor("#f97316")
         lc3.lines[0].strokeWidth = 1.8
         d3.add(lc3)
         el.append(d3)

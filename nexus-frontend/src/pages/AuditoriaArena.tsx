@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
+import type { CSSProperties } from 'react';
 import axios from 'axios';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -217,7 +218,7 @@ function Card({ label, valor, cor, sub }: any) {
 // ═══════════════════════════════════════════════════════════════════════════
 // TABELAS DE BIAS
 // ═══════════════════════════════════════════════════════════════════════════
-const styleTab = (ativo: boolean): React.CSSProperties => ({
+const styleTab = (ativo: boolean): CSSProperties => ({
   padding:'10px 18px', border:'none', background:'none', cursor:'pointer',
   fontSize:13, fontWeight:ativo?700:400,
   color:ativo?'#0f172a':'#64748b',
@@ -366,6 +367,8 @@ export default function AuditoriaArena() {
   const [gerandoRel, setGerandoRel] = useState(false);
   const [baixandoPdf, setBaixandoPdf] = useState(false);
   const [erroAgente, setErroAgente] = useState('');
+  const [relInfo, setRelInfo] = useState<{publicado:boolean; gerado_por?:string;
+    gerado_em?:string; ciclo?:string; pode_regerar?:boolean} | null>(null);
   const [chat, setChat] = useState<{role:'user'|'assistant', content:string}[]>([]);
   const [pergunta, setPergunta] = useState('');
   const [respondendo, setRespondendo] = useState(false);
@@ -423,13 +426,43 @@ export default function AuditoriaArena() {
 
 
   // ─── Agente ────────────────────────────────────────────────────────────
-  const gerarRelatorio = useCallback(async () => {
+  // Ao abrir a aba (ou trocar o recorte), busca o relatório já publicado.
+  useEffect(() => {
+    if (abaKpi !== 'agente' || !mesesSel.length) return;
+    let vivo = true;
+    (async () => {
+      try {
+        const st = await axios.get(`/api/v1/kpis/agente/relatorio/status?${qs}`);
+        if (!vivo) return;
+        setRelInfo(st.data);
+        if (st.data.publicado) {
+          const r = await axios.get(`/api/v1/kpis/agente/relatorio?${qs}`);
+          if (vivo) { setRelatorio(r.data.relatorio || ''); setErroAgente(''); }
+        } else {
+          setRelatorio('');
+        }
+      } catch { /* silencioso */ }
+    })();
+    return () => { vivo = false; };
+  }, [abaKpi, qs, mesesSel.length]);
+
+  const gerarRelatorio = useCallback(async (forcar = false) => {
     if (!mesesSel.length) { setErroAgente('Selecione ao menos um mês.'); return; }
-    setGerandoRel(true); setErroAgente(''); setRelatorio('');
+    if (forcar && !confirm(
+      'Regerar o relatório deste ciclo? A análise atual será substituída para todos os usuários.'
+    )) return;
+    setGerandoRel(true); setErroAgente('');
     try {
-      const r = await axios.get(`/api/v1/kpis/agente/relatorio?${qs}`);
+      const r = await axios.get(
+        `/api/v1/kpis/agente/relatorio?${qs}${forcar ? '&forcar=true' : ''}`);
       setRelatorio(r.data.relatorio || '');
-      setChat([]);
+      setRelInfo({
+        publicado: true,
+        gerado_por: r.data.gerado_por,
+        gerado_em: r.data.gerado_em,
+        pode_regerar: r.data.pode_regerar,
+      });
+      if (forcar) setChat([]);
     } catch (e: any) {
       setErroAgente(e?.response?.data?.detail || 'Falha ao gerar o relatório.');
     } finally { setGerandoRel(false); }
@@ -817,6 +850,14 @@ export default function AuditoriaArena() {
                   {' '}{baseCalc === 'faturado' ? 'faturado' : 'vendido'} ·
                   {' '}{unidade === 'rs' ? 'R$' : 'caixas'} · {ctx}
                 </div>
+                {relInfo?.publicado && relInfo?.gerado_em && (
+                  <div style={{ fontSize:10.5, color:'#7c3aed', marginTop:4, fontWeight:600 }}>
+                    Publicado em {new Date(relInfo.gerado_em).toLocaleString('pt-BR', {
+                      day:'2-digit', month:'2-digit', year:'numeric',
+                      hour:'2-digit', minute:'2-digit' })}
+                    {relInfo.gerado_por ? ` por ${relInfo.gerado_por}` : ''}
+                  </div>
+                )}
               </div>
 
               <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
@@ -845,15 +886,32 @@ export default function AuditoriaArena() {
                   ))}
                 </div>
 
-                <button onClick={gerarRelatorio} disabled={gerandoRel || !mesesSel.length}
-                  style={{ display:'flex', alignItems:'center', gap:7, padding:'9px 18px',
-                    borderRadius:10, border:'none', fontSize:12, fontWeight:800, cursor: gerandoRel ? 'wait' : 'pointer',
-                    background: gerandoRel ? '#e2e8f0' : '#7c3aed', color: gerandoRel ? '#94a3b8' : '#fff' }}>
-                  {gerandoRel
-                    ? <><Loader2 style={{ width:14 }} className="spin" /> Analisando…</>
-                    : <>{relatorio ? <RefreshCw style={{ width:14 }} /> : <Sparkles style={{ width:14 }} />}
-                       {relatorio ? 'Regerar' : 'Gerar relatório'}</>}
-                </button>
+                {/* Gerar: só aparece se ainda não publicado E o usuário é Admin */}
+                {!relInfo?.publicado && relInfo?.pode_regerar && (
+                  <button onClick={() => gerarRelatorio(false)} disabled={gerandoRel || !mesesSel.length}
+                    style={{ display:'flex', alignItems:'center', gap:7, padding:'9px 18px',
+                      borderRadius:10, border:'none', fontSize:12, fontWeight:800,
+                      cursor: gerandoRel ? 'wait' : 'pointer',
+                      background: gerandoRel ? '#e2e8f0' : '#7c3aed',
+                      color: gerandoRel ? '#94a3b8' : '#fff' }}>
+                    {gerandoRel
+                      ? <><Loader2 style={{ width:14 }} className="spin" /> Analisando…</>
+                      : <><Sparkles style={{ width:14 }} /> Publicar relatório</>}
+                  </button>
+                )}
+
+                {/* Regerar: só Admin, e só quando já existe publicado */}
+                {relInfo?.publicado && relInfo?.pode_regerar && (
+                  <button onClick={() => gerarRelatorio(true)} disabled={gerandoRel}
+                    style={{ display:'flex', alignItems:'center', gap:7, padding:'9px 16px',
+                      borderRadius:10, fontSize:12, fontWeight:800,
+                      cursor: gerandoRel ? 'wait' : 'pointer',
+                      border:'1px solid #ddd6fe', background:'#faf5ff', color:'#7c3aed' }}>
+                    {gerandoRel
+                      ? <><Loader2 style={{ width:14 }} className="spin" /> Analisando…</>
+                      : <><RefreshCw style={{ width:14 }} /> Regerar</>}
+                  </button>
+                )}
 
                 <button onClick={baixarPdf} disabled={!relatorio || baixandoPdf}
                   style={{ display:'flex', alignItems:'center', gap:7, padding:'9px 16px',
@@ -979,10 +1037,17 @@ export default function AuditoriaArena() {
                 <div style={{ fontSize:14, fontWeight:800, color:'#334155', marginBottom:6 }}>
                   Análise completa dos indicadores
                 </div>
-                <div style={{ fontSize:12, color:'#94a3b8', maxWidth:520, margin:'0 auto', lineHeight:1.7 }}>
-                  O agente cruza WMAPE, BIAS, fill rate e evolução YoY de todas as categorias e SKUs,
-                  identifica padrões sistemáticos e separa falhas de planejamento de falhas de operação.
-                  Todo número citado é rastreável às tabelas do anexo.
+                <div style={{ fontSize:12, color:'#94a3b8', maxWidth:540, margin:'0 auto', lineHeight:1.7 }}>
+                  {relInfo?.pode_regerar
+                    ? <>O agente cruza WMAPE, BIAS, atendimento e evolução ano a ano de todas as
+                       categorias e SKUs, identifica padrões sistemáticos e separa falhas de
+                       planejamento de restrições de produção. Todo número citado é rastreável
+                       às tabelas do anexo.<br/><br/>
+                       <b style={{color:'#7c3aed'}}>Publique o relatório do ciclo</b> — ele ficará
+                       disponível para toda a companhia com a mesma análise.</>
+                    : <>O relatório deste ciclo ainda não foi publicado.<br/><br/>
+                       Assim que o Administrador publicar, a análise aparece aqui para todos —
+                       sempre a mesma leitura, com os mesmos números.</>}
                 </div>
               </div>
             )}

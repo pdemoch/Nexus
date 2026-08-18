@@ -773,16 +773,64 @@ async def agente_relatorio(
     meses:   List[str] = Query(...),
     base:    str = Query("pedido"),
     unidade: str = Query("cx"),
+    forcar:  bool = Query(False),   # regerar — somente Administrador
     db: Session = Depends(get_db),
-    _: dict = Depends(_require_lideranca),
+    u: dict = Depends(get_current_user),
 ):
-    """Gera o relatório analítico via Claude. Retorna texto + dataset."""
+    """
+    Relatório do ciclo. Gerado uma única vez e compartilhado por todos.
+    Somente Administrador pode gerar pela primeira vez ou regerar.
+    Demais usuários leem o relatório já publicado.
+    """
+    eh_admin = u.get("funcao") == "Administrador"
     try:
-        return agente_kpis.gerar_relatorio(db, meses, base, unidade)
+        # Já existe relatório publicado para este recorte?
+        cache = agente_kpis.relatorio_existente(db, meses, base, unidade)
+
+        if cache and not (forcar and eh_admin):
+            ds = agente_kpis.montar_dataset(db, meses, base, unidade)
+            return {**cache, "dataset": ds, "pode_regerar": eh_admin}
+
+        if not eh_admin:
+            raise HTTPException(
+                403,
+                "O relatório deste ciclo ainda não foi publicado. "
+                "Aguarde a geração pelo Administrador."
+            )
+
+        nome = u.get("nome") or u.get("email") or "Administrador"
+        res = agente_kpis.gerar_relatorio(db, meses, base, unidade,
+                                          usuario=nome, forcar=forcar)
+        return {**res, "pode_regerar": True}
+
+    except HTTPException:
+        raise
     except RuntimeError as e:
         raise HTTPException(503, str(e))
     except Exception as e:
         raise HTTPException(500, f"Erro ao gerar relatório: {e}")
+
+
+@router.get("/agente/relatorio/status")
+async def agente_relatorio_status(
+    meses:   List[str] = Query(...),
+    base:    str = Query("pedido"),
+    unidade: str = Query("cx"),
+    db: Session = Depends(get_db),
+    u: dict = Depends(get_current_user),
+):
+    """Informa se já existe relatório publicado, sem chamar a IA."""
+    try:
+        cache = agente_kpis.relatorio_existente(db, meses, base, unidade)
+        return {
+            "publicado":    bool(cache),
+            "gerado_por":   cache.get("gerado_por") if cache else None,
+            "gerado_em":    cache.get("gerado_em")  if cache else None,
+            "ciclo":        cache.get("ciclo")      if cache else None,
+            "pode_regerar": u.get("funcao") == "Administrador",
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao consultar status: {e}")
 
 
 class PerguntaAgente(BaseModel):
@@ -823,7 +871,7 @@ class PdfPayload(BaseModel):
 async def agente_pdf(
     payload: PdfPayload,
     db: Session = Depends(get_db),
-    _: dict = Depends(_require_lideranca),
+    _: dict = Depends(get_current_user),
 ):
     """Gera o PDF one-page + anexos com a análise já produzida."""
     try:
