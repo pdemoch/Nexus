@@ -1,22 +1,22 @@
 """
 agente_kpis.py — Agente analítico de KPIs S&OP (Nexus / Linea Alimentos)
 
-Responsabilidades:
-  1. Montar o dataset consolidado que fundamenta o relatório (tudo rastreável).
-  2. Chamar a API da Anthropic para produzir a análise narrativa.
-  3. Responder perguntas ad-hoc sobre os indicadores (chat).
-  4. Gerar o PDF one-page + anexo com os 114 SKUs
+Escopo da análise:
+  • Acurácia da previsão de demanda: WMAPE e BIAS, em caixas ou em R$.
+  • Evolução ano a ano — cada ano avaliado isoladamente, mesmos meses do calendário.
+  • Diagnóstico por categoria e por SKU, com cruzamento WMAPE x BIAS.
+  • Atendimento (fill rate) apenas para separar erro de previsão de restrição
+    de suprimento. Descontos comerciais estão fora do escopo.
 
-Princípios:
-  • O modelo NUNCA vê dados brutos — recebe JSON pré-agregado e compacto.
-  • Todo número afirmado tem origem declarada (tabela + fórmula).
-  • Economia de tokens: só top-N no contexto; tabela completa vai só no PDF.
+Nomenclatura de negócio (o relatório NAO cita nomes de tabelas):
+  "planejamento anterior ao Nexus"  -> previsao registrada em planilha (jan/23-mai/26)
+  "planejamento no Nexus"           -> plano congelado M-2 do ciclo (jun/26+)
+  "previsao estatistica"            -> modelo do Nexus, M-2 (jun/26+)
 
-Fontes de dados (validadas no banco):
-  fato_vendas            → qt_pedido, vl_pedido, qtfatura, vlfatura, qtcorte, vlcorte
-  fato_ibp_granular      → vol_ia, vol_final (M-2), pmv_aplicado  [jun/26+]
-  fato_previsao_humana   → vol_humano, fonte='HISTORICO'          [jan/23–mai/26]
-  dim_produtos           → sku, descricao, categoria, ativo
+Principios:
+  • Tom tecnico e imparcial, sem adjetivos de julgamento.
+  • Todo numero rastreavel aos anexos.
+  • Erro absoluto sempre computado em (SKU, mes) antes de agregar.
 """
 
 import os
@@ -30,17 +30,12 @@ from sqlalchemy import text
 from dateutil.relativedelta import relativedelta
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# CONSTANTES DE ESCOPO — declaradas no relatório para auditoria
-# ═══════════════════════════════════════════════════════════════════════════
-CICLO_PISO       = datetime.date(2026, 4, 1)   # primeiro ciclo Nexus
-DEFASAGEM_MESES  = 2                            # M-2: previsão congelada 2 meses antes
-PISO_NEXUS       = datetime.date(2026, 6, 1)   # CICLO_PISO + DEFASAGEM = primeiro mês auditável
-INICIO_HISTORICO = datetime.date(2023, 1, 1)
+CICLO_PISO      = datetime.date(2026, 4, 1)
+DEFASAGEM_MESES = 2
+PISO_NEXUS      = datetime.date(2026, 6, 1)
 
 
 def _sdiv(num, den, mult=1.0):
-    """Divisão segura: retorna None se denominador <= 0 ou NaN."""
     try:
         d = float(den)
         if d <= 0 or not (d == d):
@@ -59,329 +54,297 @@ def _ultimo_mes_fechado() -> str:
     return (h - datetime.timedelta(days=1)).strftime("%Y-%m")
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# DATASET CONSOLIDADO
-# ═══════════════════════════════════════════════════════════════════════════
-def montar_dataset(
-    db: Session,
-    meses: List[str],
-    base: str = "pedido",       # pedido | faturado
-    unidade: str = "cx",        # cx | rs
-) -> Dict[str, Any]:
-    """
-    Monta o dataset completo que fundamenta o relatório.
+def _classe(wmape, bias) -> str:
+    if wmape is None or bias is None:
+        return "Sem plano"
+    if wmape <= 20 and abs(bias) <= 10:
+        return "Sob controle"
+    if bias > 10:
+        return "Superestimacao"
+    if bias < -10:
+        return "Subestimacao"
+    return "Disperso"
 
-    Granularidade base do erro: SEMPRE (sku, mês).
-    O erro absoluto é computado nesse nível e só depois agregado — nunca
-    agregamos volumes antes de calcular o erro, senão erros de sinais
-    opostos se cancelariam e o WMAPE ficaria artificialmente baixo.
 
-    base:    'pedido'   -> realizado = qt_pedido (demanda do cliente)
-             'faturado' -> realizado = qtfatura  (o que a empresa entregou)
-    unidade: 'cx' -> erro em caixas
-             'rs' -> erro em R$, valorizado pelo PMV do PEDIDO (vl_pedido/qt_pedido).
-                     O mesmo PMV multiplica previsto e realizado, isolando o erro
-                     de volume sem contaminação de desconto de faturamento.
-    """
+_SQL = """
+    WITH ativos AS (
+        SELECT sku, descricao, COALESCE(categoria,'SEM CATEGORIA') AS categoria
+        FROM dim_produtos
+        WHERE COALESCE(ativo, FALSE) = TRUE
+    ),
+    primeira_venda AS (
+        SELECT TRIM(v.sku::text) AS sku,
+               MIN(DATE_TRUNC('month', v.data_pedido))::date AS nasceu
+        FROM fato_vendas v
+        JOIN ativos a ON a.sku = TRIM(v.sku::text)
+        GROUP BY 1
+    ),
+    pmv_mes AS (
+        SELECT TRIM(v.sku::text) AS sku,
+               DATE_TRUNC('month', v.data_pedido)::date AS mes,
+               SUM(v.vl_pedido) / NULLIF(SUM(v.qt_pedido), 0) AS pmv
+        FROM fato_vendas v
+        JOIN ativos a ON a.sku = TRIM(v.sku::text)
+        GROUP BY 1, 2
+        HAVING SUM(v.qt_pedido) > 0
+    ),
+    pmv_global AS (
+        SELECT TRIM(v.sku::text) AS sku,
+               SUM(v.vl_pedido) / NULLIF(SUM(v.qt_pedido), 0) AS pmv
+        FROM fato_vendas v
+        JOIN ativos a ON a.sku = TRIM(v.sku::text)
+        GROUP BY 1
+        HAVING SUM(v.qt_pedido) > 0
+    ),
+    realizado AS (
+        SELECT TRIM(v.sku::text) AS sku,
+               DATE_TRUNC('month', v.data_pedido)::date AS mes,
+               SUM(v.{col_vol}) AS vol_real,
+               SUM(v.qt_pedido) AS qt_pedido,
+               SUM(v.qtfatura)  AS qt_fatura,
+               SUM(v.qtcorte)   AS qt_corte
+        FROM fato_vendas v
+        JOIN ativos a ON a.sku = TRIM(v.sku::text)
+        WHERE v.data_pedido >= :ini
+          AND v.data_pedido < (CAST(:fim AS date) + INTERVAL '1 month')
+        GROUP BY 1, 2
+    ),
+    plano_planilha AS (
+        SELECT h.sku, h.mes_projetado::date AS mes, SUM(h.vol_humano) AS vol_plano
+        FROM fato_previsao_humana h
+        JOIN ativos a ON a.sku = h.sku
+        WHERE h.fonte = 'HISTORICO'
+          AND h.mes_projetado >= :ini AND h.mes_projetado <= :fim
+        GROUP BY 1, 2
+    ),
+    plano_nexus AS (
+        SELECT TRIM(i.sku::text) AS sku, i.mes_projetado::date AS mes,
+               SUM(i.vol_final) AS vol_plano
+        FROM fato_ibp_granular i
+        JOIN ativos a ON a.sku = TRIM(i.sku::text)
+        WHERE (EXTRACT(YEAR FROM i.mes_projetado)*12 + EXTRACT(MONTH FROM i.mes_projetado))
+            - (SPLIT_PART(i.ciclo_sop,'/',2)::int*12 + SPLIT_PART(i.ciclo_sop,'/',1)::int) = 2
+          AND i.mes_projetado >= '2026-06-01'
+          AND i.mes_projetado >= :ini AND i.mes_projetado <= :fim
+        GROUP BY 1, 2
+    ),
+    plano AS (
+        SELECT * FROM plano_planilha UNION ALL SELECT * FROM plano_nexus
+    ),
+    ia AS (
+        SELECT TRIM(i.sku::text) AS sku, i.mes_projetado::date AS mes,
+               SUM(i.vol_ia) AS vol_ia
+        FROM fato_ibp_granular i
+        JOIN ativos a ON a.sku = TRIM(i.sku::text)
+        WHERE (EXTRACT(YEAR FROM i.mes_projetado)*12 + EXTRACT(MONTH FROM i.mes_projetado))
+            - (SPLIT_PART(i.ciclo_sop,'/',2)::int*12 + SPLIT_PART(i.ciclo_sop,'/',1)::int) = 2
+          AND i.mes_projetado >= :ini AND i.mes_projetado <= :fim
+        GROUP BY 1, 2
+    )
+    SELECT a.sku, a.descricao, a.categoria,
+           TO_CHAR(r.mes,'YYYY-MM') AS mes,
+           EXTRACT(YEAR  FROM r.mes)::int AS ano,
+           EXTRACT(MONTH FROM r.mes)::int AS num_mes,
+           r.vol_real, r.qt_pedido, r.qt_fatura, r.qt_corte,
+           p.vol_plano, i.vol_ia,
+           COALESCE(pm.pmv, pg.pmv, 0) AS pmv
+    FROM realizado r
+    JOIN ativos a           ON a.sku = r.sku
+    JOIN primeira_venda pv  ON pv.sku = r.sku AND r.mes >= pv.nasceu
+    LEFT JOIN plano p       ON p.sku = r.sku AND p.mes = r.mes
+    LEFT JOIN ia i          ON i.sku = r.sku AND i.mes = r.mes
+    LEFT JOIN pmv_mes pm    ON pm.sku = r.sku AND pm.mes = r.mes
+    LEFT JOIN pmv_global pg ON pg.sku = r.sku
+    WHERE r.vol_real > 0
+    ORDER BY a.categoria, a.sku, r.mes
+"""
+
+
+def montar_dataset(db: Session, meses: List[str],
+                   base: str = "pedido", unidade: str = "cx") -> Dict[str, Any]:
     teto = _ultimo_mes_fechado()
     meses_validos = sorted({m for m in meses if m <= teto})
     if not meses_validos:
-        return {"erro": "Nenhum mês fechado no período selecionado."}
+        return {"erro": "Nenhum mes fechado no periodo selecionado."}
 
     ini = meses_validos[0]  + "-01"
     fim = meses_validos[-1] + "-01"
 
-    # Período espelho no ano anterior (YoY)
-    meses_yoy = []
-    for m in meses_validos:
-        d = datetime.datetime.strptime(m + "-01", "%Y-%m-%d").date()
-        meses_yoy.append((d - relativedelta(years=1)).strftime("%Y-%m"))
-    ini_yoy = min(meses_yoy) + "-01"
-    fim_yoy = max(meses_yoy) + "-01"
+    ano_fim  = int(meses_validos[-1][:4])
+    ini_hist = f"{ano_fim - 3}-01-01"
 
     col_vol = "qtfatura" if base == "faturado" else "qt_pedido"
+    sql     = text(_SQL.replace("{col_vol}", col_vol))
 
-    # ── Query central: erro por (sku, mês), com PMV do pedido ──────────────
-    sql_base = f"""
-        WITH ativos AS (
-            SELECT sku, descricao, COALESCE(categoria,'SEM CATEGORIA') AS categoria
-            FROM dim_produtos
-            WHERE COALESCE(ativo, FALSE) = TRUE
-        ),
-        primeira_venda AS (
-            SELECT TRIM(v.sku::text) AS sku,
-                   MIN(DATE_TRUNC('month', v.data_pedido))::date AS nasceu
-            FROM fato_vendas v
-            JOIN ativos a ON a.sku = TRIM(v.sku::text)
-            GROUP BY 1
-        ),
-        -- PMV do PEDIDO por SKU/mes (N1). Cobertura validada em 99,98 por cento
-        pmv_mes AS (
-            SELECT TRIM(v.sku::text) AS sku,
-                   DATE_TRUNC('month', v.data_pedido)::date AS mes,
-                   SUM(v.vl_pedido) / NULLIF(SUM(v.qt_pedido), 0) AS pmv
-            FROM fato_vendas v
-            JOIN ativos a ON a.sku = TRIM(v.sku::text)
-            GROUP BY 1, 2
-            HAVING SUM(v.qt_pedido) > 0
-        ),
-        -- PMV global do SKU (N3 — fallback)
-        pmv_global AS (
-            SELECT TRIM(v.sku::text) AS sku,
-                   SUM(v.vl_pedido) / NULLIF(SUM(v.qt_pedido), 0) AS pmv
-            FROM fato_vendas v
-            JOIN ativos a ON a.sku = TRIM(v.sku::text)
-            GROUP BY 1
-            HAVING SUM(v.qt_pedido) > 0
-        ),
-        realizado AS (
-            SELECT TRIM(v.sku::text) AS sku,
-                   DATE_TRUNC('month', v.data_pedido)::date AS mes,
-                   SUM(v.{col_vol})  AS vol_real,
-                   SUM(v.qt_pedido)  AS qt_pedido,
-                   SUM(v.qtfatura)   AS qt_fatura,
-                   SUM(v.vl_pedido)  AS vl_pedido,
-                   SUM(v.vlfatura)   AS vl_fatura
-            FROM fato_vendas v
-            JOIN ativos a ON a.sku = TRIM(v.sku::text)
-            WHERE v.data_pedido >= :ini
-              AND v.data_pedido < (CAST(:fim AS date) + INTERVAL '1 month')
-            GROUP BY 1, 2
-        ),
-        -- Meta humana: Excel até mai/26, Nexus vol_final M-2 a partir de jun/26
-        humano_hist AS (
-            SELECT h.sku, h.mes_projetado::date AS mes, SUM(h.vol_humano) AS vol_humano
-            FROM fato_previsao_humana h
-            JOIN ativos a ON a.sku = h.sku
-            WHERE h.fonte = 'HISTORICO'
-              AND h.mes_projetado >= :ini AND h.mes_projetado <= :fim
-            GROUP BY 1, 2
-        ),
-        humano_nexus AS (
-            SELECT TRIM(i.sku::text) AS sku, i.mes_projetado::date AS mes,
-                   SUM(i.vol_final) AS vol_humano
-            FROM fato_ibp_granular i
-            JOIN ativos a ON a.sku = TRIM(i.sku::text)
-            WHERE (EXTRACT(YEAR FROM i.mes_projetado)*12 + EXTRACT(MONTH FROM i.mes_projetado))
-                - (SPLIT_PART(i.ciclo_sop,'/',2)::int*12 + SPLIT_PART(i.ciclo_sop,'/',1)::int) = 2
-              AND i.mes_projetado >= '2026-06-01'
-              AND i.mes_projetado >= :ini AND i.mes_projetado <= :fim
-            GROUP BY 1, 2
-        ),
-        humano AS (
-            SELECT * FROM humano_hist UNION ALL SELECT * FROM humano_nexus
-        ),
-        ia AS (
-            SELECT TRIM(i.sku::text) AS sku, i.mes_projetado::date AS mes,
-                   SUM(i.vol_ia) AS vol_ia
-            FROM fato_ibp_granular i
-            JOIN ativos a ON a.sku = TRIM(i.sku::text)
-            WHERE (EXTRACT(YEAR FROM i.mes_projetado)*12 + EXTRACT(MONTH FROM i.mes_projetado))
-                - (SPLIT_PART(i.ciclo_sop,'/',2)::int*12 + SPLIT_PART(i.ciclo_sop,'/',1)::int) = 2
-              AND i.mes_projetado >= :ini AND i.mes_projetado <= :fim
-            GROUP BY 1, 2
-        )
-        SELECT a.sku, a.descricao, a.categoria,
-               TO_CHAR(r.mes,'YYYY-MM') AS mes,
-               r.vol_real, r.qt_pedido, r.qt_fatura, r.vl_pedido, r.vl_fatura,
-               h.vol_humano, i.vol_ia,
-               COALESCE(pm.pmv, pg.pmv, 0) AS pmv
-        FROM realizado r
-        JOIN ativos a          ON a.sku = r.sku
-        JOIN primeira_venda pv ON pv.sku = r.sku AND r.mes >= pv.nasceu
-        LEFT JOIN humano h     ON h.sku = r.sku AND h.mes = r.mes
-        LEFT JOIN ia i         ON i.sku = r.sku AND i.mes = r.mes
-        LEFT JOIN pmv_mes pm   ON pm.sku = r.sku AND pm.mes = r.mes
-        LEFT JOIN pmv_global pg ON pg.sku = r.sku
-        WHERE r.vol_real > 0
-        ORDER BY a.categoria, a.sku, r.mes
-    """
-
-    rows     = db.execute(text(sql_base), {"ini": ini,     "fim": fim}).fetchall()
-    rows_yoy = db.execute(text(sql_base), {"ini": ini_yoy, "fim": fim_yoy}).fetchall()
+    rows      = db.execute(sql, {"ini": ini,      "fim": fim}).fetchall()
+    rows_hist = db.execute(sql, {"ini": ini_hist, "fim": fim}).fetchall()
 
     def _peso(r):
-        """Fator de conversão: 1 para caixas, PMV para reais."""
         return float(r.pmv or 0) if unidade == "rs" else 1.0
 
-    def _agregar(registros, chave_fn):
-        """
-        Agrega erro por chave. O erro absoluto é computado em (sku, mês)
-        e SÓ DEPOIS somado — preserva a granularidade correta.
-        """
+    def _agregar(registros, chave_fn, filtro_mes=None):
         acc: Dict[Any, Dict[str, float]] = {}
         for r in registros:
-            if r.mes not in (meses_validos + meses_yoy):
+            if filtro_mes and r.mes not in filtro_mes:
                 continue
             k = chave_fn(r)
+            if k is None:
+                continue
             a = acc.setdefault(k, {
-                "real": 0.0, "hum": 0.0, "ia": 0.0,
-                "err_h": 0.0, "err_ia": 0.0,
-                "real_h": 0.0, "real_ia": 0.0,
-                "qt_ped": 0.0, "qt_fat": 0.0,
-                "vl_ped": 0.0, "vl_fat": 0.0,
-                "n_meses_h": 0, "n_over_h": 0, "n_under_h": 0,
+                "real": 0.0, "plano": 0.0, "ia": 0.0,
+                "err": 0.0, "err_ia": 0.0,
+                "real_p": 0.0, "real_ia": 0.0,
+                "qt_ped": 0.0, "qt_fat": 0.0, "qt_cor": 0.0,
+                "n_meses": 0, "n_over": 0, "n_under": 0,
             })
             p    = _peso(r)
             real = float(r.vol_real or 0) * p
             a["real"]   += real
             a["qt_ped"] += float(r.qt_pedido or 0)
             a["qt_fat"] += float(r.qt_fatura or 0)
-            a["vl_ped"] += float(r.vl_pedido or 0)
-            a["vl_fat"] += float(r.vl_fatura or 0)
+            a["qt_cor"] += float(r.qt_corte or 0)
 
-            if r.vol_humano is not None:
-                hum = float(r.vol_humano) * p
-                a["hum"]    += hum
-                a["err_h"]  += abs(hum - real)      # erro ABSOLUTO em (sku, mês)
-                a["real_h"] += real
-                a["n_meses_h"] += 1
+            if r.vol_plano is not None:
+                pl = float(r.vol_plano) * p
+                a["plano"]   += pl
+                a["err"]     += abs(pl - real)
+                a["real_p"]  += real
+                a["n_meses"] += 1
                 if real > 0:
-                    d = (hum - real) / real
-                    if d >  0.02: a["n_over_h"]  += 1
-                    if d < -0.02: a["n_under_h"] += 1
+                    d = (pl - real) / real
+                    if d >  0.02: a["n_over"]  += 1
+                    if d < -0.02: a["n_under"] += 1
 
             if r.vol_ia is not None:
-                ia_v = float(r.vol_ia) * p
-                a["ia"]      += ia_v
-                a["err_ia"]  += abs(ia_v - real)
+                iv = float(r.vol_ia) * p
+                a["ia"]      += iv
+                a["err_ia"]  += abs(iv - real)
                 a["real_ia"] += real
         return acc
 
     def _metricas(a: Dict[str, float]) -> Dict[str, Any]:
-        wm_h  = _sdiv(a["err_h"],  a["real_h"],  100)
-        bi_h  = _sdiv(a["hum"] - a["real_h"], a["real_h"], 100)
+        wm    = _sdiv(a["err"],    a["real_p"],  100)
+        bi    = _sdiv(a["plano"] - a["real_p"], a["real_p"], 100)
         wm_ia = _sdiv(a["err_ia"], a["real_ia"], 100)
         bi_ia = _sdiv(a["ia"] - a["real_ia"], a["real_ia"], 100)
-        fva   = round(wm_h - wm_ia, 1) if (wm_h is not None and wm_ia is not None) else None
-        # Persistência: % de meses em que o erro foi na direção do BIAS médio
-        n = a["n_meses_h"]
-        pers = None
-        if n > 0 and bi_h is not None:
-            pers = round((a["n_over_h"] if bi_h >= 0 else a["n_under_h"]) / n * 100, 0)
+        fva   = round(wm - wm_ia, 1) if (wm is not None and wm_ia is not None) else None
+        n     = a["n_meses"]
+        pers  = None
+        if n > 0 and bi is not None:
+            pers = round((a["n_over"] if bi >= 0 else a["n_under"]) / n * 100)
         return {
-            "wmape_h":  round(wm_h, 1)  if wm_h  is not None else None,
-            "bias_h":   round(bi_h, 1)  if bi_h  is not None else None,
+            "wmape":    round(wm, 1)    if wm    is not None else None,
+            "bias":     round(bi, 1)    if bi    is not None else None,
             "wmape_ia": round(wm_ia, 1) if wm_ia is not None else None,
             "bias_ia":  round(bi_ia, 1) if bi_ia is not None else None,
             "fva_pp":   fva,
             "volume":   round(a["real"]),
+            "erro_abs": round(a["err"]),
             "persistencia_pct": pers,
-            "meses": n,
+            "meses_com_plano":  n,
+            "atendimento_pct": round(_sdiv(a["qt_fat"], a["qt_ped"], 100) or 0, 1),
+            "corte_cx": round(a["qt_cor"]),
         }
 
-    def _classe(m: Dict[str, Any]) -> str:
-        b, w = m.get("bias_h"), m.get("wmape_h")
-        if b is None or w is None: return "Sem meta"
-        if w <= 20 and abs(b) <= 10: return "Saudável"
-        if b >  10: return "Superestimando"
-        if b < -10: return "Subestimando"
-        return "Errático"
+    # Portfolio no periodo
+    ag_port = _agregar(rows, lambda r: "T", meses_validos)
+    port = _metricas(ag_port["T"]) if "T" in ag_port else {}
+    port["classe"] = _classe(port.get("wmape"), port.get("bias"))
 
-    # ── Portfólio ─────────────────────────────────────────────────────────
-    port     = _metricas(_agregar(rows,     lambda r: "T")["T"]) if rows     else {}
-    port_yoy = _metricas(_agregar(rows_yoy, lambda r: "T")["T"]) if rows_yoy else {}
-    if port and port_yoy and port.get("wmape_h") is not None and port_yoy.get("wmape_h") is not None:
-        port["yoy_wmape_delta_pp"] = round(port["wmape_h"] - port_yoy["wmape_h"], 1)
-        port["yoy_wmape_h"]        = port_yoy["wmape_h"]
-        port["yoy_bias_h"]         = port_yoy.get("bias_h")
-    port["classe"] = _classe(port)
-
-    # ── Fill Rate (sempre em cx e R$, independe do toggle) ────────────────
-    agg_fill = _agregar(rows, lambda r: "T").get("T", {})
-    fr_cx = _sdiv(agg_fill.get("qt_fat", 0), agg_fill.get("qt_ped", 0), 100)
-    fr_rs = _sdiv(agg_fill.get("vl_fat", 0), agg_fill.get("vl_ped", 0), 100)
-    gap   = round(fr_rs - fr_cx, 1) if (fr_cx is not None and fr_rs is not None) else None
-    valor_desconto = None
-    if gap is not None and agg_fill.get("vl_ped"):
-        # Valor perdido além do corte de volume
-        esperado_rs = agg_fill["vl_ped"] * (fr_cx / 100)
-        valor_desconto = round(esperado_rs - agg_fill.get("vl_fat", 0))
-
-    fill = {
-        "fill_rate_cx_pct": round(fr_cx, 1) if fr_cx is not None else None,
-        "fill_rate_rs_pct": round(fr_rs, 1) if fr_rs is not None else None,
-        "gap_desconto_pp":  gap,
-        "valor_desconto_rs": valor_desconto,
-        "corte_cx":  round(agg_fill.get("qt_ped", 0) - agg_fill.get("qt_fat", 0)),
-        "pedido_cx": round(agg_fill.get("qt_ped", 0)),
-    }
-
-    # ── Série mensal (fill rate + wmape) ──────────────────────────────────
-    serie = []
-    agg_mes     = _agregar(rows, lambda r: r.mes)
-    agg_mes_yoy = _agregar(rows_yoy, lambda r: r.mes)
-    for m in meses_validos:
-        a = agg_mes.get(m)
-        if not a: continue
-        mt = _metricas(a)
-        serie.append({
-            "mes": m,
-            "wmape_h":  mt["wmape_h"],
-            "bias_h":   mt["bias_h"],
-            "wmape_ia": mt["wmape_ia"],
-            "fill_cx":  round(_sdiv(a["qt_fat"], a["qt_ped"], 100) or 0, 1),
-            "fill_rs":  round(_sdiv(a["vl_fat"], a["vl_ped"], 100) or 0, 1),
-            "volume":   mt["volume"],
+    # Evolucao ano a ano: mesmos meses do calendario em cada ano
+    meses_num = sorted({int(m[5:7]) for m in meses_validos})
+    ag_ano = _agregar(rows_hist,
+                      lambda r: r.ano if r.num_mes in meses_num else None)
+    evolucao_anual = []
+    anos_ord = sorted(ag_ano.keys())
+    for idx, ano in enumerate(anos_ord):
+        mt = _metricas(ag_ano[ano])
+        delta = None
+        if idx > 0:
+            ant = _metricas(ag_ano[anos_ord[idx-1]])
+            if mt.get("wmape") is not None and ant.get("wmape") is not None:
+                delta = round(mt["wmape"] - ant["wmape"], 1)
+        if ano < 2026:
+            origem = "Planilha"
+        elif ano == 2026:
+            origem = "Planilha (jan-mai) + Nexus (jun+)"
+        else:
+            origem = "Nexus"
+        evolucao_anual.append({
+            "ano": ano, **mt,
+            "delta_wmape_pp": delta,
+            "classe": _classe(mt.get("wmape"), mt.get("bias")),
+            "origem_plano": origem,
         })
 
-    # ── Categorias (todas — são 13) ───────────────────────────────────────
-    agg_cat     = _agregar(rows,     lambda r: r.categoria)
-    agg_cat_yoy = _agregar(rows_yoy, lambda r: r.categoria)
+    # Serie mensal
+    ag_mes = _agregar(rows, lambda r: r.mes, meses_validos)
+    serie = []
+    for m in meses_validos:
+        if m not in ag_mes:
+            continue
+        mt = _metricas(ag_mes[m])
+        serie.append({"mes": m, "wmape": mt["wmape"], "bias": mt["bias"],
+                      "wmape_ia": mt["wmape_ia"], "volume": mt["volume"],
+                      "atendimento": mt["atendimento_pct"], "corte": mt["corte_cx"]})
+
+    # Categorias com comparativo do ano anterior
+    ano_atual  = ano_fim
+    ag_cat     = _agregar(rows, lambda r: r.categoria, meses_validos)
+    ag_cat_ant = _agregar(
+        rows_hist,
+        lambda r: r.categoria
+        if (r.ano == ano_atual - 1 and r.num_mes in meses_num) else None)
     categorias = []
-    for cat, a in agg_cat.items():
-        mt = _metricas(a)
-        prev = agg_cat_yoy.get(cat)
-        mt_prev = _metricas(prev) if prev else {}
+    for cat, a in ag_cat.items():
+        mt  = _metricas(a)
+        ant = _metricas(ag_cat_ant[cat]) if cat in ag_cat_ant else {}
         delta = None
-        if mt.get("wmape_h") is not None and mt_prev.get("wmape_h") is not None:
-            delta = round(mt["wmape_h"] - mt_prev["wmape_h"], 1)
+        if mt.get("wmape") is not None and ant.get("wmape") is not None:
+            delta = round(mt["wmape"] - ant["wmape"], 1)
         categorias.append({
             "categoria": cat, **mt,
-            "classe": _classe(mt),
-            "yoy_wmape_h": mt_prev.get("wmape_h"),
-            "yoy_delta_pp": delta,
-            "fill_cx": round(_sdiv(a["qt_fat"], a["qt_ped"], 100) or 0, 1),
-            "fill_rs": round(_sdiv(a["vl_fat"], a["vl_ped"], 100) or 0, 1),
+            "classe": _classe(mt.get("wmape"), mt.get("bias")),
+            "wmape_ano_anterior": ant.get("wmape"),
+            "delta_wmape_pp": delta,
         })
-    categorias.sort(key=lambda c: c.get("volume") or 0, reverse=True)
+    categorias.sort(key=lambda c: c.get("erro_abs") or 0, reverse=True)
 
-    # ── SKUs (todos — tabela completa vai para o PDF) ─────────────────────
-    agg_sku     = _agregar(rows,     lambda r: (r.sku, r.descricao, r.categoria))
-    agg_sku_yoy = _agregar(rows_yoy, lambda r: (r.sku, r.descricao, r.categoria))
+    # SKUs
+    ag_sku     = _agregar(rows, lambda r: (r.sku, r.descricao, r.categoria), meses_validos)
+    ag_sku_ant = _agregar(
+        rows_hist,
+        lambda r: (r.sku, r.descricao, r.categoria)
+        if (r.ano == ano_atual - 1 and r.num_mes in meses_num) else None)
     skus = []
-    for (sk, desc, cat), a in agg_sku.items():
-        mt = _metricas(a)
-        prev = agg_sku_yoy.get((sk, desc, cat))
-        mt_prev = _metricas(prev) if prev else {}
+    for k, a in ag_sku.items():
+        sk, desc, cat = k
+        mt  = _metricas(a)
+        ant = _metricas(ag_sku_ant[k]) if k in ag_sku_ant else {}
         delta = None
-        if mt.get("wmape_h") is not None and mt_prev.get("wmape_h") is not None:
-            delta = round(mt["wmape_h"] - mt_prev["wmape_h"], 1)
+        if mt.get("wmape") is not None and ant.get("wmape") is not None:
+            delta = round(mt["wmape"] - ant["wmape"], 1)
         skus.append({
             "sku": sk, "descricao": desc, "categoria": cat, **mt,
-            "classe": _classe(mt),
-            "yoy_wmape_h": mt_prev.get("wmape_h"),
-            "yoy_delta_pp": delta,
-            "fill_cx": round(_sdiv(a["qt_fat"], a["qt_ped"], 100) or 0, 1),
-            "erro_abs": round(a["err_h"]),
+            "classe": _classe(mt.get("wmape"), mt.get("bias")),
+            "wmape_ano_anterior": ant.get("wmape"),
+            "delta_wmape_pp": delta,
         })
     skus.sort(key=lambda s: s.get("erro_abs") or 0, reverse=True)
 
-    # ── Rankings (só top 10 vão para o contexto do modelo) ────────────────
-    com_yoy = [s for s in skus if s.get("yoy_delta_pp") is not None]
+    com_delta = [s for s in skus if s.get("delta_wmape_pp") is not None]
     rankings = {
-        "melhor_evolucao": sorted(com_yoy, key=lambda s: s["yoy_delta_pp"])[:10],
-        "pior_evolucao":   sorted(com_yoy, key=lambda s: -s["yoy_delta_pp"])[:10],
-        "maior_erro_abs":  skus[:10],
-        "pior_fill":       sorted([s for s in skus if s.get("fill_cx")],
-                                  key=lambda s: s["fill_cx"])[:10],
+        "maior_erro_absoluto": skus[:10],
+        "melhor_evolucao":     sorted(com_delta, key=lambda s: s["delta_wmape_pp"])[:10],
+        "pior_evolucao":       sorted(com_delta, key=lambda s: -s["delta_wmape_pp"])[:10],
+        "vies_sistematico":    sorted(
+            [s for s in skus if (s.get("persistencia_pct") or 0) >= 70],
+            key=lambda s: -(s.get("erro_abs") or 0))[:10],
     }
 
-    # ── Escopo declarado ──────────────────────────────────────────────────
     esc = db.execute(text("""
-        SELECT COUNT(*) FILTER (WHERE COALESCE(ativo,FALSE))          AS ativos,
-               COUNT(*)                                              AS total
-        FROM dim_produtos
+        SELECT COUNT(*) FILTER (WHERE COALESCE(ativo,FALSE)) AS ativos,
+               COUNT(*) AS total FROM dim_produtos
     """)).fetchone()
 
     return {
@@ -389,167 +352,183 @@ def montar_dataset(
             "skus_ativos": esc.ativos,
             "skus_total_base": esc.total,
             "meses_analisados": meses_validos,
-            "meses_comparativo_yoy": meses_yoy,
-            "base_volume": "qt_pedido (demanda do cliente)" if base == "pedido"
-                           else "qtfatura (entregue pela empresa)",
-            "unidade": "caixas" if unidade == "cx" else "R$ (PMV do pedido)",
-            "fonte_meta_humana": "fato_previsao_humana (Excel) jan/23–mai/26 | fato_ibp_granular.vol_final (M-2) jun/26+",
-            "fonte_ia": "fato_ibp_granular.vol_ia (M-2), disponível apenas a partir de jun/26",
-            "filtro_cliente": "nenhum — todos os clientes considerados",
-            "granularidade_erro": "erro absoluto computado em (sku, mês) e só depois agregado",
+            "meses_do_calendario_comparados": meses_num,
+            "anos_na_comparacao": anos_ord,
+            "base_volume": ("demanda pedida pelo cliente" if base == "pedido"
+                            else "volume efetivamente entregue"),
+            "unidade": "caixas" if unidade == "cx" else "R$ (preco medio do pedido)",
+            "origem_do_plano": ("planejamento anterior ao Nexus (planilha) ate mai/26; "
+                                "planejamento no Nexus, plano congelado M-2, a partir de jun/26"),
+            "origem_da_previsao_estatistica": ("modelo do Nexus, M-2, disponivel a partir de jun/26"),
+            "granularidade_erro": "erro absoluto computado em (SKU, mes) e agregado depois",
         },
-        "portfolio":  port,
-        "fill_rate":  fill,
-        "serie":      serie,
-        "categorias": categorias,
-        "skus":       skus,          # completo — vai para o PDF
-        "rankings":   rankings,      # top 10 — vai para o modelo
+        "portfolio":      port,
+        "evolucao_anual": evolucao_anual,
+        "serie":          serie,
+        "categorias":     categorias,
+        "skus":           skus,
+        "rankings":       rankings,
     }
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# CONTEXTO ENXUTO PARA O MODELO (economia de tokens)
-# ═══════════════════════════════════════════════════════════════════════════
 def _contexto_modelo(ds: Dict[str, Any]) -> str:
-    """Reduz o dataset ao mínimo necessário — não envia os 114 SKUs."""
-    compacto = {
-        "escopo":     ds["escopo"],
-        "portfolio":  ds["portfolio"],
-        "fill_rate":  ds["fill_rate"],
-        "serie":      ds["serie"],
-        "categorias": ds["categorias"],
-        "rankings": {
-            k: [{"sku": s["sku"], "desc": s["descricao"][:40], "cat": s["categoria"],
-                 "wmape": s.get("wmape_h"), "bias": s.get("bias_h"),
-                 "yoy_delta": s.get("yoy_delta_pp"), "fill": s.get("fill_cx"),
-                 "vol": s.get("volume"), "classe": s.get("classe"),
-                 "persist": s.get("persistencia_pct")}
-                for s in v]
-            for k, v in ds["rankings"].items()
-        },
-        "totais": {
-            "skus_analisados": len(ds["skus"]),
-            "categorias_analisadas": len(ds["categorias"]),
-        },
-    }
-    return json.dumps(compacto, ensure_ascii=False, separators=(",", ":"))
+    def _s(lst):
+        return [{"sku": s["sku"], "desc": s["descricao"][:38], "cat": s["categoria"],
+                 "wmape": s.get("wmape"), "bias": s.get("bias"),
+                 "delta": s.get("delta_wmape_pp"),
+                 "wmape_ant": s.get("wmape_ano_anterior"),
+                 "vol": s.get("volume"), "erro_abs": s.get("erro_abs"),
+                 "persist": s.get("persistencia_pct"), "atend": s.get("atendimento_pct"), "corte": s.get("corte_cx"),
+                 "classe": s.get("classe")} for s in lst]
+    return json.dumps({
+        "escopo":         ds["escopo"],
+        "portfolio":      ds["portfolio"],
+        "evolucao_anual": ds["evolucao_anual"],
+        "serie_mensal":   ds["serie"],
+        "categorias":     ds["categorias"],
+        "rankings":       {k: _s(v) for k, v in ds["rankings"].items()},
+        "total_skus":     len(ds["skus"]),
+    }, ensure_ascii=False, separators=(",", ":"))
 
 
 METODOLOGIA = """
-FÓRMULAS (granularidade base do erro = (sku, mês); agregação só depois):
+DEFINICOES
 
-WMAPE = Σ|previsto_sku,mês − real_sku,mês| / Σ real_sku,mês × 100
-  • Ponderado por volume: SKUs grandes dominam o indicador.
-  • WMAPE de categoria NÃO é média dos WMAPEs dos SKUs.
-  • O erro absoluto impede cancelamento entre SKUs/meses de sinais opostos.
+WMAPE = soma dos erros absolutos dividida pela soma do realizado, x100.
+  Computado em (SKU, mes) e agregado depois. O WMAPE de uma categoria nao e a
+  media dos WMAPEs dos SKUs: itens de maior volume pesam proporcionalmente mais.
 
-BIAS = (Σ previsto − Σ real) / Σ real × 100
-  • Usa erro COM SINAL: cancelamento é intencional (mede viés direcional).
-  • BIAS baixo em categoria pode esconder SKUs individuais muito enviesados.
+BIAS = (soma do previsto menos soma do realizado) dividido pela soma do
+  realizado, x100. Positivo indica plano acima do realizado; negativo, abaixo.
+  Erros de sinais opostos se cancelam, portanto um BIAS baixo numa categoria
+  pode conviver com SKUs individualmente muito enviesados.
 
-FVA = WMAPE_Humano − WMAPE_IA
-  • Positivo: o humano piorou em relação à IA. Negativo: o humano agregou valor.
+PERSISTENCIA = percentual de meses em que o erro ocorreu na mesma direcao do
+  BIAS medio. Igual ou acima de 70% caracteriza vies estrutural, nao aleatorio.
 
-FILL RATE cx = Σ qtfatura / Σ qt_pedido × 100  → capacidade de entrega
-FILL RATE R$ = Σ vlfatura / Σ vl_pedido × 100  → valor efetivamente faturado
-GAP DE DESCONTO (pp) = Fill R$ − Fill cx
-  • Negativo indica desconto no faturamento ALÉM do corte de volume
-    (política comercial/financeira, não falha de previsão).
+FVA = WMAPE do plano menos WMAPE da previsao estatistica.
+  Positivo: o ajuste manual aumentou o erro. Negativo: reduziu.
 
-PERSISTÊNCIA = % de meses em que o erro ocorreu na mesma direção do BIAS médio.
-  ≥70% indica padrão sistemático, não acaso.
+DIAGNOSTICO WMAPE x BIAS
+  WMAPE alto e BIAS proximo de zero: erro disperso. Volatilidade ou
+    sazonalidade nao capturada pelo metodo de previsao.
+  WMAPE alto e BIAS positivo: superestimacao. Excesso de cobertura e
+    capital imobilizado em estoque.
+  WMAPE alto e BIAS negativo: subestimacao. Risco de ruptura e perda de venda.
+  WMAPE baixo e BIAS proximo de zero: previsao sob controle.
 
-CRUZAMENTO WMAPE × BIAS (diagnóstico acionável):
-  WMAPE alto + BIAS ~0    → Errático: volatilidade/sazonalidade não capturada.
-  WMAPE alto + BIAS alto+ → Superestimação sistemática: gera estoque parado.
-  WMAPE alto + BIAS alto− → Subestimação sistemática: gera ruptura/perda de venda.
-  WMAPE baixo + BIAS ~0   → Previsão saudável.
-
-CRUZAMENTO CORTE × BIAS (separa culpa):
-  Corte alto + BIAS negativo → falha de PLANEJAMENTO (subestimou, não produziu).
-  Corte alto + BIAS ~0/+     → falha de OPERAÇÃO (previu certo, não entregou).
+ATENDIMENTO = volume entregue dividido pelo volume pedido. Mede execucao, nao
+  acuracia. Serve para separar erro de previsao de restricao de suprimento:
+  atendimento baixo com BIAS negativo indica plano subdimensionado; atendimento
+  baixo com BIAS neutro indica restricao operacional.
 """
 
-SYSTEM_PROMPT = f"""Você é analista sênior de S&OP da Linea Alimentos, escrevendo para C-Level e gerentes.
+SYSTEM_PROMPT = f"""Voce e especialista em S&OP e escreve o relatorio de acuracia de demanda
+para a diretoria e a gerencia da Linea Alimentos.
 
-O público é CÉTICO e técnico. Regras absolutas:
-• Todo número citado deve vir do JSON fornecido. NUNCA invente ou estime.
-• Se um dado não existe no JSON, diga explicitamente que não está disponível.
-• Declare limitações de amostra (ex.: IA só tem dados a partir de jun/26).
-• Seja acionável: cada achado deve ter uma implicação operacional clara.
-• Português do Brasil, tom executivo, direto, sem jargão vazio.
+REGRAS DE REDACAO - obrigatorias:
+- Tom tecnico, factual e imparcial. Descreva o que os dados mostram.
+- PROIBIDO usar adjetivos de julgamento como desastre, pessimo, absurdo,
+  destroi, catastrofico, alarmante. Use linguagem descritiva: "erro de X por
+  cento", "vies de X pontos percentuais", "acima do patamar do portfolio",
+  "abaixo do observado no ano anterior".
+- Nunca cite nomes de tabelas ou campos de banco de dados. Refira-se a
+  "planejamento anterior ao Nexus" e "planejamento no Nexus".
+- Todo numero citado deve existir no JSON. Nao estime nem invente.
+- Declare limitacoes de amostra quando existirem.
+- Nao trate de descontos comerciais nem de politica de preco. O escopo e
+  exclusivamente a acuracia da previsao de demanda.
 
 {METODOLOGIA}
 
-Estrutura do relatório (one-page, ~450 palavras):
-1. ESCOPO E METODOLOGIA (3-4 linhas: o que foi medido, com que dados, quais limites)
-2. PANORAMA (WMAPE/BIAS do portfólio, evolução YoY, classificação)
-3. ONDE ERRAMOS MAIS (categorias e SKUs críticos, com o cruzamento WMAPE×BIAS)
-4. EVOLUÇÃO (o que melhorou e o que piorou vs ano anterior)
-5. ENTREGA E VALOR (fill rate, gap de desconto, cruzamento corte×BIAS)
-6. AÇÕES RECOMENDADAS (3-5 itens objetivos, cada um ligado a um dado citado)
+ESTRUTURA (600 a 750 palavras, prosa densa, sem tabelas, sem markdown):
 
-Não use tabelas markdown — o PDF já traz as tabelas. Use prosa densa e parágrafos curtos."""
+1. ESCOPO E METODO
+   Periodo medido, quantidade de SKUs, origem do plano em cada janela temporal
+   e limitacao de amostra da previsao estatistica.
+
+2. LEITURA DO PERIODO
+   WMAPE e BIAS do portfolio, classificacao pelo cruzamento e persistencia.
+
+3. EVOLUCAO ANO A ANO
+   Compare cada ano isoladamente, usando os mesmos meses do calendario.
+   Informe se o erro aumentou, diminuiu ou permaneceu estavel, e quanto.
+   Trate a mudanca de origem do plano como contexto, nao como causa provada.
+
+4. CONCENTRACAO DO ERRO
+   Onde o erro absoluto se concentra, em categorias e SKUs. Distinga o item que
+   erra muito em percentual do item que erra muito em volume: sao problemas de
+   naturezas diferentes e exigem acoes diferentes.
+
+5. PADROES SISTEMATICOS
+   Itens com persistencia igual ou acima de 70%. Explique a implicacao
+   operacional de cada direcao de vies.
+
+6. PREVISAO ESTATISTICA COMPARADA AO PLANO
+   Onde o FVA indica que o ajuste manual aumentou ou reduziu o erro, sempre
+   com a ressalva sobre o tamanho da amostra disponivel.
+
+7. RECOMENDACOES
+   De quatro a seis itens objetivos. Cada um cita o dado que o sustenta e
+   indica a area responsavel: planejamento de demanda, comercial ou suprimentos.
+
+8. CONSIDERACAO FINAL
+   Um paragrafo unico de fechamento. Responda diretamente: o processo esta
+   melhorando ou piorando, onde esta o maior ganho possivel no proximo ciclo,
+   e qual o principal risco se nada for alterado. Sem repetir numeros ja
+   citados; sintetize a leitura.
+
+IMPORTANTE: complete todas as 8 secoes. Nao interrompa o texto no meio de uma
+frase. Se precisar economizar espaco, encurte as secoes 4 e 5, mas sempre
+entregue a secao 8 completa.
+
+Escreva em portugues do Brasil, paragrafos curtos."""
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# CHAMADA À API ANTHROPIC
-# ═══════════════════════════════════════════════════════════════════════════
 def _chamar_claude(system: str, mensagens: List[Dict[str, str]],
-                   max_tokens: int = 2000) -> str:
+                   max_tokens: int = 8000) -> str:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY não configurada. Adicione a chave no .env do servidor."
-        )
+        raise RuntimeError("ANTHROPIC_API_KEY nao configurada no ambiente do servidor.")
     try:
         import anthropic
     except ImportError:
-        raise RuntimeError(
-            "Biblioteca 'anthropic' não instalada. Adicione 'anthropic' ao requirements.txt."
-        )
+        raise RuntimeError("Biblioteca 'anthropic' nao instalada.")
 
     client = anthropic.Anthropic(api_key=api_key)
-
-    # Modelo configuravel via env; fallback para variantes conhecidas.
     modelos = [
         os.environ.get("ANTHROPIC_MODEL", "").strip(),
         "claude-sonnet-4-5",
         "claude-sonnet-4-20250514",
         "claude-3-5-sonnet-latest",
     ]
-    erro_final = None
+    erro = None
     for modelo in [m for m in modelos if m]:
         try:
             resp = client.messages.create(
-                model=modelo,
-                max_tokens=max_tokens,
-                system=system,
-                messages=mensagens,
+                model=modelo, max_tokens=max_tokens,
+                system=system, messages=mensagens,
             )
             return "".join(b.text for b in resp.content
                            if getattr(b, "type", "") == "text")
         except Exception as e:
-            erro_final = e
-            # Se nao for erro de modelo inexistente, aborta o fallback
+            erro = e
             if "model" not in str(e).lower():
                 raise
-    raise RuntimeError(f"Nenhum modelo disponivel. Ultimo erro: {erro_final}")
+    raise RuntimeError(f"Nenhum modelo disponivel. Ultimo erro: {erro}")
 
 
 def gerar_relatorio(db: Session, meses: List[str],
                     base: str = "pedido", unidade: str = "cx") -> Dict[str, Any]:
-    """Gera o relatório analítico completo."""
     ds = montar_dataset(db, meses, base, unidade)
     if ds.get("erro"):
         return ds
-
-    ctx = _contexto_modelo(ds)
     texto = _chamar_claude(
         SYSTEM_PROMPT,
         [{"role": "user",
-          "content": f"Analise os dados de KPI S&OP abaixo e produza o relatório executivo.\n\n{ctx}"}],
-        max_tokens=2000,
+          "content": "Produza o relatorio de acuracia S&OP a partir destes dados:\n\n"
+                     + _contexto_modelo(ds)}],
+        max_tokens=8000,
     )
     return {"relatorio": texto, "dataset": ds,
             "gerado_em": datetime.datetime.utcnow().isoformat()}
@@ -558,115 +537,112 @@ def gerar_relatorio(db: Session, meses: List[str],
 def responder_pergunta(db: Session, pergunta: str, meses: List[str],
                        base: str = "pedido", unidade: str = "cx",
                        historico: Optional[List[Dict[str, str]]] = None) -> str:
-    """Chat: responde perguntas ad-hoc sobre os indicadores."""
-    ds  = montar_dataset(db, meses, base, unidade)
+    ds = montar_dataset(db, meses, base, unidade)
     if ds.get("erro"):
         return ds["erro"]
 
-    # No chat o modelo pode consultar SKUs específicos — envia lista resumida
-    skus_resumo = [
-        {"sku": s["sku"], "desc": s["descricao"][:45], "cat": s["categoria"],
-         "wmape": s.get("wmape_h"), "bias": s.get("bias_h"),
-         "vol": s.get("volume"), "fill": s.get("fill_cx"),
-         "yoy": s.get("yoy_delta_pp"), "classe": s.get("classe")}
-        for s in ds["skus"]
-    ]
+    skus = [{"sku": s["sku"], "desc": s["descricao"][:45], "cat": s["categoria"],
+             "wmape": s.get("wmape"), "bias": s.get("bias"),
+             "erro_abs": s.get("erro_abs"), "vol": s.get("volume"),
+             "delta": s.get("delta_wmape_pp"), "wmape_ant": s.get("wmape_ano_anterior"),
+             "persist": s.get("persistencia_pct"), "atend": s.get("atendimento_pct"), "corte": s.get("corte_cx"),
+             "classe": s.get("classe")} for s in ds["skus"]]
+
     ctx = json.dumps({
-        "escopo":     ds["escopo"],
-        "portfolio":  ds["portfolio"],
-        "fill_rate":  ds["fill_rate"],
-        "serie":      ds["serie"],
-        "categorias": ds["categorias"],
-        "skus":       skus_resumo,
+        "escopo": ds["escopo"], "portfolio": ds["portfolio"],
+        "evolucao_anual": ds["evolucao_anual"], "serie_mensal": ds["serie"],
+        "categorias": ds["categorias"], "skus": skus,
     }, ensure_ascii=False, separators=(",", ":"))
 
-    system = f"""Você é analista de S&OP da Linea Alimentos respondendo perguntas sobre os KPIs.
+    system = f"""Voce e especialista em S&OP da Linea Alimentos respondendo perguntas
+sobre a acuracia da previsao de demanda.
 
 {METODOLOGIA}
 
 Regras:
-• Responda APENAS com base no JSON fornecido. Nunca invente números.
-• Se o dado não estiver no JSON, diga que não está disponível no recorte atual.
-• Seja conciso e direto. Cite os números exatos que fundamentam a resposta.
-• Português do Brasil.
+- Responda apenas com base no JSON. Nunca invente numeros.
+- Se o dado nao estiver no recorte, diga isso claramente.
+- Tom tecnico e imparcial, sem adjetivos de julgamento.
+- Nao cite nomes de tabelas de banco. Use "planejamento anterior ao Nexus"
+  e "planejamento no Nexus".
+- Nao trate de descontos comerciais.
+- Seja conciso e cite os numeros que fundamentam a resposta.
+- Sempre conclua o raciocinio. Nunca interrompa a resposta no meio de
+  uma frase ou de uma lista. Se a resposta for longa, priorize os itens
+  mais relevantes e feche com uma sintese.
 
-Dados do recorte atual:
+Dados do recorte:
 {ctx}"""
 
     msgs = list(historico or [])
     msgs.append({"role": "user", "content": pergunta})
-    return _chamar_claude(system, msgs, max_tokens=1200)
+    return _chamar_claude(system, msgs, max_tokens=3000)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# GERAÇÃO DO PDF
-# ═══════════════════════════════════════════════════════════════════════════
 def gerar_pdf(relatorio: str, ds: Dict[str, Any]) -> bytes:
-    """
-    PDF: página 1 = análise do agente + KPIs principais.
-         páginas seguintes = tabela completa de categorias e dos 114 SKUs.
-    """
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import cm
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.enums import TA_JUSTIFY
-    from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
-    )
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                    Table, TableStyle, PageBreak)
+    from reportlab.graphics.shapes import Drawing
+    from reportlab.graphics.charts.barcharts import VerticalBarChart
+    from reportlab.graphics.charts.linecharts import HorizontalLineChart
+
+    AZ  = colors.HexColor("#2563eb")
+    ROX = colors.HexColor("#7c3aed")
+    CZ  = colors.HexColor("#94a3b8")
+    ESC = colors.HexColor("#1e293b")
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4,
-                            leftMargin=1.6*cm, rightMargin=1.6*cm,
-                            topMargin=1.4*cm, bottomMargin=1.4*cm)
+                            leftMargin=1.5*cm, rightMargin=1.5*cm,
+                            topMargin=1.3*cm, bottomMargin=1.3*cm)
     ss = getSampleStyleSheet()
-    st_titulo = ParagraphStyle("t", parent=ss["Title"], fontSize=16,
-                               textColor=colors.HexColor("#0f172a"), spaceAfter=2)
-    st_sub    = ParagraphStyle("s", parent=ss["Normal"], fontSize=8.5,
-                               textColor=colors.HexColor("#64748b"), spaceAfter=10)
-    st_h2     = ParagraphStyle("h", parent=ss["Heading2"], fontSize=10.5,
-                               textColor=colors.HexColor("#2563eb"),
-                               spaceBefore=9, spaceAfter=4)
-    st_txt    = ParagraphStyle("p", parent=ss["Normal"], fontSize=8.6,
-                               leading=12.4, alignment=TA_JUSTIFY, spaceAfter=5)
-    st_nota   = ParagraphStyle("n", parent=ss["Normal"], fontSize=6.8,
-                               textColor=colors.HexColor("#94a3b8"), leading=9)
+    S_TIT = ParagraphStyle("t", parent=ss["Title"], fontSize=15.5,
+                           textColor=colors.HexColor("#0f172a"), spaceAfter=2)
+    S_SUB = ParagraphStyle("s", parent=ss["Normal"], fontSize=8,
+                           textColor=colors.HexColor("#64748b"), spaceAfter=9)
+    S_H2  = ParagraphStyle("h", parent=ss["Heading2"], fontSize=9.6,
+                           textColor=AZ, spaceBefore=8, spaceAfter=4)
+    S_TXT = ParagraphStyle("p", parent=ss["Normal"], fontSize=8.3,
+                           leading=11.8, alignment=TA_JUSTIFY, spaceAfter=4.5)
+    S_NOT = ParagraphStyle("n", parent=ss["Normal"], fontSize=6.5,
+                           textColor=CZ, leading=8.8)
+
+    def f(v, suf="%"):
+        return "-" if v is None else f"{v:.1f}{suf}".replace(".", ",")
+
+    def n(v):
+        return "-" if v is None else f"{int(v):,}".replace(",", ".")
 
     esc  = ds["escopo"]
     port = ds["portfolio"]
-    fill = ds["fill_rate"]
-    hoje = _hoje_br().strftime("%d/%m/%Y")
-    per  = f"{esc['meses_analisados'][0]} a {esc['meses_analisados'][-1]}" \
-           if esc["meses_analisados"] else "—"
+    per  = (f"{esc['meses_analisados'][0]} a {esc['meses_analisados'][-1]}"
+            if esc["meses_analisados"] else "-")
 
     el = []
-    el.append(Paragraph("Relatório de Acurácia S&OP", st_titulo))
+    el.append(Paragraph("Relatorio de Acuracia de Demanda | S&amp;OP", S_TIT))
     el.append(Paragraph(
-        f"Linea Alimentos · Período {per} · Base: {esc['base_volume']} · "
-        f"Unidade: {esc['unidade']} · Emitido em {hoje}", st_sub))
+        f"Linea Alimentos &middot; Periodo {per} &middot; Base: {esc['base_volume']} "
+        f"&middot; Unidade: {esc['unidade']} &middot; "
+        f"Emitido em {_hoje_br().strftime('%d/%m/%Y')}", S_SUB))
 
-    # ── Faixa de KPIs ─────────────────────────────────────────────────────
-    def _f(v, suf="%"):
-        return "—" if v is None else f"{v:.1f}{suf}".replace(".", ",")
-
-    kpis = [[
-        "WMAPE Humano", "BIAS Humano", "WMAPE IA", "FVA",
-        "Fill Rate cx", "Fill Rate R$", "Gap desconto",
-    ], [
-        _f(port.get("wmape_h")), _f(port.get("bias_h")),
-        _f(port.get("wmape_ia")), _f(port.get("fva_pp"), " pp"),
-        _f(fill.get("fill_rate_cx_pct")), _f(fill.get("fill_rate_rs_pct")),
-        _f(fill.get("gap_desconto_pp"), " pp"),
-    ]]
-    t = Table(kpis, colWidths=[2.5*cm]*7)
+    kpi = [["WMAPE", "BIAS", "Persistencia", "Volume", "Erro absoluto", "Diagnostico"],
+           [f(port.get("wmape")), f(port.get("bias")),
+            f(port.get("persistencia_pct"), "%"),
+            n(port.get("volume")), n(port.get("erro_abs")),
+            port.get("classe", "-")]]
+    t = Table(kpi, colWidths=[3*cm]*6)
     t.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#f1f5f9")),
         ("TEXTCOLOR",  (0,0), (-1,0), colors.HexColor("#64748b")),
         ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE",   (0,0), (-1,0), 6.5),
+        ("FONTSIZE",   (0,0), (-1,0), 6.4),
         ("FONTNAME",   (0,1), (-1,1), "Helvetica-Bold"),
-        ("FONTSIZE",   (0,1), (-1,1), 12),
-        ("TEXTCOLOR",  (0,1), (-1,1), colors.HexColor("#0f172a")),
+        ("FONTSIZE",   (0,1), (-1,1), 11),
         ("ALIGN",      (0,0), (-1,-1), "CENTER"),
         ("VALIGN",     (0,0), (-1,-1), "MIDDLE"),
         ("TOPPADDING", (0,0), (-1,-1), 5),
@@ -676,97 +652,157 @@ def gerar_pdf(relatorio: str, ds: Dict[str, Any]) -> bytes:
     el.append(t)
     el.append(Spacer(1, 9))
 
-    # ── Análise do agente ─────────────────────────────────────────────────
-    for bloco in relatorio.split("\n"):
-        b = bloco.strip()
+    # Grafico 1 - WMAPE por ano
+    ev = [e for e in ds["evolucao_anual"] if e.get("wmape") is not None]
+    if len(ev) >= 2:
+        el.append(Paragraph("WMAPE por ano, mesmos meses do calendario", S_H2))
+        d = Drawing(455, 122)
+        bc = VerticalBarChart()
+        bc.x, bc.y, bc.width, bc.height = 32, 20, 400, 86
+        bc.data = [[e["wmape"] for e in ev]]
+        bc.categoryAxis.categoryNames = [str(e["ano"]) for e in ev]
+        bc.categoryAxis.labels.fontSize = 8
+        bc.valueAxis.valueMin = 0
+        bc.valueAxis.valueMax = max(e["wmape"] for e in ev) * 1.3
+        bc.valueAxis.labels.fontSize = 7
+        bc.bars[0].fillColor = AZ
+        bc.barWidth = 11
+        bc.groupSpacing = 26
+        bc.barLabels.fontSize = 7.5
+        bc.barLabelFormat = "%0.1f"
+        bc.barLabels.dy = 5
+        d.add(bc)
+        el.append(d)
+
+    # Grafico 2 - WMAPE mes a mes
+    sm = [s for s in ds["serie"] if s.get("wmape") is not None]
+    if len(sm) >= 3:
+        el.append(Paragraph("WMAPE mes a mes no periodo", S_H2))
+        d2 = Drawing(455, 112)
+        lc = HorizontalLineChart()
+        lc.x, lc.y, lc.width, lc.height = 32, 22, 400, 76
+        lc.data = [[s["wmape"] for s in sm]]
+        lc.categoryAxis.categoryNames = [s["mes"][5:7] + "/" + s["mes"][2:4] for s in sm]
+        lc.categoryAxis.labels.fontSize = 6.2
+        lc.categoryAxis.labels.angle = 45
+        lc.categoryAxis.labels.dy = -7
+        lc.valueAxis.valueMin = 0
+        lc.valueAxis.labels.fontSize = 7
+        lc.lines[0].strokeColor = ROX
+        lc.lines[0].strokeWidth = 1.8
+        d2.add(lc)
+        el.append(d2)
+
+    el.append(Spacer(1, 5))
+
+    for linha in relatorio.split("\n"):
+        b = linha.strip().replace("**", "").replace("&", "&amp;")
         if not b:
             continue
-        b = b.replace("**", "")
-        # Títulos de seção numerados ou em caixa alta curta
-        if (b[:2].rstrip(".").isdigit() and len(b) < 70) or (b.isupper() and len(b) < 70):
-            el.append(Paragraph(b.lstrip("#").strip(), st_h2))
-        else:
-            el.append(Paragraph(b.lstrip("#-• ").strip(), st_txt))
+        eh_tit = ((b[:2].rstrip(".").isdigit() and len(b) < 75)
+                  or (b.isupper() and 3 < len(b) < 75))
+        el.append(Paragraph(b.lstrip("#-* ").strip(), S_H2 if eh_tit else S_TXT))
 
-    el.append(Spacer(1, 6))
+    el.append(Spacer(1, 5))
     el.append(Paragraph(
-        f"<b>Escopo auditável:</b> {esc['skus_ativos']} SKUs ativos de {esc['skus_total_base']} na base · "
-        f"{esc['filtro_cliente']} · {esc['granularidade_erro']}.<br/>"
-        f"<b>Meta humana:</b> {esc['fonte_meta_humana']}.<br/>"
-        f"<b>IA:</b> {esc['fonte_ia']}.<br/>"
-        f"<b>Comparativo YoY:</b> {', '.join(esc['meses_comparativo_yoy'])}.", st_nota))
+        f"<b>Escopo:</b> {esc['skus_ativos']} SKUs ativos de {esc['skus_total_base']} "
+        f"cadastrados &middot; {esc['granularidade_erro']}.<br/>"
+        f"<b>Origem do plano:</b> {esc['origem_do_plano']}.<br/>"
+        f"<b>Previsao estatistica:</b> {esc['origem_da_previsao_estatistica']}.<br/>"
+        f"<b>Comparacao ano a ano:</b> meses "
+        f"{', '.join(f'{m:02d}' for m in esc['meses_do_calendario_comparados'])} de cada ano.",
+        S_NOT))
 
-    # ── Anexo I — Categorias ──────────────────────────────────────────────
+    # Anexo I - evolucao anual
     el.append(PageBreak())
-    el.append(Paragraph("Anexo I — Todas as categorias", st_h2))
-    cab = ["Categoria","Vol.","WMAPE","BIAS","WMAPE IA","FVA","YoY Δpp","Fill cx","Classe"]
-    dados = [cab]
-    for c in ds["categorias"]:
-        dados.append([
-            c["categoria"][:22],
-            f"{c.get('volume') or 0:,}".replace(",", "."),
-            _f(c.get("wmape_h")), _f(c.get("bias_h")),
-            _f(c.get("wmape_ia")), _f(c.get("fva_pp"), ""),
-            _f(c.get("yoy_delta_pp"), ""), _f(c.get("fill_cx")),
-            c.get("classe","—"),
-        ])
-    tc = Table(dados, colWidths=[3.4*cm,2*cm,1.7*cm,1.7*cm,1.8*cm,1.4*cm,1.6*cm,1.6*cm,2.2*cm],
-               repeatRows=1)
-    tc.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#1e293b")),
+    el.append(Paragraph("Anexo I | Evolucao ano a ano do portfolio", S_H2))
+    cab = ["Ano","Volume","WMAPE","Delta vs ano ant.","BIAS","Persist.",
+           "Erro absoluto","Diagnostico","Origem do plano"]
+    dados = [cab] + [[
+        str(e["ano"]), n(e.get("volume")), f(e.get("wmape")),
+        f(e.get("delta_wmape_pp"), " pp"), f(e.get("bias")),
+        f(e.get("persistencia_pct"), "%"), n(e.get("erro_abs")),
+        e.get("classe","-"), e.get("origem_plano","-"),
+    ] for e in ds["evolucao_anual"]]
+    ta = Table(dados, colWidths=[1.2*cm,2*cm,1.5*cm,2.1*cm,1.4*cm,1.4*cm,
+                                 2*cm,2.2*cm,4.1*cm], repeatRows=1)
+    ta.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), ESC),
         ("TEXTCOLOR",  (0,0), (-1,0), colors.white),
         ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE",   (0,0), (-1,-1), 6.6),
-        ("ALIGN",      (1,0), (-1,-1), "RIGHT"),
-        ("ALIGN",      (0,0), (0,-1),  "LEFT"),
+        ("FONTSIZE",   (0,0), (-1,-1), 6.3),
+        ("ALIGN",      (1,0), (6,-1), "RIGHT"),
         ("GRID",       (0,0), (-1,-1), 0.3, colors.HexColor("#e2e8f0")),
         ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#f8fafc")]),
-        ("TOPPADDING", (0,0), (-1,-1), 3),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+        ("TOPPADDING", (0,0), (-1,-1), 3), ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+    ]))
+    el.append(ta)
+
+    # Anexo II - categorias
+    el.append(Spacer(1, 11))
+    el.append(Paragraph("Anexo II | Categorias, ordenadas por erro absoluto", S_H2))
+    cab2 = ["Categoria","Volume","Erro abs.","WMAPE","Ano ant.","Delta pp",
+            "BIAS","Persist.","WMAPE IA","FVA","Atend.","Diagnostico"]
+    dados2 = [cab2] + [[
+        c["categoria"][:19], n(c.get("volume")), n(c.get("erro_abs")),
+        f(c.get("wmape")), f(c.get("wmape_ano_anterior")),
+        f(c.get("delta_wmape_pp"), ""), f(c.get("bias")),
+        f(c.get("persistencia_pct"), "%"), f(c.get("wmape_ia")),
+        f(c.get("fva_pp"), ""), f(c.get("atendimento_pct")), c.get("classe","-"),
+    ] for c in ds["categorias"]]
+    tc = Table(dados2, colWidths=[2.5*cm,1.7*cm,1.6*cm,1.35*cm,1.35*cm,1.25*cm,
+                                  1.25*cm,1.3*cm,1.4*cm,1.1*cm,1.25*cm,2.1*cm],
+               repeatRows=1)
+    tc.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), ESC),
+        ("TEXTCOLOR",  (0,0), (-1,0), colors.white),
+        ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE",   (0,0), (-1,-1), 5.8),
+        ("ALIGN",      (1,0), (-2,-1), "RIGHT"),
+        ("GRID",       (0,0), (-1,-1), 0.3, colors.HexColor("#e2e8f0")),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#f8fafc")]),
+        ("TOPPADDING", (0,0), (-1,-1), 2.5), ("BOTTOMPADDING", (0,0), (-1,-1), 2.5),
     ]))
     el.append(tc)
 
-    # ── Anexo II — SKUs ───────────────────────────────────────────────────
+    # Anexo III - SKUs
     el.append(PageBreak())
     el.append(Paragraph(
-        f"Anexo II — Todos os {len(ds['skus'])} SKUs (ordenado por erro absoluto)", st_h2))
-    cab2 = ["SKU","Descrição","Categoria","Vol.","WMAPE","BIAS","YoY Δpp","Fill cx","Persist.","Classe"]
-    dados2 = [cab2]
-    for s in ds["skus"]:
-        dados2.append([
-            s["sku"],
-            (s["descricao"] or "")[:30],
-            (s["categoria"] or "")[:14],
-            f"{s.get('volume') or 0:,}".replace(",", "."),
-            _f(s.get("wmape_h")), _f(s.get("bias_h")),
-            _f(s.get("yoy_delta_pp"), ""), _f(s.get("fill_cx")),
-            _f(s.get("persistencia_pct"), ""),
-            s.get("classe","—")[:13],
-        ])
-    ts = Table(dados2,
-               colWidths=[1.7*cm,4.6*cm,2.1*cm,1.5*cm,1.4*cm,1.4*cm,1.3*cm,1.3*cm,1.2*cm,1.9*cm],
+        f"Anexo III | {len(ds['skus'])} SKUs, ordenados por erro absoluto", S_H2))
+    cab3 = ["SKU","Descricao","Categoria","Volume","Erro abs.","WMAPE",
+            "Ano ant.","Delta pp","BIAS","Persist.","Atend.","Diagnostico"]
+    dados3 = [cab3] + [[
+        s["sku"], (s["descricao"] or "")[:25], (s["categoria"] or "")[:13],
+        n(s.get("volume")), n(s.get("erro_abs")), f(s.get("wmape")),
+        f(s.get("wmape_ano_anterior")), f(s.get("delta_wmape_pp"), ""),
+        f(s.get("bias")), f(s.get("persistencia_pct"), "%"),
+        f(s.get("atendimento_pct")), s.get("classe","-")[:14],
+    ] for s in ds["skus"]]
+    ts = Table(dados3, colWidths=[1.5*cm,3.4*cm,1.85*cm,1.5*cm,1.4*cm,1.3*cm,
+                                  1.3*cm,1.2*cm,1.2*cm,1.2*cm,1.2*cm,1.75*cm],
                repeatRows=1)
     ts.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#1e293b")),
+        ("BACKGROUND", (0,0), (-1,0), ESC),
         ("TEXTCOLOR",  (0,0), (-1,0), colors.white),
         ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE",   (0,0), (-1,-1), 5.7),
-        ("ALIGN",      (3,0), (-1,-1), "RIGHT"),
-        ("ALIGN",      (0,0), (2,-1),  "LEFT"),
+        ("FONTSIZE",   (0,0), (-1,-1), 5.3),
+        ("ALIGN",      (3,0), (-2,-1), "RIGHT"),
         ("GRID",       (0,0), (-1,-1), 0.25, colors.HexColor("#e2e8f0")),
         ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#f8fafc")]),
-        ("TOPPADDING", (0,0), (-1,-1), 2),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+        ("TOPPADDING", (0,0), (-1,-1), 1.8), ("BOTTOMPADDING", (0,0), (-1,-1), 1.8),
     ]))
     el.append(ts)
 
-    el.append(Spacer(1, 8))
+    el.append(Spacer(1, 7))
     el.append(Paragraph(
-        "Fórmulas: WMAPE = Σ|previsto−real|/Σreal · BIAS = (Σprevisto−Σreal)/Σreal · "
-        "FVA = WMAPE_Humano − WMAPE_IA · Fill Rate cx = Σqtfatura/Σqt_pedido · "
-        "Gap desconto = Fill R$ − Fill cx. "
-        "Erro absoluto sempre computado em (sku, mês) antes de agregar. "
-        "Fonte: fato_vendas, fato_ibp_granular, fato_previsao_humana, dim_produtos.", st_nota))
+        "WMAPE = soma dos erros absolutos / soma do realizado &middot; "
+        "BIAS = (soma do previsto - soma do realizado) / soma do realizado &middot; "
+        "Persistencia = percentual de meses com erro na direcao do BIAS medio &middot; "
+        "FVA = WMAPE do plano - WMAPE da previsao estatistica &middot; "
+        "Atendimento = volume entregue / volume pedido. "
+        "Erro absoluto computado em (SKU, mes) antes de qualquer agregacao. "
+        "Comparacao ano a ano restrita aos mesmos meses do calendario em cada ano.",
+        S_NOT))
 
     doc.build(el)
     buf.seek(0)

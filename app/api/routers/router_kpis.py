@@ -454,14 +454,16 @@ async def diagnostico(
 async def fill_rate(
     meses:     List[str] = Query(...),
     categoria: Optional[str] = None,
-    nivel:     str = Query("evolucao"),  # evolucao | categoria | sku
+    sku:       Optional[str] = None,
+    unidade:   str = Query("cx"),          # cx | rs
+    nivel:     str = Query("evolucao"),    # evolucao | categoria | sku
     db: Session = Depends(get_db),
     _: dict = Depends(get_current_user),
 ):
     """
-    Fill Rate = SUM(qtfatura) / SUM(qt_pedido) × 100
-    Mede o percentual do volume pedido que foi efetivamente faturado.
-    Disponível em três granularidades: evolução mensal, por categoria e por SKU.
+    Atendimento = volume entregue / volume pedido.
+    Corte = volume pedido nao entregue, medido diretamente em qtcorte/vlcorte.
+    unidade='cx' usa qt_pedido/qtfatura/qtcorte; 'rs' usa vl_pedido/vlfatura/vlcorte.
     """
     try:
         teto = _ultimo_mes_fechado()
@@ -472,130 +474,93 @@ async def fill_rate(
         ini = meses_validos[0]  + "-01"
         fim = meses_validos[-1] + "-01"
 
-        filtro_cat = "AND p.categoria = :cat" if categoria else ""
-        params: dict = {}
+        if unidade == "rs":
+            c_ped, c_fat, c_cor = "vl_pedido", "vlfatura", "vlcorte"
+        else:
+            c_ped, c_fat, c_cor = "qt_pedido", "qtfatura", "qtcorte"
+
+        filtros, params = [], {"ini": ini, "fim": fim, "meses": meses_validos}
         if categoria:
-            params["cat"] = categoria
-        params["ini"] = ini
-        params["fim"] = fim
+            filtros.append("AND p.categoria = :cat"); params["cat"] = categoria
+        if sku:
+            filtros.append("AND TRIM(v.sku::text) = :sku"); params["sku"] = sku
+        w = " ".join(filtros)
+
+        sel = f"""SUM(v.{c_ped}) AS pedido,
+                  SUM(v.{c_fat}) AS entregue,
+                  SUM(v.{c_cor}) AS corte"""
+
+        base_from = f"""
+            FROM fato_vendas v
+            JOIN dim_produtos p ON p.sku = TRIM(v.sku::text)
+            WHERE COALESCE(p.ativo, FALSE) = TRUE
+              AND v.data_pedido >= :ini
+              AND v.data_pedido < (CAST(:fim AS date) + INTERVAL '1 month')
+              AND TO_CHAR(DATE_TRUNC('month', v.data_pedido),'YYYY-MM') = ANY(:meses)
+              {w}
+        """
+
+        def _mont(pedido, entregue, corte):
+            pedido, entregue, corte = float(pedido or 0), float(entregue or 0), float(corte or 0)
+            at = round(entregue / pedido * 100, 1) if pedido > 0 else None
+            return pedido, entregue, corte, at
+
+        def _classe(at):
+            if at is None:  return "Sem dado"
+            if at >= 95:    return "Adequado"
+            if at >= 85:    return "Atencao"
+            return "Restricao"
 
         if nivel == "evolucao":
             rows = db.execute(text(f"""
-                SELECT TO_CHAR(DATE_TRUNC('month', v.data_pedido), 'YYYY-MM') AS mes,
-                       SUM(v.qt_pedido) AS pedido,
-                       SUM(v.qtfatura)  AS faturado,
-                       SUM(v.qtcorte)   AS cortado
-                FROM fato_vendas v
-                JOIN dim_produtos p ON p.sku = TRIM(v.sku::text)
-                WHERE COALESCE(p.ativo, FALSE) = TRUE
-                  AND v.data_pedido >= :ini
-                  AND v.data_pedido < (CAST(:fim AS date) + INTERVAL '1 month')
-                  {filtro_cat}
-                GROUP BY 1
-                ORDER BY 1
+                SELECT TO_CHAR(DATE_TRUNC('month', v.data_pedido),'YYYY-MM') AS mes, {sel}
+                {base_from}
+                GROUP BY 1 ORDER BY 1
             """), params).fetchall()
-
-            serie = []
+            serie, tp, te, tc = [], 0.0, 0.0, 0.0
             for r in rows:
-                if r.mes not in meses_validos:
-                    continue
-                pedido   = float(r.pedido   or 0)
-                faturado = float(r.faturado or 0)
-                cortado  = float(r.cortado  or 0)
-                fr = round(faturado / pedido * 100, 1) if pedido > 0 else None
-                serie.append({
-                    "mes":        r.mes,
-                    "pedido":     round(pedido),
-                    "faturado":   round(faturado),
-                    "cortado":    round(cortado),
-                    "fill_rate":  fr,
-                })
-
-            total_ped = sum(s["pedido"]   for s in serie)
-            total_fat = sum(s["faturado"] for s in serie)
-            total_cor = sum(s["cortado"]  for s in serie)
-            resumo = {
-                "pedido":    total_ped,
-                "faturado":  total_fat,
-                "cortado":   total_cor,
-                "fill_rate": round(total_fat / total_ped * 100, 1) if total_ped > 0 else None,
-            }
+                pe, en, co, at = _mont(r.pedido, r.entregue, r.corte)
+                tp += pe; te += en; tc += co
+                serie.append({"mes": r.mes, "pedido": round(pe), "entregue": round(en),
+                              "corte": round(co), "atendimento": at})
+            resumo = {"pedido": round(tp), "entregue": round(te), "corte": round(tc),
+                      "atendimento": round(te / tp * 100, 1) if tp > 0 else None,
+                      "unidade": unidade}
             return {"serie": serie, "resumo": resumo}
 
-        elif nivel == "categoria":
+        if nivel == "categoria":
             rows = db.execute(text(f"""
-                SELECT COALESCE(p.categoria, 'SEM CATEGORIA') AS categoria,
-                       SUM(v.qt_pedido) AS pedido,
-                       SUM(v.qtfatura)  AS faturado,
-                       SUM(v.qtcorte)   AS cortado
-                FROM fato_vendas v
-                JOIN dim_produtos p ON p.sku = TRIM(v.sku::text)
-                WHERE COALESCE(p.ativo, FALSE) = TRUE
-                  AND v.data_pedido >= :ini
-                  AND v.data_pedido < (CAST(:fim AS date) + INTERVAL '1 month')
-                  AND TO_CHAR(DATE_TRUNC('month', v.data_pedido), 'YYYY-MM') = ANY(:meses)
-                  {filtro_cat}
-                GROUP BY 1
-                ORDER BY SUM(v.qtcorte) DESC
-            """), {**params, "meses": meses_validos}).fetchall()
-
-            itens = []
-            for r in rows:
-                pedido   = float(r.pedido   or 0)
-                faturado = float(r.faturado or 0)
-                cortado  = float(r.cortado  or 0)
-                fr = round(faturado / pedido * 100, 1) if pedido > 0 else None
-                itens.append({
-                    "categoria":  r.categoria,
-                    "pedido":     round(pedido),
-                    "faturado":   round(faturado),
-                    "cortado":    round(cortado),
-                    "fill_rate":  fr,
-                    "classe":     "Crítico" if fr and fr < 85 else "Atenção" if fr and fr < 95 else "OK",
-                })
-            return {"itens": itens}
-
-        else:  # sku
+                SELECT COALESCE(p.categoria,'SEM CATEGORIA') AS chave, {sel}
+                {base_from}
+                GROUP BY 1 ORDER BY 4 DESC
+            """), params).fetchall()
+        else:
             rows = db.execute(text(f"""
-                SELECT TRIM(v.sku::text)    AS sku,
-                       p.descricao,
-                       COALESCE(p.categoria,'SEM CATEGORIA') AS categoria,
-                       SUM(v.qt_pedido) AS pedido,
-                       SUM(v.qtfatura)  AS faturado,
-                       SUM(v.qtcorte)   AS cortado
-                FROM fato_vendas v
-                JOIN dim_produtos p ON p.sku = TRIM(v.sku::text)
-                WHERE COALESCE(p.ativo, FALSE) = TRUE
-                  AND v.data_pedido >= :ini
-                  AND v.data_pedido < (CAST(:fim AS date) + INTERVAL '1 month')
-                  AND TO_CHAR(DATE_TRUNC('month', v.data_pedido), 'YYYY-MM') = ANY(:meses)
-                  {filtro_cat}
+                SELECT TRIM(v.sku::text) AS chave, p.descricao,
+                       COALESCE(p.categoria,'SEM CATEGORIA') AS categoria, {sel}
+                {base_from}
                 GROUP BY 1, 2, 3
-                HAVING SUM(v.qtcorte) > 0
-                ORDER BY SUM(v.qtcorte) DESC
-                LIMIT 100
-            """), {**params, "meses": meses_validos}).fetchall()
+                HAVING SUM(v.{c_cor}) > 0
+                ORDER BY 5 DESC
+                LIMIT 150
+            """), params).fetchall()
 
-            itens = []
-            for r in rows:
-                pedido   = float(r.pedido   or 0)
-                faturado = float(r.faturado or 0)
-                cortado  = float(r.cortado  or 0)
-                fr = round(faturado / pedido * 100, 1) if pedido > 0 else None
-                itens.append({
-                    "sku":       r.sku,
-                    "descricao": r.descricao,
-                    "categoria": r.categoria,
-                    "pedido":    round(pedido),
-                    "faturado":  round(faturado),
-                    "cortado":   round(cortado),
-                    "fill_rate": fr,
-                    "classe":    "Crítico" if fr and fr < 85 else "Atenção" if fr and fr < 95 else "OK",
-                })
-            return {"itens": itens}
+        itens = []
+        for r in rows:
+            pe, en, co, at = _mont(r.pedido, r.entregue, r.corte)
+            it = {"pedido": round(pe), "entregue": round(en), "corte": round(co),
+                  "atendimento": at, "classe": _classe(at)}
+            if nivel == "categoria":
+                it["categoria"] = r.chave
+            else:
+                it["sku"] = r.chave
+                it["descricao"] = r.descricao
+                it["categoria"] = r.categoria
+            itens.append(it)
+        return {"itens": itens, "unidade": unidade}
 
     except Exception as e:
-        raise HTTPException(500, f"Erro no fill rate: {e}")
+        raise HTTPException(500, f"Erro no atendimento: {e}")
 async def alertas(limite: int = Query(20), db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
     try:
         teto = _ultimo_mes_fechado()

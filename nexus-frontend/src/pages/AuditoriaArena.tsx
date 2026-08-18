@@ -501,12 +501,24 @@ export default function AuditoriaArena() {
 
           {/* Toggle Pedido / Faturado */}
           {abaKpi !== 'agente' && (
-            <div style={{ marginLeft:'auto', display:'flex', alignItems:'center', gap:8, paddingBottom:6 }}>
+            <div style={{ marginLeft:'auto', display:'flex', alignItems:'center', gap:10, paddingBottom:6 }}>
+              {/* Unidade */}
+              <div style={{ display:'flex', background:'#f1f5f9', borderRadius:8, padding:2 }}>
+                {([['cx','Caixas'], ['rs','Reais']] as const).map(([id, label]) => (
+                  <button key={id} onClick={() => setUnidade(id)}
+                    style={{ padding:'5px 12px', fontSize:11, fontWeight:800, border:'none', borderRadius:6,
+                      cursor:'pointer', background: unidade===id ? '#fff' : 'transparent',
+                      color: unidade===id ? '#2563eb' : '#64748b',
+                      boxShadow: unidade===id ? '0 1px 3px rgba(0,0,0,.08)' : 'none' }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
               <span style={{ fontSize:10, fontWeight:800, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8' }}>
-                Comparar meta com
+                Base
               </span>
               <div style={{ display:'flex', background:'#f1f5f9', borderRadius:8, padding:2 }}>
-                {([['pedido','Vendido'], ['faturado','Faturado']] as const).map(([id, label]) => (
+                {([['pedido','Vendido'], ['faturado','Entregue']] as const).map(([id, label]) => (
                   <button key={id} onClick={() => setBaseCalc(id)}
                     style={{ padding:'5px 14px', fontSize:11, fontWeight:800, border:'none', borderRadius:6,
                       cursor:'pointer', transition:'all .15s',
@@ -664,11 +676,11 @@ export default function AuditoriaArena() {
             {fillRate?.resumo && (
               <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:12, marginBottom:16 }}>
                 {[
-                  { label:'Pedido total', val: (fillRate.resumo.pedido||0).toLocaleString('pt-BR') + ' cx', cor:'#0f172a' },
-                  { label:'Faturado',     val: (fillRate.resumo.faturado||0).toLocaleString('pt-BR') + ' cx', cor:'#059669' },
-                  { label:'Corte',        val: (fillRate.resumo.cortado||0).toLocaleString('pt-BR') + ' cx', cor:'#e11d48' },
-                  { label:'Fill Rate',    val: fillRate.resumo.fill_rate != null ? `${fillRate.resumo.fill_rate.toFixed(1).replace('.',',')}%` : '—',
-                    cor: fillRate.resumo.fill_rate >= 95 ? '#059669' : fillRate.resumo.fill_rate >= 85 ? '#d97706' : '#e11d48' },
+                  { label:'Pedido', val: (fillRate.resumo.pedido||0).toLocaleString('pt-BR') + (unidade==='rs'?'':' cx'), cor:'#0f172a' },
+                  { label:'Entregue', val: (fillRate.resumo.entregue||0).toLocaleString('pt-BR') + (unidade==='rs'?'':' cx'), cor:'#059669' },
+                  { label:'Corte', val: (fillRate.resumo.corte||0).toLocaleString('pt-BR') + (unidade==='rs'?'':' cx'), cor:'#e11d48' },
+                  { label:'Atendimento',    val: fillRate.resumo.atendimento != null ? `${fillRate.resumo.atendimento.toFixed(1).replace('.',',')}%` : '—',
+                    cor: (fillRate.resumo.atendimento ?? 0) >= 95 ? '#059669' : (fillRate.resumo.atendimento ?? 0) >= 85 ? '#d97706' : '#e11d48' },
                 ].map(c => (
                   <div key={c.label} style={{ background:'#fff', borderRadius:12, border:'1px solid #f1f5f9', padding:'16px 20px' }}>
                     <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8', marginBottom:6 }}>{c.label}</div>
@@ -681,7 +693,7 @@ export default function AuditoriaArena() {
             {/* Gráfico evolução mensal */}
             {(fillRate?.serie || []).length > 0 && (
               <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', padding:'20px', marginBottom:16 }}>
-                <div style={{ fontSize:13, fontWeight:800, color:'#0f172a', marginBottom:16 }}>Evolução mensal do Fill Rate</div>
+                <div style={{ fontSize:13, fontWeight:800, color:'#0f172a', marginBottom:16 }}>Atendimento mês a mês</div>
                 <ResponsiveContainer width="100%" height={220}>
                   <LineChart data={fillRate.serie} margin={{ top:10, right:20, left:0, bottom:0 }}>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
@@ -694,7 +706,7 @@ export default function AuditoriaArena() {
                     <ReferenceLine y={85} stroke="#e11d48" strokeDasharray="4 2" strokeWidth={1}>
                       <Label value="Crítico 85%" position="right" fontSize={9} fill="#e11d48" />
                     </ReferenceLine>
-                    <Line dataKey="fill_rate" name="Fill Rate" stroke="#2563eb" strokeWidth={2.5} dot={{ r:4 }}
+                    <Line dataKey="atendimento" name="Atendimento" stroke="#2563eb" strokeWidth={2.5} dot={{ r:4 }}
                       label={RoituloLinha('#2563eb', fillRate.serie.length)} />
                   </LineChart>
                 </ResponsiveContainer>
@@ -705,12 +717,12 @@ export default function AuditoriaArena() {
             {fillDiag.cat.length > 0 && (
               <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden', marginBottom:16 }}>
                 <div style={{ padding:'14px 18px', fontWeight:800, fontSize:13, borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
-                  Fill Rate por Categoria — ordenado pelo maior corte
+                  Atendimento por categoria — ordenado pelo maior corte
                 </div>
                 <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
                   <thead>
                     <tr style={{ background:'#f8fafc' }}>
-                      {['Categoria','Pedido (cx)','Faturado (cx)','Corte (cx)','Fill Rate','Status'].map(h => (
+                      {['Categoria','Pedido (cx)','Faturado (cx)','Corte (cx)','Atendimento','Status'].map(h => (
                         <th key={h} style={{ padding:'8px 14px', textAlign: h==='Categoria' ? 'left' : 'right',
                           fontSize:10, fontWeight:800, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8' }}>{h}</th>
                       ))}
@@ -718,15 +730,15 @@ export default function AuditoriaArena() {
                   </thead>
                   <tbody>
                     {fillDiag.cat.map((r: any, i: number) => {
-                      const cor = r.classe==='Crítico' ? '#e11d48' : r.classe==='Atenção' ? '#d97706' : '#059669';
+                      const cor = r.classe==='Restricao' ? '#e11d48' : r.classe==='Atencao' ? '#d97706' : '#059669';
                       return (
                         <tr key={r.categoria} style={{ background: i%2 ? '#f9fafb' : '#fff', borderBottom:'1px solid #f1f5f9' }}>
                           <td style={{ padding:'8px 14px', fontWeight:700, color:'#334155' }}>{r.categoria}</td>
                           <td style={{ padding:'8px 14px', textAlign:'right', color:'#475569' }}>{r.pedido.toLocaleString('pt-BR')}</td>
-                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#059669', fontWeight:700 }}>{r.faturado.toLocaleString('pt-BR')}</td>
-                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#e11d48', fontWeight:700 }}>{r.cortado.toLocaleString('pt-BR')}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#059669', fontWeight:700 }}>{r.entregue.toLocaleString('pt-BR')}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#e11d48', fontWeight:700 }}>{r.corte.toLocaleString('pt-BR')}</td>
                           <td style={{ padding:'8px 14px', textAlign:'right', fontWeight:900, color:cor }}>
-                            {r.fill_rate != null ? `${r.fill_rate.toFixed(1).replace('.',',')}%` : '—'}
+                            {r.atendimento != null ? `${r.atendimento.toFixed(1).replace('.',',')}%` : '—'}
                           </td>
                           <td style={{ padding:'8px 14px', textAlign:'right' }}>
                             <span style={{ fontSize:10, fontWeight:800, padding:'2px 8px', borderRadius:6, background: cor+'18', color:cor }}>{r.classe}</span>
@@ -743,12 +755,12 @@ export default function AuditoriaArena() {
             {fillDiag.sku.length > 0 && (
               <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
                 <div style={{ padding:'14px 18px', fontWeight:800, fontSize:13, borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
-                  Top SKUs com maior corte (máx. 100)
+                  SKUs com corte, ordenados pelo maior volume cortado
                 </div>
                 <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
                   <thead>
                     <tr style={{ background:'#f8fafc' }}>
-                      {['SKU','Descrição','Categoria','Pedido','Faturado','Corte','Fill Rate','Status'].map(h => (
+                      {['SKU','Descrição','Categoria','Pedido','Entregue','Corte','Atendimento','Status'].map(h => (
                         <th key={h} style={{ padding:'8px 14px', textAlign: ['SKU','Descrição','Categoria'].includes(h) ? 'left' : 'right',
                           fontSize:10, fontWeight:800, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8' }}>{h}</th>
                       ))}
@@ -756,17 +768,17 @@ export default function AuditoriaArena() {
                   </thead>
                   <tbody>
                     {fillDiag.sku.map((r: any, i: number) => {
-                      const cor = r.classe==='Crítico' ? '#e11d48' : r.classe==='Atenção' ? '#d97706' : '#059669';
+                      const cor = r.classe==='Restricao' ? '#e11d48' : r.classe==='Atencao' ? '#d97706' : '#059669';
                       return (
                         <tr key={r.sku} style={{ background: i%2 ? '#f9fafb' : '#fff', borderBottom:'1px solid #f1f5f9' }}>
                           <td style={{ padding:'8px 14px', fontWeight:700, color:'#64748b', fontSize:10 }}>{r.sku}</td>
                           <td style={{ padding:'8px 14px', fontWeight:700, color:'#334155', maxWidth:200, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r.descricao}</td>
                           <td style={{ padding:'8px 14px', color:'#64748b' }}>{r.categoria}</td>
                           <td style={{ padding:'8px 14px', textAlign:'right', color:'#475569' }}>{r.pedido.toLocaleString('pt-BR')}</td>
-                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#059669', fontWeight:700 }}>{r.faturado.toLocaleString('pt-BR')}</td>
-                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#e11d48', fontWeight:700 }}>{r.cortado.toLocaleString('pt-BR')}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#059669', fontWeight:700 }}>{r.entregue.toLocaleString('pt-BR')}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#e11d48', fontWeight:700 }}>{r.corte.toLocaleString('pt-BR')}</td>
                           <td style={{ padding:'8px 14px', textAlign:'right', fontWeight:900, color:cor }}>
-                            {r.fill_rate != null ? `${r.fill_rate.toFixed(1).replace('.',',')}%` : '—'}
+                            {r.atendimento != null ? `${r.atendimento.toFixed(1).replace('.',',')}%` : '—'}
                           </td>
                           <td style={{ padding:'8px 14px', textAlign:'right' }}>
                             <span style={{ fontSize:10, fontWeight:800, padding:'2px 8px', borderRadius:6, background: cor+'18', color:cor }}>{r.classe}</span>
@@ -780,9 +792,10 @@ export default function AuditoriaArena() {
             )}
 
             <div style={{ fontSize:10, color:'#94a3b8', lineHeight:1.8, padding:'12px 4px' }}>
-              <b>Fill Rate cx</b> = Σ qtfatura / Σ qt_pedido × 100 → capacidade de entrega. &nbsp;
-              <b>Corte</b> = volume pedido que não foi entregue (ruptura de estoque ou capacidade). &nbsp;
-              Classificação: <b style={{color:'#059669'}}>OK</b> ≥ 95% · <b style={{color:'#d97706'}}>Atenção</b> 85–95% · <b style={{color:'#e11d48'}}>Crítico</b> &lt; 85%.
+              <b>Atendimento</b> = volume entregue / volume pedido. &nbsp;
+              <b>Corte</b> = volume pedido não entregue, medido diretamente no registro de corte do pedido. &nbsp;
+              Mede execução de suprimento, não acurácia de previsão. &nbsp;
+              Situação: <b style={{color:'#059669'}}>Adequado</b> ≥ 95% · <b style={{color:'#d97706'}}>Atenção</b> 85–95% · <b style={{color:'#e11d48'}}>Restrição</b> &lt; 85%.
             </div>
           </div>
         )}
@@ -821,7 +834,7 @@ export default function AuditoriaArena() {
                 </div>
                 {/* Toggle base */}
                 <div style={{ display:'flex', background:'#f1f5f9', borderRadius:8, padding:2 }}>
-                  {([['pedido','Vendido'], ['faturado','Faturado']] as const).map(([id, label]) => (
+                  {([['pedido','Vendido'], ['faturado','Entregue']] as const).map(([id, label]) => (
                     <button key={id} onClick={() => setBaseCalc(id)}
                       style={{ padding:'5px 12px', fontSize:11, fontWeight:800, border:'none', borderRadius:6,
                         cursor:'pointer', background: baseCalc===id ? '#fff' : 'transparent',
@@ -896,8 +909,7 @@ export default function AuditoriaArena() {
             )}
 
             {/* Chat */}
-            {relatorio && (
-              <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
+            <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
                 <div style={{ padding:'14px 20px', borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
                   <div style={{ fontSize:12, fontWeight:900, color:'#0f172a' }}>Perguntas sobre os indicadores</div>
                   <div style={{ fontSize:10.5, color:'#94a3b8', marginTop:2 }}>
@@ -958,8 +970,7 @@ export default function AuditoriaArena() {
                     <Send style={{ width:13 }} /> Enviar
                   </button>
                 </div>
-              </div>
-            )}
+            </div>
 
             {!relatorio && !gerandoRel && (
               <div style={{ background:'#fff', borderRadius:14, border:'1px dashed #e2e8f0',
