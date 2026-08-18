@@ -100,7 +100,7 @@ def _carregar(db: Session, inicio: str, fim: str,
             FROM fato_vendas v
             JOIN ativos a ON a.sku = TRIM(v.sku::text)
             WHERE v.data_pedido >= :inicio
-              AND v.data_pedido < (:fim::date + INTERVAL '1 month')
+              AND v.data_pedido < (CAST(:fim AS date) + INTERVAL '1 month')
             GROUP BY 1, 2
         ),
         humano_hist AS (
@@ -489,7 +489,7 @@ async def fill_rate(
                 JOIN dim_produtos p ON p.sku = TRIM(v.sku::text)
                 WHERE COALESCE(p.ativo, FALSE) = TRUE
                   AND v.data_pedido >= :ini
-                  AND v.data_pedido < (:fim::date + INTERVAL '1 month')
+                  AND v.data_pedido < (CAST(:fim AS date) + INTERVAL '1 month')
                   {filtro_cat}
                 GROUP BY 1
                 ORDER BY 1
@@ -532,7 +532,7 @@ async def fill_rate(
                 JOIN dim_produtos p ON p.sku = TRIM(v.sku::text)
                 WHERE COALESCE(p.ativo, FALSE) = TRUE
                   AND v.data_pedido >= :ini
-                  AND v.data_pedido < (:fim::date + INTERVAL '1 month')
+                  AND v.data_pedido < (CAST(:fim AS date) + INTERVAL '1 month')
                   AND TO_CHAR(DATE_TRUNC('month', v.data_pedido), 'YYYY-MM') = ANY(:meses)
                   {filtro_cat}
                 GROUP BY 1
@@ -567,7 +567,7 @@ async def fill_rate(
                 JOIN dim_produtos p ON p.sku = TRIM(v.sku::text)
                 WHERE COALESCE(p.ativo, FALSE) = TRUE
                   AND v.data_pedido >= :ini
-                  AND v.data_pedido < (:fim::date + INTERVAL '1 month')
+                  AND v.data_pedido < (CAST(:fim AS date) + INTERVAL '1 month')
                   AND TO_CHAR(DATE_TRUNC('month', v.data_pedido), 'YYYY-MM') = ANY(:meses)
                   {filtro_cat}
                 GROUP BY 1, 2, 3
@@ -656,7 +656,7 @@ async def fill_rate_evolucao(
             FROM fato_vendas v
             LEFT JOIN dim_produtos p ON p.sku = v.sku
             WHERE v.data_pedido >= :inicio
-              AND v.data_pedido < (:fim::date + INTERVAL '1 month')
+              AND v.data_pedido < (CAST(:fim AS date) + INTERVAL '1 month')
               AND v.qt_pedido > 0
               {w}
             GROUP BY 1
@@ -740,7 +740,7 @@ async def fill_rate_diagnostico(
             FROM fato_vendas v
             LEFT JOIN dim_produtos p ON p.sku = v.sku
             WHERE v.data_pedido >= :inicio
-              AND v.data_pedido < (:fim::date + INTERVAL '1 month')
+              AND v.data_pedido < (CAST(:fim AS date) + INTERVAL '1 month')
               AND v.qt_pedido > 0
               AND COALESCE(p.ativo, FALSE) = TRUE
               {w}
