@@ -7,8 +7,13 @@ import datetime
 import pandas as pd
 import numpy as np
 
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+import io
+
 from app.core.database import get_db
 from app.api.routers.router_auth import get_current_user
+from app.api.routers import agente_kpis
 
 router = APIRouter(prefix="/api/v1/kpis", tags=["KPIs Acurácia S&OP"])
 
@@ -57,7 +62,13 @@ def _clamp(mes: Optional[str]) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 def _carregar(db: Session, inicio: str, fim: str,
               categoria: Optional[str] = None,
-              sku: Optional[str] = None) -> pd.DataFrame:
+              sku: Optional[str] = None,
+              base: str = "pedido") -> pd.DataFrame:
+    """
+    base='pedido'   -> realizado = qt_pedido  (demanda do cliente)
+    base='faturado' -> realizado = qtfatura   (o que a empresa entregou)
+    """
+    col_real = "qtfatura" if base == "faturado" else "qt_pedido"
 
     filtros, params = ["COALESCE(p.ativo, FALSE) = TRUE"], {}
     if categoria:
@@ -65,6 +76,9 @@ def _carregar(db: Session, inicio: str, fim: str,
     if sku:
         filtros.append("p.sku = :sku");       params["sku"] = sku
     w = "AND " + " AND ".join(filtros)
+
+    params["inicio"] = inicio
+    params["fim"]    = fim
 
     sql = text(f"""
         WITH ativos AS (
@@ -82,11 +96,11 @@ def _carregar(db: Session, inicio: str, fim: str,
         real AS (
             SELECT TRIM(v.sku::text) AS sku,
                    DATE_TRUNC('month', v.data_pedido)::date AS mes,
-                   SUM(v.qt_pedido) AS vol_real
+                   SUM(v.{col_real}) AS vol_real
             FROM fato_vendas v
             JOIN ativos a ON a.sku = TRIM(v.sku::text)
-            WHERE v.data_pedido >= '{inicio}'
-              AND v.data_pedido < ('{fim}'::date + INTERVAL '1 month')
+            WHERE v.data_pedido >= :inicio
+              AND v.data_pedido < (:fim::date + INTERVAL '1 month')
             GROUP BY 1, 2
         ),
         humano_hist AS (
@@ -95,8 +109,8 @@ def _carregar(db: Session, inicio: str, fim: str,
             FROM fato_previsao_humana h
             JOIN ativos a ON a.sku = h.sku
             WHERE h.fonte = 'HISTORICO'
-              AND h.mes_projetado >= '{inicio}'
-              AND h.mes_projetado <= '{fim}'
+              AND h.mes_projetado >= :inicio
+              AND h.mes_projetado <= :fim
             GROUP BY 1, 2
         ),
         humano_nexus AS (
@@ -113,8 +127,8 @@ def _carregar(db: Session, inicio: str, fim: str,
               + SPLIT_PART(i.ciclo_sop,'/',1)::int
             ) = 2
               AND i.mes_projetado > '2026-05-01'
-              AND i.mes_projetado >= '{inicio}'
-              AND i.mes_projetado <= '{fim}'
+              AND i.mes_projetado >= :inicio
+              AND i.mes_projetado <= :fim
             GROUP BY 1, 2
         ),
         ia AS (
@@ -130,8 +144,8 @@ def _carregar(db: Session, inicio: str, fim: str,
                 SPLIT_PART(i.ciclo_sop,'/',2)::int * 12
               + SPLIT_PART(i.ciclo_sop,'/',1)::int
             ) = 2
-              AND i.mes_projetado >= '{inicio}'
-              AND i.mes_projetado <= '{fim}'
+              AND i.mes_projetado >= :inicio
+              AND i.mes_projetado <= :fim
             GROUP BY 1, 2
         ),
         humano AS (
@@ -154,7 +168,9 @@ def _carregar(db: Session, inicio: str, fim: str,
         ORDER BY a.sku, r.mes
     """)
 
-    df = pd.read_sql(sql, db.bind, params=params or None)
+    resultado = db.execute(sql, params or {})
+    colunas   = list(resultado.keys())
+    df        = pd.DataFrame(resultado.fetchall(), columns=colunas)
     if df.empty:
         return df
 
@@ -267,6 +283,7 @@ async def filtros(db: Session = Depends(get_db), _: dict = Depends(get_current_u
 @router.get("/evolucao")
 async def evolucao(
     meses:     List[str] = Query(...),
+    base:      str = Query("pedido"),  # pedido | faturado
     categoria: Optional[str] = None,
     sku:       Optional[str] = None,
     db: Session = Depends(get_db),
@@ -282,7 +299,7 @@ async def evolucao(
 
         ini_sql = meses_validos[0] + "-01"
         fim_sql = meses_validos[-1] + "-01"
-        df = _carregar(db, ini_sql, fim_sql, categoria, sku)
+        df = _carregar(db, ini_sql, fim_sql, categoria, sku, base=base)
         if df.empty:
             return {"serie": [], "resumo": {}}
         df = df[df.mes.isin(meses_validos)]
@@ -290,6 +307,8 @@ async def evolucao(
             return {"serie": [], "resumo": {}}
 
         serie = _serie_metricas(df)
+        if serie.empty or "mes" not in serie.columns:
+            return {"serie": [], "resumo": {}}
         real_t = float(df.vol_real.sum())
         resumo = {"vol_real_total": round(real_t, 0)}
 
@@ -335,6 +354,7 @@ async def evolucao(
 @router.get("/diagnostico")
 async def diagnostico(
     meses:     List[str] = Query(...),
+    base:      str = Query("pedido"),  # pedido | faturado
     categoria: Optional[str] = None,
     nivel:     str = Query("sku"),
     db: Session = Depends(get_db),
@@ -348,7 +368,7 @@ async def diagnostico(
 
         ini_sql = meses_validos[0] + "-01"
         fim_sql = meses_validos[-1] + "-01"
-        df = _carregar(db, ini_sql, fim_sql, categoria, None)
+        df = _carregar(db, ini_sql, fim_sql, categoria, None, base=base)
         if df.empty:
             return {"itens": [], "agregados": {}}
         df = df[df.mes.isin(meses_validos)]
@@ -430,7 +450,152 @@ async def diagnostico(
         raise HTTPException(500, f"Erro no diagnóstico: {e}")
 
 
-@router.get("/alertas")
+@router.get("/fill-rate")
+async def fill_rate(
+    meses:     List[str] = Query(...),
+    categoria: Optional[str] = None,
+    nivel:     str = Query("evolucao"),  # evolucao | categoria | sku
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_user),
+):
+    """
+    Fill Rate = SUM(qtfatura) / SUM(qt_pedido) × 100
+    Mede o percentual do volume pedido que foi efetivamente faturado.
+    Disponível em três granularidades: evolução mensal, por categoria e por SKU.
+    """
+    try:
+        teto = _ultimo_mes_fechado()
+        meses_validos = sorted({m for m in meses if m <= teto})
+        if not meses_validos:
+            return {"itens": [], "serie": [], "resumo": {}}
+
+        ini = meses_validos[0]  + "-01"
+        fim = meses_validos[-1] + "-01"
+
+        filtro_cat = "AND p.categoria = :cat" if categoria else ""
+        params: dict = {}
+        if categoria:
+            params["cat"] = categoria
+        params["ini"] = ini
+        params["fim"] = fim
+
+        if nivel == "evolucao":
+            rows = db.execute(text(f"""
+                SELECT TO_CHAR(DATE_TRUNC('month', v.data_pedido), 'YYYY-MM') AS mes,
+                       SUM(v.qt_pedido) AS pedido,
+                       SUM(v.qtfatura)  AS faturado,
+                       SUM(v.qtcorte)   AS cortado
+                FROM fato_vendas v
+                JOIN dim_produtos p ON p.sku = TRIM(v.sku::text)
+                WHERE COALESCE(p.ativo, FALSE) = TRUE
+                  AND v.data_pedido >= :ini
+                  AND v.data_pedido < (:fim::date + INTERVAL '1 month')
+                  {filtro_cat}
+                GROUP BY 1
+                ORDER BY 1
+            """), params).fetchall()
+
+            serie = []
+            for r in rows:
+                if r.mes not in meses_validos:
+                    continue
+                pedido   = float(r.pedido   or 0)
+                faturado = float(r.faturado or 0)
+                cortado  = float(r.cortado  or 0)
+                fr = round(faturado / pedido * 100, 1) if pedido > 0 else None
+                serie.append({
+                    "mes":        r.mes,
+                    "pedido":     round(pedido),
+                    "faturado":   round(faturado),
+                    "cortado":    round(cortado),
+                    "fill_rate":  fr,
+                })
+
+            total_ped = sum(s["pedido"]   for s in serie)
+            total_fat = sum(s["faturado"] for s in serie)
+            total_cor = sum(s["cortado"]  for s in serie)
+            resumo = {
+                "pedido":    total_ped,
+                "faturado":  total_fat,
+                "cortado":   total_cor,
+                "fill_rate": round(total_fat / total_ped * 100, 1) if total_ped > 0 else None,
+            }
+            return {"serie": serie, "resumo": resumo}
+
+        elif nivel == "categoria":
+            rows = db.execute(text(f"""
+                SELECT COALESCE(p.categoria, 'SEM CATEGORIA') AS categoria,
+                       SUM(v.qt_pedido) AS pedido,
+                       SUM(v.qtfatura)  AS faturado,
+                       SUM(v.qtcorte)   AS cortado
+                FROM fato_vendas v
+                JOIN dim_produtos p ON p.sku = TRIM(v.sku::text)
+                WHERE COALESCE(p.ativo, FALSE) = TRUE
+                  AND v.data_pedido >= :ini
+                  AND v.data_pedido < (:fim::date + INTERVAL '1 month')
+                  AND TO_CHAR(DATE_TRUNC('month', v.data_pedido), 'YYYY-MM') = ANY(:meses)
+                  {filtro_cat}
+                GROUP BY 1
+                ORDER BY SUM(v.qtcorte) DESC
+            """), {**params, "meses": meses_validos}).fetchall()
+
+            itens = []
+            for r in rows:
+                pedido   = float(r.pedido   or 0)
+                faturado = float(r.faturado or 0)
+                cortado  = float(r.cortado  or 0)
+                fr = round(faturado / pedido * 100, 1) if pedido > 0 else None
+                itens.append({
+                    "categoria":  r.categoria,
+                    "pedido":     round(pedido),
+                    "faturado":   round(faturado),
+                    "cortado":    round(cortado),
+                    "fill_rate":  fr,
+                    "classe":     "Crítico" if fr and fr < 85 else "Atenção" if fr and fr < 95 else "OK",
+                })
+            return {"itens": itens}
+
+        else:  # sku
+            rows = db.execute(text(f"""
+                SELECT TRIM(v.sku::text)    AS sku,
+                       p.descricao,
+                       COALESCE(p.categoria,'SEM CATEGORIA') AS categoria,
+                       SUM(v.qt_pedido) AS pedido,
+                       SUM(v.qtfatura)  AS faturado,
+                       SUM(v.qtcorte)   AS cortado
+                FROM fato_vendas v
+                JOIN dim_produtos p ON p.sku = TRIM(v.sku::text)
+                WHERE COALESCE(p.ativo, FALSE) = TRUE
+                  AND v.data_pedido >= :ini
+                  AND v.data_pedido < (:fim::date + INTERVAL '1 month')
+                  AND TO_CHAR(DATE_TRUNC('month', v.data_pedido), 'YYYY-MM') = ANY(:meses)
+                  {filtro_cat}
+                GROUP BY 1, 2, 3
+                HAVING SUM(v.qtcorte) > 0
+                ORDER BY SUM(v.qtcorte) DESC
+                LIMIT 100
+            """), {**params, "meses": meses_validos}).fetchall()
+
+            itens = []
+            for r in rows:
+                pedido   = float(r.pedido   or 0)
+                faturado = float(r.faturado or 0)
+                cortado  = float(r.cortado  or 0)
+                fr = round(faturado / pedido * 100, 1) if pedido > 0 else None
+                itens.append({
+                    "sku":       r.sku,
+                    "descricao": r.descricao,
+                    "categoria": r.categoria,
+                    "pedido":    round(pedido),
+                    "faturado":  round(faturado),
+                    "cortado":   round(cortado),
+                    "fill_rate": fr,
+                    "classe":    "Crítico" if fr and fr < 85 else "Atenção" if fr and fr < 95 else "OK",
+                })
+            return {"itens": itens}
+
+    except Exception as e:
+        raise HTTPException(500, f"Erro no fill rate: {e}")
 async def alertas(limite: int = Query(20), db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
     try:
         teto = _ultimo_mes_fechado()
@@ -447,3 +612,262 @@ async def alertas(limite: int = Query(20), db: Session = Depends(get_db), _: dic
         return {"alertas": criticos[:limite]}
     except Exception as e:
         raise HTTPException(500, f"Erro nos alertas: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FILL RATE
+# Fill Rate = SUM(qtfatura) / SUM(qt_pedido) × 100
+# Mede o quanto do volume pedido foi efetivamente faturado (entregue).
+# Corte = qt_pedido - qtfatura (volume não atendido por ruptura/falta)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/fill-rate/evolucao")
+async def fill_rate_evolucao(
+    meses:     List[str] = Query(...),
+    categoria: Optional[str] = None,
+    sku:       Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_user),
+):
+    """Evolução mensal do Fill Rate — série para gráfico de linha."""
+    try:
+        teto = _ultimo_mes_fechado()
+        meses_validos = sorted({m for m in meses if m <= teto})
+        if not meses_validos:
+            return {"serie": [], "resumo": {}}
+
+        filtros, params = ["1=1"], {}
+        if categoria:
+            filtros.append("p.categoria = :cat"); params["cat"] = categoria
+        if sku:
+            filtros.append("v.sku = :sku"); params["sku"] = sku
+
+        params["inicio"] = meses_validos[0] + "-01"
+        params["fim"]    = meses_validos[-1] + "-01"
+
+        w = "AND " + " AND ".join(filtros)
+
+        rows = db.execute(text(f"""
+            SELECT
+                TO_CHAR(DATE_TRUNC('month', v.data_pedido), 'YYYY-MM') AS mes,
+                SUM(v.qt_pedido) AS pedido,
+                SUM(v.qtfatura)  AS faturado,
+                SUM(GREATEST(v.qt_pedido - v.qtfatura, 0)) AS corte
+            FROM fato_vendas v
+            LEFT JOIN dim_produtos p ON p.sku = v.sku
+            WHERE v.data_pedido >= :inicio
+              AND v.data_pedido < (:fim::date + INTERVAL '1 month')
+              AND v.qt_pedido > 0
+              {w}
+            GROUP BY 1
+            ORDER BY 1
+        """), params).fetchall()
+
+        serie = []
+        for r in rows:
+            if r.mes not in meses_validos:
+                continue
+            pedido   = float(r.pedido  or 0)
+            faturado = float(r.faturado or 0)
+            corte    = float(r.corte   or 0)
+            fr = round(faturado / pedido * 100, 1) if pedido > 0 else None
+            serie.append({
+                "mes":      r.mes,
+                "pedido":   round(pedido),
+                "faturado": round(faturado),
+                "corte":    round(corte),
+                "fill_rate": fr,
+            })
+
+        # Resumo acumulado
+        tot_ped = sum(s["pedido"]   for s in serie)
+        tot_fat = sum(s["faturado"] for s in serie)
+        tot_cor = sum(s["corte"]    for s in serie)
+        fr_acum = round(tot_fat / tot_ped * 100, 1) if tot_ped > 0 else None
+
+        return {
+            "serie": serie,
+            "resumo": {
+                "fill_rate":      fr_acum,
+                "pedido_total":   round(tot_ped),
+                "faturado_total": round(tot_fat),
+                "corte_total":    round(tot_cor),
+                "corte_pct":      round((1 - tot_fat / tot_ped) * 100, 1) if tot_ped > 0 else None,
+            }
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Erro no fill rate evolução: {e}")
+
+
+@router.get("/fill-rate/diagnostico")
+async def fill_rate_diagnostico(
+    meses:     List[str] = Query(...),
+    categoria: Optional[str] = None,
+    nivel:     str = Query("sku"),
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_user),
+):
+    """Fill Rate por categoria ou SKU — tabela de diagnóstico."""
+    try:
+        teto = _ultimo_mes_fechado()
+        meses_validos = sorted({m for m in meses if m <= teto})
+        if not meses_validos:
+            return {"itens": []}
+
+        filtros, params = ["1=1"], {}
+        if categoria:
+            filtros.append("p.categoria = :cat"); params["cat"] = categoria
+
+        params["inicio"] = meses_validos[0] + "-01"
+        params["fim"]    = meses_validos[-1] + "-01"
+
+        w = "AND " + " AND ".join(filtros)
+
+        # Agrupamento dinâmico: por categoria ou por SKU
+        if nivel == "categoria":
+            group_sel = "p.categoria AS chave, p.categoria AS descricao, p.categoria AS categoria"
+            group_by  = "p.categoria"
+        else:
+            group_sel = "v.sku AS chave, COALESCE(p.descricao,'') AS descricao, COALESCE(p.categoria,'') AS categoria"
+            group_by  = "v.sku, p.descricao, p.categoria"
+
+        rows = db.execute(text(f"""
+            SELECT
+                {group_sel},
+                SUM(v.qt_pedido) AS pedido,
+                SUM(v.qtfatura)  AS faturado,
+                SUM(GREATEST(v.qt_pedido - v.qtfatura, 0)) AS corte
+            FROM fato_vendas v
+            LEFT JOIN dim_produtos p ON p.sku = v.sku
+            WHERE v.data_pedido >= :inicio
+              AND v.data_pedido < (:fim::date + INTERVAL '1 month')
+              AND v.qt_pedido > 0
+              AND COALESCE(p.ativo, FALSE) = TRUE
+              {w}
+            GROUP BY {group_by}
+            ORDER BY SUM(GREATEST(v.qt_pedido - v.qtfatura, 0)) DESC
+        """), params).fetchall()
+
+        itens = []
+        for r in rows:
+            pedido   = float(r.pedido   or 0)
+            faturado = float(r.faturado or 0)
+            corte    = float(r.corte    or 0)
+            if pedido <= 0:
+                continue
+            fr = round(faturado / pedido * 100, 1)
+            itens.append({
+                "chave":     r.chave,
+                "descricao": r.descricao,
+                "categoria": r.categoria,
+                "pedido":    round(pedido),
+                "faturado":  round(faturado),
+                "corte":     round(corte),
+                "fill_rate": fr,
+                "corte_pct": round(corte / pedido * 100, 1),
+                # Classificação por nível de fill rate
+                "classe": (
+                    "Crítico"   if fr < 85 else
+                    "Atenção"   if fr < 93 else
+                    "Adequado"  if fr < 98 else
+                    "Excelente"
+                ),
+            })
+
+        return {"itens": itens}
+    except Exception as e:
+        raise HTTPException(500, f"Erro no fill rate diagnóstico: {e}")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AGENTE DE IA — relatório analítico, chat e PDF
+# ═══════════════════════════════════════════════════════════════════════════
+def _require_lideranca(u: dict = Depends(get_current_user)):
+    """Relatório executivo: restrito a Administrador, C-Level e Gerente."""
+    if u.get("funcao") not in {"Administrador", "C-Level", "Gerente"}:
+        raise HTTPException(403, "Relatório restrito à liderança.")
+    return u
+
+
+@router.get("/agente/dataset")
+async def agente_dataset(
+    meses:   List[str] = Query(...),
+    base:    str = Query("pedido"),
+    unidade: str = Query("cx"),
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_user),
+):
+    """Dataset consolidado que fundamenta o relatório — sem chamar a IA."""
+    try:
+        return agente_kpis.montar_dataset(db, meses, base, unidade)
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao montar dataset: {e}")
+
+
+@router.get("/agente/relatorio")
+async def agente_relatorio(
+    meses:   List[str] = Query(...),
+    base:    str = Query("pedido"),
+    unidade: str = Query("cx"),
+    db: Session = Depends(get_db),
+    _: dict = Depends(_require_lideranca),
+):
+    """Gera o relatório analítico via Claude. Retorna texto + dataset."""
+    try:
+        return agente_kpis.gerar_relatorio(db, meses, base, unidade)
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao gerar relatório: {e}")
+
+
+class PerguntaAgente(BaseModel):
+    pergunta:  str
+    meses:     List[str]
+    base:      str = "pedido"
+    unidade:   str = "cx"
+    historico: Optional[List[dict]] = None
+
+
+@router.post("/agente/chat")
+async def agente_chat(
+    payload: PerguntaAgente,
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_user),
+):
+    """Chat: responde perguntas ad-hoc sobre os indicadores do recorte atual."""
+    try:
+        resposta = agente_kpis.responder_pergunta(
+            db, payload.pergunta, payload.meses,
+            payload.base, payload.unidade, payload.historico
+        )
+        return {"resposta": resposta}
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Erro no chat: {e}")
+
+
+class PdfPayload(BaseModel):
+    relatorio: str
+    meses:     List[str]
+    base:      str = "pedido"
+    unidade:   str = "cx"
+
+
+@router.post("/agente/pdf")
+async def agente_pdf(
+    payload: PdfPayload,
+    db: Session = Depends(get_db),
+    _: dict = Depends(_require_lideranca),
+):
+    """Gera o PDF one-page + anexos com a análise já produzida."""
+    try:
+        ds  = agente_kpis.montar_dataset(db, payload.meses, payload.base, payload.unidade)
+        pdf = agente_kpis.gerar_pdf(payload.relatorio, ds)
+        nome = f"relatorio_sop_{payload.meses[0]}_{payload.meses[-1]}.pdf"
+        return StreamingResponse(
+            io.BytesIO(pdf), media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{nome}"'}
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao gerar PDF: {e}")

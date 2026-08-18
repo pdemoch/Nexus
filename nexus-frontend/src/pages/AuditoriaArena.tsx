@@ -4,7 +4,8 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine, Legend, Label,
 } from 'recharts';
-import { ChevronDown, ChevronRight, Loader2, TrendingUp, TrendingDown, AlertTriangle } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, TrendingUp, TrendingDown, AlertTriangle,
+         Sparkles, FileDown, Send, RefreshCw } from 'lucide-react';
 
 // ─── Paleta ───────────────────────────────────────────────────────────────────
 const COR = { humano: '#2563eb', ia: '#10b981', over: '#e11d48', under: '#2563eb', neutro: '#94a3b8' };
@@ -357,6 +358,19 @@ export default function AuditoriaArena() {
   const [loading, setLoading]     = useState(false);
   const [erro, setErro]           = useState('');
   const [abaTabela, setAbaTabela] = useState<'wmape'|'super'|'sub'>('wmape');
+  const [abaKpi, setAbaKpi]       = useState<'acuracia'|'fillrate'|'agente'>('acuracia');
+  const [baseCalc, setBaseCalc]   = useState<'pedido'|'faturado'>('pedido');
+  const [unidade, setUnidade]     = useState<'cx'|'rs'>('cx');
+  // Agente
+  const [relatorio, setRelatorio]   = useState<string>('');
+  const [gerandoRel, setGerandoRel] = useState(false);
+  const [baixandoPdf, setBaixandoPdf] = useState(false);
+  const [erroAgente, setErroAgente] = useState('');
+  const [chat, setChat] = useState<{role:'user'|'assistant', content:string}[]>([]);
+  const [pergunta, setPergunta] = useState('');
+  const [respondendo, setRespondendo] = useState(false);
+  const [fillRate, setFillRate]    = useState<any>(null);
+  const [fillDiag, setFillDiag]    = useState<{cat: any[], sku: any[]}>({cat:[], sku:[]});
 
   useEffect(() => {
     axios.get('/api/v1/kpis/filtros').then(r => {
@@ -373,19 +387,26 @@ export default function AuditoriaArena() {
     mesesSel.forEach(m=>p.append('meses',m));
     if (categoria) p.set('categoria',categoria);
     if (sku) p.set('sku',sku);
+    p.set('base', baseCalc);
+    p.set('unidade', unidade);
     return p.toString();
-  }, [mesesSel, categoria, sku]);
+  }, [mesesSel, categoria, sku, baseCalc, unidade]);
 
   const carregar = useCallback(async () => {
     if (!mesesSel.length) { setEvolucao(null); setDiag([]); return; }
     setLoading(true); setErro('');
     try {
-      const [ev, dg] = await Promise.all([
+      const [ev, dg, fr, frCat, frSku] = await Promise.all([
         axios.get(`/api/v1/kpis/evolucao?${qs}`),
         axios.get(`/api/v1/kpis/diagnostico?${qs}&nivel=sku`),
+        axios.get(`/api/v1/kpis/fill-rate?${qs}&nivel=evolucao`),
+        axios.get(`/api/v1/kpis/fill-rate?${qs}&nivel=categoria`),
+        axios.get(`/api/v1/kpis/fill-rate?${qs}&nivel=sku`),
       ]);
       setEvolucao(ev.data);
       setDiag(dg.data?.itens || []);
+      setFillRate(fr.data);
+      setFillDiag({ cat: frCat.data?.itens || [], sku: frSku.data?.itens || [] });
     } catch(e: any) {
       setErro(e?.response?.data?.detail || 'Erro ao carregar.');
       setEvolucao(null); setDiag([]);
@@ -400,19 +421,104 @@ export default function AuditoriaArena() {
   const skusFilt = opts.skus.filter((s: any)=>!categoria||s.categoria===categoria);
   const ctx = sku?`SKU ${sku}`:categoria?`Categoria: ${categoria}`:'Portfólio completo';
 
+
+  // ─── Agente ────────────────────────────────────────────────────────────
+  const gerarRelatorio = useCallback(async () => {
+    if (!mesesSel.length) { setErroAgente('Selecione ao menos um mês.'); return; }
+    setGerandoRel(true); setErroAgente(''); setRelatorio('');
+    try {
+      const r = await axios.get(`/api/v1/kpis/agente/relatorio?${qs}`);
+      setRelatorio(r.data.relatorio || '');
+      setChat([]);
+    } catch (e: any) {
+      setErroAgente(e?.response?.data?.detail || 'Falha ao gerar o relatório.');
+    } finally { setGerandoRel(false); }
+  }, [qs, mesesSel]);
+
+  const baixarPdf = useCallback(async () => {
+    if (!relatorio) return;
+    setBaixandoPdf(true);
+    try {
+      const r = await axios.post('/api/v1/kpis/agente/pdf',
+        { relatorio, meses: mesesSel, base: baseCalc, unidade },
+        { responseType: 'blob' });
+      const url = window.URL.createObjectURL(new Blob([r.data], { type: 'application/pdf' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `relatorio_sop_${mesesSel[0]}_${mesesSel[mesesSel.length-1]}.pdf`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch {
+      setErroAgente('Falha ao gerar o PDF.');
+    } finally { setBaixandoPdf(false); }
+  }, [relatorio, mesesSel, baseCalc, unidade]);
+
+  const enviarPergunta = useCallback(async () => {
+    const p = pergunta.trim();
+    if (!p || respondendo) return;
+    setPergunta('');
+    const novoChat = [...chat, { role: 'user' as const, content: p }];
+    setChat(novoChat);
+    setRespondendo(true);
+    try {
+      const r = await axios.post('/api/v1/kpis/agente/chat', {
+        pergunta: p, meses: mesesSel, base: baseCalc, unidade,
+        historico: chat.slice(-6),
+      });
+      setChat([...novoChat, { role: 'assistant' as const, content: r.data.resposta }]);
+    } catch (e: any) {
+      setChat([...novoChat, { role: 'assistant' as const,
+        content: e?.response?.data?.detail || 'Não consegui responder agora.' }]);
+    } finally { setRespondendo(false); }
+  }, [pergunta, chat, mesesSel, baseCalc, unidade, respondendo]);
+
   const nSuper = diag.filter(i=>(i.bias_h||0)>5).length;
   const nSub   = diag.filter(i=>(i.bias_h||0)<-5).length;
 
   return (
     <div style={{ minHeight:'100vh', background:'#f8fafc', padding:'24px 28px', fontFamily:'system-ui,sans-serif' }}>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}} .spin{animation:spin 1s linear infinite}`}</style>
       <div style={{ maxWidth:1440, margin:'0 auto' }}>
 
         {/* CABEÇALHO */}
         <div style={{ marginBottom:18 }}>
-          <h1 style={{ fontSize:20, fontWeight:900, color:'#0f172a', margin:0 }}>Acurácia do S&OP</h1>
+          <h1 style={{ fontSize:20, fontWeight:900, color:'#0f172a', margin:0 }}>KPIs S&OP</h1>
           <p style={{ fontSize:12, color:'#64748b', margin:'4px 0 0' }}>
-            Previsão vs realizado em caixas · Meses fechados · {ctx}
+            Previsão vs {baseCalc === 'faturado' ? 'faturado' : 'vendido'} em caixas · Meses fechados · {ctx}
           </p>
+        </div>
+
+        {/* ABAS KPI + TOGGLE BASE */}
+        <div style={{ display:'flex', gap:4, marginBottom:16, borderBottom:'2px solid #f1f5f9', alignItems:'center' }}>
+          {([['acuracia','📊 Acurácia'], ['fillrate','📦 Fill Rate'], ['agente','✨ Relatório IA']] as const).map(([id, label]) => (
+            <button key={id} onClick={() => setAbaKpi(id)}
+              style={{ padding:'8px 20px', fontSize:13, fontWeight:800, border:'none', background:'none',
+                cursor:'pointer', borderBottom: abaKpi===id ? '2px solid #2563eb' : '2px solid transparent',
+                color: abaKpi===id ? '#2563eb' : '#94a3b8', marginBottom:-2 }}>
+              {label}
+            </button>
+          ))}
+
+          {/* Toggle Pedido / Faturado */}
+          {abaKpi !== 'agente' && (
+            <div style={{ marginLeft:'auto', display:'flex', alignItems:'center', gap:8, paddingBottom:6 }}>
+              <span style={{ fontSize:10, fontWeight:800, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8' }}>
+                Comparar meta com
+              </span>
+              <div style={{ display:'flex', background:'#f1f5f9', borderRadius:8, padding:2 }}>
+                {([['pedido','Vendido'], ['faturado','Faturado']] as const).map(([id, label]) => (
+                  <button key={id} onClick={() => setBaseCalc(id)}
+                    style={{ padding:'5px 14px', fontSize:11, fontWeight:800, border:'none', borderRadius:6,
+                      cursor:'pointer', transition:'all .15s',
+                      background: baseCalc===id ? '#fff' : 'transparent',
+                      color: baseCalc===id ? '#2563eb' : '#64748b',
+                      boxShadow: baseCalc===id ? '0 1px 3px rgba(0,0,0,.08)' : 'none' }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* FILTROS */}
@@ -443,6 +549,9 @@ export default function AuditoriaArena() {
           {loading && <Loader2 style={{ width:16, color:'#94a3b8', alignSelf:'center' }} className="animate-spin"/>}
           {erro && <span style={{ color:'#e11d48', fontSize:12, alignSelf:'center' }}>{erro}</span>}
         </div>
+
+        {/* ── ABA ACURÁCIA ── */}
+        {abaKpi === 'acuracia' && <>
 
         {/* CARDS */}
         {resumo.wmape_h != null && (
@@ -546,6 +655,335 @@ export default function AuditoriaArena() {
           <b>FVA</b> = WMAPE_IA − WMAPE_Humano (disponível somente para ciclos Nexus, M+2 congelado, a partir de jun/26). &nbsp;
           Meta humana jan/23–mai/26 via arquivo histórico · jun/26+ via vol_final do ciclo M+2 · portfólio ativo, a partir da primeira venda de cada SKU.
         </div>
+        </>}
+
+        {/* ── ABA FILL RATE ── */}
+        {abaKpi === 'fillrate' && (
+          <div>
+            {/* Cards de resumo */}
+            {fillRate?.resumo && (
+              <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:12, marginBottom:16 }}>
+                {[
+                  { label:'Pedido total', val: (fillRate.resumo.pedido||0).toLocaleString('pt-BR') + ' cx', cor:'#0f172a' },
+                  { label:'Faturado',     val: (fillRate.resumo.faturado||0).toLocaleString('pt-BR') + ' cx', cor:'#059669' },
+                  { label:'Corte',        val: (fillRate.resumo.cortado||0).toLocaleString('pt-BR') + ' cx', cor:'#e11d48' },
+                  { label:'Fill Rate',    val: fillRate.resumo.fill_rate != null ? `${fillRate.resumo.fill_rate.toFixed(1).replace('.',',')}%` : '—',
+                    cor: fillRate.resumo.fill_rate >= 95 ? '#059669' : fillRate.resumo.fill_rate >= 85 ? '#d97706' : '#e11d48' },
+                ].map(c => (
+                  <div key={c.label} style={{ background:'#fff', borderRadius:12, border:'1px solid #f1f5f9', padding:'16px 20px' }}>
+                    <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8', marginBottom:6 }}>{c.label}</div>
+                    <div style={{ fontSize:22, fontWeight:900, color:c.cor }}>{c.val}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Gráfico evolução mensal */}
+            {(fillRate?.serie || []).length > 0 && (
+              <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', padding:'20px', marginBottom:16 }}>
+                <div style={{ fontSize:13, fontWeight:800, color:'#0f172a', marginBottom:16 }}>Evolução mensal do Fill Rate</div>
+                <ResponsiveContainer width="100%" height={220}>
+                  <LineChart data={fillRate.serie} margin={{ top:10, right:20, left:0, bottom:0 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                    <XAxis dataKey="mes" tickFormatter={lMes} tick={{ fontSize:10, fontWeight:700 }} axisLine={false} tickLine={false} />
+                    <YAxis domain={[70,100]} tick={{ fontSize:10 }} axisLine={false} tickLine={false} tickFormatter={v=>`${v}%`} />
+                    <Tooltip content={<TT />} />
+                    <ReferenceLine y={95} stroke="#059669" strokeDasharray="4 2" strokeWidth={1}>
+                      <Label value="Meta 95%" position="right" fontSize={9} fill="#059669" />
+                    </ReferenceLine>
+                    <ReferenceLine y={85} stroke="#e11d48" strokeDasharray="4 2" strokeWidth={1}>
+                      <Label value="Crítico 85%" position="right" fontSize={9} fill="#e11d48" />
+                    </ReferenceLine>
+                    <Line dataKey="fill_rate" name="Fill Rate" stroke="#2563eb" strokeWidth={2.5} dot={{ r:4 }}
+                      label={RoituloLinha('#2563eb', fillRate.serie.length)} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
+            {/* Tabela por categoria */}
+            {fillDiag.cat.length > 0 && (
+              <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden', marginBottom:16 }}>
+                <div style={{ padding:'14px 18px', fontWeight:800, fontSize:13, borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
+                  Fill Rate por Categoria — ordenado pelo maior corte
+                </div>
+                <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                  <thead>
+                    <tr style={{ background:'#f8fafc' }}>
+                      {['Categoria','Pedido (cx)','Faturado (cx)','Corte (cx)','Fill Rate','Status'].map(h => (
+                        <th key={h} style={{ padding:'8px 14px', textAlign: h==='Categoria' ? 'left' : 'right',
+                          fontSize:10, fontWeight:800, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fillDiag.cat.map((r: any, i: number) => {
+                      const cor = r.classe==='Crítico' ? '#e11d48' : r.classe==='Atenção' ? '#d97706' : '#059669';
+                      return (
+                        <tr key={r.categoria} style={{ background: i%2 ? '#f9fafb' : '#fff', borderBottom:'1px solid #f1f5f9' }}>
+                          <td style={{ padding:'8px 14px', fontWeight:700, color:'#334155' }}>{r.categoria}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#475569' }}>{r.pedido.toLocaleString('pt-BR')}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#059669', fontWeight:700 }}>{r.faturado.toLocaleString('pt-BR')}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#e11d48', fontWeight:700 }}>{r.cortado.toLocaleString('pt-BR')}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', fontWeight:900, color:cor }}>
+                            {r.fill_rate != null ? `${r.fill_rate.toFixed(1).replace('.',',')}%` : '—'}
+                          </td>
+                          <td style={{ padding:'8px 14px', textAlign:'right' }}>
+                            <span style={{ fontSize:10, fontWeight:800, padding:'2px 8px', borderRadius:6, background: cor+'18', color:cor }}>{r.classe}</span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Tabela por SKU */}
+            {fillDiag.sku.length > 0 && (
+              <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
+                <div style={{ padding:'14px 18px', fontWeight:800, fontSize:13, borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
+                  Top SKUs com maior corte (máx. 100)
+                </div>
+                <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                  <thead>
+                    <tr style={{ background:'#f8fafc' }}>
+                      {['SKU','Descrição','Categoria','Pedido','Faturado','Corte','Fill Rate','Status'].map(h => (
+                        <th key={h} style={{ padding:'8px 14px', textAlign: ['SKU','Descrição','Categoria'].includes(h) ? 'left' : 'right',
+                          fontSize:10, fontWeight:800, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fillDiag.sku.map((r: any, i: number) => {
+                      const cor = r.classe==='Crítico' ? '#e11d48' : r.classe==='Atenção' ? '#d97706' : '#059669';
+                      return (
+                        <tr key={r.sku} style={{ background: i%2 ? '#f9fafb' : '#fff', borderBottom:'1px solid #f1f5f9' }}>
+                          <td style={{ padding:'8px 14px', fontWeight:700, color:'#64748b', fontSize:10 }}>{r.sku}</td>
+                          <td style={{ padding:'8px 14px', fontWeight:700, color:'#334155', maxWidth:200, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r.descricao}</td>
+                          <td style={{ padding:'8px 14px', color:'#64748b' }}>{r.categoria}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#475569' }}>{r.pedido.toLocaleString('pt-BR')}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#059669', fontWeight:700 }}>{r.faturado.toLocaleString('pt-BR')}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#e11d48', fontWeight:700 }}>{r.cortado.toLocaleString('pt-BR')}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', fontWeight:900, color:cor }}>
+                            {r.fill_rate != null ? `${r.fill_rate.toFixed(1).replace('.',',')}%` : '—'}
+                          </td>
+                          <td style={{ padding:'8px 14px', textAlign:'right' }}>
+                            <span style={{ fontSize:10, fontWeight:800, padding:'2px 8px', borderRadius:6, background: cor+'18', color:cor }}>{r.classe}</span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <div style={{ fontSize:10, color:'#94a3b8', lineHeight:1.8, padding:'12px 4px' }}>
+              <b>Fill Rate cx</b> = Σ qtfatura / Σ qt_pedido × 100 → capacidade de entrega. &nbsp;
+              <b>Corte</b> = volume pedido que não foi entregue (ruptura de estoque ou capacidade). &nbsp;
+              Classificação: <b style={{color:'#059669'}}>OK</b> ≥ 95% · <b style={{color:'#d97706'}}>Atenção</b> 85–95% · <b style={{color:'#e11d48'}}>Crítico</b> &lt; 85%.
+            </div>
+          </div>
+        )}
+
+        {/* ── ABA AGENTE IA ── */}
+        {abaKpi === 'agente' && (
+          <div>
+            {/* Barra de ação */}
+            <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9',
+              padding:'18px 22px', marginBottom:16, display:'flex', alignItems:'center',
+              justifyContent:'space-between', gap:16, flexWrap:'wrap' }}>
+              <div style={{ minWidth:0 }}>
+                <div style={{ fontSize:14, fontWeight:900, color:'#0f172a', display:'flex', alignItems:'center', gap:8 }}>
+                  <Sparkles style={{ width:16, color:'#7c3aed' }} />
+                  Relatório analítico
+                </div>
+                <div style={{ fontSize:11, color:'#64748b', marginTop:3 }}>
+                  {mesesSel.length} {mesesSel.length === 1 ? 'mês' : 'meses'} ·
+                  {' '}{baseCalc === 'faturado' ? 'faturado' : 'vendido'} ·
+                  {' '}{unidade === 'rs' ? 'R$' : 'caixas'} · {ctx}
+                </div>
+              </div>
+
+              <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
+                {/* Toggle unidade */}
+                <div style={{ display:'flex', background:'#f1f5f9', borderRadius:8, padding:2 }}>
+                  {([['cx','Caixas'], ['rs','Reais']] as const).map(([id, label]) => (
+                    <button key={id} onClick={() => setUnidade(id)}
+                      style={{ padding:'5px 12px', fontSize:11, fontWeight:800, border:'none', borderRadius:6,
+                        cursor:'pointer', background: unidade===id ? '#fff' : 'transparent',
+                        color: unidade===id ? '#2563eb' : '#64748b',
+                        boxShadow: unidade===id ? '0 1px 3px rgba(0,0,0,.08)' : 'none' }}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {/* Toggle base */}
+                <div style={{ display:'flex', background:'#f1f5f9', borderRadius:8, padding:2 }}>
+                  {([['pedido','Vendido'], ['faturado','Faturado']] as const).map(([id, label]) => (
+                    <button key={id} onClick={() => setBaseCalc(id)}
+                      style={{ padding:'5px 12px', fontSize:11, fontWeight:800, border:'none', borderRadius:6,
+                        cursor:'pointer', background: baseCalc===id ? '#fff' : 'transparent',
+                        color: baseCalc===id ? '#2563eb' : '#64748b',
+                        boxShadow: baseCalc===id ? '0 1px 3px rgba(0,0,0,.08)' : 'none' }}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                <button onClick={gerarRelatorio} disabled={gerandoRel || !mesesSel.length}
+                  style={{ display:'flex', alignItems:'center', gap:7, padding:'9px 18px',
+                    borderRadius:10, border:'none', fontSize:12, fontWeight:800, cursor: gerandoRel ? 'wait' : 'pointer',
+                    background: gerandoRel ? '#e2e8f0' : '#7c3aed', color: gerandoRel ? '#94a3b8' : '#fff' }}>
+                  {gerandoRel
+                    ? <><Loader2 style={{ width:14 }} className="spin" /> Analisando…</>
+                    : <>{relatorio ? <RefreshCw style={{ width:14 }} /> : <Sparkles style={{ width:14 }} />}
+                       {relatorio ? 'Regerar' : 'Gerar relatório'}</>}
+                </button>
+
+                <button onClick={baixarPdf} disabled={!relatorio || baixandoPdf}
+                  style={{ display:'flex', alignItems:'center', gap:7, padding:'9px 16px',
+                    borderRadius:10, fontSize:12, fontWeight:800,
+                    cursor: (!relatorio || baixandoPdf) ? 'not-allowed' : 'pointer',
+                    border:'1px solid #e2e8f0',
+                    background:'#fff', color: relatorio ? '#334155' : '#cbd5e1' }}>
+                  {baixandoPdf ? <Loader2 style={{ width:14 }} className="spin" /> : <FileDown style={{ width:14 }} />}
+                  PDF
+                </button>
+              </div>
+            </div>
+
+            {erroAgente && (
+              <div style={{ background:'#fef2f2', border:'1px solid #fecaca', borderRadius:12,
+                padding:'12px 16px', marginBottom:16, fontSize:12, color:'#991b1b', fontWeight:600 }}>
+                {erroAgente}
+              </div>
+            )}
+
+            {/* Relatório */}
+            {gerandoRel && !relatorio && (
+              <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9',
+                padding:'48px 24px', textAlign:'center', marginBottom:16 }}>
+                <Loader2 style={{ width:26, color:'#7c3aed', margin:'0 auto 12px' }} className="spin" />
+                <div style={{ fontSize:13, fontWeight:800, color:'#334155' }}>Analisando os indicadores…</div>
+                <div style={{ fontSize:11, color:'#94a3b8', marginTop:5 }}>
+                  Cruzando WMAPE, BIAS, fill rate e evolução YoY. Leva alguns segundos.
+                </div>
+              </div>
+            )}
+
+            {relatorio && (
+              <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9',
+                padding:'26px 32px', marginBottom:16 }}>
+                {relatorio.split('\n').filter(l => l.trim()).map((linha, i) => {
+                  const t = linha.trim().replace(/\*\*/g, '');
+                  const ehTitulo = (/^\d+[.)]/.test(t) && t.length < 70)
+                                || (t === t.toUpperCase() && t.length < 70 && t.length > 3);
+                  return ehTitulo ? (
+                    <div key={i} style={{ fontSize:12, fontWeight:900, color:'#7c3aed',
+                      textTransform:'uppercase', letterSpacing:'.04em', marginTop: i ? 18 : 0, marginBottom:7 }}>
+                      {t.replace(/^#+\s*/, '')}
+                    </div>
+                  ) : (
+                    <p key={i} style={{ fontSize:13, lineHeight:1.72, color:'#334155',
+                      margin:'0 0 9px', textAlign:'justify' }}>
+                      {t.replace(/^[#\-\u2022]\s*/, '')}
+                    </p>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Chat */}
+            {relatorio && (
+              <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
+                <div style={{ padding:'14px 20px', borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
+                  <div style={{ fontSize:12, fontWeight:900, color:'#0f172a' }}>Perguntas sobre os indicadores</div>
+                  <div style={{ fontSize:10.5, color:'#94a3b8', marginTop:2 }}>
+                    O agente responde apenas com base nos dados do recorte selecionado.
+                  </div>
+                </div>
+
+                <div style={{ maxHeight:400, overflowY:'auto', padding: chat.length ? '16px 20px' : 0 }}>
+                  {chat.map((m, i) => (
+                    <div key={i} style={{ marginBottom:14, display:'flex',
+                      justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                      <div style={{ maxWidth:'82%', padding:'10px 14px', borderRadius:12, fontSize:12.5, lineHeight:1.6,
+                        background: m.role === 'user' ? '#eef2ff' : '#f8fafc',
+                        color: m.role === 'user' ? '#3730a3' : '#334155',
+                        border: `1px solid ${m.role === 'user' ? '#e0e7ff' : '#f1f5f9'}`,
+                        whiteSpace:'pre-wrap' }}>
+                        {m.content}
+                      </div>
+                    </div>
+                  ))}
+                  {respondendo && (
+                    <div style={{ display:'flex', gap:7, alignItems:'center', color:'#94a3b8', fontSize:12, padding:'4px 2px' }}>
+                      <Loader2 style={{ width:13 }} className="spin" /> Consultando os dados…
+                    </div>
+                  )}
+                </div>
+
+                {/* Sugestões rápidas */}
+                {!chat.length && (
+                  <div style={{ padding:'14px 20px', display:'flex', gap:7, flexWrap:'wrap' }}>
+                    {[
+                      'Qual categoria mais piorou vs ano passado?',
+                      'Onde o corte é falha de planejamento e não de operação?',
+                      'A IA está melhor que o humano? Em quais categorias?',
+                      'Quais SKUs têm viés sistemático?',
+                    ].map(s => (
+                      <button key={s} onClick={() => setPergunta(s)}
+                        style={{ fontSize:11, padding:'6px 12px', borderRadius:16, cursor:'pointer',
+                          border:'1px solid #e2e8f0', background:'#fff', color:'#64748b', fontWeight:600 }}>
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <div style={{ display:'flex', gap:8, padding:'14px 20px', borderTop:'1px solid #f1f5f9' }}>
+                  <input value={pergunta} onChange={e => setPergunta(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') enviarPergunta(); }}
+                    placeholder="Pergunte sobre WMAPE, BIAS, fill rate, categorias, SKUs…"
+                    style={{ flex:1, border:'1px solid #e2e8f0', borderRadius:10, padding:'10px 14px',
+                      fontSize:12.5, outline:'none' }} />
+                  <button onClick={enviarPergunta} disabled={!pergunta.trim() || respondendo}
+                    style={{ display:'flex', alignItems:'center', gap:6, padding:'10px 18px', borderRadius:10,
+                      border:'none', fontSize:12, fontWeight:800,
+                      cursor: (!pergunta.trim() || respondendo) ? 'not-allowed' : 'pointer',
+                      background: (!pergunta.trim() || respondendo) ? '#e2e8f0' : '#2563eb',
+                      color: (!pergunta.trim() || respondendo) ? '#94a3b8' : '#fff' }}>
+                    <Send style={{ width:13 }} /> Enviar
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {!relatorio && !gerandoRel && (
+              <div style={{ background:'#fff', borderRadius:14, border:'1px dashed #e2e8f0',
+                padding:'52px 24px', textAlign:'center' }}>
+                <Sparkles style={{ width:30, color:'#c4b5fd', margin:'0 auto 14px' }} />
+                <div style={{ fontSize:14, fontWeight:800, color:'#334155', marginBottom:6 }}>
+                  Análise completa dos indicadores
+                </div>
+                <div style={{ fontSize:12, color:'#94a3b8', maxWidth:520, margin:'0 auto', lineHeight:1.7 }}>
+                  O agente cruza WMAPE, BIAS, fill rate e evolução YoY de todas as categorias e SKUs,
+                  identifica padrões sistemáticos e separa falhas de planejamento de falhas de operação.
+                  Todo número citado é rastreável às tabelas do anexo.
+                </div>
+              </div>
+            )}
+
+            <div style={{ fontSize:10, color:'#94a3b8', lineHeight:1.8, padding:'14px 4px' }}>
+              <b>Escopo:</b> SKUs ativos do portfólio · sem filtro de cliente · erro absoluto computado em (sku, mês) antes de agregar. &nbsp;
+              <b>Meta humana:</b> arquivo Excel jan/23–mai/26 · vol_final do ciclo M-2 a partir de jun/26. &nbsp;
+              <b>IA:</b> vol_ia do ciclo M-2, disponível apenas a partir de jun/26. &nbsp;
+              <b>R$:</b> valorizado pelo PMV do pedido (vl_pedido/qt_pedido), isolando erro de volume de desconto de faturamento.
+            </div>
+          </div>
+        )}
 
       </div>
     </div>
