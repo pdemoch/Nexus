@@ -5,7 +5,7 @@ Responsabilidades:
   1. Montar o dataset consolidado que fundamenta o relatório (tudo rastreável).
   2. Chamar a API da Anthropic para produzir a análise narrativa.
   3. Responder perguntas ad-hoc sobre os indicadores (chat).
-  4. Gerar o PDF one-page + anexo com os 114 SKUs.
+  4. Gerar o PDF one-page + anexo com os 114 SKUs
 
 Princípios:
   • O modelo NUNCA vê dados brutos — recebe JSON pré-agregado e compacto.
@@ -145,7 +145,7 @@ def montar_dataset(
             FROM fato_vendas v
             JOIN ativos a ON a.sku = TRIM(v.sku::text)
             WHERE v.data_pedido >= :ini
-              AND v.data_pedido < (:fim::date + INTERVAL '1 month')
+              AND v.data_pedido < (CAST(:fim AS date) + INTERVAL '1 month')
             GROUP BY 1, 2
         ),
         -- Meta humana: Excel até mai/26, Nexus vol_final M-2 a partir de jun/26
