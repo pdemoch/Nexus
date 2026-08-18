@@ -35,6 +35,63 @@ DEFASAGEM_MESES = 2
 PISO_NEXUS      = datetime.date(2026, 6, 1)
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CONTEXTO DE NEGOCIO — conhecimento que nao esta nas tabelas
+# Manter atualizado. O agente usa isso para nao atribuir a falha de previsao
+# aquilo que foi decisao ou restricao conhecida.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Restricoes de producao: periodos em que a entrega foi limitada por decisao
+# ou capacidade, nao por erro de plano. Formato:
+#   {"escopo": "categoria"|"segmento"|"sku", "valor": "...",
+#    "ini": "YYYY-MM", "fim": "YYYY-MM", "motivo": "..."}
+RESTRICOES_PRODUCAO = [
+    {"escopo": "segmento", "valor": "BISCOITOS DOCES",  "ini": "2026-02", "fim": "2026-07",
+     "motivo": "restricao estrategica de producao"},
+    {"escopo": "segmento", "valor": "BARRA CEREAIS",    "ini": "2026-03", "fim": "2026-07",
+     "motivo": "restricao estrategica de producao"},
+    {"escopo": "segmento", "valor": "LEITE CONDENSADO", "ini": "2026-03", "fim": "2026-06",
+     "motivo": "restricao estrategica de producao"},
+    {"escopo": "segmento", "valor": "DOCE DE LEITE",    "ini": "2026-03", "fim": "2026-06",
+     "motivo": "restricao estrategica de producao"},
+    {"escopo": "segmento", "valor": "MOLHOS",           "ini": "2026-03", "fim": "2026-06",
+     "motivo": "restricao estrategica de producao"},
+]
+
+# Limites de maturidade do SKU, em meses de historico de venda
+MESES_LANCAMENTO = 6    # ate 6 meses: lancamento
+MESES_RECENTE    = 18   # 7 a 18 meses: recente
+
+
+def _maturidade(meses_hist: int) -> str:
+    if meses_hist is None:
+        return "Indefinido"
+    if meses_hist <= MESES_LANCAMENTO:
+        return "Lancamento"
+    if meses_hist <= MESES_RECENTE:
+        return "Recente"
+    return "Maduro"
+
+
+def _restricoes_aplicaveis(categoria: str, segmento: str, sku: str,
+                           meses: List[str]) -> List[Dict[str, Any]]:
+    """Retorna as restricoes de producao que incidem sobre o item no periodo."""
+    achadas = []
+    for r in RESTRICOES_PRODUCAO:
+        alvo = {"categoria": categoria, "segmento": segmento, "sku": sku}.get(r["escopo"])
+        if not alvo or str(alvo).upper() != str(r["valor"]).upper():
+            continue
+        sobrepoe = [m for m in meses if r["ini"] <= m <= r["fim"]]
+        if sobrepoe:
+            achadas.append({
+                "motivo": r["motivo"],
+                "periodo": f"{r['ini']} a {r['fim']}",
+                "meses_afetados_no_recorte": len(sobrepoe),
+            })
+    return achadas
+
+
 def _sdiv(num, den, mult=1.0):
     try:
         d = float(den)
@@ -68,7 +125,10 @@ def _classe(wmape, bias) -> str:
 
 _SQL = """
     WITH ativos AS (
-        SELECT sku, descricao, COALESCE(categoria,'SEM CATEGORIA') AS categoria
+        SELECT sku, descricao,
+               COALESCE(categoria,'SEM CATEGORIA') AS categoria,
+               COALESCE(segmento, 'SEM SEGMENTO')  AS segmento,
+               COALESCE(curva, 'SEM CURVA')        AS curva
         FROM dim_produtos
         WHERE COALESCE(ativo, FALSE) = TRUE
     ),
@@ -141,7 +201,8 @@ _SQL = """
           AND i.mes_projetado >= :ini AND i.mes_projetado <= :fim
         GROUP BY 1, 2
     )
-    SELECT a.sku, a.descricao, a.categoria,
+    SELECT a.sku, a.descricao, a.categoria, a.segmento, a.curva,
+           pv.nasceu,
            TO_CHAR(r.mes,'YYYY-MM') AS mes,
            EXTRACT(YEAR  FROM r.mes)::int AS ano,
            EXTRACT(MONTH FROM r.mes)::int AS num_mes,
@@ -196,6 +257,7 @@ def montar_dataset(db: Session, meses: List[str],
                 "real_p": 0.0, "real_ia": 0.0,
                 "qt_ped": 0.0, "qt_fat": 0.0, "qt_cor": 0.0,
                 "n_meses": 0, "n_over": 0, "n_under": 0,
+                "meses_hist": set(),
             })
             p    = _peso(r)
             real = float(r.vol_real or 0) * p
@@ -203,6 +265,7 @@ def montar_dataset(db: Session, meses: List[str],
             a["qt_ped"] += float(r.qt_pedido or 0)
             a["qt_fat"] += float(r.qt_fatura or 0)
             a["qt_cor"] += float(r.qt_corte or 0)
+            a["meses_hist"].add(r.mes)
 
             if r.vol_plano is not None:
                 pl = float(r.vol_plano) * p
@@ -295,6 +358,20 @@ def montar_dataset(db: Session, meses: List[str],
         rows_hist,
         lambda r: r.categoria
         if (r.ano == ano_atual - 1 and r.num_mes in meses_num) else None)
+    # Restricoes que incidem sobre cada categoria — via seus segmentos
+    segs_por_cat: Dict[str, set] = {}
+    for r in rows:
+        segs_por_cat.setdefault(r.categoria, set()).add(r.segmento)
+    restr_cat: Dict[str, List[Dict[str, Any]]] = {}
+    for cat, segs in segs_por_cat.items():
+        achadas = []
+        for sg in segs:
+            for x in _restricoes_aplicaveis(cat, sg, None, meses_validos):
+                x = dict(x); x["segmento"] = sg
+                achadas.append(x)
+        if achadas:
+            restr_cat[cat] = achadas
+
     categorias = []
     for cat, a in ag_cat.items():
         mt  = _metricas(a)
@@ -307,30 +384,79 @@ def montar_dataset(db: Session, meses: List[str],
             "classe": _classe(mt.get("wmape"), mt.get("bias")),
             "wmape_ano_anterior": ant.get("wmape"),
             "delta_wmape_pp": delta,
+            "restricao_producao": restr_cat.get(cat) or None,
         })
     categorias.sort(key=lambda c: c.get("erro_abs") or 0, reverse=True)
 
     # SKUs
-    ag_sku     = _agregar(rows, lambda r: (r.sku, r.descricao, r.categoria), meses_validos)
+    ag_sku     = _agregar(rows, lambda r: (r.sku, r.descricao, r.categoria, r.segmento),
+                          meses_validos)
     ag_sku_ant = _agregar(
         rows_hist,
-        lambda r: (r.sku, r.descricao, r.categoria)
+        lambda r: (r.sku, r.descricao, r.categoria, r.segmento)
         if (r.ano == ano_atual - 1 and r.num_mes in meses_num) else None)
+
+    # Meses de historico total de cada SKU (base para maturidade)
+    hist_sku: Dict[str, set] = {}
+    nasc_sku: Dict[str, str] = {}
+    for r in rows_hist:
+        hist_sku.setdefault(r.sku, set()).add(r.mes)
+        if r.nasceu is not None:
+            d = r.nasceu.strftime("%Y-%m")
+            if r.sku not in nasc_sku or d < nasc_sku[r.sku]:
+                nasc_sku[r.sku] = d
+
     skus = []
     for k, a in ag_sku.items():
-        sk, desc, cat = k
+        sk, desc, cat, seg = k
         mt  = _metricas(a)
         ant = _metricas(ag_sku_ant[k]) if k in ag_sku_ant else {}
         delta = None
         if mt.get("wmape") is not None and ant.get("wmape") is not None:
             delta = round(mt["wmape"] - ant["wmape"], 1)
+
+        n_hist = len(hist_sku.get(sk, set()))
+        restr  = _restricoes_aplicaveis(cat, seg, sk, meses_validos)
+
         skus.append({
-            "sku": sk, "descricao": desc, "categoria": cat, **mt,
+            "sku": sk, "descricao": desc, "categoria": cat, "segmento": seg, **mt,
             "classe": _classe(mt.get("wmape"), mt.get("bias")),
             "wmape_ano_anterior": ant.get("wmape"),
             "delta_wmape_pp": delta,
+            "primeira_venda": nasc_sku.get(sk),
+            "meses_historico": n_hist,
+            "maturidade": _maturidade(n_hist),
+            "restricao_producao": restr or None,
         })
     skus.sort(key=lambda s: s.get("erro_abs") or 0, reverse=True)
+
+    # Itens de lancamento e recentes — nao comparaveis a itens maduros
+    lancamentos = [s for s in skus if s["maturidade"] in ("Lancamento", "Recente")]
+    lancamentos.sort(key=lambda s: (s["meses_historico"], -(s.get("volume") or 0)))
+
+    # Itens sob restricao de producao no periodo
+    sob_restricao = [s for s in skus if s.get("restricao_producao")]
+    sob_restricao.sort(key=lambda s: -(s.get("corte_cx") or 0))
+
+    # Atendimento: leitura de execucao, separada da acuracia
+    ag_at = ag_port.get("T", {})
+    atendimento = {
+        "pedido":       round(ag_at.get("qt_ped", 0)),
+        "entregue":     round(ag_at.get("qt_fat", 0)),
+        "corte":        round(ag_at.get("qt_cor", 0)),
+        "atendimento_pct": round(_sdiv(ag_at.get("qt_fat", 0),
+                                       ag_at.get("qt_ped", 0), 100) or 0, 1),
+        "serie_mensal": [
+            {"mes": s["mes"], "atendimento": s["atendimento"], "corte": s["corte"]}
+            for s in serie
+        ],
+    }
+
+    # Itens com maior corte, separados entre restricao declarada e nao declarada
+    com_corte = [s for s in skus if (s.get("corte_cx") or 0) > 0]
+    com_corte.sort(key=lambda s: -(s.get("corte_cx") or 0))
+    corte_com_restricao = [s for s in com_corte if s.get("restricao_producao")][:10]
+    corte_sem_restricao = [s for s in com_corte if not s.get("restricao_producao")][:10]
 
     com_delta = [s for s in skus if s.get("delta_wmape_pp") is not None]
     rankings = {
@@ -338,8 +464,11 @@ def montar_dataset(db: Session, meses: List[str],
         "melhor_evolucao":     sorted(com_delta, key=lambda s: s["delta_wmape_pp"])[:10],
         "pior_evolucao":       sorted(com_delta, key=lambda s: -s["delta_wmape_pp"])[:10],
         "vies_sistematico":    sorted(
-            [s for s in skus if (s.get("persistencia_pct") or 0) >= 70],
+            [s for s in skus if (s.get("persistencia_pct") or 0) >= 70
+                             and s["maturidade"] == "Maduro"],
             key=lambda s: -(s.get("erro_abs") or 0))[:10],
+        "maior_corte_sem_restricao": corte_sem_restricao,
+        "maior_corte_com_restricao": corte_com_restricao,
     }
 
     esc = db.execute(text("""
@@ -361,12 +490,18 @@ def montar_dataset(db: Session, meses: List[str],
                                 "planejamento no Nexus, plano congelado M-2, a partir de jun/26"),
             "origem_da_previsao_estatistica": ("modelo do Nexus, M-2, disponivel a partir de jun/26"),
             "granularidade_erro": "erro absoluto computado em (SKU, mes) e agregado depois",
+            "regra_maturidade": (f"Lancamento ate {MESES_LANCAMENTO} meses de historico; "
+                                 f"Recente ate {MESES_RECENTE}; acima disso, Maduro"),
+            "restricoes_de_producao_declaradas": RESTRICOES_PRODUCAO,
         },
         "portfolio":      port,
+        "atendimento":    atendimento,
         "evolucao_anual": evolucao_anual,
         "serie":          serie,
         "categorias":     categorias,
         "skus":           skus,
+        "lancamentos":    lancamentos,
+        "sob_restricao":  sob_restricao,
         "rankings":       rankings,
     }
 
@@ -374,19 +509,27 @@ def montar_dataset(db: Session, meses: List[str],
 def _contexto_modelo(ds: Dict[str, Any]) -> str:
     def _s(lst):
         return [{"sku": s["sku"], "desc": s["descricao"][:38], "cat": s["categoria"],
+                 "seg": s.get("segmento"),
                  "wmape": s.get("wmape"), "bias": s.get("bias"),
                  "delta": s.get("delta_wmape_pp"),
                  "wmape_ant": s.get("wmape_ano_anterior"),
                  "vol": s.get("volume"), "erro_abs": s.get("erro_abs"),
-                 "persist": s.get("persistencia_pct"), "atend": s.get("atendimento_pct"), "corte": s.get("corte_cx"),
+                 "persist": s.get("persistencia_pct"),
+                 "atend": s.get("atendimento_pct"), "corte": s.get("corte_cx"),
+                 "maturidade": s.get("maturidade"),
+                 "meses_hist": s.get("meses_historico"),
+                 "restricao": s.get("restricao_producao"),
                  "classe": s.get("classe")} for s in lst]
     return json.dumps({
         "escopo":         ds["escopo"],
         "portfolio":      ds["portfolio"],
+        "atendimento":    ds["atendimento"],
         "evolucao_anual": ds["evolucao_anual"],
         "serie_mensal":   ds["serie"],
         "categorias":     ds["categorias"],
         "rankings":       {k: _s(v) for k, v in ds["rankings"].items()},
+        "lancamentos_e_recentes": _s(ds["lancamentos"]),
+        "itens_sob_restricao_de_producao": _s(ds["sob_restricao"]),
         "total_skus":     len(ds["skus"]),
     }, ensure_ascii=False, separators=(",", ":"))
 
@@ -421,6 +564,24 @@ ATENDIMENTO = volume entregue dividido pelo volume pedido. Mede execucao, nao
   acuracia. Serve para separar erro de previsao de restricao de suprimento:
   atendimento baixo com BIAS negativo indica plano subdimensionado; atendimento
   baixo com BIAS neutro indica restricao operacional.
+
+MATURIDADE DO ITEM
+  Lancamento: ate 6 meses de historico de venda. Nao ha serie suficiente para
+    o modelo estatistico aprender padrao. WMAPE alto e esperado e nao indica
+    falha de processo. Cobrar acuracia de item nesta faixa e incorreto.
+  Recente: 7 a 18 meses. Ja ha serie, mas ainda sem ciclo sazonal completo
+    fechado. Comparacao ano a ano pode ser parcial ou inexistente.
+  Maduro: acima de 18 meses. Este e o universo em que a acuracia deve ser
+    cobrada e onde padroes sistematicos sao acionaveis.
+
+RESTRICAO DE PRODUCAO
+  Alguns itens tiveram a entrega limitada por decisao ou capacidade em periodos
+  declarados. Nesses casos o atendimento baixo e o corte NAO sao falha de
+  previsao nem de suprimento: sao consequencia de uma decisao conhecida.
+  O plano pode ate estar correto — o que faltou foi produto disponivel.
+  Ao analisar item ou categoria sob restricao, informe a restricao antes de
+  qualquer leitura de atendimento, e nao inclua esses itens em recomendacoes
+  de melhoria de previsao.
 """
 
 SYSTEM_PROMPT = f"""Voce e especialista em S&OP e escreve o relatorio de acuracia de demanda
@@ -441,7 +602,7 @@ REGRAS DE REDACAO - obrigatorias:
 
 {METODOLOGIA}
 
-ESTRUTURA (600 a 750 palavras, prosa densa, sem tabelas, sem markdown):
+ESTRUTURA (700 a 900 palavras, prosa densa, sem tabelas, sem markdown):
 
 1. ESCOPO E METODO
    Periodo medido, quantidade de SKUs, origem do plano em cada janela temporal
@@ -459,28 +620,49 @@ ESTRUTURA (600 a 750 palavras, prosa densa, sem tabelas, sem markdown):
    Onde o erro absoluto se concentra, em categorias e SKUs. Distinga o item que
    erra muito em percentual do item que erra muito em volume: sao problemas de
    naturezas diferentes e exigem acoes diferentes.
+   Separe explicitamente os itens maduros dos itens de lancamento: so os
+   primeiros devem entrar na leitura de acuracia do processo.
 
-5. PADROES SISTEMATICOS
-   Itens com persistencia igual ou acima de 70%. Explique a implicacao
-   operacional de cada direcao de vies.
+5. LANCAMENTOS E ITENS SOB RESTRICAO
+   Liste os itens de lancamento e recentes do periodo, com quantos meses de
+   historico cada um tem, e declare que o erro deles nao e comparavel ao dos
+   itens maduros.
+   Liste as categorias e itens sob restricao declarada de producao, com o
+   periodo da restricao, e deixe claro que o atendimento baixo desses itens
+   e consequencia da restricao, nao de falha de previsao ou de suprimento.
 
-6. PREVISAO ESTATISTICA COMPARADA AO PLANO
+6. PADROES SISTEMATICOS
+   Itens MADUROS com persistencia igual ou acima de 70%. Explique a implicacao
+   operacional de cada direcao de vies. Nao inclua lancamentos aqui.
+
+7. ATENDIMENTO E ORIGEM DO CORTE
+   Informe o atendimento do portfolio no periodo e como evoluiu mes a mes.
+   Depois separe o corte em dois grupos, usando o cruzamento corte x BIAS:
+     - Corte em itens SOB RESTRICAO declarada: consequencia da decisao de
+       producao. Nao e falha de previsao nem de suprimento. Cite o periodo.
+     - Corte em itens SEM restricao: aqui a analise vale. Se o BIAS e negativo,
+       o plano subdimensionou e a producao seguiu o plano. Se o BIAS e neutro
+       ou positivo, o plano estava correto e a limitacao foi de execucao.
+   Essa separacao e obrigatoria: sem ela o indicador de atendimento fica
+   distorcido pelos itens que tiveram producao restringida por decisao.
+
+8. PREVISAO ESTATISTICA COMPARADA AO PLANO
    Onde o FVA indica que o ajuste manual aumentou ou reduziu o erro, sempre
    com a ressalva sobre o tamanho da amostra disponivel.
 
-7. RECOMENDACOES
+9. RECOMENDACOES
    De quatro a seis itens objetivos. Cada um cita o dado que o sustenta e
    indica a area responsavel: planejamento de demanda, comercial ou suprimentos.
 
-8. CONSIDERACAO FINAL
+10. CONSIDERACAO FINAL
    Um paragrafo unico de fechamento. Responda diretamente: o processo esta
    melhorando ou piorando, onde esta o maior ganho possivel no proximo ciclo,
    e qual o principal risco se nada for alterado. Sem repetir numeros ja
    citados; sintetize a leitura.
 
-IMPORTANTE: complete todas as 8 secoes. Nao interrompa o texto no meio de uma
+IMPORTANTE: complete todas as 10 secoes. Nao interrompa o texto no meio de uma
 frase. Se precisar economizar espaco, encurte as secoes 4 e 5, mas sempre
-entregue a secao 8 completa.
+entregue a secao 10 completa.
 
 Escreva em portugues do Brasil, paragrafos curtos."""
 
@@ -542,14 +724,19 @@ def responder_pergunta(db: Session, pergunta: str, meses: List[str],
         return ds["erro"]
 
     skus = [{"sku": s["sku"], "desc": s["descricao"][:45], "cat": s["categoria"],
+             "seg": s.get("segmento"),
              "wmape": s.get("wmape"), "bias": s.get("bias"),
              "erro_abs": s.get("erro_abs"), "vol": s.get("volume"),
              "delta": s.get("delta_wmape_pp"), "wmape_ant": s.get("wmape_ano_anterior"),
-             "persist": s.get("persistencia_pct"), "atend": s.get("atendimento_pct"), "corte": s.get("corte_cx"),
+             "persist": s.get("persistencia_pct"),
+             "atend": s.get("atendimento_pct"), "corte": s.get("corte_cx"),
+             "maturidade": s.get("maturidade"), "meses_hist": s.get("meses_historico"),
+             "restricao": s.get("restricao_producao"),
              "classe": s.get("classe")} for s in ds["skus"]]
 
     ctx = json.dumps({
         "escopo": ds["escopo"], "portfolio": ds["portfolio"],
+        "atendimento": ds["atendimento"],
         "evolucao_anual": ds["evolucao_anual"], "serie_mensal": ds["serie"],
         "categorias": ds["categorias"], "skus": skus,
     }, ensure_ascii=False, separators=(",", ":"))
@@ -630,19 +817,21 @@ def gerar_pdf(relatorio: str, ds: Dict[str, Any]) -> bytes:
         f"&middot; Unidade: {esc['unidade']} &middot; "
         f"Emitido em {_hoje_br().strftime('%d/%m/%Y')}", S_SUB))
 
-    kpi = [["WMAPE", "BIAS", "Persistencia", "Volume", "Erro absoluto", "Diagnostico"],
+    at = ds.get("atendimento", {})
+    kpi = [["WMAPE", "BIAS", "Persistencia", "Erro absoluto",
+            "Atendimento", "Corte", "Volume", "Diagnostico"],
            [f(port.get("wmape")), f(port.get("bias")),
-            f(port.get("persistencia_pct"), "%"),
-            n(port.get("volume")), n(port.get("erro_abs")),
-            port.get("classe", "-")]]
-    t = Table(kpi, colWidths=[3*cm]*6)
+            f(port.get("persistencia_pct"), "%"), n(port.get("erro_abs")),
+            f(at.get("atendimento_pct")), n(at.get("corte")),
+            n(port.get("volume")), port.get("classe", "-")]]
+    t = Table(kpi, colWidths=[2.25*cm]*8)
     t.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#f1f5f9")),
         ("TEXTCOLOR",  (0,0), (-1,0), colors.HexColor("#64748b")),
         ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE",   (0,0), (-1,0), 6.4),
+        ("FONTSIZE",   (0,0), (-1,0), 6.0),
         ("FONTNAME",   (0,1), (-1,1), "Helvetica-Bold"),
-        ("FONTSIZE",   (0,1), (-1,1), 11),
+        ("FONTSIZE",   (0,1), (-1,1), 10),
         ("ALIGN",      (0,0), (-1,-1), "CENTER"),
         ("VALIGN",     (0,0), (-1,-1), "MIDDLE"),
         ("TOPPADDING", (0,0), (-1,-1), 5),
@@ -692,6 +881,26 @@ def gerar_pdf(relatorio: str, ds: Dict[str, Any]) -> bytes:
         lc.lines[0].strokeWidth = 1.8
         d2.add(lc)
         el.append(d2)
+
+    # Grafico 3 - atendimento mes a mes
+    sa = [s for s in (at.get("serie_mensal") or []) if s.get("atendimento") is not None]
+    if len(sa) >= 3:
+        el.append(Paragraph("Atendimento mes a mes no periodo", S_H2))
+        d3 = Drawing(455, 108)
+        lc3 = HorizontalLineChart()
+        lc3.x, lc3.y, lc3.width, lc3.height = 32, 20, 400, 74
+        lc3.data = [[s["atendimento"] for s in sa]]
+        lc3.categoryAxis.categoryNames = [s["mes"][5:7] + "/" + s["mes"][2:4] for s in sa]
+        lc3.categoryAxis.labels.fontSize = 6.2
+        lc3.categoryAxis.labels.angle = 45
+        lc3.categoryAxis.labels.dy = -7
+        lc3.valueAxis.valueMin = 0
+        lc3.valueAxis.valueMax = 100
+        lc3.valueAxis.labels.fontSize = 7
+        lc3.lines[0].strokeColor = colors.HexColor("#f59e0b")
+        lc3.lines[0].strokeWidth = 1.8
+        d3.add(lc3)
+        el.append(d3)
 
     el.append(Spacer(1, 5))
 
@@ -769,29 +978,101 @@ def gerar_pdf(relatorio: str, ds: Dict[str, Any]) -> bytes:
     el.append(PageBreak())
     el.append(Paragraph(
         f"Anexo III | {len(ds['skus'])} SKUs, ordenados por erro absoluto", S_H2))
-    cab3 = ["SKU","Descricao","Categoria","Volume","Erro abs.","WMAPE",
-            "Ano ant.","Delta pp","BIAS","Persist.","Atend.","Diagnostico"]
+    cab3 = ["SKU","Descricao","Categoria","Maturid.","Volume","Erro abs.","WMAPE",
+            "Ano ant.","Delta pp","BIAS","Persist.","Atend.","Restr.","Diagnostico"]
     dados3 = [cab3] + [[
-        s["sku"], (s["descricao"] or "")[:25], (s["categoria"] or "")[:13],
+        s["sku"], (s["descricao"] or "")[:22], (s["categoria"] or "")[:11],
+        (s.get("maturidade") or "-")[:10],
         n(s.get("volume")), n(s.get("erro_abs")), f(s.get("wmape")),
         f(s.get("wmape_ano_anterior")), f(s.get("delta_wmape_pp"), ""),
         f(s.get("bias")), f(s.get("persistencia_pct"), "%"),
-        f(s.get("atendimento_pct")), s.get("classe","-")[:14],
+        f(s.get("atendimento_pct")),
+        "Sim" if s.get("restricao_producao") else "-",
+        s.get("classe","-")[:13],
     ] for s in ds["skus"]]
-    ts = Table(dados3, colWidths=[1.5*cm,3.4*cm,1.85*cm,1.5*cm,1.4*cm,1.3*cm,
-                                  1.3*cm,1.2*cm,1.2*cm,1.2*cm,1.2*cm,1.75*cm],
+    ts = Table(dados3, colWidths=[1.35*cm,2.9*cm,1.6*cm,1.5*cm,1.3*cm,1.25*cm,1.15*cm,
+                                  1.15*cm,1.05*cm,1.05*cm,1.05*cm,1.05*cm,0.85*cm,1.6*cm],
                repeatRows=1)
     ts.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), ESC),
         ("TEXTCOLOR",  (0,0), (-1,0), colors.white),
         ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE",   (0,0), (-1,-1), 5.3),
-        ("ALIGN",      (3,0), (-2,-1), "RIGHT"),
+        ("FONTSIZE",   (0,0), (-1,-1), 5.0),
+        ("ALIGN",      (4,0), (-2,-1), "RIGHT"),
         ("GRID",       (0,0), (-1,-1), 0.25, colors.HexColor("#e2e8f0")),
         ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#f8fafc")]),
         ("TOPPADDING", (0,0), (-1,-1), 1.8), ("BOTTOMPADDING", (0,0), (-1,-1), 1.8),
     ]))
     el.append(ts)
+
+    # Anexo IV - lancamentos e restricoes
+    if ds.get("lancamentos") or ds.get("sob_restricao"):
+        el.append(PageBreak())
+        el.append(Paragraph(
+            "Anexo IV | Itens fora do universo comparavel", S_H2))
+        el.append(Paragraph(
+            "Itens de lancamento nao possuem serie suficiente para o modelo "
+            "estatistico aprender padrao — o erro deles nao e comparavel ao de "
+            "itens maduros. Itens sob restricao de producao tiveram a entrega "
+            "limitada por decisao conhecida, e o atendimento baixo nao decorre "
+            "de falha de previsao.", S_NOT))
+        el.append(Spacer(1, 7))
+
+        if ds.get("lancamentos"):
+            el.append(Paragraph("Lancamentos e itens recentes", S_H2))
+            cabL = ["SKU","Descricao","Categoria","1a venda","Meses","Maturid.",
+                    "Volume","WMAPE","BIAS","Atend."]
+            dadosL = [cabL] + [[
+                s["sku"], (s["descricao"] or "")[:30], (s["categoria"] or "")[:14],
+                s.get("primeira_venda") or "-", str(s.get("meses_historico") or "-"),
+                s.get("maturidade","-"), n(s.get("volume")),
+                f(s.get("wmape")), f(s.get("bias")), f(s.get("atendimento_pct")),
+            ] for s in ds["lancamentos"]]
+            tl = Table(dadosL, colWidths=[1.5*cm,4.2*cm,2.1*cm,1.6*cm,1.2*cm,
+                                          1.7*cm,1.5*cm,1.4*cm,1.4*cm,1.4*cm],
+                       repeatRows=1)
+            tl.setStyle(TableStyle([
+                ("BACKGROUND", (0,0), (-1,0), ESC),
+                ("TEXTCOLOR",  (0,0), (-1,0), colors.white),
+                ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
+                ("FONTSIZE",   (0,0), (-1,-1), 5.9),
+                ("ALIGN",      (4,0), (-1,-1), "RIGHT"),
+                ("GRID",       (0,0), (-1,-1), 0.3, colors.HexColor("#e2e8f0")),
+                ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#f8fafc")]),
+                ("TOPPADDING", (0,0), (-1,-1), 2.5), ("BOTTOMPADDING", (0,0), (-1,-1), 2.5),
+            ]))
+            el.append(tl)
+            el.append(Spacer(1, 11))
+
+        if ds.get("sob_restricao"):
+            el.append(Paragraph("Itens sob restricao declarada de producao", S_H2))
+            cabR = ["SKU","Descricao","Categoria","Segmento","Periodo","Motivo",
+                    "Pedido","Corte","Atend.","BIAS"]
+            dadosR = []
+            for s in ds["sob_restricao"]:
+                r0 = (s.get("restricao_producao") or [{}])[0]
+                dadosR.append([
+                    s["sku"], (s["descricao"] or "")[:26], (s["categoria"] or "")[:12],
+                    (s.get("segmento") or "-")[:12],
+                    r0.get("periodo","-"), (r0.get("motivo","-"))[:24],
+                    n(s.get("volume")), n(s.get("corte_cx")),
+                    f(s.get("atendimento_pct")), f(s.get("bias")),
+                ])
+            tr = Table([cabR] + dadosR,
+                       colWidths=[1.4*cm,3.6*cm,1.8*cm,1.8*cm,2.1*cm,3.0*cm,
+                                  1.3*cm,1.3*cm,1.3*cm,1.3*cm],
+                       repeatRows=1)
+            tr.setStyle(TableStyle([
+                ("BACKGROUND", (0,0), (-1,0), ESC),
+                ("TEXTCOLOR",  (0,0), (-1,0), colors.white),
+                ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
+                ("FONTSIZE",   (0,0), (-1,-1), 5.7),
+                ("ALIGN",      (6,0), (-1,-1), "RIGHT"),
+                ("GRID",       (0,0), (-1,-1), 0.3, colors.HexColor("#e2e8f0")),
+                ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#FEF6EC")]),
+                ("TOPPADDING", (0,0), (-1,-1), 2.5), ("BOTTOMPADDING", (0,0), (-1,-1), 2.5),
+            ]))
+            el.append(tr)
 
     el.append(Spacer(1, 7))
     el.append(Paragraph(
@@ -801,7 +1082,9 @@ def gerar_pdf(relatorio: str, ds: Dict[str, Any]) -> bytes:
         "FVA = WMAPE do plano - WMAPE da previsao estatistica &middot; "
         "Atendimento = volume entregue / volume pedido. "
         "Erro absoluto computado em (SKU, mes) antes de qualquer agregacao. "
-        "Comparacao ano a ano restrita aos mesmos meses do calendario em cada ano.",
+        "Comparacao ano a ano restrita aos mesmos meses do calendario em cada ano. "
+        "Maturidade: Lancamento ate 6 meses de historico, Recente ate 18, Maduro acima disso. "
+        "Itens sob restricao de producao tem o atendimento explicado pela restricao, nao por falha de previsao.",
         S_NOT))
 
     doc.build(el)
