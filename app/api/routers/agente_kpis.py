@@ -115,7 +115,7 @@ def montar_dataset(
             JOIN ativos a ON a.sku = TRIM(v.sku::text)
             GROUP BY 1
         ),
-        -- PMV do PEDIDO por SKU/mês (N1). Cobertura validada: 99,98%
+        -- PMV do PEDIDO por SKU/mes (N1). Cobertura validada em 99,98 por cento
         pmv_mes AS (
             SELECT TRIM(v.sku::text) AS sku,
                    DATE_TRUNC('month', v.data_pedido)::date AS mes,
@@ -510,13 +510,31 @@ def _chamar_claude(system: str, mensagens: List[Dict[str, str]],
         )
 
     client = anthropic.Anthropic(api_key=api_key)
-    resp = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=max_tokens,
-        system=system,
-        messages=mensagens,
-    )
-    return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+
+    # Modelo configuravel via env; fallback para variantes conhecidas.
+    modelos = [
+        os.environ.get("ANTHROPIC_MODEL", "").strip(),
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-20250514",
+        "claude-3-5-sonnet-latest",
+    ]
+    erro_final = None
+    for modelo in [m for m in modelos if m]:
+        try:
+            resp = client.messages.create(
+                model=modelo,
+                max_tokens=max_tokens,
+                system=system,
+                messages=mensagens,
+            )
+            return "".join(b.text for b in resp.content
+                           if getattr(b, "type", "") == "text")
+        except Exception as e:
+            erro_final = e
+            # Se nao for erro de modelo inexistente, aborta o fallback
+            if "model" not in str(e).lower():
+                raise
+    raise RuntimeError(f"Nenhum modelo disponivel. Ultimo erro: {erro_final}")
 
 
 def gerar_relatorio(db: Session, meses: List[str],
