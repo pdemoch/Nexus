@@ -8,7 +8,6 @@
 *.key
 data/
 *.parquet
-.env
 __pycache__/
 node_modules/
 
@@ -65,8 +64,6 @@ nexus_pgdata/
 *.sqlite3
 
 # Ficheiros de Dados Brutos (ERP) e Exportações
-*.csv
-*.xls
 *.parquet
 # Nota: Se precisar de subir um template vazio para a equipa,
 # retire o comentário da linha abaixo e coloque o nome do ficheiro:
