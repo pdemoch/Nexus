@@ -46,18 +46,7 @@ PISO_NEXUS      = datetime.date(2026, 6, 1)
 # ou capacidade, nao por erro de plano. Formato:
 #   {"escopo": "categoria"|"segmento"|"sku", "valor": "...",
 #    "ini": "YYYY-MM", "fim": "YYYY-MM", "motivo": "..."}
-RESTRICOES_PRODUCAO = [
-    {"escopo": "segmento", "valor": "BISCOITOS DOCES",  "ini": "2026-02", "fim": "2026-07",
-     "motivo": "restricao estrategica de producao"},
-    {"escopo": "segmento", "valor": "BARRA CEREAIS",    "ini": "2026-03", "fim": "2026-07",
-     "motivo": "restricao estrategica de producao"},
-    {"escopo": "segmento", "valor": "LEITE CONDENSADO", "ini": "2026-03", "fim": "2026-06",
-     "motivo": "restricao estrategica de producao"},
-    {"escopo": "segmento", "valor": "DOCE DE LEITE",    "ini": "2026-03", "fim": "2026-06",
-     "motivo": "restricao estrategica de producao"},
-    {"escopo": "segmento", "valor": "MOLHOS",           "ini": "2026-03", "fim": "2026-06",
-     "motivo": "restricao estrategica de producao"},
-]
+RESTRICOES_PRODUCAO: List[Dict[str, Any]] = []   # desativado
 
 # Limites de maturidade do SKU, em meses de historico de venda
 MESES_LANCAMENTO = 6    # ate 6 meses: lancamento
@@ -327,18 +316,21 @@ def montar_dataset(db: Session, meses: List[str],
             ant = _metricas(ag_ano[anos_ord[idx-1]])
             if mt.get("wmape") is not None and ant.get("wmape") is not None:
                 delta = round(mt["wmape"] - ant["wmape"], 1)
-        if ano < 2026:
-            origem = "Planilha"
-        elif ano == 2026:
-            origem = "Planilha (jan-mai) + Nexus (jun+)"
-        else:
-            origem = "Nexus"
         evolucao_anual.append({
             "ano": ano, **mt,
             "delta_wmape_pp": delta,
             "classe": _classe(mt.get("wmape"), mt.get("bias")),
-            "origem_plano": origem,
         })
+
+    # Meses de historico total de cada SKU (base para maturidade)
+    hist_sku: Dict[str, set] = {}
+    nasc_sku: Dict[str, str] = {}
+    for r in rows_hist:
+        hist_sku.setdefault(r.sku, set()).add(r.mes)
+        if r.nasceu is not None:
+            d = r.nasceu.strftime("%Y-%m")
+            if r.sku not in nasc_sku or d < nasc_sku[r.sku]:
+                nasc_sku[r.sku] = d
 
     # Serie mensal
     ag_mes = _agregar(rows, lambda r: r.mes, meses_validos)
@@ -396,16 +388,6 @@ def montar_dataset(db: Session, meses: List[str],
         lambda r: (r.sku, r.descricao, r.categoria, r.segmento)
         if (r.ano == ano_atual - 1 and r.num_mes in meses_num) else None)
 
-    # Meses de historico total de cada SKU (base para maturidade)
-    hist_sku: Dict[str, set] = {}
-    nasc_sku: Dict[str, str] = {}
-    for r in rows_hist:
-        hist_sku.setdefault(r.sku, set()).add(r.mes)
-        if r.nasceu is not None:
-            d = r.nasceu.strftime("%Y-%m")
-            if r.sku not in nasc_sku or d < nasc_sku[r.sku]:
-                nasc_sku[r.sku] = d
-
     skus = []
     for k, a in ag_sku.items():
         sk, desc, cat, seg = k
@@ -437,6 +419,55 @@ def montar_dataset(db: Session, meses: List[str],
     # Itens sob restricao de producao no periodo
     sob_restricao = [s for s in skus if s.get("restricao_producao")]
     sob_restricao.sort(key=lambda s: -(s.get("corte_cx") or 0))
+
+    # ── DETALHE MENSAL — permite responder sobre um mes especifico ────────
+    # Sem isto o agente so enxerga o agregado do periodo e responde de forma
+    # generica quando perguntado sobre um mes isolado.
+    ag_cat_mes = _agregar(rows, lambda r: (r.mes, r.categoria), meses_validos)
+    ag_sku_mes = _agregar(
+        rows, lambda r: (r.mes, r.sku, r.descricao, r.categoria), meses_validos)
+
+    detalhe_mensal = []
+    for m in meses_validos:
+        cats = []
+        for (mm, cat), a in ag_cat_mes.items():
+            if mm != m:
+                continue
+            mt = _metricas(a)
+            cats.append({
+                "categoria": cat, "wmape": mt["wmape"], "bias": mt["bias"],
+                "volume": mt["volume"], "erro_abs": mt["erro_abs"],
+                "atendimento": mt["atendimento_pct"], "corte": mt["corte_cx"],
+                "classe": _classe(mt.get("wmape"), mt.get("bias")),
+            })
+        cats.sort(key=lambda x: -(x["erro_abs"] or 0))
+
+        itens = []
+        for (mm, sk, desc, cat), a in ag_sku_mes.items():
+            if mm != m:
+                continue
+            mt = _metricas(a)
+            if not mt.get("erro_abs"):
+                continue
+            itens.append({
+                "sku": sk, "descricao": desc, "categoria": cat,
+                "wmape": mt["wmape"], "bias": mt["bias"],
+                "volume": mt["volume"], "erro_abs": mt["erro_abs"],
+                "atendimento": mt["atendimento_pct"], "corte": mt["corte_cx"],
+                "maturidade": _maturidade(len(hist_sku.get(sk, set()))),
+            })
+        itens.sort(key=lambda x: -(x["erro_abs"] or 0))
+
+        mt_mes = _metricas(ag_mes[m]) if m in ag_mes else {}
+        detalhe_mensal.append({
+            "mes": m,
+            "wmape": mt_mes.get("wmape"), "bias": mt_mes.get("bias"),
+            "volume": mt_mes.get("volume"), "erro_abs": mt_mes.get("erro_abs"),
+            "atendimento": mt_mes.get("atendimento_pct"),
+            "corte": mt_mes.get("corte_cx"),
+            "categorias": cats,
+            "top_skus_erro": itens[:15],
+        })
 
     # Atendimento: leitura de execucao, separada da acuracia
     ag_at = ag_port.get("T", {})
@@ -486,9 +517,8 @@ def montar_dataset(db: Session, meses: List[str],
             "base_volume": ("demanda pedida pelo cliente" if base == "pedido"
                             else "volume efetivamente entregue"),
             "unidade": "caixas" if unidade == "cx" else "R$ (preco medio do pedido)",
-            "origem_do_plano": ("planejamento anterior ao Nexus (planilha) ate mai/26; "
-                                "planejamento no Nexus, plano congelado M-2, a partir de jun/26"),
-            "origem_da_previsao_estatistica": ("modelo do Nexus, M-2, disponivel a partir de jun/26"),
+            "plano_congelado_em": "M-2 (dois meses antes do mes de venda)",
+            "previsao_estatistica_disponivel_desde": "2026-06",
             "granularidade_erro": "erro absoluto computado em (SKU, mes) e agregado depois",
             "regra_maturidade": (f"Lancamento ate {MESES_LANCAMENTO} meses de historico; "
                                  f"Recente ate {MESES_RECENTE}; acima disso, Maduro"),
@@ -498,6 +528,7 @@ def montar_dataset(db: Session, meses: List[str],
         "atendimento":    atendimento,
         "evolucao_anual": evolucao_anual,
         "serie":          serie,
+        "detalhe_mensal": detalhe_mensal,
         "categorias":     categorias,
         "skus":           skus,
         "lancamentos":    lancamentos,
@@ -574,14 +605,6 @@ MATURIDADE DO ITEM
   Maduro: acima de 18 meses. Este e o universo em que a acuracia deve ser
     cobrada e onde padroes sistematicos sao acionaveis.
 
-RESTRICAO DE PRODUCAO
-  Alguns itens tiveram a entrega limitada por decisao ou capacidade em periodos
-  declarados. Nesses casos o atendimento baixo e o corte NAO sao falha de
-  previsao nem de suprimento: sao consequencia de uma decisao conhecida.
-  O plano pode ate estar correto — o que faltou foi produto disponivel.
-  Ao analisar item ou categoria sob restricao, informe a restricao antes de
-  qualquer leitura de atendimento, e nao inclua esses itens em recomendacoes
-  de melhoria de previsao.
 """
 
 SYSTEM_PROMPT = f"""Voce e especialista em S&OP e escreve o relatorio de acuracia de demanda
@@ -593,16 +616,23 @@ REGRAS DE REDACAO - obrigatorias:
   destroi, catastrofico, alarmante. Use linguagem descritiva: "erro de X por
   cento", "vies de X pontos percentuais", "acima do patamar do portfolio",
   "abaixo do observado no ano anterior".
-- Nunca cite nomes de tabelas ou campos de banco de dados. Refira-se a
-  "planejamento anterior ao Nexus" e "planejamento no Nexus".
+- Nunca cite nomes de tabelas, campos de banco, sistemas ou ferramentas.
+  Nao mencione Nexus, planilha, plataforma, migracao, transicao,
+  parametrizacao ou curva de aprendizado em nenhuma hipotese.
+- NOME DO PRODUTO: use SEMPRE a descricao exata do campo "desc" ou
+  "descricao", sem reescrever, abreviar, traduzir ou padronizar. Se a
+  descricao e "LINEA ADOC SACARINA LIQ 12X100ml", escreva exatamente assim.
 - Todo numero citado deve existir no JSON. Nao estime nem invente.
 - Declare limitacoes de amostra quando existirem.
 - Nao trate de descontos comerciais nem de politica de preco. O escopo e
   exclusivamente a acuracia da previsao de demanda.
 - NUNCA atribua variacao de resultado a mudanca de sistema, plataforma,
-  ferramenta ou metodologia de registro. Nao especule sobre causas que nao
-  estejam demonstradas nos dados. Quando a causa nao for identificavel,
-  declare isso de forma direta.
+  ferramenta, metodologia de registro ou origem do plano. Nao especule sobre
+  causas que nao estejam demonstradas nos dados. Quando a causa nao for
+  identificavel, declare isso de forma direta e mostre o que os dados revelam:
+  qual a direcao do erro, quais categorias e itens concentraram o desvio, e
+  qual a contribuicao de cada um no erro absoluto do periodo.
+- Nao trate de restricao de producao: esse tema esta fora do escopo.
 
 {METODOLOGIA}
 
@@ -618,9 +648,8 @@ ESTRUTURA (700 a 900 palavras, prosa densa, sem tabelas, sem markdown):
 3. EVOLUCAO ANO A ANO
    Compare cada ano isoladamente, usando os mesmos meses do calendario.
    Informe se o erro aumentou, diminuiu ou permaneceu estavel, e quanto.
-   PROIBIDO atribuir variacao de indicador a mudanca de sistema, de ferramenta,
-   de plataforma ou de metodologia de registro. Nao mencione troca de origem
-   do plano como explicacao para nenhum resultado. Se um mes ou periodo destoa,
+   PROIBIDO atribuir variacao de indicador a mudanca de sistema, ferramenta,
+   plataforma, metodologia de registro ou origem do plano. Se um mes ou periodo destoa,
    descreva o que os dados mostram (direcao do erro, categorias que
    concentraram o desvio, itens com maior contribuicao) e, quando a causa nao
    estiver nos dados, diga apenas que a causa nao e identificavel pelo recorte
@@ -633,13 +662,11 @@ ESTRUTURA (700 a 900 palavras, prosa densa, sem tabelas, sem markdown):
    Separe explicitamente os itens maduros dos itens de lancamento: so os
    primeiros devem entrar na leitura de acuracia do processo.
 
-5. LANCAMENTOS E ITENS SOB RESTRICAO
-   Liste os itens de lancamento e recentes do periodo, com quantos meses de
-   historico cada um tem, e declare que o erro deles nao e comparavel ao dos
-   itens maduros.
-   Liste as categorias e itens sob restricao declarada de producao, com o
-   periodo da restricao, e deixe claro que o atendimento baixo desses itens
-   e consequencia da restricao, nao de falha de previsao ou de suprimento.
+5. LANCAMENTOS E ITENS RECENTES
+   Liste os itens de lancamento e recentes do periodo, com a descricao completa
+   do produto e quantos meses de historico cada um tem. Declare que o erro
+   deles nao e comparavel ao dos itens maduros e que nao devem entrar na
+   cobranca de acuracia do processo.
 
 6. PADROES SISTEMATICOS
    Itens MADUROS com persistencia igual ou acima de 70%. Explique a implicacao
@@ -647,14 +674,12 @@ ESTRUTURA (700 a 900 palavras, prosa densa, sem tabelas, sem markdown):
 
 7. ATENDIMENTO E ORIGEM DO CORTE
    Informe o atendimento do portfolio no periodo e como evoluiu mes a mes.
-   Depois separe o corte em dois grupos, usando o cruzamento corte x BIAS:
-     - Corte em itens SOB RESTRICAO declarada: consequencia da decisao de
-       producao. Nao e falha de previsao nem de suprimento. Cite o periodo.
-     - Corte em itens SEM restricao: aqui a analise vale. Se o BIAS e negativo,
-       o plano subdimensionou e a producao seguiu o plano. Se o BIAS e neutro
-       ou positivo, o plano estava correto e a limitacao foi de execucao.
-   Essa separacao e obrigatoria: sem ela o indicador de atendimento fica
-   distorcido pelos itens que tiveram producao restringida por decisao.
+   Identifique os itens com maior corte e classifique a origem pelo cruzamento
+   corte x BIAS:
+     - BIAS negativo: o plano subdimensionou e a producao seguiu o plano.
+       A origem esta no planejamento de demanda.
+     - BIAS neutro ou positivo: o plano estava adequado e a limitacao foi de
+       execucao. A origem esta em suprimentos ou producao.
 
 8. PREVISAO ESTATISTICA COMPARADA AO PLANO
    Onde o FVA indica que o ajuste manual aumentou ou reduziu o erro, sempre
@@ -865,6 +890,7 @@ def responder_pergunta(db: Session, pergunta: str, meses: List[str],
         "escopo": ds["escopo"], "portfolio": ds["portfolio"],
         "atendimento": ds["atendimento"],
         "evolucao_anual": ds["evolucao_anual"], "serie_mensal": ds["serie"],
+        "detalhe_por_mes": ds["detalhe_mensal"],
         "categorias": ds["categorias"], "skus": skus,
     }, ensure_ascii=False, separators=(",", ":"))
 
@@ -877,12 +903,22 @@ Regras:
 - Responda apenas com base no JSON. Nunca invente numeros.
 - Se o dado nao estiver no recorte, diga isso claramente.
 - Tom tecnico e imparcial, sem adjetivos de julgamento.
-- Nao cite nomes de tabelas de banco. Use "planejamento anterior ao Nexus"
-  e "planejamento no Nexus".
-- Nao trate de descontos comerciais.
-- NUNCA atribua variacao de resultado a mudanca de sistema, plataforma ou
-  metodologia de registro. Se a causa nao estiver nos dados, diga que nao e
-  identificavel pelo recorte disponivel e aponte o que os dados mostram.
+- Nao cite nomes de tabelas nem de sistemas. Nao mencione Nexus, planilha,
+  plataforma, ferramenta, migracao, transicao, parametrizacao ou curva de
+  aprendizado. PROIBIDO atribuir qualquer variacao de resultado a mudanca de
+  sistema ou de metodologia de registro. Se a causa nao estiver nos dados,
+  escreva apenas que nao e identificavel pelo recorte e mostre o que os dados
+  revelam: direcao do erro, categorias e itens que concentraram o desvio.
+- Nao trate de descontos comerciais nem de restricao de producao.
+- NOME DO PRODUTO: use SEMPRE a descricao exata do campo "desc", sem
+  reescrever, abreviar, traduzir ou padronizar. Se a descricao e
+  "LINEA ADOC SACARINA LIQ 12X100ml", escreva exatamente assim. Nunca converta
+  para "Sacarina Liquido 12x100ml" ou variacoes.
+- ESCOPO TEMPORAL DA PERGUNTA: se a pergunta menciona um mes especifico, use
+  o bloco "detalhe_por_mes" daquele mes — ele traz as categorias e os itens
+  com maior erro NAQUELE mes. NAO responda com o agregado do periodo inteiro
+  quando a pergunta e sobre um mes. Se a pergunta nao especifica mes, use o
+  agregado do periodo.
 - Seja conciso e cite os numeros que fundamentam a resposta.
 - Sempre conclua o raciocinio. Nunca interrompa a resposta no meio de
   uma frase ou de uma lista. Se a resposta for longa, priorize os itens
@@ -1052,7 +1088,7 @@ def gerar_pdf(relatorio: str, ds: Dict[str, Any]) -> bytes:
         lc3.valueAxis.valueMin = 0
         lc3.valueAxis.valueMax = 100
         lc3.valueAxis.labels.fontSize = 7
-        lc3.lines[0].strokeColor = ambar = colors.HexColor("#f97316")
+        lc3.lines[0].strokeColor = ambar = colors.HexColor("#f59e0b")
         lc3.lines[0].strokeWidth = 1.8
         d3.add(lc3)
         el.append(d3)
@@ -1071,8 +1107,9 @@ def gerar_pdf(relatorio: str, ds: Dict[str, Any]) -> bytes:
     el.append(Paragraph(
         f"<b>Escopo:</b> {esc['skus_ativos']} SKUs ativos de {esc['skus_total_base']} "
         f"cadastrados &middot; {esc['granularidade_erro']}.<br/>"
-        f"<b>Origem do plano:</b> {esc['origem_do_plano']}.<br/>"
-        f"<b>Previsao estatistica:</b> {esc['origem_da_previsao_estatistica']}.<br/>"
+        f"<b>Plano congelado em:</b> {esc['plano_congelado_em']}.<br/>"
+        f"<b>Previsao estatistica disponivel desde:</b> "
+        f"{esc['previsao_estatistica_disponivel_desde']}.<br/>"
         f"<b>Comparacao ano a ano:</b> meses "
         f"{', '.join(f'{m:02d}' for m in esc['meses_do_calendario_comparados'])} de cada ano.",
         S_NOT))
@@ -1081,15 +1118,15 @@ def gerar_pdf(relatorio: str, ds: Dict[str, Any]) -> bytes:
     el.append(PageBreak())
     el.append(Paragraph("Anexo I | Evolucao ano a ano do portfolio", S_H2))
     cab = ["Ano","Volume","WMAPE","Delta vs ano ant.","BIAS","Persist.",
-           "Erro absoluto","Diagnostico","Origem do plano"]
+           "Erro absoluto","Diagnostico"]
     dados = [cab] + [[
         str(e["ano"]), n(e.get("volume")), f(e.get("wmape")),
         f(e.get("delta_wmape_pp"), " pp"), f(e.get("bias")),
         f(e.get("persistencia_pct"), "%"), n(e.get("erro_abs")),
-        e.get("classe","-"), e.get("origem_plano","-"),
+        e.get("classe","-"),
     ] for e in ds["evolucao_anual"]]
-    ta = Table(dados, colWidths=[1.2*cm,2*cm,1.5*cm,2.1*cm,1.4*cm,1.4*cm,
-                                 2*cm,2.2*cm,4.1*cm], repeatRows=1)
+    ta = Table(dados, colWidths=[1.6*cm,2.4*cm,1.8*cm,2.4*cm,1.7*cm,1.7*cm,
+                                 2.4*cm,3*cm], repeatRows=1)
     ta.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), ESC),
         ("TEXTCOLOR",  (0,0), (-1,0), colors.white),
