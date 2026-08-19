@@ -699,7 +699,16 @@ IMPORTANTE: complete todas as 10 secoes. Nao interrompa o texto no meio de uma
 frase. Se precisar economizar espaco, encurte as secoes 4 e 5, mas sempre
 entregue a secao 10 completa.
 
-Escreva em portugues do Brasil, paragrafos curtos."""
+Escreva em portugues do Brasil, paragrafos curtos.
+
+FORMATACAO: escreva prosa limpa, sem markdown. Nao use #, ##, **, ---, *, _,
+crase nem tabelas em pipe. Os titulos das secoes devem ser escritos em
+MAIUSCULAS numa linha isolada, precedidos do numero da secao. Exemplo:
+
+1. ESCOPO E METODO
+
+Nao inclua tabelas no texto: os anexos do documento ja trazem todos os dados
+tabulados. Cite os numeros dentro das frases."""
 
 
 def _chamar_claude(system: str, mensagens: List[Dict[str, str]],
@@ -920,6 +929,22 @@ Regras:
   quando a pergunta e sobre um mes. Se a pergunta nao especifica mes, use o
   agregado do periodo.
 - Seja conciso e cite os numeros que fundamentam a resposta.
+
+FORMATO DA RESPOSTA - siga exatamente:
+- Comece com uma frase de resposta direta a pergunta, sem titulo antes dela.
+- Use no maximo dois niveis de titulo, sempre com "## " (dois cerquilhas e um
+  espaco). Nunca use "#" sozinho nem "###".
+- Use **negrito** apenas para numeros-chave e nomes de item. Nunca para frases
+  inteiras.
+- Tabelas: use pipe simples, com cabecalho e linha separadora. Maximo de 6
+  colunas e 10 linhas. Sempre coloque a coluna de maior relevancia analitica
+  (erro absoluto, WMAPE ou volume) como segunda coluna, logo apos o nome.
+  Ordene sempre da maior para a menor contribuicao.
+- Nao use listas com marcador dentro de tabela nem tabela dentro de lista.
+- Termine com uma linha iniciada por "Leitura: " contendo a conclusao pratica
+  em uma frase.
+- Nunca use separadores horizontais como tres tracos.
+- Nao repita em texto o que ja esta na tabela.
 - Sempre conclua o raciocinio. Nunca interrompa a resposta no meio de
   uma frase ou de uma lista. Se a resposta for longa, priorize os itens
   mais relevantes e feche com uma sintese.
@@ -1088,7 +1113,7 @@ def gerar_pdf(relatorio: str, ds: Dict[str, Any]) -> bytes:
         lc3.valueAxis.valueMin = 0
         lc3.valueAxis.valueMax = 100
         lc3.valueAxis.labels.fontSize = 7
-        lc3.lines[0].strokeColor = ambar = colors.HexColor("#f59e0b")
+        lc3.lines[0].strokeColor = ambar = colors.HexColor("#f97316")
         lc3.lines[0].strokeWidth = 1.8
         d3.add(lc3)
         el.append(d3)
