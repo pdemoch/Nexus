@@ -59,14 +59,26 @@ from dateutil.relativedelta import relativedelta
 from sqlalchemy import text
 
 from app.core.database import SessionLocal
+from app.core.constants import HORIZONTE, HORIZ_DECISAO
 from app.ml.models_library import (
     ARENA, gerar_todos_candidatos, montar_serie_mensal,
 )
 
 logger = logging.getLogger(__name__)
 
-HORIZONTE = 5                 # M+0 .. M+4
-HORIZ_DECISAO = (2, 3, 4)     # o que o plano decide
+# HORIZONTE e HORIZ_DECISAO vêm de app/core/constants.py — ponto único.
+#
+#   HORIZONTE = 5      o modelo CALCULA M+0..M+4. Necessário: a validação por
+#                      origem rolante mede o erro em cada passo, e os
+#                      candidatos geram vetor de 5 posições.
+#   HORIZ_DECISAO      só M+2, M+3 e M+4 são GRAVADOS no banco. A regra M-2
+#                      torna M+0 e M+1 inalcançáveis pelo planejamento: quando
+#                      o ciclo nasce, esses meses já estão em curso ou
+#                      encerrados. Nunca aparecem em tela, nunca são editados,
+#                      nunca entram em acurácia.
+#
+# Antes desta trava, M+0 e M+1 ocupavam 140.785 de 353.589 linhas da
+# fato_ibp_granular (39,8%, ~98 MB) sem qualquer consumidor.
 JANELA_VALIDACAO = 24         # origens de validação por SKU
 MIN_MESES_TORNEIO = 18        # abaixo disso não há campeonato confiável
 HISTERESE = 0.0               # 0.0 = meritocracia pura a cada ciclo
@@ -333,7 +345,12 @@ class NexusForecaster:
                 if chave.startswith("Fallback"):
                     por_fallback += 1
 
-                for i in range(HORIZONTE):
+                # GRAVA SÓ OS HORIZONTES DE DECISÃO (M+2, M+3, M+4).
+                # O vetor prev tem HORIZONTE posições — o modelo precisa
+                # calcular M+0 e M+1 para a validação por origem rolante —
+                # mas eles NÃO vão para o banco: a regra M-2 os torna
+                # inalcançáveis pelo planejamento.
+                for i in HORIZ_DECISAO:
                     resultados.append({
                         "ciclo_sop": ciclo_alvo,
                         "mes_projetado": inicio + relativedelta(months=i),
@@ -345,6 +362,9 @@ class NexusForecaster:
 
             resumo = ", ".join(f"{k}: {v}" for k, v in sorted(contagem.items()))
             log_callback(f"   -> {len(skus)} SKUs previstos ({resumo}).")
+            log_callback(f"   -> {len(resultados)} linhas geradas "
+                         f"(horizontes {', '.join('M+'+str(h) for h in HORIZ_DECISAO)} "
+                         f"— M+0 e M+1 não são gravados).")
             if por_fallback:
                 log_callback(f"   ⚠️ {por_fallback} SKUs saíram por fallback (histórico curto). "
                              f"Têm número, mas erro esperado ~2x maior — revisar no S&OP.")

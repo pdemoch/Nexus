@@ -8,6 +8,9 @@ from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.database import SessionLocal, engine
+from app.core.constants import (
+    HORIZ_DECISAO, JANELA_PMV_MESES, JANELA_SHARE_MESES, horizonte_do_par,
+)
 from app.models.domain_models import FatoIbpGranular, FatoVendas, DimCliente, FatoOrcamento, FatoEstoqueD0
 
 
@@ -272,7 +275,7 @@ class NexusLoader:
         log_callback(f"⏳ [LOAD] Iniciando Rateio Tático (Share 6M) para o ciclo {ciclo_alvo}...")
 
         hoje = date.today()
-        corte_6m = (hoje - relativedelta(months=6)).strftime("%Y-%m-%d")
+        corte_6m = (hoje - relativedelta(months=JANELA_SHARE_MESES)).strftime("%Y-%m-%d")
 
         try:
             log_callback("   • Extraindo Matriz de Share (6M)...")
@@ -299,6 +302,7 @@ class NexusLoader:
 
             dados_granulares = []
             df_forecast_pd = df_forecast.to_pandas()
+            descartadas_horizonte = 0
 
             log_callback("   • Fatiando volumes com Método do Maior Resto (PMV nasce zerado)...")
 
@@ -307,6 +311,24 @@ class NexusLoader:
                 vol_ia = float(row['vol_ia_global'])
                 modelo_vencedor = str(row.get('modelo_vencedor', 'Media_Simples'))
                 acuracia_ia = float(row.get('acuracia_ia', 50.0))
+
+                # ============================================================
+                # TRAVA DE HORIZONTE — segunda barreira.
+                # O forecaster já filtra por HORIZ_DECISAO, mas esta guarda
+                # impede que qualquer origem (injeção de NPD, reprocessamento
+                # manual, forecaster antigo) grave M+0, M+1 ou horizonte
+                # negativo na fato_ibp_granular. A regra M-2 torna esses meses
+                # inalcançáveis pelo planejamento: eles nunca aparecem em tela,
+                # nunca são editados e nunca entram em acurácia.
+                # ============================================================
+                mes_proj = row['mes_projetado']
+                if hasattr(mes_proj, "date"):
+                    mes_proj_d = mes_proj.date()
+                else:
+                    mes_proj_d = mes_proj
+                if horizonte_do_par(ciclo_alvo, mes_proj_d) not in HORIZ_DECISAO:
+                    descartadas_horizonte += 1
+                    continue
 
                 clientes_sku = df_hist[df_hist['sku'] == sku].copy()
                 if clientes_sku.empty:
@@ -341,6 +363,13 @@ class NexusLoader:
                         "modelo_vencedor": modelo_vencedor,
                         "acuracia_ia": round(acuracia_ia, 2)
                     })
+
+            if descartadas_horizonte:
+                log_callback(
+                    f"   ⚠️ {descartadas_horizonte} linha(s) descartada(s) por estarem "
+                    f"fora dos horizontes de decisão "
+                    f"({', '.join('M+'+str(h) for h in HORIZ_DECISAO)})."
+                )
 
             log_callback(f"   • Gravando {len(dados_granulares)} linhas atômicas no PostgreSQL...")
 
@@ -395,65 +424,37 @@ class NexusLoader:
           4. Última venda do SKU (qualquer data) — rede de segurança final.
 
         'Venda válida' = qt_pedido > 0 E vl_pedido > 0 (exclui bonificação e
-        devolução).
-
-        NPD / item sem venda: o reset é SELETIVO — só zera linhas cujo SKU já
-        tem venda válida. Item sem nenhuma venda mantém o preço definido pelo
-        Marketing na injeção, já que a cascata não teria como precificá-lo.
-        Na primeira venda registrada, o item passa a entrar no reset e a
-        cascata assume o preço real automaticamente. Idempotente.
+        devolução). SKU de NPD sem venda alguma fica intocado (preserva o preço
+        que o Marketing definiu na injeção). Idempotente.
         """
         log_callback(f"⏳ [PMV] Precificando ciclo {ciclo_alvo} (cascata 4 níveis, janela 3m)...")
         try:
             with SessionLocal() as db:
                 # ----------------------------------------------------------------
-                # RESET SELETIVO. Zera o PMV apenas das linhas cujo SKU JÁ TEM
-                # venda válida — essas serão recalculadas pela cascata.
-                #
-                # SKU sem nenhuma venda (NPD recém-injetado) fica INTOCADO: a
-                # cascata não teria como precificá-lo, e zerar destruiria o preço
-                # que o Marketing definiu na injeção. Assim que o item registrar
-                # a primeira venda, ele passa a entrar no reset e a cascata assume
-                # o preço real — a transição é automática.
-                #
-                # Sem o reset nas linhas com venda, uma REPRECIFICAÇÃO manteria o
-                # preço antigo (pmv>0) e os níveis de fallback nunca rodariam.
-                # Só toca o ciclo ativo; ciclos passados são imutáveis.
+                # RESET — Opção A (recalcular tudo). Zera o PMV do ciclo ativo
+                # ANTES da cascata. Sem isto, numa REPRECIFICAÇÃO as linhas já têm
+                # preço antigo (pmv>0), e os níveis de fallback (que preenchem só
+                # onde pmv=0) nunca rodam — deixando clientes sem venda recente com
+                # preço velho em vez do fallback regional/SKU. O reset garante que
+                # a cascata recalcula do zero, cada nível cobrindo o que o anterior
+                # não alcançou. Só toca o ciclo ativo; passados são imutáveis.
                 r0 = db.execute(text("""
-                    UPDATE fato_ibp_granular f
+                    UPDATE fato_ibp_granular
                     SET pmv_aplicado = 0
-                    WHERE f.ciclo_sop = :ciclo
-                      AND EXISTS (
-                          SELECT 1 FROM fato_vendas v
-                          WHERE v.sku = f.sku
-                            AND v.qt_pedido > 0
-                            AND v.vl_pedido > 0
-                      )
+                    WHERE ciclo_sop = :ciclo
                 """), {"ciclo": ciclo_alvo})
-                preservadas = db.execute(text("""
-                    SELECT COUNT(*) FROM fato_ibp_granular f
-                    WHERE f.ciclo_sop = :ciclo
-                      AND COALESCE(f.pmv_aplicado, 0) > 0
-                      AND NOT EXISTS (
-                          SELECT 1 FROM fato_vendas v
-                          WHERE v.sku = f.sku AND v.qt_pedido > 0 AND v.vl_pedido > 0
-                      )
-                """), {"ciclo": ciclo_alvo}).scalar() or 0
-                log_callback(
-                    f"   [PMV] Reset: {r0.rowcount} linhas zeradas para recálculo · "
-                    f"{preservadas} linhas de itens sem venda preservadas (preço de lançamento)."
-                )
+                log_callback(f"   [PMV] Reset: {r0.rowcount} linhas do ciclo zeradas para recálculo.")
 
                 # ----------------------------------------------------------------
                 # NÍVEL 1 — CNPJ×SKU, últimos 3 meses (ponderado por volume).
                 # ----------------------------------------------------------------
-                r1 = db.execute(text("""
+                r1 = db.execute(text(f"""
                     WITH pmv_cliente AS (
                         SELECT cgc, sku,
                                SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv
                         FROM fato_vendas
                         WHERE qt_pedido > 0 AND vl_pedido > 0
-                          AND data_pedido >= (CURRENT_DATE - INTERVAL '3 months')
+                          AND data_pedido >= (CURRENT_DATE - INTERVAL '{JANELA_PMV_MESES} months')
                         GROUP BY cgc, sku
                     )
                     UPDATE fato_ibp_granular f
@@ -469,14 +470,14 @@ class NexusLoader:
                 # Para linhas sem preço próprio: usa o preço médio ponderado da
                 # regional do cliente (via dim_clientes) para aquele SKU.
                 # ----------------------------------------------------------------
-                r2 = db.execute(text("""
+                r2 = db.execute(text(f"""
                     WITH pmv_regional AS (
                         SELECT c.regional, v.sku,
                                SUM(v.vl_pedido) / NULLIF(SUM(v.qt_pedido), 0) AS pmv
                         FROM fato_vendas v
                         JOIN dim_clientes c ON c.cgc = v.cgc
                         WHERE v.qt_pedido > 0 AND v.vl_pedido > 0
-                          AND v.data_pedido >= (CURRENT_DATE - INTERVAL '3 months')
+                          AND v.data_pedido >= (CURRENT_DATE - INTERVAL '{JANELA_PMV_MESES} months')
                         GROUP BY c.regional, v.sku
                     )
                     UPDATE fato_ibp_granular f
@@ -492,13 +493,13 @@ class NexusLoader:
                 # ----------------------------------------------------------------
                 # NÍVEL 3 — SKU geral, últimos 3 meses (ponderado, todas regionais).
                 # ----------------------------------------------------------------
-                r3 = db.execute(text("""
+                r3 = db.execute(text(f"""
                     WITH pmv_sku AS (
                         SELECT sku,
                                SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv
                         FROM fato_vendas
                         WHERE qt_pedido > 0 AND vl_pedido > 0
-                          AND data_pedido >= (CURRENT_DATE - INTERVAL '3 months')
+                          AND data_pedido >= (CURRENT_DATE - INTERVAL '{JANELA_PMV_MESES} months')
                         GROUP BY sku
                     )
                     UPDATE fato_ibp_granular f

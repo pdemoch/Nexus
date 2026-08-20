@@ -461,8 +461,16 @@ async def fill_rate(
     _: dict = Depends(get_current_user),
 ):
     """
-    Atendimento = volume entregue / volume pedido.
-    Corte = volume pedido nao entregue, medido diretamente em qtcorte/vlcorte.
+    Atendimento (fill rate) sobre o volume JA DECIDIDO.
+
+    A fato_vendas obedece a identidade de tres estados:
+        qt_pedido = qtfatura + qtcorte + carteira_em_aberto
+
+    O denominador do fill rate e (qtfatura + qtcorte), NAO qt_pedido. Usar
+    qt_pedido joga a carteira em aberto contra o indicador e derruba o mes
+    corrente artificialmente (08/2026 exibia 58% quando o real era 97,9%).
+
+    Corte = qtcorte/vlcorte, valor do ERP. Nunca por subtracao.
     unidade='cx' usa qt_pedido/qtfatura/qtcorte; 'rs' usa vl_pedido/vlfatura/vlcorte.
     """
     try:
@@ -502,8 +510,11 @@ async def fill_rate(
 
         def _mont(pedido, entregue, corte):
             pedido, entregue, corte = float(pedido or 0), float(entregue or 0), float(corte or 0)
-            at = round(entregue / pedido * 100, 1) if pedido > 0 else None
-            return pedido, entregue, corte, at
+            decidido = entregue + corte
+            carteira = max(pedido - decidido, 0.0)
+            at  = round(entregue / decidido * 100, 1) if decidido > 0 else None
+            cob = round(decidido / pedido * 100, 1) if pedido > 0 else None
+            return pedido, entregue, corte, at, carteira, cob
 
         def _classe(at):
             if at is None:  return "Sem dado"
@@ -519,12 +530,16 @@ async def fill_rate(
             """), params).fetchall()
             serie, tp, te, tc = [], 0.0, 0.0, 0.0
             for r in rows:
-                pe, en, co, at = _mont(r.pedido, r.entregue, r.corte)
+                pe, en, co, at, ca, cob = _mont(r.pedido, r.entregue, r.corte)
                 tp += pe; te += en; tc += co
                 serie.append({"mes": r.mes, "pedido": round(pe), "entregue": round(en),
-                              "corte": round(co), "atendimento": at})
+                              "corte": round(co), "atendimento": at,
+                              "carteira": round(ca), "cobertura": cob})
+            td = te + tc
             resumo = {"pedido": round(tp), "entregue": round(te), "corte": round(tc),
-                      "atendimento": round(te / tp * 100, 1) if tp > 0 else None,
+                      "carteira": round(max(tp - td, 0.0)),
+                      "atendimento": round(te / td * 100, 1) if td > 0 else None,
+                      "cobertura": round(td / tp * 100, 1) if tp > 0 else None,
                       "unidade": unidade}
             return {"serie": serie, "resumo": resumo}
 
@@ -547,8 +562,9 @@ async def fill_rate(
 
         itens = []
         for r in rows:
-            pe, en, co, at = _mont(r.pedido, r.entregue, r.corte)
+            pe, en, co, at, ca, cob = _mont(r.pedido, r.entregue, r.corte)
             it = {"pedido": round(pe), "entregue": round(en), "corte": round(co),
+                  "carteira": round(ca), "cobertura": cob,
                   "atendimento": at, "classe": _classe(at)}
             if nivel == "categoria":
                 it["categoria"] = r.chave
@@ -561,6 +577,9 @@ async def fill_rate(
 
     except Exception as e:
         raise HTTPException(500, f"Erro no atendimento: {e}")
+
+
+@router.get("/alertas")
 async def alertas(limite: int = Query(20), db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
     try:
         teto = _ultimo_mes_fechado()
@@ -580,10 +599,29 @@ async def alertas(limite: int = Query(20), db: Session = Depends(get_db), _: dic
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# FILL RATE
-# Fill Rate = SUM(qtfatura) / SUM(qt_pedido) × 100
-# Mede o quanto do volume pedido foi efetivamente faturado (entregue).
-# Corte = qt_pedido - qtfatura (volume não atendido por ruptura/falta)
+# FILL RATE — MODELO DE TRÊS ESTADOS
+#
+# A fato_vendas nasce do relatório de pendência e obedece à identidade:
+#
+#       qt_pedido = qtfatura + qtcorte + carteira_em_aberto
+#
+# Um pedido tem TRÊS destinos, não dois: foi faturado, foi cortado, ou ainda
+# aguarda decisão. Validado no banco (jan/2025 a ago/2026): a carteira é ruído
+# (±800 cx) em todo mês fechado e 28.087 cx em 08/2026 no dia 20 — exatamente
+# o volume ainda em aberto no mês corrente.
+#
+# NUNCA usar (qt_pedido - qtfatura) como corte: isso conta carteira em aberto
+# como ruptura. Com a fórmula antiga, agosto/2026 exibia 58% de fill rate e
+# 28.961 cx de corte, quando o real era 97,9% e 874 cx.
+#
+#       Fill Rate = qtfatura / (qtfatura + qtcorte)    -> execução do decidido
+#       Corte     = qtcorte                             -> valor do ERP, canônico
+#       Carteira  = qt_pedido - qtfatura - qtcorte      -> ainda indefinido
+#       Cobertura = (qtfatura + qtcorte) / qt_pedido    -> % do pedido resolvido
+#
+# As três rotas de fill rate (/fill-rate, /fill-rate/evolucao,
+# /fill-rate/diagnostico) usam esta mesma definição. Qualquer divergência entre
+# elas é bug.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/fill-rate/evolucao")
@@ -617,7 +655,8 @@ async def fill_rate_evolucao(
                 TO_CHAR(DATE_TRUNC('month', v.data_pedido), 'YYYY-MM') AS mes,
                 SUM(v.qt_pedido) AS pedido,
                 SUM(v.qtfatura)  AS faturado,
-                SUM(GREATEST(v.qt_pedido - v.qtfatura, 0)) AS corte
+                SUM(v.qtcorte)   AS corte,
+                SUM(GREATEST(v.qt_pedido - v.qtfatura - v.qtcorte, 0)) AS carteira
             FROM fato_vendas v
             LEFT JOIN dim_produtos p ON p.sku = v.sku
             WHERE v.data_pedido >= :inicio
@@ -632,32 +671,38 @@ async def fill_rate_evolucao(
         for r in rows:
             if r.mes not in meses_validos:
                 continue
-            pedido   = float(r.pedido  or 0)
+            pedido   = float(r.pedido   or 0)
             faturado = float(r.faturado or 0)
-            corte    = float(r.corte   or 0)
-            fr = round(faturado / pedido * 100, 1) if pedido > 0 else None
+            corte    = float(r.corte    or 0)
+            carteira = float(r.carteira or 0)
+            decidido = faturado + corte          # denominador do fill rate
             serie.append({
-                "mes":      r.mes,
-                "pedido":   round(pedido),
-                "faturado": round(faturado),
-                "corte":    round(corte),
-                "fill_rate": fr,
+                "mes":       r.mes,
+                "pedido":    round(pedido),
+                "faturado":  round(faturado),
+                "corte":     round(corte),
+                "carteira":  round(carteira),
+                "fill_rate": round(_sdiv(faturado, decidido, 100), 1) if decidido > 0 else None,
+                "cobertura": round(_sdiv(decidido, pedido, 100), 1) if pedido > 0 else None,
             })
 
-        # Resumo acumulado
+        # Resumo acumulado — sempre sobre o volume decidido, nunca sobre o pedido
         tot_ped = sum(s["pedido"]   for s in serie)
         tot_fat = sum(s["faturado"] for s in serie)
         tot_cor = sum(s["corte"]    for s in serie)
-        fr_acum = round(tot_fat / tot_ped * 100, 1) if tot_ped > 0 else None
+        tot_car = sum(s["carteira"] for s in serie)
+        tot_dec = tot_fat + tot_cor
 
         return {
             "serie": serie,
             "resumo": {
-                "fill_rate":      fr_acum,
+                "fill_rate":      round(_sdiv(tot_fat, tot_dec, 100), 1) if tot_dec > 0 else None,
                 "pedido_total":   round(tot_ped),
                 "faturado_total": round(tot_fat),
                 "corte_total":    round(tot_cor),
-                "corte_pct":      round((1 - tot_fat / tot_ped) * 100, 1) if tot_ped > 0 else None,
+                "carteira_total": round(tot_car),
+                "corte_pct":      round(_sdiv(tot_cor, tot_dec, 100), 1) if tot_dec > 0 else None,
+                "cobertura":      round(_sdiv(tot_dec, tot_ped, 100), 1) if tot_ped > 0 else None,
             }
         }
     except Exception as e:
@@ -701,7 +746,8 @@ async def fill_rate_diagnostico(
                 {group_sel},
                 SUM(v.qt_pedido) AS pedido,
                 SUM(v.qtfatura)  AS faturado,
-                SUM(GREATEST(v.qt_pedido - v.qtfatura, 0)) AS corte
+                SUM(v.qtcorte)   AS corte,
+                SUM(GREATEST(v.qt_pedido - v.qtfatura - v.qtcorte, 0)) AS carteira
             FROM fato_vendas v
             LEFT JOIN dim_produtos p ON p.sku = v.sku
             WHERE v.data_pedido >= :inicio
@@ -710,7 +756,7 @@ async def fill_rate_diagnostico(
               AND COALESCE(p.ativo, FALSE) = TRUE
               {w}
             GROUP BY {group_by}
-            ORDER BY SUM(GREATEST(v.qt_pedido - v.qtfatura, 0)) DESC
+            ORDER BY SUM(v.qtcorte) DESC
         """), params).fetchall()
 
         itens = []
@@ -718,9 +764,11 @@ async def fill_rate_diagnostico(
             pedido   = float(r.pedido   or 0)
             faturado = float(r.faturado or 0)
             corte    = float(r.corte    or 0)
-            if pedido <= 0:
+            carteira = float(r.carteira or 0)
+            decidido = faturado + corte
+            if decidido <= 0:
                 continue
-            fr = round(faturado / pedido * 100, 1)
+            fr = round(faturado / decidido * 100, 1)
             itens.append({
                 "chave":     r.chave,
                 "descricao": r.descricao,
@@ -728,8 +776,10 @@ async def fill_rate_diagnostico(
                 "pedido":    round(pedido),
                 "faturado":  round(faturado),
                 "corte":     round(corte),
+                "carteira":  round(carteira),
                 "fill_rate": fr,
-                "corte_pct": round(corte / pedido * 100, 1),
+                "corte_pct": round(corte / decidido * 100, 1),
+                "cobertura": round(_sdiv(decidido, pedido, 100), 1) if pedido > 0 else None,
                 # Classificação por nível de fill rate
                 "classe": (
                     "Crítico"   if fr < 85 else
