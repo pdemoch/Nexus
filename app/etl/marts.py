@@ -134,8 +134,13 @@ SELECT TRIM(v.sku::text)                            AS sku,
        -- Só fica populado após a Recarga Total com o transformer que
        -- preserva sku_origem. Antes disso é zero, e qt_corte segue
        -- valendo integralmente.
-       SUM(v.qtcorte) FILTER (WHERE v.sku_origem <> v.sku) AS qt_corte_transferencia,
-       SUM(v.vlcorte) FILTER (WHERE v.sku_origem <> v.sku) AS vl_corte_transferencia,
+       -- COALESCE obrigatorio: FILTER sem linhas correspondentes devolve
+       -- NULL, nao zero. Gravado como NULL, qualquer conta do tipo
+       -- (entregue + corte - transferencia) vira NULL na linha inteira e
+       -- some do SUM do denominador, enquanto o numerador continua
+       -- somando tudo — o fill rate ajustado dava 557%.
+       COALESCE(SUM(v.qtcorte) FILTER (WHERE v.sku_origem <> v.sku), 0) AS qt_corte_transferencia,
+       COALESCE(SUM(v.vlcorte) FILTER (WHERE v.sku_origem <> v.sku), 0) AS vl_corte_transferencia,
        -- GREATEST(...,0): o ERP tem raras linhas com entregue > pedido
        -- (54 cx em 2026). Sem a trava viraria carteira negativa.
        SUM(GREATEST(v.qt_pedido - v.qtfatura - v.qtcorte, 0)) AS qt_carteira,
