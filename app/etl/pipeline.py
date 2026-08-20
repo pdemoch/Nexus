@@ -10,6 +10,7 @@ from sqlalchemy import text
 from app.etl.extractor import GobiExtractor
 from app.etl.transformer import NexusTransformer
 from app.etl.loader import NexusLoader
+from app.etl import marts
 from app.ml.forecaster import NexusForecaster
 
 # =========================================================================
@@ -182,6 +183,14 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print,
             # Sentinela: alerta se sobrou alguma linha sem preço.
             await asyncio.to_thread(_auditar_pmv_zerado, ciclo_alvo, log_callback)
 
+            # MARTS SEMPRE RODAM — inclusive em ciclo existente.
+            # A fato_vendas acabou de ser recarregada (janela de 5 meses), então
+            # realizado, PMV e acurácia mudaram mesmo sem o S&OP ter sido tocado.
+            # Sem esta chamada, KPIs e agente leriam marts defasados enquanto as
+            # telas de planejamento mostrariam dado fresco — exatamente a
+            # divergência que os marts existem para eliminar.
+            await asyncio.to_thread(marts.compute_marts, ciclo_alvo, log_callback)
+
             log_callback("✅ Sincronização de Dados finalizada com sucesso.")
             return  # IA e Rateio permanecem bloqueados (protege o S&OP em curso).
 
@@ -199,6 +208,14 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print,
 
         # Sentinela: nenhuma linha pode ficar sem preço (receita zero silenciosa).
         await asyncio.to_thread(_auditar_pmv_zerado, ciclo_alvo, log_callback)
+
+        # ====================================================================
+        # 4. CAMADA ANALÍTICA (MARTS)
+        # ====================================================================
+        # Roda por último: depende de fato_vendas recarregada, do rateio e da
+        # precificação já concluídos. Só lê — nenhuma tabela transacional é
+        # tocada, e os marts são reconstrutíveis a qualquer momento.
+        await asyncio.to_thread(marts.compute_marts, ciclo_alvo, log_callback)
 
         log_callback("\n✅ Pipeline Executado com Sucesso Absoluto!")
 

@@ -23,13 +23,16 @@ Contrato do front (mantido):
 """
 
 import datetime
+from datetime import date
 from typing import List, Optional
+from dateutil.relativedelta import relativedelta
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.core.database import get_db
+from app.core.constants import HORIZ_DECISAO, horizonte_do_par
 from app.api.routers.router_auth import get_current_user
 from app.api.routers.shared_ibp import (
     get_current_cycle, get_working_window_months, ratear_maior_resto,
@@ -145,6 +148,35 @@ def injetar(payload: PayloadInjetar, db: Session = Depends(get_db),
         linhas_criadas = 0
         for proj in payload.projecao:
             data_alvo = parse_date_safe(proj.mes if len(proj.mes) > 7 else proj.mes + "-01")
+
+            # ============================================================
+            # TRAVA DE HORIZONTE — o lançamento só pode nascer em M+2..M+4.
+            #
+            # A regra M-2 significa que, quando o ciclo N abre, os meses N e
+            # N+1 já estão em curso ou encerrados: não há como planejá-los.
+            # Sem esta validação a tela aceitava qualquer mês, inclusive
+            # ANTERIOR ao ciclo. Foi assim que nasceram 17 linhas no ciclo
+            # 05/2026 apontando para abril/2026 (horizonte -1), removidas na
+            # limpeza de 20/08/2026.
+            #
+            # A trava existe em três camadas: aqui (entrada pela tela), no
+            # loader (rateio do pipeline) e no forecaster (geração). Esta é a
+            # única que devolve mensagem ao usuário.
+            # ============================================================
+            h = horizonte_do_par(ciclo, data_alvo)
+            if h not in HORIZ_DECISAO:
+                meses_ok = ", ".join(
+                    (date(int(ciclo[3:]), int(ciclo[:2]), 1)
+                     + relativedelta(months=k)).strftime("%m/%Y")
+                    for k in HORIZ_DECISAO
+                )
+                raise HTTPException(
+                    422,
+                    f"O mês {data_alvo.strftime('%m/%Y')} está no horizonte M+{h} do "
+                    f"ciclo {ciclo} e não pode receber lançamento. "
+                    f"O ciclo {ciclo} planeja apenas: {meses_ok}."
+                )
+
             check_imutabilidade_mes(data_alvo, payload.codigo_lancamento, contexto="lançamento")
 
             volume_nacional = int(proj.volume)   # zero é zero: não pula
