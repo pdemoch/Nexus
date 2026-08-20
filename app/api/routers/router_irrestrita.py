@@ -155,9 +155,9 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_irrestrita))
                SUM(f.vol_topdown)                      AS topdown,
                SUM(f.vol_bottomup)                     AS bottomup,
                COALESCE(
-                   SUM(f.vol_bottomup * f.pmv_aplicado)
-                   / NULLIF(SUM(f.vol_bottomup), 0),
-                   AVG(f.pmv_aplicado)
+                   SUM(f.vol_bottomup * f.pmv_aplicado) / NULLIF(SUM(f.vol_bottomup), 0),
+                   SUM(f.vol_ia * f.pmv_aplicado) / NULLIF(SUM(f.vol_ia), 0),
+                   0
                )                                       AS pmv
         FROM fato_ibp_granular f
         LEFT JOIN dim_produtos p ON p.sku = f.sku
@@ -323,7 +323,11 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_irrestrita
                    SUM(f.vol_ia)                        AS ia,
                    SUM(f.vol_topdown)                   AS topdown,
                    SUM(f.vol_bottomup)                  AS bottomup,
-                   AVG(f.pmv_aplicado)                  AS pmv,
+                   COALESCE(
+                   SUM(f.vol_bottomup * f.pmv_aplicado) / NULLIF(SUM(f.vol_bottomup), 0),
+                   SUM(f.vol_ia * f.pmv_aplicado) / NULLIF(SUM(f.vol_ia), 0),
+                   0
+               )                                       AS pmv,
                    SUM(f.vol_bottomup * f.pmv_aplicado) AS receita
             FROM fato_ibp_granular f
             LEFT JOIN dim_produtos p ON p.sku = f.sku

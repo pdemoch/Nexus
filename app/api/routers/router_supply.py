@@ -273,7 +273,11 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_supply)):
                TO_CHAR(f.mes_projetado,'YYYY-MM-DD')   AS mes,
                SUM(f.vol_ia)                            AS ia,
                SUM(f.vol_supply)                       AS supply,
-               AVG(f.pmv_aplicado)                      AS pmv,
+               COALESCE(
+                   SUM(f.vol_supply * f.pmv_aplicado) / NULLIF(SUM(f.vol_supply), 0),
+                   SUM(f.vol_ia * f.pmv_aplicado) / NULLIF(SUM(f.vol_ia), 0),
+                   0
+               )                                       AS pmv,
                SUM(f.vol_supply * f.pmv_aplicado)      AS receita_td
         FROM fato_ibp_granular f
         LEFT JOIN dim_produtos p ON p.sku = f.sku
@@ -320,7 +324,8 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_supply)):
         })
         td = int(r.supply or 0); ia = int(r.ia or 0)
         receita = float(r.receita_td or 0)
-        pmv = (receita / td) if td > 0 else float(r.pmv or 0)
+        # PMV ponderado por vol_final — padrão único do sistema.
+        pmv = float(r.pmv or 0)
         sk["meses"][r.mes] = {
             "ia": ia, "supply": td, "pmv": round(pmv, 2),
             "receita": round(receita, 2),
@@ -397,7 +402,7 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_supply)):
         for r in rows:
             td      = int(r.supply or 0)
             receita = float(r.receita_td or 0)
-            pmv     = round(receita / td, 2) if td > 0 else 0.0
+            pmv     = round(float(r.pmv or 0), 2)   # ponderado por vol_final
             registros.append({
                 "categoria": r.categoria,
                 "segmento":  r.segmento,

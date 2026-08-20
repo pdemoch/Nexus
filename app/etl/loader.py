@@ -395,26 +395,54 @@ class NexusLoader:
           4. Última venda do SKU (qualquer data) — rede de segurança final.
 
         'Venda válida' = qt_pedido > 0 E vl_pedido > 0 (exclui bonificação e
-        devolução). SKU de NPD sem venda alguma fica intocado (preserva o preço
-        que o Marketing definiu na injeção). Idempotente.
+        devolução).
+
+        NPD / item sem venda: o reset é SELETIVO — só zera linhas cujo SKU já
+        tem venda válida. Item sem nenhuma venda mantém o preço definido pelo
+        Marketing na injeção, já que a cascata não teria como precificá-lo.
+        Na primeira venda registrada, o item passa a entrar no reset e a
+        cascata assume o preço real automaticamente. Idempotente.
         """
         log_callback(f"⏳ [PMV] Precificando ciclo {ciclo_alvo} (cascata 4 níveis, janela 3m)...")
         try:
             with SessionLocal() as db:
                 # ----------------------------------------------------------------
-                # RESET — Opção A (recalcular tudo). Zera o PMV do ciclo ativo
-                # ANTES da cascata. Sem isto, numa REPRECIFICAÇÃO as linhas já têm
-                # preço antigo (pmv>0), e os níveis de fallback (que preenchem só
-                # onde pmv=0) nunca rodam — deixando clientes sem venda recente com
-                # preço velho em vez do fallback regional/SKU. O reset garante que
-                # a cascata recalcula do zero, cada nível cobrindo o que o anterior
-                # não alcançou. Só toca o ciclo ativo; passados são imutáveis.
+                # RESET SELETIVO. Zera o PMV apenas das linhas cujo SKU JÁ TEM
+                # venda válida — essas serão recalculadas pela cascata.
+                #
+                # SKU sem nenhuma venda (NPD recém-injetado) fica INTOCADO: a
+                # cascata não teria como precificá-lo, e zerar destruiria o preço
+                # que o Marketing definiu na injeção. Assim que o item registrar
+                # a primeira venda, ele passa a entrar no reset e a cascata assume
+                # o preço real — a transição é automática.
+                #
+                # Sem o reset nas linhas com venda, uma REPRECIFICAÇÃO manteria o
+                # preço antigo (pmv>0) e os níveis de fallback nunca rodariam.
+                # Só toca o ciclo ativo; ciclos passados são imutáveis.
                 r0 = db.execute(text("""
-                    UPDATE fato_ibp_granular
+                    UPDATE fato_ibp_granular f
                     SET pmv_aplicado = 0
-                    WHERE ciclo_sop = :ciclo
+                    WHERE f.ciclo_sop = :ciclo
+                      AND EXISTS (
+                          SELECT 1 FROM fato_vendas v
+                          WHERE v.sku = f.sku
+                            AND v.qt_pedido > 0
+                            AND v.vl_pedido > 0
+                      )
                 """), {"ciclo": ciclo_alvo})
-                log_callback(f"   [PMV] Reset: {r0.rowcount} linhas do ciclo zeradas para recálculo.")
+                preservadas = db.execute(text("""
+                    SELECT COUNT(*) FROM fato_ibp_granular f
+                    WHERE f.ciclo_sop = :ciclo
+                      AND COALESCE(f.pmv_aplicado, 0) > 0
+                      AND NOT EXISTS (
+                          SELECT 1 FROM fato_vendas v
+                          WHERE v.sku = f.sku AND v.qt_pedido > 0 AND v.vl_pedido > 0
+                      )
+                """), {"ciclo": ciclo_alvo}).scalar() or 0
+                log_callback(
+                    f"   [PMV] Reset: {r0.rowcount} linhas zeradas para recálculo · "
+                    f"{preservadas} linhas de itens sem venda preservadas (preço de lançamento)."
+                )
 
                 # ----------------------------------------------------------------
                 # NÍVEL 1 — CNPJ×SKU, últimos 3 meses (ponderado por volume).

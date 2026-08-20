@@ -204,7 +204,8 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(get_current_user)):
                SUM(f.vol_meta)      AS meta,
                SUM(f.vol_supply)    AS supply,
                SUM(f.vol_final)     AS final,
-               SUM(f.vol_final * f.pmv_aplicado) AS receita_final
+               SUM(f.vol_final * f.pmv_aplicado) AS receita_final,
+               SUM(f.vol_ia    * f.pmv_aplicado) AS receita_ia
         FROM fato_ibp_granular f
         LEFT JOIN dim_produtos p ON p.sku = f.sku
         WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)
@@ -243,7 +244,9 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(get_current_user)):
         receita = float(r.receita_final or 0)
         # PMV exibido = ponderado por volume (receita_grao / volume). Coerente:
         # pmv_ponderado × volume == receita, sempre. Nunca média simples.
-        pmv = (receita / fin) if fin > 0 else 0.0
+        ia_cx = int(r.ia or 0)
+        ia_rs = float(r.receita_ia or 0)
+        pmv = (receita / fin) if fin > 0 else ((ia_rs / ia_cx) if ia_cx > 0 else 0.0)
         sk["meses"][r.mes] = {
             "ia": int(r.ia or 0), "topdown": int(r.topdown or 0),
             "bottomup": int(r.bottomup or 0), "meta": int(r.meta or 0),
@@ -435,7 +438,8 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(get_current_user))
                TO_CHAR(f.mes_projetado,'MM/YYYY') AS mes,
                SUM(f.vol_ia) AS ia, SUM(f.vol_topdown) AS td, SUM(f.vol_bottomup) AS bu,
                SUM(f.vol_meta) AS meta, SUM(f.vol_supply) AS sup, SUM(f.vol_final) AS fin,
-               SUM(f.vol_final * f.pmv_aplicado) AS receita_final
+               SUM(f.vol_final * f.pmv_aplicado) AS receita_final,
+               SUM(f.vol_ia    * f.pmv_aplicado) AS receita_ia
         FROM fato_ibp_granular f
         LEFT JOIN dim_produtos p ON p.sku = f.sku
         WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)
@@ -447,7 +451,8 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(get_current_user))
     linhas = ["Categoria;Segmento;SKU;Descricao;Mes;IA;TopDown;BottomUp;Meta;Supply;Final;PMV;Receita Final (R$)"]
     for r in rows:
         fin = int(r.fin or 0); receita = float(r.receita_final or 0)
-        pmv = (receita / fin) if fin > 0 else 0.0
+        _iacx = int(r.ia or 0); _iars = float(r.receita_ia or 0)
+        pmv = (receita / fin) if fin > 0 else ((_iars / _iacx) if _iacx > 0 else 0.0)
         linhas.append(";".join([r.categoria, r.segmento, r.sku, r.descricao, r.mes,
             str(int(r.ia or 0)), str(int(r.td or 0)), str(int(r.bu or 0)),
             str(int(r.meta or 0)), str(int(r.sup or 0)), str(fin), _num(pmv), _num(receita)]))

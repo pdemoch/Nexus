@@ -500,7 +500,8 @@ def consolidado(db: Session = Depends(get_db), _: dict = Depends(require_metas))
                 SUM(f.vol_ia)       AS ia,
                 COALESCE(
                     SUM(f.vol_meta * f.pmv_aplicado) / NULLIF(SUM(f.vol_meta), 0),
-                    AVG(f.pmv_aplicado)
+                    SUM(f.vol_ia   * f.pmv_aplicado) / NULLIF(SUM(f.vol_ia), 0),
+                    0
                 )                   AS pmv
             FROM fato_ibp_granular f
             LEFT JOIN dim_produtos p ON p.sku = f.sku
@@ -700,7 +701,8 @@ def consolidado(db: Session = Depends(get_db), _: dict = Depends(require_metas))
                 SUM(f.vol_ia)                            AS ia,
                 COALESCE(
                     SUM(f.vol_meta * f.pmv_aplicado) / NULLIF(SUM(f.vol_meta), 0),
-                    AVG(f.pmv_aplicado)
+                    SUM(f.vol_ia   * f.pmv_aplicado) / NULLIF(SUM(f.vol_ia), 0),
+                    0
                 )                                        AS pmv
             FROM fato_ibp_granular f
             LEFT JOIN dim_produtos p ON p.sku = f.sku
