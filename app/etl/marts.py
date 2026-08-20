@@ -262,22 +262,30 @@ SELECT e.sku,
 
        -- ── GAPS EM VOLUME ────────────────────────────────────────────
        -- Positivo = superestimou / sobrou.
-       CASE WHEN pl.qt_plano IS NOT NULL
-            THEN pl.qt_plano - COALESCE(v.qt_pedido, 0) END AS gap_previsao_cx,
+       --
+       -- COALESCE(qt_plano, 0): vender um SKU que NÃO estava no plano é
+       -- erro de previsão de tamanho igual ao volume vendido — o plano
+       -- disse zero, implicitamente. Tratar como NULL removeria esse item
+       -- do numerador do WMAPE mantendo-o no denominador, e o indicador
+       -- ficaria artificialmente bom.
+       --
+       -- Medido em 20/08/2026: com NULL, o WMAPE de abril caía de 20,50
+       -- para 17,69 — 2,81 pp de erro escondido.
+       --
+       -- A coluna tem_plano preserva a distinção entre "errou a previsão"
+       -- e "não havia previsão", para quem quiser separar as duas coisas.
+       COALESCE(pl.qt_plano, 0) - COALESCE(v.qt_pedido, 0)   AS gap_previsao_cx,
        COALESCE(v.qt_pedido, 0) - COALESCE(v.qt_entregue, 0) AS gap_execucao_cx,
        -- erro_abs_cx alimenta o WMAPE. Gravado no grão (sku, mes) porque
        -- o WMAPE TEM que ser computado aqui e só depois agregado.
-       CASE WHEN pl.qt_plano IS NOT NULL
-            THEN ABS(pl.qt_plano - COALESCE(v.qt_pedido, 0)) END AS erro_abs_cx,
+       ABS(COALESCE(pl.qt_plano, 0) - COALESCE(v.qt_pedido, 0)) AS erro_abs_cx,
 
        -- ── GAPS EM REAIS ─────────────────────────────────────────────
-       CASE WHEN pl.qt_plano IS NOT NULL
-            THEN (pl.qt_plano - COALESCE(v.qt_pedido, 0))
-                 * COALESCE(pm.pmv_mes, pm.pmv_3m, pm.pmv_historico, 0) END,
+       (COALESCE(pl.qt_plano, 0) - COALESCE(v.qt_pedido, 0))
+           * COALESCE(pm.pmv_mes, pm.pmv_3m, pm.pmv_historico, 0),
        COALESCE(v.vl_pedido, 0) - COALESCE(v.vl_entregue, 0),
-       CASE WHEN pl.qt_plano IS NOT NULL
-            THEN ABS(pl.qt_plano - COALESCE(v.qt_pedido, 0))
-                 * COALESCE(pm.pmv_mes, pm.pmv_3m, pm.pmv_historico, 0) END,
+       ABS(COALESCE(pl.qt_plano, 0) - COALESCE(v.qt_pedido, 0))
+           * COALESCE(pm.pmv_mes, pm.pmv_3m, pm.pmv_historico, 0),
 
        -- ── PRECIFICAÇÃO DO ERRO ──────────────────────────────────────
        -- Capital imobilizado: plano acima do que o mercado pediu.
@@ -286,10 +294,9 @@ SELECT e.sku,
        -- Receita perdida na entrega: corte confirmado pelo ERP.
        COALESCE(v.vl_corte, 0),
        -- Venda que o plano não enxergou: pedido acima do planejado.
-       CASE WHEN pl.qt_plano IS NOT NULL
-            THEN GREATEST(COALESCE(v.qt_pedido, 0) - pl.qt_plano, 0)
-                 * COALESCE(pm.pmv_mes, pm.pmv_3m, pm.pmv_historico, 0)
-            ELSE 0 END
+       -- Inclui o caso sem plano nenhum (plano = 0).
+       GREATEST(COALESCE(v.qt_pedido, 0) - COALESCE(pl.qt_plano, 0), 0)
+           * COALESCE(pm.pmv_mes, pm.pmv_3m, pm.pmv_historico, 0)
 
 FROM espinha e
 LEFT JOIN mart_vendas_mes     v  ON v.sku  = e.sku AND v.mes  = e.mes
@@ -413,23 +420,27 @@ def validar_marts(log_callback=print) -> bool:
             SELECT TO_CHAR(mes, 'YYYY-MM') AS mes,
                    ROUND((SUM(erro_abs_cx) / NULLIF(SUM(qt_pedido), 0) * 100)::numeric, 2) AS wmape,
                    ROUND(((SUM(qt_plano) - SUM(qt_pedido))
-                          / NULLIF(SUM(qt_pedido), 0) * 100)::numeric, 2) AS bias
+                          / NULLIF(SUM(qt_pedido), 0) * 100)::numeric, 2) AS bias,
+                   ROUND((SUM(qt_pedido) FILTER (WHERE NOT tem_plano)
+                          / NULLIF(SUM(qt_pedido), 0) * 100)::numeric, 2) AS sem_plano_pct
             FROM mart_acuracia_sku_mes
             WHERE ativo = TRUE AND qt_pedido > 0
               AND mes >= '2026-01-01' AND mes < '2026-08-01'
             GROUP BY 1 ORDER BY 1
         """)).fetchall()
 
-        log_callback("   mes     | wmape  (esp)   | bias    (esp)")
-        log_callback("   --------|----------------|----------------")
+        log_callback("   mes     | wmape  (esp)   | bias    (esp)    | s/plano")
+        log_callback("   --------|----------------|------------------|--------")
         for r in rows:
             ew, eb = BASELINE.get(r.mes, (None, None))
             w, b = float(r.wmape or 0), float(r.bias or 0)
+            sp = float(r.sem_plano_pct or 0)
             bw = ew is not None and abs(w - ew) < 0.05
             bb = eb is not None and abs(b - eb) < 0.05
             ok = ok and bw and bb
-            log_callback(f"   {r.mes} | {w:6.2f} ({ew:6.2f}) {'OK' if bw else '<<< DIVERGIU'}"
-                         f" | {b:7.2f} ({eb:7.2f}) {'OK' if bb else '<<< DIVERGIU'}")
+            log_callback(f"   {r.mes} | {w:6.2f} ({ew:6.2f}) {'OK  ' if bw else '<<<<'}"
+                         f" | {b:7.2f} ({eb:7.2f}) {'OK  ' if bb else '<<<<'}"
+                         f" | {sp:5.2f}%")
 
     log_callback("   ✅ Marts batem com o baseline." if ok else
                  "   ❌ DIVERGÊNCIA. Não migre os routers (Fase 6).")
