@@ -107,6 +107,26 @@ class NexusTransformer:
             lf_vendas = lf_vendas.join(
                 df_de_para.lazy(), on="produto", how="left"
             ).with_columns([
+                # ============================================================
+                # sku_origem PRESERVA O CODIGO ANTES DA CONSOLIDACAO.
+                #
+                # Sem esta coluna, o corte por TRANSFERENCIA DE CODIGO fica
+                # indistinguivel de ruptura de suprimento. Quando a promocao
+                # COPA encerra, o pedido no codigo 418 e cortado e o cliente
+                # e atendido no codigo regular 410 — ele RECEBEU o produto,
+                # nao houve venda perdida. Mas com o coalesce destrutivo os
+                # dois viram a mesma linha e o corte conta contra o fill rate.
+                #
+                # Medido: 9.001 cx nos 5 SKUs consolidados entre jan e
+                # jul/2026 (10,7% do corte do ano), com pico de 4.312 em
+                # fevereiro contra base de ~300/mes.
+                #
+                # Sempre preenchida (nunca nula): igual a produto quando nao
+                # houve DE-PARA. A chave unica da fato_vendas passou a ser
+                # (pedido, sku_origem, cgc) — com NULL, o Postgres trataria
+                # cada linha como distinta e a deduplicacao quebraria.
+                # ============================================================
+                pl.col("produto").alias("sku_origem"),
                 pl.coalesce([pl.col("produto_destino"), pl.col("produto")]).alias("produto"),
                 pl.coalesce([pl.col("descricao_destino"), pl.col("descricao")]).alias("descricao"),
             ]).drop(["produto_destino", "descricao_destino"])
@@ -116,6 +136,10 @@ class NexusTransformer:
                     df_de_para["produto_destino"].to_list()[:6])
             )
             print(f"🔁 [SILVER] DE-PARA aplicado em {df_de_para.height} SKU(s): {pares}")
+        else:
+            # Sem DE-PARA ativo a coluna ainda precisa existir: o loader a
+            # seleciona incondicionalmente e ela e NOT NULL no banco.
+            lf_vendas = lf_vendas.with_columns(pl.col("produto").alias("sku_origem"))
 
         
         # --- GARANTIA FINANCEIRA: Adicionando colunas de valores reais com fallback 0 se vier nulo ---

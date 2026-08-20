@@ -193,7 +193,13 @@ class NexusLoader:
             log_callback(f"⏳ [LOAD] Apagando vendas a partir de {data_inicio} e substituindo pelos dados extraídos...")
         try:
             # 🔥 FILTRO DE INTEGRALIDADE: Garante apenas os campos existentes na fato_vendas
-            colunas_vendas = ["pedido", "data_pedido", "sku", "cgc", "vendedor_nome", "qt_pedido", "vl_pedido", "qtfatura", "qtcorte", "vlfatura", "vlcorte"]
+            colunas_vendas = ["pedido", "data_pedido", "sku", "sku_origem", "cgc", "vendedor_nome",
+                              "qt_pedido", "vl_pedido", "qtfatura", "qtcorte", "vlfatura", "vlcorte"]
+            # Retrocompatibilidade: extracoes anteriores ao sku_origem nao trazem
+            # a coluna. Como ela e NOT NULL no banco, cai para o proprio sku
+            # (que e o valor correto quando nao houve DE-PARA).
+            if "sku_origem" not in df_silver.columns:
+                df_silver = df_silver.with_columns(pl.col("sku").alias("sku_origem"))
             df_vendas = df_silver.select(colunas_vendas).to_dicts()
             if not df_vendas:
                 log_callback("⚠️ [LOAD] Nenhum dado encontrado para carga.")
@@ -233,21 +239,29 @@ class NexusLoader:
                 else:
                     db.execute(text("DELETE FROM fato_vendas WHERE data_pedido >= :dt"), {"dt": data_inicio})
 
-                # 2. Inserção com ON CONFLICT: se (pedido, sku, cgc) já existe
-                # (mesmo item em lojas diferentes, ou DE-PARA COPA colapsando dois SKUs),
-                # soma os volumes em vez de rejeitar. Preserva a granularidade original
-                # da API 150 sem perder nenhum volume.
+                # 2. Inserção com ON CONFLICT sobre (pedido, sku_origem, cgc).
+                #
+                # A chave usa sku_origem, NAO sku. Com sku, o DE-PARA COPA
+                # colapsava 418 e 410 do mesmo pedido/cliente numa linha so,
+                # somando os volumes — e era essa fusao que apagava a
+                # diferenca entre corte por transferencia de codigo e corte
+                # por ruptura de suprimento.
+                #
+                # Para linhas sem DE-PARA, sku_origem = sku e o comportamento
+                # e identico ao anterior: mesmo item em lojas diferentes do
+                # mesmo pedido continua somando, preservando a granularidade
+                # original da API 150 sem perder volume.
                 lote_size = 5000
                 for i in range(0, len(df_vendas), lote_size):
                     lote = df_vendas[i:i+lote_size]
                     db.execute(text("""
                         INSERT INTO fato_vendas
-                            (pedido, data_pedido, sku, cgc, vendedor_nome,
+                            (pedido, data_pedido, sku, sku_origem, cgc, vendedor_nome,
                              qt_pedido, vl_pedido, qtfatura, qtcorte, vlfatura, vlcorte)
                         VALUES
-                            (:pedido, :data_pedido, :sku, :cgc, :vendedor_nome,
+                            (:pedido, :data_pedido, :sku, :sku_origem, :cgc, :vendedor_nome,
                              :qt_pedido, :vl_pedido, :qtfatura, :qtcorte, :vlfatura, :vlcorte)
-                        ON CONFLICT (pedido, sku, cgc) DO UPDATE SET
+                        ON CONFLICT (pedido, sku_origem, cgc) DO UPDATE SET
                             qt_pedido   = fato_vendas.qt_pedido   + EXCLUDED.qt_pedido,
                             vl_pedido   = fato_vendas.vl_pedido   + EXCLUDED.vl_pedido,
                             qtfatura    = fato_vendas.qtfatura    + EXCLUDED.qtfatura,

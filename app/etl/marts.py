@@ -102,7 +102,8 @@ _SQL_VENDAS = """
 INSERT INTO mart_vendas_mes
     (sku, mes, categoria, segmento, curva, ativo,
      qt_pedido, vl_pedido, qt_entregue, vl_entregue,
-     qt_corte, vl_corte, qt_carteira, vl_carteira, pmv, n_clientes)
+     qt_corte, vl_corte, qt_corte_transferencia, vl_corte_transferencia,
+     qt_carteira, vl_carteira, pmv, n_clientes)
 SELECT TRIM(v.sku::text)                            AS sku,
        DATE_TRUNC('month', v.data_pedido)::date     AS mes,
        MAX(p.categoria)                             AS categoria,
@@ -119,6 +120,22 @@ SELECT TRIM(v.sku::text)                            AS sku,
        -- métrica no mês corrente.
        SUM(v.qtcorte)                               AS qt_corte,
        SUM(v.vlcorte)                               AS vl_corte,
+       -- ── CORTE POR TRANSFERÊNCIA DE CÓDIGO ────────────────────────
+       -- Linha com sku_origem <> sku veio de um código consolidado por
+       -- DE-PARA (COPA). Quando a promoção encerra, o pedido no código
+       -- promocional é cortado e o cliente é atendido no código regular:
+       -- ele RECEBEU o produto, não houve venda perdida.
+       --
+       -- Somar isso ao corte de ruptura mistura decisão comercial com
+       -- falha de suprimento. Medido: 9.001 cx nos 5 SKUs consolidados
+       -- entre jan e jul/2026, com pico de 4.312 em fevereiro contra base
+       -- de ~300/mês.
+       --
+       -- Só fica populado após a Recarga Total com o transformer que
+       -- preserva sku_origem. Antes disso é zero, e qt_corte segue
+       -- valendo integralmente.
+       SUM(v.qtcorte) FILTER (WHERE v.sku_origem <> v.sku) AS qt_corte_transferencia,
+       SUM(v.vlcorte) FILTER (WHERE v.sku_origem <> v.sku) AS vl_corte_transferencia,
        -- GREATEST(...,0): o ERP tem raras linhas com entregue > pedido
        -- (54 cx em 2026). Sem a trava viraria carteira negativa.
        SUM(GREATEST(v.qt_pedido - v.qtfatura - v.qtcorte, 0)) AS qt_carteira,
