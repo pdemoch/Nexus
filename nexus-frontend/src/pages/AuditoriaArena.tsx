@@ -1,5 +1,4 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import type { CSSProperties } from 'react';
 import axios from 'axios';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -218,199 +217,7 @@ function Card({ label, valor, cor, sub }: any) {
 // ═══════════════════════════════════════════════════════════════════════════
 // TABELAS DE BIAS
 // ═══════════════════════════════════════════════════════════════════════════
-
-/* ── Renderizador das respostas do agente ─────────────────────────────────
-   O agente devolve texto com marcadores simples (##T, ##TB, ##KPI, ##CH).
-   Aqui eles viram blocos visuais. Texto sem marcador vira parágrafo.        */
-function RespostaAgente({ texto }: { texto: string }) {
-  const blocos: any[] = [];
-  const linhas = (texto || '').split('\n');
-  let i = 0;
-
-  while (i < linhas.length) {
-    const l = linhas[i].trim();
-
-    if (!l) { i++; continue; }
-
-    // Título de seção
-    if (l.startsWith('##T ')) {
-      blocos.push({ tipo: 'titulo', txt: l.slice(4).trim() });
-      i++; continue;
-    }
-
-    // Nota / destaque
-    if (l.startsWith('##NOTA ')) {
-      blocos.push({ tipo: 'nota', txt: l.slice(7).trim() });
-      i++; continue;
-    }
-
-    // KPI
-    if (l.startsWith('##KPI ')) {
-      const p = l.slice(6).split('|').map(s => s.trim());
-      blocos.push({ tipo: 'kpi', rotulo: p[0], valor: p[1], ctx: p[2] });
-      i++; continue;
-    }
-
-    // Tabela
-    if (l.startsWith('##TB')) {
-      const titulo = l.slice(4).trim();
-      let cab: string[] = [];
-      const linhasTab: string[][] = [];
-      i++;
-      while (i < linhas.length && !linhas[i].trim().startsWith('##TF')) {
-        const t = linhas[i].trim();
-        if (t.startsWith('##TH')) cab = t.slice(4).split('|').map(s => s.trim());
-        else if (t.startsWith('##TR')) linhasTab.push(t.slice(4).split('|').map(s => s.trim()));
-        i++;
-      }
-      i++; // pula ##TF
-      blocos.push({ tipo: 'tabela', titulo, cab, linhas: linhasTab });
-      continue;
-    }
-
-    // Gráfico
-    if (l.startsWith('##CH')) {
-      const [titulo, unidade] = l.slice(4).split('|').map(s => s.trim());
-      const pontos: { rotulo: string; valor: number }[] = [];
-      i++;
-      while (i < linhas.length && !linhas[i].trim().startsWith('##CF')) {
-        const t = linhas[i].trim();
-        if (t.startsWith('##CD')) {
-          const [r, v] = t.slice(4).split('|').map(s => s.trim());
-          const num = parseFloat((v || '').replace(/\./g, '').replace(',', '.'));
-          if (!isNaN(num)) pontos.push({ rotulo: r, valor: num });
-        }
-        i++;
-      }
-      i++; // pula ##CF
-      blocos.push({ tipo: 'gráfico', titulo, unidade, pontos });
-      continue;
-    }
-
-    // Parágrafo: acumula linhas até o próximo marcador
-    const par: string[] = [];
-    while (i < linhas.length) {
-      const t = linhas[i].trim();
-      if (!t || t.startsWith('##')) break;
-      par.push(t.replace(/\*\*/g, '').replace(/^#+\s*/, ''));
-      i++;
-    }
-    if (par.length) blocos.push({ tipo: 'paragrafo', txt: par.join(' ') });
-  }
-
-  const maxV = Math.max(
-    ...blocos.filter(b => b.tipo === 'gráfico')
-             .flatMap(b => b.pontos.map((p: any) => p.valor)), 1);
-
-  return (
-    <div>
-      {blocos.map((b, k) => {
-        if (b.tipo === 'titulo') return (
-          <div key={k} style={{ fontSize:11.5, fontWeight:900, color:'#7c3aed',
-            textTransform:'uppercase', letterSpacing:'.04em',
-            marginTop: k ? 16 : 0, marginBottom:7 }}>{b.txt}</div>
-        );
-
-        if (b.tipo === 'paragrafo') return (
-          <p key={k} style={{ fontSize:12.5, lineHeight:1.7, color:'#334155',
-            margin:'0 0 9px' }}>{b.txt}</p>
-        );
-
-        if (b.tipo === 'nota') return (
-          <div key={k} style={{ background:'#f5f3ff', borderLeft:'3px solid #7c3aed',
-            borderRadius:'0 8px 8px 0', padding:'10px 14px', margin:'10px 0',
-            fontSize:12, color:'#4c1d95', lineHeight:1.6 }}>{b.txt}</div>
-        );
-
-        if (b.tipo === 'kpi') return (
-          <div key={k} style={{ display:'inline-block', background:'#fff',
-            border:'1px solid #e2e8f0', borderRadius:10, padding:'10px 16px',
-            margin:'4px 8px 8px 0', minWidth:130 }}>
-            <div style={{ fontSize:9.5, fontWeight:800, textTransform:'uppercase',
-              letterSpacing:'.05em', color:'#94a3b8' }}>{b.rotulo}</div>
-            <div style={{ fontSize:19, fontWeight:900, color:'#0f172a', margin:'2px 0' }}>{b.valor}</div>
-            {b.ctx && <div style={{ fontSize:10, color:'#64748b' }}>{b.ctx}</div>}
-          </div>
-        );
-
-        if (b.tipo === 'tabela') return (
-          <div key={k} style={{ margin:'12px 0', border:'1px solid #e2e8f0',
-            borderRadius:10, overflow:'hidden' }}>
-            {b.titulo && (
-              <div style={{ padding:'8px 14px', background:'#f8fafc', fontSize:11,
-                fontWeight:800, color:'#334155', borderBottom:'1px solid #e2e8f0' }}>
-                {b.titulo}
-              </div>
-            )}
-            <div style={{ overflowX:'auto' }}>
-              <table style={{ width:'100%', borderCollapse:'collapse', fontSize:11.5 }}>
-                <thead>
-                  <tr style={{ background:'#f1f5f9' }}>
-                    {b.cab.map((h: string, j: number) => (
-                      <th key={j} style={{ padding:'7px 12px',
-                        textAlign: j === 0 ? 'left' : 'right', fontSize:9.5,
-                        fontWeight:800, textTransform:'uppercase',
-                        letterSpacing:'.04em', color:'#64748b', whiteSpace:'nowrap' }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {b.linhas.map((lin: string[], j: number) => (
-                    <tr key={j} style={{ background: j % 2 ? '#f9fafb' : '#fff',
-                      borderTop:'1px solid #f1f5f9' }}>
-                      {lin.map((cel, m) => (
-                        <td key={m} style={{ padding:'7px 12px',
-                          textAlign: m === 0 ? 'left' : 'right',
-                          fontWeight: m === 0 ? 700 : 500,
-                          color: m === 0 ? '#334155' : '#475569',
-                          whiteSpace:'nowrap' }}>{cel}</td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        );
-
-        if (b.tipo === 'gráfico') {
-          const mx = Math.max(...b.pontos.map((p: any) => Math.abs(p.valor)), 1);
-          return (
-            <div key={k} style={{ margin:'12px 0', border:'1px solid #e2e8f0',
-              borderRadius:10, padding:'12px 14px', background:'#fff' }}>
-              {b.titulo && (
-                <div style={{ fontSize:11, fontWeight:800, color:'#334155', marginBottom:10 }}>
-                  {b.titulo}{b.unidade ? ` (${b.unidade})` : ''}
-                </div>
-              )}
-              {b.pontos.map((p: any, j: number) => (
-                <div key={j} style={{ display:'flex', alignItems:'center', gap:8, marginBottom:5 }}>
-                  <div style={{ width:95, fontSize:10.5, color:'#64748b',
-                    textAlign:'right', whiteSpace:'nowrap', overflow:'hidden',
-                    textOverflow:'ellipsis' }}>{p.rotulo}</div>
-                  <div style={{ flex:1, background:'#f1f5f9', borderRadius:4, height:16 }}>
-                    <div style={{ width:`${Math.abs(p.valor) / mx * 100}%`, height:'100%',
-                      background: p.valor < 0 ? '#2563eb' : '#7c3aed',
-                      borderRadius:4, transition:'width .3s' }} />
-                  </div>
-                  <div style={{ width:62, fontSize:10.5, fontWeight:800,
-                    color:'#334155', textAlign:'right' }}>
-                    {p.valor.toLocaleString('pt-BR', { maximumFractionDigits:1 })}
-                  </div>
-                </div>
-              ))}
-            </div>
-          );
-        }
-
-        return null;
-      })}
-    </div>
-  );
-}
-
-
-const styleTab = (ativo: boolean): CSSProperties => ({
+const styleTab = (ativo: boolean): React.CSSProperties => ({
   padding:'10px 18px', border:'none', background:'none', cursor:'pointer',
   fontSize:13, fontWeight:ativo?700:400,
   color:ativo?'#0f172a':'#64748b',
@@ -552,15 +359,12 @@ export default function AuditoriaArena() {
   const [erro, setErro]           = useState('');
   const [abaTabela, setAbaTabela] = useState<'wmape'|'super'|'sub'>('wmape');
   const [abaKpi, setAbaKpi]       = useState<'acuracia'|'fillrate'|'agente'>('acuracia');
-  const [baseCalc, setBaseCalc]   = useState<'pedido'|'faturado'>('pedido');
   const [unidade, setUnidade]     = useState<'cx'|'rs'>('cx');
   // Agente
   const [relatorio, setRelatorio]   = useState<string>('');
   const [gerandoRel, setGerandoRel] = useState(false);
   const [baixandoPdf, setBaixandoPdf] = useState(false);
   const [erroAgente, setErroAgente] = useState('');
-  const [relInfo, setRelInfo] = useState<{publicado:boolean; gerado_por?:string;
-    gerado_em?:string; ciclo?:string; pode_regerar?:boolean} | null>(null);
   const [chat, setChat] = useState<{role:'user'|'assistant', content:string}[]>([]);
   const [pergunta, setPergunta] = useState('');
   const [respondendo, setRespondendo] = useState(false);
@@ -582,10 +386,10 @@ export default function AuditoriaArena() {
     mesesSel.forEach(m=>p.append('meses',m));
     if (categoria) p.set('categoria',categoria);
     if (sku) p.set('sku',sku);
-    p.set('base', baseCalc);
+    p.set('base', 'pedido');
     p.set('unidade', unidade);
     return p.toString();
-  }, [mesesSel, categoria, sku, baseCalc, unidade]);
+  }, [mesesSel, categoria, sku, unidade]);
 
   const carregar = useCallback(async () => {
     if (!mesesSel.length) { setEvolucao(null); setDiag([]); return; }
@@ -618,43 +422,13 @@ export default function AuditoriaArena() {
 
 
   // ─── Agente ────────────────────────────────────────────────────────────
-  // Ao abrir a aba (ou trocar o recorte), busca o relatório já publicado.
-  useEffect(() => {
-    if (abaKpi !== 'agente' || !mesesSel.length) return;
-    let vivo = true;
-    (async () => {
-      try {
-        const st = await axios.get(`/api/v1/kpis/agente/relatorio/status?${qs}`);
-        if (!vivo) return;
-        setRelInfo(st.data);
-        if (st.data.publicado) {
-          const r = await axios.get(`/api/v1/kpis/agente/relatorio?${qs}`);
-          if (vivo) { setRelatorio(r.data.relatorio || ''); setErroAgente(''); }
-        } else {
-          setRelatorio('');
-        }
-      } catch { /* silencioso */ }
-    })();
-    return () => { vivo = false; };
-  }, [abaKpi, qs, mesesSel.length]);
-
-  const gerarRelatorio = useCallback(async (forcar = false) => {
+  const gerarRelatorio = useCallback(async () => {
     if (!mesesSel.length) { setErroAgente('Selecione ao menos um mês.'); return; }
-    if (forcar && !confirm(
-      'Regerar o relatório deste ciclo? A análise atual será substituída para todos os usuários.'
-    )) return;
-    setGerandoRel(true); setErroAgente('');
+    setGerandoRel(true); setErroAgente(''); setRelatorio('');
     try {
-      const r = await axios.get(
-        `/api/v1/kpis/agente/relatorio?${qs}${forcar ? '&forcar=true' : ''}`);
+      const r = await axios.get(`/api/v1/kpis/agente/relatorio?${qs}`);
       setRelatorio(r.data.relatorio || '');
-      setRelInfo({
-        publicado: true,
-        gerado_por: r.data.gerado_por,
-        gerado_em: r.data.gerado_em,
-        pode_regerar: r.data.pode_regerar,
-      });
-      if (forcar) setChat([]);
+      setChat([]);
     } catch (e: any) {
       setErroAgente(e?.response?.data?.detail || 'Falha ao gerar o relatório.');
     } finally { setGerandoRel(false); }
@@ -665,7 +439,7 @@ export default function AuditoriaArena() {
     setBaixandoPdf(true);
     try {
       const r = await axios.post('/api/v1/kpis/agente/pdf',
-        { relatorio, meses: mesesSel, base: baseCalc, unidade },
+        { relatorio, meses: mesesSel, base: 'pedido', unidade: 'cx' },
         { responseType: 'blob' });
       const url = window.URL.createObjectURL(new Blob([r.data], { type: 'application/pdf' }));
       const a = document.createElement('a');
@@ -676,7 +450,7 @@ export default function AuditoriaArena() {
     } catch {
       setErroAgente('Falha ao gerar o PDF.');
     } finally { setBaixandoPdf(false); }
-  }, [relatorio, mesesSel, baseCalc, unidade]);
+  }, [relatorio, mesesSel]);
 
   const enviarPergunta = useCallback(async () => {
     const p = pergunta.trim();
@@ -687,7 +461,7 @@ export default function AuditoriaArena() {
     setRespondendo(true);
     try {
       const r = await axios.post('/api/v1/kpis/agente/chat', {
-        pergunta: p, meses: mesesSel, base: baseCalc, unidade,
+        pergunta: p, meses: mesesSel, base: 'pedido', unidade: 'cx',
         historico: chat.slice(-6),
       });
       setChat([...novoChat, { role: 'assistant' as const, content: r.data.resposta }]);
@@ -695,7 +469,7 @@ export default function AuditoriaArena() {
       setChat([...novoChat, { role: 'assistant' as const,
         content: e?.response?.data?.detail || 'Não consegui responder agora.' }]);
     } finally { setRespondendo(false); }
-  }, [pergunta, chat, mesesSel, baseCalc, unidade, respondendo]);
+  }, [pergunta, chat, mesesSel, respondendo]);
 
   const nSuper = diag.filter(i=>(i.bias_h||0)>5).length;
   const nSub   = diag.filter(i=>(i.bias_h||0)<-5).length;
@@ -709,7 +483,7 @@ export default function AuditoriaArena() {
         <div style={{ marginBottom:18 }}>
           <h1 style={{ fontSize:20, fontWeight:900, color:'#0f172a', margin:0 }}>KPIs S&OP</h1>
           <p style={{ fontSize:12, color:'#64748b', margin:'4px 0 0' }}>
-            Previsão vs {baseCalc === 'faturado' ? 'faturado' : 'vendido'} em caixas · Meses fechados · {ctx}
+            Previsão vs vendido em caixas · Meses fechados · {ctx}
           </p>
         </div>
 
@@ -724,10 +498,9 @@ export default function AuditoriaArena() {
             </button>
           ))}
 
-          {/* Toggle Pedido / Faturado */}
-          {abaKpi !== 'agente' && (
+          {/* Toggle — só aparece no Fill Rate, só Caixas / Reais */}
+          {abaKpi === 'fillrate' && (
             <div style={{ marginLeft:'auto', display:'flex', alignItems:'center', gap:10, paddingBottom:6 }}>
-              {/* Unidade */}
               <div style={{ display:'flex', background:'#f1f5f9', borderRadius:8, padding:2 }}>
                 {([['cx','Caixas'], ['rs','Reais']] as const).map(([id, label]) => (
                   <button key={id} onClick={() => setUnidade(id)}
@@ -735,21 +508,6 @@ export default function AuditoriaArena() {
                       cursor:'pointer', background: unidade===id ? '#fff' : 'transparent',
                       color: unidade===id ? '#2563eb' : '#64748b',
                       boxShadow: unidade===id ? '0 1px 3px rgba(0,0,0,.08)' : 'none' }}>
-                    {label}
-                  </button>
-                ))}
-              </div>
-              <span style={{ fontSize:10, fontWeight:800, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8' }}>
-                Base
-              </span>
-              <div style={{ display:'flex', background:'#f1f5f9', borderRadius:8, padding:2 }}>
-                {([['pedido','Vendido'], ['faturado','Entregue']] as const).map(([id, label]) => (
-                  <button key={id} onClick={() => setBaseCalc(id)}
-                    style={{ padding:'5px 14px', fontSize:11, fontWeight:800, border:'none', borderRadius:6,
-                      cursor:'pointer', transition:'all .15s',
-                      background: baseCalc===id ? '#fff' : 'transparent',
-                      color: baseCalc===id ? '#2563eb' : '#64748b',
-                      boxShadow: baseCalc===id ? '0 1px 3px rgba(0,0,0,.08)' : 'none' }}>
                     {label}
                   </button>
                 ))}
@@ -901,11 +659,24 @@ export default function AuditoriaArena() {
             {fillRate?.resumo && (
               <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:12, marginBottom:16 }}>
                 {[
-                  { label:'Pedido', val: (fillRate.resumo.pedido||0).toLocaleString('pt-BR') + (unidade==='rs'?'':' cx'), cor:'#0f172a' },
-                  { label:'Entregue', val: (fillRate.resumo.entregue||0).toLocaleString('pt-BR') + (unidade==='rs'?'':' cx'), cor:'#059669' },
-                  { label:'Corte', val: (fillRate.resumo.corte||0).toLocaleString('pt-BR') + (unidade==='rs'?'':' cx'), cor:'#e11d48' },
-                  { label:'Atendimento',    val: fillRate.resumo.atendimento != null ? `${fillRate.resumo.atendimento.toFixed(1).replace('.',',')}%` : '—',
-                    cor: (fillRate.resumo.atendimento ?? 0) >= 95 ? '#059669' : (fillRate.resumo.atendimento ?? 0) >= 85 ? '#d97706' : '#e11d48' },
+                  { label:'Pedido',
+                    val: unidade==='rs'
+                      ? 'R$ ' + (fillRate.resumo.pedido_total||0).toLocaleString('pt-BR')
+                      : (fillRate.resumo.pedido_total||0).toLocaleString('pt-BR') + ' cx',
+                    cor:'#0f172a' },
+                  { label:'Faturado',
+                    val: unidade==='rs'
+                      ? 'R$ ' + (fillRate.resumo.faturado_total||0).toLocaleString('pt-BR')
+                      : (fillRate.resumo.faturado_total||0).toLocaleString('pt-BR') + ' cx',
+                    cor:'#059669' },
+                  { label:'Corte',
+                    val: unidade==='rs'
+                      ? 'R$ ' + (fillRate.resumo.corte_total||0).toLocaleString('pt-BR')
+                      : (fillRate.resumo.corte_total||0).toLocaleString('pt-BR') + ' cx',
+                    cor:'#e11d48' },
+                  { label:'Atendimento',
+                    val: fillRate.resumo.fill_rate != null ? `${Number(fillRate.resumo.fill_rate).toFixed(1).replace('.',',')}%` : '—',
+                    cor: (fillRate.resumo.fill_rate ?? 0) >= 95 ? '#059669' : (fillRate.resumo.fill_rate ?? 0) >= 85 ? '#d97706' : '#e11d48' },
                 ].map(c => (
                   <div key={c.label} style={{ background:'#fff', borderRadius:12, border:'1px solid #f1f5f9', padding:'16px 20px' }}>
                     <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8', marginBottom:6 }}>{c.label}</div>
@@ -947,7 +718,11 @@ export default function AuditoriaArena() {
                 <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
                   <thead>
                     <tr style={{ background:'#f8fafc' }}>
-                      {['Categoria','Pedido (cx)','Faturado (cx)','Corte (cx)','Atendimento','Status'].map(h => (
+                      {['Categoria',
+                        unidade==='rs' ? 'Pedido (R$)' : 'Pedido (cx)',
+                        unidade==='rs' ? 'Faturado (R$)' : 'Faturado (cx)',
+                        unidade==='rs' ? 'Corte (R$)' : 'Corte (cx)',
+                        'Atendimento','Status'].map(h => (
                         <th key={h} style={{ padding:'8px 14px', textAlign: h==='Categoria' ? 'left' : 'right',
                           fontSize:10, fontWeight:800, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8' }}>{h}</th>
                       ))}
@@ -956,12 +731,15 @@ export default function AuditoriaArena() {
                   <tbody>
                     {fillDiag.cat.map((r: any, i: number) => {
                       const cor = r.classe==='Restricao' ? '#e11d48' : r.classe==='Atencao' ? '#d97706' : '#059669';
+                      const pedVal  = unidade==='rs' ? 'R$ '+(r.vl_pedido||0).toLocaleString('pt-BR')   : (r.pedido||0).toLocaleString('pt-BR');
+                      const fatVal  = unidade==='rs' ? 'R$ '+(r.vl_entregue||0).toLocaleString('pt-BR') : (r.entregue||0).toLocaleString('pt-BR');
+                      const corVal  = unidade==='rs' ? 'R$ '+(r.vl_corte||0).toLocaleString('pt-BR')    : (r.corte||0).toLocaleString('pt-BR');
                       return (
                         <tr key={r.categoria} style={{ background: i%2 ? '#f9fafb' : '#fff', borderBottom:'1px solid #f1f5f9' }}>
                           <td style={{ padding:'8px 14px', fontWeight:700, color:'#334155' }}>{r.categoria}</td>
-                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#475569' }}>{r.pedido.toLocaleString('pt-BR')}</td>
-                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#059669', fontWeight:700 }}>{r.entregue.toLocaleString('pt-BR')}</td>
-                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#e11d48', fontWeight:700 }}>{r.corte.toLocaleString('pt-BR')}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#475569' }}>{pedVal}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#059669', fontWeight:700 }}>{fatVal}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#e11d48', fontWeight:700 }}>{corVal}</td>
                           <td style={{ padding:'8px 14px', textAlign:'right', fontWeight:900, color:cor }}>
                             {r.atendimento != null ? `${r.atendimento.toFixed(1).replace('.',',')}%` : '—'}
                           </td>
@@ -985,7 +763,11 @@ export default function AuditoriaArena() {
                 <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
                   <thead>
                     <tr style={{ background:'#f8fafc' }}>
-                      {['SKU','Descrição','Categoria','Pedido','Entregue','Corte','Atendimento','Status'].map(h => (
+                      {['SKU','Descrição','Categoria',
+                        unidade==='rs' ? 'Pedido (R$)' : 'Pedido (cx)',
+                        unidade==='rs' ? 'Faturado (R$)' : 'Faturado (cx)',
+                        unidade==='rs' ? 'Corte (R$)' : 'Corte (cx)',
+                        'Atendimento','Status'].map(h => (
                         <th key={h} style={{ padding:'8px 14px', textAlign: ['SKU','Descrição','Categoria'].includes(h) ? 'left' : 'right',
                           fontSize:10, fontWeight:800, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8' }}>{h}</th>
                       ))}
@@ -994,14 +776,17 @@ export default function AuditoriaArena() {
                   <tbody>
                     {fillDiag.sku.map((r: any, i: number) => {
                       const cor = r.classe==='Restricao' ? '#e11d48' : r.classe==='Atencao' ? '#d97706' : '#059669';
+                      const pedVal = unidade==='rs' ? 'R$ '+(r.vl_pedido||0).toLocaleString('pt-BR')   : (r.pedido||0).toLocaleString('pt-BR');
+                      const fatVal = unidade==='rs' ? 'R$ '+(r.vl_entregue||0).toLocaleString('pt-BR') : (r.entregue||0).toLocaleString('pt-BR');
+                      const corVal = unidade==='rs' ? 'R$ '+(r.vl_corte||0).toLocaleString('pt-BR')    : (r.corte||0).toLocaleString('pt-BR');
                       return (
                         <tr key={r.sku} style={{ background: i%2 ? '#f9fafb' : '#fff', borderBottom:'1px solid #f1f5f9' }}>
                           <td style={{ padding:'8px 14px', fontWeight:700, color:'#64748b', fontSize:10 }}>{r.sku}</td>
                           <td style={{ padding:'8px 14px', fontWeight:700, color:'#334155', maxWidth:200, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r.descricao}</td>
                           <td style={{ padding:'8px 14px', color:'#64748b' }}>{r.categoria}</td>
-                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#475569' }}>{r.pedido.toLocaleString('pt-BR')}</td>
-                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#059669', fontWeight:700 }}>{r.entregue.toLocaleString('pt-BR')}</td>
-                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#e11d48', fontWeight:700 }}>{r.corte.toLocaleString('pt-BR')}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#475569' }}>{pedVal}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#059669', fontWeight:700 }}>{fatVal}</td>
+                          <td style={{ padding:'8px 14px', textAlign:'right', color:'#e11d48', fontWeight:700 }}>{corVal}</td>
                           <td style={{ padding:'8px 14px', textAlign:'right', fontWeight:900, color:cor }}>
                             {r.atendimento != null ? `${r.atendimento.toFixed(1).replace('.',',')}%` : '—'}
                           </td>
@@ -1038,72 +823,19 @@ export default function AuditoriaArena() {
                   Relatório analítico
                 </div>
                 <div style={{ fontSize:11, color:'#64748b', marginTop:3 }}>
-                  {mesesSel.length} {mesesSel.length === 1 ? 'mês' : 'meses'} ·
-                  {' '}{baseCalc === 'faturado' ? 'faturado' : 'vendido'} ·
-                  {' '}{unidade === 'rs' ? 'R$' : 'caixas'} · {ctx}
+                  {mesesSel.length} {mesesSel.length === 1 ? 'mês' : 'meses'} · vendido · caixas · {ctx}
                 </div>
-                {relInfo?.publicado && relInfo?.gerado_em && (
-                  <div style={{ fontSize:10.5, color:'#7c3aed', marginTop:4, fontWeight:600 }}>
-                    Publicado em {new Date(relInfo.gerado_em).toLocaleString('pt-BR', {
-                      day:'2-digit', month:'2-digit', year:'numeric',
-                      hour:'2-digit', minute:'2-digit' })}
-                    {relInfo.gerado_por ? ` por ${relInfo.gerado_por}` : ''}
-                  </div>
-                )}
               </div>
-
               <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
-                {/* Toggle unidade */}
-                <div style={{ display:'flex', background:'#f1f5f9', borderRadius:8, padding:2 }}>
-                  {([['cx','Caixas'], ['rs','Reais']] as const).map(([id, label]) => (
-                    <button key={id} onClick={() => setUnidade(id)}
-                      style={{ padding:'5px 12px', fontSize:11, fontWeight:800, border:'none', borderRadius:6,
-                        cursor:'pointer', background: unidade===id ? '#fff' : 'transparent',
-                        color: unidade===id ? '#2563eb' : '#64748b',
-                        boxShadow: unidade===id ? '0 1px 3px rgba(0,0,0,.08)' : 'none' }}>
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                {/* Toggle base */}
-                <div style={{ display:'flex', background:'#f1f5f9', borderRadius:8, padding:2 }}>
-                  {([['pedido','Vendido'], ['faturado','Entregue']] as const).map(([id, label]) => (
-                    <button key={id} onClick={() => setBaseCalc(id)}
-                      style={{ padding:'5px 12px', fontSize:11, fontWeight:800, border:'none', borderRadius:6,
-                        cursor:'pointer', background: baseCalc===id ? '#fff' : 'transparent',
-                        color: baseCalc===id ? '#2563eb' : '#64748b',
-                        boxShadow: baseCalc===id ? '0 1px 3px rgba(0,0,0,.08)' : 'none' }}>
-                      {label}
-                    </button>
-                  ))}
-                </div>
-
-                {/* Gerar: só aparece se ainda não publicado E o usuário é Admin */}
-                {!relInfo?.publicado && relInfo?.pode_regerar && (
-                  <button onClick={() => gerarRelatorio(false)} disabled={gerandoRel || !mesesSel.length}
-                    style={{ display:'flex', alignItems:'center', gap:7, padding:'9px 18px',
-                      borderRadius:10, border:'none', fontSize:12, fontWeight:800,
-                      cursor: gerandoRel ? 'wait' : 'pointer',
-                      background: gerandoRel ? '#e2e8f0' : '#7c3aed',
-                      color: gerandoRel ? '#94a3b8' : '#fff' }}>
-                    {gerandoRel
-                      ? <><Loader2 style={{ width:14 }} className="spin" /> Analisando…</>
-                      : <><Sparkles style={{ width:14 }} /> Publicar relatório</>}
-                  </button>
-                )}
-
-                {/* Regerar: só Admin, e só quando já existe publicado */}
-                {relInfo?.publicado && relInfo?.pode_regerar && (
-                  <button onClick={() => gerarRelatorio(true)} disabled={gerandoRel}
-                    style={{ display:'flex', alignItems:'center', gap:7, padding:'9px 16px',
-                      borderRadius:10, fontSize:12, fontWeight:800,
-                      cursor: gerandoRel ? 'wait' : 'pointer',
-                      border:'1px solid #ddd6fe', background:'#faf5ff', color:'#7c3aed' }}>
-                    {gerandoRel
-                      ? <><Loader2 style={{ width:14 }} className="spin" /> Analisando…</>
-                      : <><RefreshCw style={{ width:14 }} /> Regerar</>}
-                  </button>
-                )}
+                <button onClick={gerarRelatorio} disabled={gerandoRel || !mesesSel.length}
+                  style={{ display:'flex', alignItems:'center', gap:7, padding:'9px 18px',
+                    borderRadius:10, border:'none', fontSize:12, fontWeight:800, cursor: gerandoRel ? 'wait' : 'pointer',
+                    background: gerandoRel ? '#e2e8f0' : '#7c3aed', color: gerandoRel ? '#94a3b8' : '#fff' }}>
+                  {gerandoRel
+                    ? <><Loader2 style={{ width:14 }} className="spin" /> Analisando…</>
+                    : <>{relatorio ? <RefreshCw style={{ width:14 }} /> : <Sparkles style={{ width:14 }} />}
+                       {relatorio ? 'Regerar' : 'Gerar relatório'}</>}
+                </button>
 
                 <button onClick={baixarPdf} disabled={!relatorio || baixandoPdf}
                   style={{ display:'flex', alignItems:'center', gap:7, padding:'9px 16px',
@@ -1140,11 +872,7 @@ export default function AuditoriaArena() {
               <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9',
                 padding:'26px 32px', marginBottom:16 }}>
                 {relatorio.split('\n').filter(l => l.trim()).map((linha, i) => {
-                  const t = linha.trim()
-                    .replace(/\*\*/g, '')
-                    .replace(/^#+\s*/, '')
-                    .replace(/^[-*]\s+/, '')
-                    .replace(/`/g, '');
+                  const t = linha.trim().replace(/\*\*/g, '');
                   const ehTitulo = (/^\d+[.)]/.test(t) && t.length < 70)
                                 || (t === t.toUpperCase() && t.length < 70 && t.length > 3);
                   return ehTitulo ? (
@@ -1173,20 +901,15 @@ export default function AuditoriaArena() {
 
                 <div style={{ maxHeight:400, overflowY:'auto', padding: chat.length ? '16px 20px' : 0 }}>
                   {chat.map((m, i) => (
-                    <div key={i} style={{ marginBottom:16, display:'flex',
+                    <div key={i} style={{ marginBottom:14, display:'flex',
                       justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
-                      {m.role === 'user' ? (
-                        <div style={{ maxWidth:'78%', padding:'10px 14px', borderRadius:12,
-                          fontSize:12.5, lineHeight:1.6, background:'#eef2ff',
-                          color:'#3730a3', border:'1px solid #e0e7ff', whiteSpace:'pre-wrap' }}>
-                          {m.content}
-                        </div>
-                      ) : (
-                        <div style={{ maxWidth:'94%', padding:'14px 16px', borderRadius:12,
-                          background:'#fbfcfd', border:'1px solid #f1f5f9' }}>
-                          <RespostaAgente texto={m.content} />
-                        </div>
-                      )}
+                      <div style={{ maxWidth:'82%', padding:'10px 14px', borderRadius:12, fontSize:12.5, lineHeight:1.6,
+                        background: m.role === 'user' ? '#eef2ff' : '#f8fafc',
+                        color: m.role === 'user' ? '#3730a3' : '#334155',
+                        border: `1px solid ${m.role === 'user' ? '#e0e7ff' : '#f1f5f9'}`,
+                        whiteSpace:'pre-wrap' }}>
+                        {m.content}
+                      </div>
                     </div>
                   ))}
                   {respondendo && (
@@ -1238,17 +961,10 @@ export default function AuditoriaArena() {
                 <div style={{ fontSize:14, fontWeight:800, color:'#334155', marginBottom:6 }}>
                   Análise completa dos indicadores
                 </div>
-                <div style={{ fontSize:12, color:'#94a3b8', maxWidth:540, margin:'0 auto', lineHeight:1.7 }}>
-                  {relInfo?.pode_regerar
-                    ? <>O agente cruza WMAPE, BIAS, atendimento e evolução ano a ano de todas as
-                       categorias e SKUs, identifica padrões sistemáticos e separa falhas de
-                       planejamento de restrições de produção. Todo número citado é rastreável
-                       às tabelas do anexo.<br/><br/>
-                       <b style={{color:'#7c3aed'}}>Publique o relatório do ciclo</b> — ele ficará
-                       disponível para toda a companhia com a mesma análise.</>
-                    : <>O relatório deste ciclo ainda não foi publicado.<br/><br/>
-                       Assim que o Administrador publicar, a análise aparece aqui para todos —
-                       sempre a mesma leitura, com os mesmos números.</>}
+                <div style={{ fontSize:12, color:'#94a3b8', maxWidth:520, margin:'0 auto', lineHeight:1.7 }}>
+                  O agente cruza WMAPE, BIAS, fill rate e evolução YoY de todas as categorias e SKUs,
+                  identifica padrões sistemáticos e separa falhas de planejamento de falhas de operação.
+                  Todo número citado é rastreável às tabelas do anexo.
                 </div>
               </div>
             )}
