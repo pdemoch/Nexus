@@ -938,7 +938,8 @@ async def agente_relatorio(
     """
     eh_admin = u.get("funcao") == "Administrador"
     try:
-        cache = agente_kpis.relatorio_do_ciclo(db, ciclo)
+        ciclo_ativo = ciclo or agente_kpis._ciclo_atual(db)
+        cache = agente_kpis.relatorio_existente(db, ciclo=ciclo_ativo)
 
         if cache and not (forcar and eh_admin):
             return {**cache, "pode_regerar": eh_admin}
@@ -951,7 +952,9 @@ async def agente_relatorio(
             )
 
         nome = u.get("nome") or u.get("email") or "Administrador"
-        res = agente_kpis.gerar_relatorio_ciclo(db, ciclo, usuario=nome, forcar=forcar)
+        res = agente_kpis.gerar_relatorio(
+            db, ciclo=ciclo_ativo, usuario=nome, forcar=forcar
+        )
         return {**res, "pode_regerar": True}
 
     except HTTPException:
@@ -970,13 +973,15 @@ async def agente_relatorio_status(
 ):
     """Informa se ja existe relatorio publicado, sem chamar a IA."""
     try:
-        cache = agente_kpis.relatorio_do_ciclo(db, ciclo)
+        ciclo_ativo = ciclo or agente_kpis._ciclo_atual(db)
+        cache = agente_kpis.relatorio_existente(db, ciclo=ciclo_ativo)
+        jan   = agente_kpis.janela_do_ciclo(ciclo_ativo)
         return {
             "publicado":      bool(cache),
             "gerado_por":     cache.get("gerado_por") if cache else None,
             "gerado_em":      cache.get("gerado_em")  if cache else None,
-            "ciclo":          cache.get("ciclo")      if cache else None,
-            "mes_referencia": cache.get("mes_referencia") if cache else None,
+            "ciclo":          ciclo_ativo,
+            "mes_referencia": jan["mes_referencia"],
             "pode_regerar":   u.get("funcao") == "Administrador",
         }
     except Exception as e:
