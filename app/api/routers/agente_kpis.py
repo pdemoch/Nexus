@@ -67,6 +67,7 @@ Quando o renderizador for ajustado, basta trocar a instrucao do prompt.
 """
 
 import os
+import re
 import json
 import hashlib
 import logging
@@ -130,6 +131,27 @@ def _sdiv(num, den, mult=1.0):
         return float(num) / d * float(mult)
     except (ZeroDivisionError, TypeError, ValueError):
         return None
+
+
+def _corrigir_nome_empresa(texto: str) -> str:
+    """
+    Salvaguarda deterministica pos-geracao.
+
+    'Linea' e nome proprio, mas 'Linha' e palavra comum em portugues
+    (significa 'linha', como em 'linha de producao'). O modelo tende a
+    autocorrigir para a grafia comum mesmo com instrucao explicita no
+    prompt. Instrucao sozinha nao e garantia — aqui a correcao roda
+    sempre, independente do que o modelo escreveu, preservando o padrao
+    de capitalizacao (CAIXA ALTA / Titulo / minusculo) do trecho original.
+    """
+    def _rep(m):
+        original = m.group(0)
+        if original.isupper():
+            return "LINEA ALIMENTOS"
+        if original[0].isupper():
+            return "Linea Alimentos"
+        return "linea alimentos"
+    return re.sub(r'\bLinha\s+Alimentos\b', _rep, texto, flags=re.IGNORECASE)
 
 
 def _r(v, casas=2):
@@ -306,6 +328,16 @@ def montar_dataset(db: Session, meses: List[str] = None,
 
     p_det = {"ini": jan["ini_detalhe"], "fim": jan["fim_detalhe"]}
 
+    # Total de SKUs ativos no portfolio (dim_produtos), independente de terem
+    # tido pedido no periodo. Um SKU pode estar ativo e nao ter vendido nada
+    # no recorte — n_skus (mais abaixo) conta so quem teve pedido, e os dois
+    # numeros nao sao a mesma coisa. Sem isso o relatorio ja escreveu que
+    # 109 SKUs com pedido "representavam a totalidade do portfolio", quando
+    # o portfolio ativo tinha 112.
+    total_skus_ativos = db.execute(
+        text("SELECT COUNT(*) FROM dim_produtos WHERE ativo = TRUE")
+    ).scalar() or 0
+
     # ---- YoY: mesmo recorte de meses em cada ano ----
     yoy = []
     for r in db.execute(text(_SQL_YOY),
@@ -467,6 +499,7 @@ def montar_dataset(db: Session, meses: List[str] = None,
         "top_subplano":  top_subplan,
         "sem_plano":     sorted(sem_plano, key=lambda x: -x["qt_corte"])[:TOP_N],
         "n_skus":        len(skus),
+        "total_skus_ativos_portfolio": int(total_skus_ativos),
         "detalhe_mensal": detalhe_mensal,
     }
 
@@ -566,6 +599,8 @@ para a diretoria e a gerencia da Linea Alimentos.
 
 REGRAS DE REDACAO - obrigatorias:
 - Tom tecnico, factual e imparcial. Descreva o que os dados mostram.
+- A empresa se chama "Linea Alimentos" — com E, nao "Linha" (que e uma
+  palavra comum em portugues). Confira a grafia sempre que citar o nome.
 - PROIBIDO adjetivos de julgamento: desastre, pessimo, absurdo, catastrofico.
   Use: "erro de X porcento", "vies de X pontos percentuais".
 - Nunca cite nomes de tabelas, campos de banco, sistemas ou ferramentas.
@@ -582,17 +617,22 @@ REGRAS DE REDACAO - obrigatorias:
   dos dois como "conservador", "agressivo" ou similar.
 - Todo valor em R$ vem acompanhado da conta que o gerou na mesma frase,
   EXCETO vl_corte, que e citado como valor direto do ERP sem formula.
+- NUNCA atribua uma recomendacao ou acao a uma area, departamento, cargo ou
+  responsavel especifico (nada de "Planejamento de Demanda deve...",
+  "a area de Suprimentos precisa..."). Descreva a acao e o resultado
+  esperado; quem executa nao e parte do relatorio.
 
 {METODOLOGIA}
 
 ESTRUTURA (700 a 900 palavras, prosa densa):
 
 1. ESCOPO E METODO
-   Periodo medido, quantidade de SKUs, origem do plano e limitacoes. n_skus
-   e a contagem de SKUs ativos que tiveram pedido no periodo analisado — pode
-   ser menor que o total de SKUs ativos do portfolio, porque um SKU ativo sem
-   nenhum pedido no recorte nao entra na base de calculo. Nao trate essa
-   diferenca como inconsistencia.
+   Periodo medido, quantidade de SKUs, origem do plano e limitacoes. Cite os
+   DOIS numeros de SKU do contexto: quantos tem pedido no periodo e quantos
+   existem no portfolio ativo total. Se forem diferentes, diga "X de Y SKUs
+   ativos tiveram pedido no periodo" — PROIBIDO escrever que os SKUs com
+   pedido "representam a totalidade do portfolio" quando os dois numeros
+   nao forem iguais.
 
 2. LEITURA DO PERIODO
    WMAPE e BIAS do portfolio, classificacao pelo cruzamento e persistencia.
@@ -624,8 +664,10 @@ ESTRUTURA (700 a 900 palavras, prosa densa):
    FVA: onde o ajuste manual aumentou ou reduziu o erro.
 
 9. RECOMENDACOES
-   Quatro a seis itens objetivos, cada um com o dado que o sustenta e a area
-   responsavel: planejamento de demanda, comercial ou suprimentos.
+   Quatro a seis itens objetivos e diretos. Cada item traz o dado numerico
+   que o sustenta e o resultado esperado. Descreva O QUE fazer e POR QUE —
+   nunca QUEM deve fazer. Nao atribua a acao a nenhuma area, departamento
+   ou cargo.
 
 10. CONSIDERACAO FINAL
    Um paragrafo unico. Responda: o processo esta melhorando ou piorando,
@@ -646,12 +688,19 @@ Sem emojis. Sem preambulo. Cite numeros dentro das frases, nao em tabela."""
 
 def _contexto_modelo(ds: Dict[str, Any]) -> str:
     jan = ds["janela"]
+    total_ativos = ds.get("total_skus_ativos_portfolio", ds["n_skus"])
     linhas = [
         f"CICLO ATIVO: {jan['ciclo']}",
         f"ULTIMO MES FECHADO: {jan['mes_referencia']}",
         f"JANELA YoY: meses 01 a {jan['mes_num_fim']:02d} de cada ano em {jan['anos_yoy']}",
         f"JANELA DETALHE: {', '.join(jan['meses_detalhe'])}",
-        f"SKUs ATIVOS NO PERIODO: {ds['n_skus']}",
+        f"SKUs ATIVOS NO PORTFOLIO (dim_produtos, ativo=true): {total_ativos}",
+        f"SKUs ATIVOS QUE TIVERAM PEDIDO NO PERIODO ANALISADO: {ds['n_skus']}",
+        "  -> Estes dois numeros SAO DIFERENTES por definicao: o primeiro e o",
+        "     portfolio inteiro; o segundo e quem vendeu no recorte. NUNCA",
+        "     diga que o segundo 'representa a totalidade do portfolio' —",
+        f"     diga '{ds['n_skus']} de {total_ativos} SKUs ativos tiveram pedido",
+        "     no periodo' quando os dois numeros forem diferentes.",
         "",
         "DADOS (JSON):",
         json.dumps({
@@ -812,6 +861,7 @@ def gerar_relatorio(db: Session, meses: List[str] = None,
         _SYSTEM,
         [{"role": "user", "content": _contexto_modelo(ds)}],
     )
+    texto = _corrigir_nome_empresa(texto)
     salvar_relatorio(db, texto, usuario, ciclo, ds)
     return {
         "relatorio":  texto,
@@ -868,6 +918,8 @@ Regras:
   nunca "conservador". Subplano dominante = BIAS negativo = subestimacao.
 - Todo valor em R$ vem acompanhado da conta que o gerou na mesma frase,
   EXCETO vl_corte, que e citado como valor direto do ERP sem formula.
+- NUNCA atribua uma recomendacao a uma area, departamento ou responsavel
+  especifico. Descreva a acao e o resultado esperado, nao quem executa.
 - Seja conciso. Cite os numeros que fundamentam a resposta.
 
 FORMATO DA RESPOSTA:
@@ -914,6 +966,7 @@ def responder_pergunta(db: Session, pergunta: str,
     })
 
     resposta = _chamar_claude(_SYSTEM_CHAT, msgs, max_tokens=1500)
+    resposta = _corrigir_nome_empresa(resposta)
 
     db.execute(text("""
         INSERT INTO agente_chat_cache (ciclo_sop, chave, pergunta, resposta)
