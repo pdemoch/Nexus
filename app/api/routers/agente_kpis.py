@@ -30,26 +30,41 @@ BIAS   = (SUM vol_final - SUM qt_pedido) / SUM qt_pedido SO EM CAIXAS
 FVA    = WMAPE_humano - WMAPE_ia, na MESMA populacao     SO EM CAIXAS
 FILL   = SUM qt_entregue / SUM qt_pedido                 SO EM CAIXAS
 
-Acuracia mede contra DEMANDA (qt_pedido), nunca contra embarque. Medir
-contra o entregue cria demanda censurada: se o plano subestima, a
-producao subestima e a entrega subestima junto — o erro se apaga e
-quanto pior o suprimento, melhor a acuracia aparente.
+Acuracia mede contra DEMANDA (qt_pedido = volume vendido), nunca contra
+embarque. Medir contra o faturado cria demanda censurada: se o plano
+subestima, a producao subestima e a entrega subestima junto — o erro se
+apaga e quanto pior o suprimento, melhor a acuracia aparente.
 
 Valor monetario NAO entra em WMAPE, BIAS nem FVA. Fica na secao de
 impacto financeiro, que monetiza os gaps de volume.
+
+NOMENCLATURA (o que o leitor ve, nao os nomes de coluna do banco)
+---------------------------------------------------------------------
+qt_pedido / vl_pedido      -> "volume vendido" / "valor vendido"
+qt_entregue / vl_entregue  -> "volume faturado" / "valor faturado"
+Os nomes de campo no banco continuam qt_pedido/qt_entregue (schema nao
+muda); e a PROSA do relatorio e do chat que usa a nomenclatura de negocio.
 
 FONTE DO R$
 ---------------------------------------------------------------------
 vl_pedido, vl_entregue e vl_corte vem do ERP — valor real, com nota.
 O PMV so entra onde NAO existe valor no ERP, porque o volume e
 hipotetico e nunca virou nota fiscal:
-    capital imobilizado = max(plano - pedido, 0) x PMV
-    venda nao prevista  = max(pedido - plano, 0) x PMV
+    capital imobilizado = max(plano - vendido, 0) x PMV
+    venda nao prevista  = max(vendido - plano, 0) x PMV
 
 JANELA (ciclo ativo 08/2026)
 ---------------------------------------------------------------------
-YoY      Jan-Jul/2026 vs Jan-Jul/2025 vs Jan-Jul/2024 vs Jan-Jul/2023
-Detalhe  Fev a Jul/2026 (6 meses fechados), mes a mes
+Ano vigente (YTD)  Jan a Jul/2026 — do inicio do ano ate o ultimo mes
+                    fechado. Unica janela do relatorio: usada tanto no
+                    detalhe mes a mes quanto no lado "ano corrente" do YoY.
+YoY                 Jan-Jul/2026 vs Jan-Jul/2025 vs Jan-Jul/2024 vs
+                    Jan-Jul/2023 — MESMO recorte de meses em cada ano.
+
+Antes desta versao, a janela de detalhe era uma janela fixa de 6 meses
+(trailing) enquanto o YoY comparava Jan-Jul: o relatorio dizia "Jan-Jul"
+num paragrafo e o detalhe mensal so cobria Fev-Jul no seguinte —
+inconsistencia visivel. Unificar em YTD elimina a divergencia.
 
 O YoY compara o MESMO recorte de meses em cada ano: comparar 7 meses
 contra 12 daria diferenca de calendario, nao de desempenho.
@@ -80,7 +95,6 @@ from dateutil.relativedelta import relativedelta
 
 logger = logging.getLogger(__name__)
 
-MESES_DETALHE = 6      # meses fechados detalhados mes a mes
 ANOS_YOY      = 4      # ano corrente + 3 anteriores
 TOP_N         = 12     # itens nos rankings
 
@@ -195,16 +209,27 @@ def janela_do_ciclo(ciclo: str) -> Dict[str, Any]:
     Deriva a janela de analise do ciclo ativo.
 
     Ciclo 08/2026 -> ultimo mes fechado = 07/2026
-      YoY:      Jan-Jul de 2026, 2025, 2024, 2023
-      Detalhe:  Fev a Jul/2026 (6 meses fechados)
+      Ano vigente (YTD): Jan a Jul/2026 — do inicio do ano corrente ate o
+        ultimo mes fechado. Usado tanto para o detalhe mes a mes quanto
+        para o lado "ano corrente" da comparacao YoY.
+      YoY: Jan-Jul de 2026, 2025, 2024, 2023 — MESMO recorte de meses em
+        cada ano. Comparar 7 meses contra 12 mediria calendario, nao
+        desempenho.
 
-    O YoY usa o MESMO recorte de meses em cada ano. Comparar 7 meses
-    contra 12 mediria calendario, nao desempenho.
+    As duas janelas usam EXATAMENTE os mesmos meses do ano corrente de
+    proposito: antes o detalhe mes a mes era uma janela fixa de 6 meses
+    (trailing), enquanto o YoY comparava Jan-Jul — o relatorio falava em
+    "Jan-Jul" num paragrafo e o detalhe mensal so cobria Fev-Jul no
+    seguinte, uma inconsistencia visivel para quem lia com atencao.
+    Unificar em YTD elimina a divergencia: e sempre o mesmo periodo.
     """
     mes, ano = int(ciclo[:2]), int(ciclo[3:])
     ref = datetime.date(ano, mes, 1) - relativedelta(months=1)   # ultimo fechado
 
-    ini_det = (ref - relativedelta(months=MESES_DETALHE - 1)).replace(day=1)
+    # Ano vigente = do dia 1 de janeiro do ano do ultimo mes fechado ate ele
+    # mesmo. Se o ciclo abrir em janeiro (ref = dezembro do ano anterior),
+    # o ano vigente e o ano inteiro que acabou de fechar.
+    ini_det = datetime.date(ref.year, 1, 1)
     meses_detalhe = []
     d = ini_det
     while d <= ref:
@@ -235,6 +260,8 @@ SELECT EXTRACT(YEAR FROM a.mes)::int              AS ano,
        SUM(a.vl_entregue)                         AS vl_entregue,
        SUM(a.qt_corte)                            AS qt_corte,
        SUM(a.vl_corte)                            AS vl_corte,
+       SUM(a.qt_corte_transferencia)               AS qt_corte_transf,
+       SUM(a.vl_corte_transferencia)               AS vl_corte_transf,
        SUM(a.qt_plano)                            AS qt_plano,
        SUM(a.erro_abs_cx)                         AS erro_abs,
        SUM(a.qt_pedido) FILTER (WHERE a.tem_plano) AS qt_com_plano,
@@ -256,6 +283,8 @@ SELECT TO_CHAR(a.mes, 'YYYY-MM')                  AS mes,
        SUM(a.vl_entregue)                         AS vl_entregue,
        SUM(a.qt_corte)                            AS qt_corte,
        SUM(a.vl_corte)                            AS vl_corte,
+       SUM(a.qt_corte_transferencia)               AS qt_corte_transf,
+       SUM(a.vl_corte_transferencia)               AS vl_corte_transf,
        SUM(a.qt_plano)                            AS qt_plano,
        SUM(a.erro_abs_cx)                         AS erro_abs,
        SUM(a.qt_pedido) FILTER (WHERE a.tem_plano) AS qt_com_plano,
@@ -279,6 +308,8 @@ SELECT a.categoria,
        SUM(a.qt_entregue) AS qt_entregue,
        SUM(a.qt_corte)    AS qt_corte,
        SUM(a.vl_corte)    AS vl_corte,
+       SUM(a.qt_corte_transferencia) AS qt_corte_transf,
+       SUM(a.vl_corte_transferencia) AS vl_corte_transf,
        SUM(a.qt_plano)    AS qt_plano,
        SUM(a.erro_abs_cx) AS erro_abs,
        SUM(a.vl_excesso_plano)  AS vl_excesso,
@@ -300,6 +331,8 @@ SELECT a.sku,
        SUM(a.qt_entregue) AS qt_entregue,
        SUM(a.qt_corte)    AS qt_corte,
        SUM(a.vl_corte)    AS vl_corte,
+       SUM(a.qt_corte_transferencia) AS qt_corte_transf,
+       SUM(a.vl_corte_transferencia) AS vl_corte_transf,
        SUM(a.erro_abs_cx) AS erro_abs,
        SUM(a.vl_excesso_plano)  AS vl_excesso,
        SUM(a.vl_perda_subplano) AS vl_subplano,
@@ -351,6 +384,8 @@ def montar_dataset(db: Session, meses: List[str] = None,
             "vl_entregue": round(float(r.vl_entregue or 0)),
             "qt_corte":   round(float(r.qt_corte or 0)),
             "vl_corte":   round(float(r.vl_corte or 0)),
+            "qt_corte_transferencia": round(float(r.qt_corte_transf or 0)),
+            "vl_corte_transferencia": round(float(r.vl_corte_transf or 0)),
             "qt_plano":   round(float(r.qt_plano or 0)),
             "wmape":      _r(_sdiv(r.erro_abs, qp, 100)),
             "bias":       _r(_sdiv(float(r.qt_plano or 0) - qp, qp, 100)),
@@ -375,6 +410,8 @@ def montar_dataset(db: Session, meses: List[str] = None,
             "vl_entregue": round(float(r.vl_entregue or 0)),
             "qt_corte":   round(float(r.qt_corte or 0)),
             "vl_corte":   round(float(r.vl_corte or 0)),
+            "qt_corte_transferencia": round(float(r.qt_corte_transf or 0)),
+            "vl_corte_transferencia": round(float(r.vl_corte_transf or 0)),
             "qt_plano":   round(float(r.qt_plano or 0)),
             "wmape":      _r(_sdiv(r.erro_abs, qp, 100)),
             "bias":       _r(_sdiv(float(r.qt_plano or 0) - qp, qp, 100)),
@@ -397,6 +434,8 @@ def montar_dataset(db: Session, meses: List[str] = None,
             "vl_pedido":  round(float(r.vl_pedido or 0)),
             "qt_corte":   round(float(r.qt_corte or 0)),
             "vl_corte":   round(float(r.vl_corte or 0)),
+            "qt_corte_transferencia": round(float(r.qt_corte_transf or 0)),
+            "vl_corte_transferencia": round(float(r.vl_corte_transf or 0)),
             "wmape":      _r(_sdiv(r.erro_abs, qp, 100)),
             "bias":       _r(_sdiv(float(r.qt_plano or 0) - qp, qp, 100)),
             "fill_rate":  _r(_sdiv(r.qt_entregue, qp, 100), 1),
@@ -418,6 +457,8 @@ def montar_dataset(db: Session, meses: List[str] = None,
             "qt_plano":   round(float(r.qt_plano or 0)),
             "qt_corte":   round(float(r.qt_corte or 0)),
             "vl_corte":   round(float(r.vl_corte or 0)),
+            "qt_corte_transferencia": round(float(r.qt_corte_transf or 0)),
+            "vl_corte_transferencia": round(float(r.vl_corte_transf or 0)),
             "erro_abs":   round(float(r.erro_abs or 0)),
             "vl_excesso": round(float(r.vl_excesso or 0)),
             "vl_subplano": round(float(r.vl_subplano or 0)),
@@ -444,12 +485,17 @@ def montar_dataset(db: Session, meses: List[str] = None,
         "vl_entregue": sum(m["vl_entregue"] for m in mensal),
         "qt_corte":    sum(m["qt_corte"]   for m in mensal),
         "vl_corte":    sum(m["vl_corte"]   for m in mensal),
+        "qt_corte_transferencia": sum(m["qt_corte_transferencia"] for m in mensal),
+        "vl_corte_transferencia": sum(m["vl_corte_transferencia"] for m in mensal),
         "vl_excesso":  sum(m["vl_excesso"] for m in mensal),
         "vl_subplano": sum(m["vl_subplano"] for m in mensal),
     }
     tot["fill_rate"] = _r(_sdiv(tot["qt_entregue"], tot["qt_pedido"], 100), 1)
     tot["pmv_medio"] = _r(_sdiv(tot["vl_pedido"], tot["qt_pedido"]), 4)
     tot["vl_impacto_total"] = tot["vl_corte"] + tot["vl_excesso"] + tot["vl_subplano"]
+    # Corte real de ruptura, descontada a transferencia de codigo COPA —
+    # a distincao que o relatorio precisa fazer na secao 7.
+    tot["vl_corte_ruptura"] = tot["vl_corte"] - tot["vl_corte_transferencia"]
 
     # ---- Detalhe por mês: categorias no grão mensal para o chat ----
     # O chat precisa disto para responder perguntas como "qual categoria
@@ -465,6 +511,8 @@ def montar_dataset(db: Session, meses: List[str] = None,
                    SUM(a.erro_abs_cx) AS erro_abs,
                    SUM(a.qt_corte)    AS qt_corte,
                    SUM(a.vl_corte)    AS vl_corte,
+                   SUM(a.qt_corte_transferencia) AS qt_corte_transf,
+                   SUM(a.vl_corte_transferencia) AS vl_corte_transf,
                    SUM(a.vl_excesso_plano)  AS vl_excesso,
                    SUM(a.vl_perda_subplano) AS vl_subplano
             FROM mart_acuracia_sku_mes a
@@ -482,6 +530,8 @@ def montar_dataset(db: Session, meses: List[str] = None,
                 "bias":      _r(_sdiv(float(r.qt_plano or 0) - qp, qp, 100)),
                 "qt_corte":  round(float(r.qt_corte or 0)),
                 "vl_corte":  round(float(r.vl_corte or 0)),
+                "qt_corte_transferencia": round(float(r.qt_corte_transf or 0)),
+                "vl_corte_transferencia": round(float(r.vl_corte_transf or 0)),
                 "vl_excesso": round(float(r.vl_excesso or 0)),
                 "vl_subplano": round(float(r.vl_subplano or 0)),
             })
@@ -510,10 +560,16 @@ def montar_dataset(db: Session, meses: List[str] = None,
 METODOLOGIA = """
 DEFINICOES
 
+NOMENCLATURA — use estas palavras na prosa, nunca "pedido" nem "entregue":
+  qt_pedido / vl_pedido      -> "volume vendido" / "valor vendido"
+  qt_entregue / vl_entregue  -> "volume faturado" / "valor faturado"
+  Os nomes de campo no JSON continuam qt_pedido/qt_entregue — isso e so
+  sobre a palavra que aparece na frase para o leitor humano.
+
 WMAPE = soma dos erros absolutos dividida pela soma do realizado, x100.
   Computado em (SKU, mes) e agregado depois. O WMAPE de uma categoria nao e a
   media dos WMAPEs dos SKUs: itens de maior volume pesam proporcionalmente mais.
-  Medido SEMPRE em caixas, plano contra pedido. Nunca contra entregue.
+  Medido SEMPRE em caixas, plano contra vendido. Nunca contra faturado.
 
 BIAS = (soma do previsto menos soma do realizado) dividido pela soma do
   realizado, x100. Positivo indica plano acima do realizado; negativo, abaixo.
@@ -526,10 +582,11 @@ PERSISTENCIA = percentual de meses em que o erro ocorreu na mesma direcao do
 FVA = WMAPE do plano humano menos WMAPE da previsao estatistica, na MESMA
   populacao de SKUs. Positivo: o ajuste manual aumentou o erro. Negativo: reduziu.
 
-FILL RATE = entregue dividido por pedido, em caixas. Mede execucao, nao
-  acuracia. Serve para separar erro de previsao de restricao de suprimento:
-  fill rate baixo com BIAS negativo indica plano subdimensionado; fill rate
-  baixo com BIAS neutro indica restricao operacional.
+FILL RATE = volume faturado dividido por volume vendido, em caixas. Mede
+  execucao, nao acuracia. Serve para separar erro de previsao de restricao
+  de suprimento: fill rate baixo com BIAS negativo indica plano
+  subdimensionado; fill rate baixo com BIAS neutro indica restricao
+  operacional.
 
 DIAGNOSTICO WMAPE x BIAS
   WMAPE alto e BIAS proximo de zero: erro disperso. Volatilidade ou sazonalidade
@@ -541,12 +598,28 @@ DIAGNOSTICO WMAPE x BIAS
 IMPACTO FINANCEIRO (campos novos)
 
   vl_corte = SOMA DIRETA do campo vlcorte do ERP (fato_vendas), por SKU e mes.
-    NAO HA FORMULA. NAO e diferenca entre pedido e entregue. NAO e multiplicado
-    por PMV. E' um valor que ja vem pronto do ERP, com nota fiscal por tras.
-    Ao citar vl_corte, diga apenas "R$ X em corte, valor registrado no ERP" —
-    NUNCA invente um calculo do tipo "diferenca x PMV" para este campo. Se
-    descrever um calculo para vl_corte que nao seja "soma direta do ERP", a
-    frase esta ERRADA e nao deve ser escrita.
+    NAO HA FORMULA. NAO e diferenca entre vendido e faturado. NAO e
+    multiplicado por PMV. E' um valor que ja vem pronto do ERP, com nota
+    fiscal por tras. Ao citar vl_corte, diga apenas "R$ X em corte, valor
+    registrado no ERP" — NUNCA invente um calculo do tipo "diferenca x PMV"
+    para este campo. Se descrever um calculo para vl_corte que nao seja
+    "soma direta do ERP", a frase esta ERRADA e nao deve ser escrita.
+
+  vl_corte_transferencia = parcela de vl_corte que NAO e ruptura real. Um
+    grupo pequeno de itens (linha liquida STEVIA e SUCRALOSE, entre outros)
+    teve promocao temporaria sob um codigo alternativo; quando a promocao
+    encerra, o pedido feito no codigo promocional e cortado e o mesmo
+    cliente e atendido no codigo regular no mesmo periodo — ele RECEBEU o
+    produto, so que registrado sob outro codigo. Isso aparece no ERP como
+    corte, mas nao e demanda perdida.
+    vl_corte_ruptura = vl_corte - vl_corte_transferencia. Este e o numero
+    que representa ruptura de fato (falta de estoque ou plano insuficiente).
+    Quando vl_corte_transferencia for uma fracao pequena do vl_corte total
+    (a ordem de grandeza tipica e abaixo de 1% no agregado, com picos
+    pontuais em meses de troca de promocao), mencione isso brevemente sem
+    dar peso desproporcional. Quando for uma fracao grande NUM SKU ou
+    CATEGORIA especifico, destaque que aquele corte especifico nao deve
+    ser lido como ruptura de suprimento.
 
   vl_excesso e vl_subplano SAO CALCULADOS, ao contrario de vl_corte. A conta
     roda por (SKU, mes) — nunca por categoria ou pelo PMV medio do periodo:
@@ -627,12 +700,14 @@ REGRAS DE REDACAO - obrigatorias:
 ESTRUTURA (700 a 900 palavras, prosa densa):
 
 1. ESCOPO E METODO
-   Periodo medido, quantidade de SKUs, origem do plano e limitacoes. Cite os
-   DOIS numeros de SKU do contexto: quantos tem pedido no periodo e quantos
-   existem no portfolio ativo total. Se forem diferentes, diga "X de Y SKUs
-   ativos tiveram pedido no periodo" — PROIBIDO escrever que os SKUs com
-   pedido "representam a totalidade do portfolio" quando os dois numeros
-   nao forem iguais.
+   Periodo medido (o ano vigente, do inicio do ano ate o ultimo mes
+   fechado — e o UNICO periodo do relatorio, use sempre o mesmo recorte
+   ao longo de todo o texto), quantidade de SKUs, origem do plano e
+   limitacoes. Cite os DOIS numeros de SKU do contexto: quantos venderam
+   no periodo e quantos existem no portfolio ativo total. Se forem
+   diferentes, diga "X de Y SKUs ativos venderam no periodo" — PROIBIDO
+   escrever que os SKUs vendidos "representam a totalidade do portfolio"
+   quando os dois numeros nao forem iguais.
 
 2. LEITURA DO PERIODO
    WMAPE e BIAS do portfolio, classificacao pelo cruzamento e persistencia.
@@ -658,7 +733,9 @@ ESTRUTURA (700 a 900 palavras, prosa densa):
 7. ATENDIMENTO E ORIGEM DO CORTE
    Fill rate do portfolio e evolucao mes a mes. Maior corte por categoria.
    Classifique a origem: BIAS negativo indica planejamento; neutro ou positivo
-   indica restricao operacional.
+   indica restricao operacional. Se totais.vl_corte_transferencia for maior
+   que zero, informe o valor e use vl_corte_ruptura (nao vl_corte bruto)
+   como o numero de ruptura real na leitura — ver METODOLOGIA.
 
 8. VALOR AGREGADO DA PREVISAO
    FVA: onde o ajuste manual aumentou ou reduziu o erro.
@@ -689,17 +766,25 @@ Sem emojis. Sem preambulo. Cite numeros dentro das frases, nao em tabela."""
 def _contexto_modelo(ds: Dict[str, Any]) -> str:
     jan = ds["janela"]
     total_ativos = ds.get("total_skus_ativos_portfolio", ds["n_skus"])
+    rotulo_periodo = (jan["meses_detalhe"][0] + " a " + jan["meses_detalhe"][-1]
+                       if len(jan["meses_detalhe"]) > 1 else jan["meses_detalhe"][0])
     linhas = [
         f"CICLO ATIVO: {jan['ciclo']}",
         f"ULTIMO MES FECHADO: {jan['mes_referencia']}",
-        f"JANELA YoY: meses 01 a {jan['mes_num_fim']:02d} de cada ano em {jan['anos_yoy']}",
-        f"JANELA DETALHE: {', '.join(jan['meses_detalhe'])}",
+        f"PERIODO ANALISADO (ano vigente, do inicio do ano ate o ultimo mes",
+        f"  fechado): {rotulo_periodo} — {len(jan['meses_detalhe'])} mes(es).",
+        f"  Este e O UNICO periodo do relatorio. O detalhe mes a mes e a",
+        f"  comparacao YoY usam EXATAMENTE os mesmos meses — nao ha uma",
+        f"  janela 'de detalhe' diferente da janela 'do periodo'. Nunca",
+        f"  escreva dois recortes de meses diferentes no mesmo relatorio.",
+        f"COMPARACAO YoY: mesmos meses (01 a {jan['mes_num_fim']:02d}) em cada um",
+        f"  destes anos: {jan['anos_yoy']}.",
         f"SKUs ATIVOS NO PORTFOLIO (dim_produtos, ativo=true): {total_ativos}",
         f"SKUs ATIVOS QUE TIVERAM PEDIDO NO PERIODO ANALISADO: {ds['n_skus']}",
         "  -> Estes dois numeros SAO DIFERENTES por definicao: o primeiro e o",
         "     portfolio inteiro; o segundo e quem vendeu no recorte. NUNCA",
         "     diga que o segundo 'representa a totalidade do portfolio' —",
-        f"     diga '{ds['n_skus']} de {total_ativos} SKUs ativos tiveram pedido",
+        f"     diga '{ds['n_skus']} de {total_ativos} SKUs ativos venderam",
         "     no periodo' quando os dois numeros forem diferentes.",
         "",
         "DADOS (JSON):",
@@ -1010,11 +1095,11 @@ def gerar_pdf(relatorio: str, ds: Dict[str, Any] = None) -> bytes:
             f"Ciclo {jan.get('ciclo','-')} · ultimo mes fechado {jan.get('mes_referencia','-')}",
             st_txt))
         dados = [
-            ["Pedido (cx)",   f"{t['qt_pedido']:,.0f}".replace(",", ".")],
-            ["Entregue (cx)", f"{t['qt_entregue']:,.0f}".replace(",", ".")],
+            ["Vendido (cx)",  f"{t['qt_pedido']:,.0f}".replace(",", ".")],
+            ["Faturado (cx)", f"{t['qt_entregue']:,.0f}".replace(",", ".")],
             ["Corte (cx)",    f"{t['qt_corte']:,.0f}".replace(",", ".")],
             ["Fill Rate",     f"{t['fill_rate']}%"],
-            ["Receita pedida (R$)",  f"{t['vl_pedido']:,.0f}".replace(",", ".")],
+            ["Receita vendida (R$)", f"{t['vl_pedido']:,.0f}".replace(",", ".")],
             ["Perda no corte (R$)",  f"{t['vl_corte']:,.0f}".replace(",", ".")],
             ["Excesso de plano (R$)", f"{t['vl_excesso']:,.0f}".replace(",", ".")],
         ]

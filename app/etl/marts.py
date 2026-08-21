@@ -232,7 +232,7 @@ INSERT INTO mart_acuracia_sku_mes
     (sku, mes, categoria, segmento, curva, ativo,
      fonte_plano, ciclo_plano, meses_historico, maturidade,
      qt_pedido, vl_pedido, qt_entregue, vl_entregue,
-     qt_corte, vl_corte, qt_carteira,
+     qt_corte, vl_corte, qt_corte_transferencia, vl_corte_transferencia, qt_carteira,
      qt_plano, vl_plano, qt_ia, tem_plano, pmv,
      gap_previsao_cx, gap_execucao_cx, erro_abs_cx,
      gap_previsao_rs, gap_execucao_rs, erro_abs_rs,
@@ -274,6 +274,13 @@ SELECT e.sku,
        COALESCE(v.vl_entregue, 0),
        COALESCE(v.qt_corte,    0),
        COALESCE(v.vl_corte,    0),
+       -- Parcela do corte por transferência de código (promoção COPA
+       -- encerrada, cliente atendido no código regular). Copiado de
+       -- mart_vendas_mes, que já isola isso via sku_origem <> sku. Sem
+       -- esta coluna aqui, o agente não enxergava essa distinção e
+       -- tratava todo corte como ruptura real.
+       COALESCE(v.qt_corte_transferencia, 0),
+       COALESCE(v.vl_corte_transferencia, 0),
        COALESCE(v.qt_carteira, 0),
 
        pl.qt_plano,
