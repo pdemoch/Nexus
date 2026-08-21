@@ -999,11 +999,15 @@ async def agente_chat(
 ):
     """Chat: responde perguntas ad-hoc sobre os indicadores do recorte atual."""
     try:
-        resposta = agente_kpis.responder_pergunta(
+        r = agente_kpis.responder_pergunta(
             db, payload.pergunta, payload.meses,
             payload.base, payload.unidade, payload.historico
         )
-        return {"resposta": resposta}
+        # responder_pergunta devolve dict com resposta + flag de cache.
+        # Tolera str para nao quebrar se a versao antiga estiver no ar.
+        if isinstance(r, dict):
+            return {"resposta": r.get("resposta", ""), "do_cache": r.get("do_cache", False)}
+        return {"resposta": r}
     except RuntimeError as e:
         raise HTTPException(503, str(e))
     except Exception as e:

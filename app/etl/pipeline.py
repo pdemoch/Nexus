@@ -66,6 +66,32 @@ def _auditar_pmv_zerado(ciclo_alvo: str, log_callback=print):
         log_callback(f"⚠️ [PMV-AUDIT] Falha ao auditar PMV: {e}")
 
 
+def _gerar_relatorio_agente(ciclo_alvo: str, log_callback=print) -> None:
+    """
+    Dispara o relatorio S&OP do ciclo.
+
+    Isolado numa funcao propria e com try/except largo de proposito: o
+    relatorio depende da API da Anthropic, que e uma dependencia EXTERNA.
+    Uma indisponibilidade la nao pode marcar como falho um pipeline cujos
+    dados ja estao integros e ja foram commitados. O relatorio pode ser
+    gerado depois pela tela, sem reprocessar nada.
+    """
+    try:
+        from app.core.database import SessionLocal
+        from app.api.routers import agente_kpis
+        log_callback("\n🤖 [AGENTE] Gerando relatorio S&OP do ciclo...")
+        with SessionLocal() as db:
+            r = agente_kpis.gerar_relatorio_ciclo(
+                db, ciclo_alvo, usuario="Pipeline", forcar=True)
+        n = len(r.get("relatorio") or "")
+        log_callback(f"   ✅ Relatorio do ciclo {ciclo_alvo} gerado "
+                     f"({n} caracteres, referencia {r.get('mes_referencia')}).")
+    except Exception as e:
+        log_callback(f"   ⚠️ [AGENTE] Relatorio nao gerado: {e}")
+        log_callback("   (Os dados do ciclo estao integros. "
+                     "Gere o relatorio pela tela quando quiser.)")
+
+
 async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print,
                                   modo_recarga_total: bool = False):
     """
@@ -216,6 +242,17 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print,
         # precificação já concluídos. Só lê — nenhuma tabela transacional é
         # tocada, e os marts são reconstrutíveis a qualquer momento.
         await asyncio.to_thread(marts.compute_marts, ciclo_alvo, log_callback)
+
+        # ====================================================================
+        # 5. RELATÓRIO S&OP DO CICLO
+        # ====================================================================
+        # Gerado automaticamente ao criar o ciclo, uma vez, e servido a todos
+        # os perfis. Não depende de filtro de tela nem de ação do usuário: a
+        # janela sai do próprio ciclo.
+        #
+        # Falha aqui NÃO derruba o pipeline: os dados já estão consistentes e
+        # o relatório pode ser gerado depois pela tela.
+        await asyncio.to_thread(_gerar_relatorio_agente, ciclo_alvo, log_callback)
 
         log_callback("\n✅ Pipeline Executado com Sucesso Absoluto!")
 
