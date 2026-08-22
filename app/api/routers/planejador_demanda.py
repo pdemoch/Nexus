@@ -136,6 +136,49 @@ def listar_categorias_ativas(db: Session) -> List[str]:
     return [r[0] for r in rows]
 
 
+def buscar_itens(db: Session, q: str) -> List[Dict[str, Any]]:
+    """
+    Autocomplete de SKU/categoria para o seletor do chat (modo Demanda).
+
+    Busca por codigo do SKU, descricao (ILIKE) ou nome de categoria.
+    Chamado por GET /api/v1/assistente/buscar?q=... — o painel da Sidebar
+    usa isso para o usuario escolher o item antes de perguntar, ja que o
+    chat unico nao esta mais preso a tela onde um dossie especifico esteja
+    aberto.
+    """
+    termo = f"%{(q or '').strip()}%"
+    resultados: List[Dict[str, Any]] = []
+
+    skus = db.execute(text("""
+        SELECT sku, descricao, categoria
+        FROM dim_produtos
+        WHERE ativo = TRUE AND (sku ILIKE :t OR descricao ILIKE :t)
+        ORDER BY descricao
+        LIMIT 15
+    """), {"t": termo}).fetchall()
+    for r in skus:
+        resultados.append({
+            "tipo": "sku", "id": r.sku,
+            "label": f"{r.descricao} ({r.sku})",
+            "categoria": r.categoria,
+        })
+
+    cats = db.execute(text("""
+        SELECT DISTINCT categoria FROM dim_produtos
+        WHERE ativo = TRUE AND categoria ILIKE :t
+        ORDER BY categoria
+        LIMIT 8
+    """), {"t": termo}).fetchall()
+    for r in cats:
+        resultados.append({
+            "tipo": "categoria", "id": r.categoria,
+            "label": f"Categoria: {r.categoria}",
+            "categoria": r.categoria,
+        })
+
+    return resultados
+
+
 # =====================================================================
 # QUERIES — todas em mart_acuracia_sku_mes, sem base nova
 # =====================================================================
@@ -517,6 +560,37 @@ def avaliar_todas_categorias(db: Session, ciclo: str = None,
         resumo += f" | falhas: {', '.join(falhas)}"
     log_callback(resumo)
     return {"ok": ok, "total": len(categorias), "falhas": falhas, "ciclo": ciclo}
+
+
+# =====================================================================
+# CHAT — dispatcher unico chamado por router_assistente.py
+# =====================================================================
+def responder_pergunta(db: Session, modo: str, pergunta: str,
+                       escopo_tipo: str = None, escopo_id: str = None,
+                       historico: List[dict] = None) -> Dict[str, Any]:
+    """
+    Ponto de entrada unico do chat da Sidebar. O router NAO sabe qual
+    modulo resolve cada modo — so passa o payload adiante e recebe
+    {"resposta": ..., "do_cache": ...} nos dois casos.
+
+      modo='indicadores' -> delega para agente_kpis (portfolio, ciclo ativo)
+      modo='demanda'     -> delega para responder_pergunta_planejador
+                             (exige escopo_tipo + escopo_id ja escolhidos
+                             pelo usuario na busca do painel)
+    """
+    if modo == "indicadores":
+        from app.api.routers import agente_kpis
+        r = agente_kpis.responder_pergunta(db, pergunta, historico=historico)
+        return {"resposta": r["resposta"], "do_cache": r.get("do_cache", False)}
+
+    if modo == "demanda":
+        if not escopo_tipo or not escopo_id:
+            raise RuntimeError(
+                "Selecione um SKU ou categoria antes de perguntar no modo Demanda."
+            )
+        return responder_pergunta_planejador(db, escopo_tipo, escopo_id, pergunta, historico)
+
+    raise RuntimeError(f"Modo '{modo}' invalido — use 'indicadores' ou 'demanda'.")
 
 
 # =====================================================================
