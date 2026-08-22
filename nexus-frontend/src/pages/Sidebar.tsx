@@ -4,6 +4,7 @@ import {
   UserCircle, ShieldAlert, Factory, Activity, Crosshair, Database, 
   ChevronLeft, ChevronRight, Landmark, Zap
 } from 'lucide-react';
+import AssistenteChat from './AssistenteChat';
 
 export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout }: any) {
   // Estado para controlar se a sidebar está recolhida (w-20) ou expandida (w-64)
@@ -72,6 +73,11 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
           );
         })}
       </nav>
+
+      {/* ASSISTENTE — chat único (Indicadores + Demanda), ícone diferenciado */}
+      <div className="px-3 pb-2 shrink-0">
+        <AssistenteChat isCollapsed={isCollapsed} />
+      </div>
 
       {/* LOGOUT */}
       <div className="p-4 border-t border-slate-800 shrink-0">
