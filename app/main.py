@@ -18,6 +18,7 @@ from app.api.routers import (
     router_dashboard,       # Demanda Final (S&OP Global)
     router_npd,             # NPD / Inovações
     router_kpis,            # Auditoria / KPIs
+    router_assistente,      # Chat único da Sidebar (Indicadores + Demanda)
 )
 from app.core.config import settings
 from app.models.domain_models import Base
@@ -63,6 +64,7 @@ app.include_router(router_supply.router)
 app.include_router(router_dashboard.router)
 app.include_router(router_npd.router)
 app.include_router(router_kpis.router)
+app.include_router(router_assistente.router)
 
 
 @app.get("/", tags=["Health Check"])

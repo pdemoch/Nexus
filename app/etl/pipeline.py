@@ -92,6 +92,31 @@ def _gerar_relatorio_agente(ciclo_alvo: str, log_callback=print) -> None:
                      "Gere o relatorio pela tela quando quiser.)")
 
 
+def _avaliar_planejador_demanda(ciclo_alvo: str, log_callback=print) -> None:
+    """
+    Dispara a avaliacao do Planejador de Demanda: uma chamada por
+    categoria (~13), cada uma avaliando a categoria E todos os SKUs
+    dela juntos. Alimenta o bloco de avaliacao no Dossie.
+
+    Mesmo isolamento do relatorio principal: dependencia externa
+    (Anthropic), falha aqui nao pode reprovar um pipeline com dados
+    integros. Falha em UMA categoria tambem nao aborta as demais —
+    avaliar_todas_categorias ja continua e reporta falhas no final.
+    """
+    try:
+        from app.core.database import SessionLocal
+        from app.api.routers import planejador_demanda
+        log_callback("\n🧭 [PLANEJADOR] Avaliando categorias e SKUs do ciclo...")
+        with SessionLocal() as db:
+            r = planejador_demanda.avaliar_todas_categorias(
+                db, ciclo=ciclo_alvo, usuario="Pipeline", log_callback=log_callback)
+        log_callback(f"   ✅ Planejador: {r['ok']}/{r['total']} categorias avaliadas.")
+    except Exception as e:
+        log_callback(f"   ⚠️ [PLANEJADOR] Avaliacao nao gerada: {e}")
+        log_callback("   (Os dados do ciclo estao integros. "
+                     "As avaliacoes podem ser geradas depois.)")
+
+
 async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print,
                                   modo_recarga_total: bool = False):
     """
@@ -253,6 +278,7 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print,
         # Falha aqui NÃO derruba o pipeline: os dados já estão consistentes e
         # o relatório pode ser gerado depois pela tela.
         await asyncio.to_thread(_gerar_relatorio_agente, ciclo_alvo, log_callback)
+        await asyncio.to_thread(_avaliar_planejador_demanda, ciclo_alvo, log_callback)
 
         log_callback("\n✅ Pipeline Executado com Sucesso Absoluto!")
 
