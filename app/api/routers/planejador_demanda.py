@@ -418,6 +418,9 @@ TOM E CONTEUDO DE CADA AVALIACAO
   tendencia de rampa, nao sobre erro percentual alto.
 - Se sem_plano=true em algum SKU: diga isso explicitamente — e ausencia de previsao, nao
   erro de previsao.
+- Texto CORRIDO, sem markdown: sem #, sem **, sem listas com marcador. O Dossie exibe isto
+  como paragrafo simples, nao como chat renderizado — qualquer simbolo de formatacao
+  apareceria literal na tela.
 
 FORMATO DE SAIDA — APENAS JSON, SEM TEXTO ANTES OU DEPOIS, SEM BLOCO DE CODIGO MARKDOWN.
 Estrutura exata:
@@ -438,7 +441,16 @@ um SKU ou categoria especifico, para ajudar quem esta decidindo o proximo plano.
   que nao esta disponivel nesse recorte — nunca estime.
 - Tom pratico, de conselheiro — nao de auditor de portfolio. Responda pensando em "o que eu
   faco com isso no plano do proximo mes".
-- 1 a 3 paragrafos curtos. Sem tabelas markdown, sem bullets longos.
+
+FORMATO DA RESPOSTA:
+- Comece com uma frase de resposta direta a pergunta, sem titulo.
+- Use no maximo dois niveis de titulo com "## " (dois cerquilhas e espaco) — NUNCA "# "
+  com um cerquilha so, o renderizador nao reconhece e o simbolo aparece literal na tela.
+- Use **negrito** apenas para numeros-chave e nomes de item.
+- Tabelas: use pipe simples com cabecalho e linha separadora. Maximo 6 colunas e 10 linhas.
+- Termine com uma linha iniciada por "Leitura: " contendo a conclusao pratica.
+- Conclua sempre o raciocinio. Nunca interrompa no meio de uma frase.
+- 1 a 3 paragrafos curtos fora das tabelas.
 """
 
 
