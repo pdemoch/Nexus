@@ -59,9 +59,15 @@ from dateutil.relativedelta import relativedelta
 
 from app.core.constants import PISO_HISTORICO
 from app.api.routers.agente_kpis import (
-    _sdiv, _r, _corrigir_nome_empresa, _chamar_claude,
+    _sdiv, _corrigir_nome_empresa, _chamar_claude,
     _ciclo_atual, _normalizar, _chave, METODOLOGIA,
 )
+
+# _r nao e exportado por todas as versoes do agente_kpis — definido aqui
+# para quebrar a dependencia de versao e tornar este modulo auto-contido.
+def _r(v, casas: int = 2):
+    """Arredonda tolerando None."""
+    return None if v is None else round(float(v), casas)
 
 logger = logging.getLogger(__name__)
 
