@@ -1,87 +1,143 @@
 """
-agente_kpis.py — Agente analítico de KPIs S&OP (Nexus / Linea Alimentos)
+=====================================================================
+AGENTE DE KPIs S&OP — RELATORIO MENSAL DO CICLO
+=====================================================================
+Destino: app/api/routers/agente_kpis.py
 
-Escopo da análise:
-  • Acurácia da previsão de demanda: WMAPE e BIAS, em caixas ou em R$.
-  • Evolução ano a ano — cada ano avaliado isoladamente, mesmos meses do calendário.
-  • Diagnóstico por categoria e por SKU, com cruzamento WMAPE x BIAS.
-  • Atendimento (fill rate) apenas para separar erro de previsão de restrição
-    de suprimento. Descontos comerciais estão fora do escopo.
+O QUE MUDOU NESTA REESCRITA
+---------------------------------------------------------------------
+1. SEM FILTROS. A janela e derivada do ciclo ativo no painel admin, nao
+   de toggles ou seletores de periodo. As assinaturas publicas ainda
+   aceitam `meses`, `base` e `unidade` para nao quebrar o frontend, mas
+   os valores sao IGNORADOS. Um ciclo, um relatorio.
 
-Nomenclatura de negócio (o relatório NAO cita nomes de tabelas):
-  "planejamento anterior ao Nexus"  -> previsao registrada em planilha (jan/23-mai/26)
-  "planejamento no Nexus"           -> plano congelado M-2 do ciclo (jun/26+)
-  "previsao estatistica"            -> modelo do Nexus, M-2 (jun/26+)
+2. LE DOS MARTS. mart_acuracia_sku_mes e mart_vendas_mes ja resolvem no
+   grao (sku, mes) a uniao previsao_humana + ibp_granular (regra M-2), o
+   PMV em cascata e os tres estados de venda. Antes era uma CTE de ~200
+   linhas montada ao vivo em toda requisicao — era isso que deixava o
+   chat travado em "consultando dados".
 
-Principios:
-  • Tom tecnico e imparcial, sem adjetivos de julgamento.
-  • Todo numero rastreavel aos anexos.
-  • Erro absoluto sempre computado em (SKU, mes) antes de agregar.
+3. HAIKU. Relatorio e prosa estruturada sobre JSON ja preparado; nao
+   exige o modelo mais caro.
+
+4. DIMENSAO FINANCEIRA COM PROVA. Todo valor em R$ vem acompanhado da
+   conta que o gerou.
+
+DEFINICOES TRAVADAS (decisoes de negocio, nao de implementacao)
+---------------------------------------------------------------------
+WMAPE  = SUM|vol_final - qt_pedido| / SUM qt_pedido     SO EM CAIXAS
+BIAS   = (SUM vol_final - SUM qt_pedido) / SUM qt_pedido SO EM CAIXAS
+FVA    = WMAPE_humano - WMAPE_ia, na MESMA populacao     SO EM CAIXAS
+FILL   = SUM qt_entregue / SUM qt_pedido                 SO EM CAIXAS
+
+Acuracia mede contra DEMANDA (qt_pedido = volume vendido), nunca contra
+embarque. Medir contra o faturado cria demanda censurada: se o plano
+subestima, a producao subestima e a entrega subestima junto — o erro se
+apaga e quanto pior o suprimento, melhor a acuracia aparente.
+
+Valor monetario NAO entra em WMAPE, BIAS nem FVA. Fica na secao de
+impacto financeiro, que monetiza os gaps de volume.
+
+NOMENCLATURA (o que o leitor ve, nao os nomes de coluna do banco)
+---------------------------------------------------------------------
+qt_pedido / vl_pedido      -> "volume vendido" / "valor vendido"
+qt_entregue / vl_entregue  -> "volume faturado" / "valor faturado"
+Os nomes de campo no banco continuam qt_pedido/qt_entregue (schema nao
+muda); e a PROSA do relatorio e do chat que usa a nomenclatura de negocio.
+
+FONTE DO R$
+---------------------------------------------------------------------
+vl_pedido, vl_entregue e vl_corte vem do ERP — valor real, com nota.
+O PMV so entra onde NAO existe valor no ERP, porque o volume e
+hipotetico e nunca virou nota fiscal:
+    capital imobilizado = max(plano - vendido, 0) x PMV
+    venda nao prevista  = max(vendido - plano, 0) x PMV
+
+JANELA (ciclo ativo 08/2026)
+---------------------------------------------------------------------
+Ano vigente (YTD)  Jan a Jul/2026 — do inicio do ano ate o ultimo mes
+                    fechado. Unica janela do relatorio: usada tanto no
+                    detalhe mes a mes quanto no lado "ano corrente" do YoY.
+YoY                 Jan-Jul/2026 vs Jan-Jul/2025 vs Jan-Jul/2024 vs
+                    Jan-Jul/2023 — MESMO recorte de meses em cada ano.
+
+Antes desta versao, a janela de detalhe era uma janela fixa de 6 meses
+(trailing) enquanto o YoY comparava Jan-Jul: o relatorio dizia "Jan-Jul"
+num paragrafo e o detalhe mensal so cobria Fev-Jul no seguinte —
+inconsistencia visivel. Unificar em YTD elimina a divergencia.
+
+O YoY compara o MESMO recorte de meses em cada ano: comparar 7 meses
+contra 12 daria diferenca de calendario, nao de desempenho.
+
+RENDERIZACAO
+---------------------------------------------------------------------
+O frontend (AuditoriaArena) renderiza texto puro linha a linha: linhas
+numeradas ou em MAIUSCULAS com menos de 70 caracteres viram titulo; o
+resto vira paragrafo justificado. Tabelas markdown NAO renderizam — os
+pipes sairiam embaralhados no meio do texto.
+
+Por isso o prompt exige prova de calculo em PROSA com os numeros
+explicitos ("14.886 cx x R$ 18,40 = R$ 273.902") em vez de tabela.
+Quando o renderizador for ajustado, basta trocar a instrucao do prompt.
 """
 
 import os
-import io
+import re
 import json
+import hashlib
+import logging
 import datetime
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
 
-from sqlalchemy.orm import Session
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 from dateutil.relativedelta import relativedelta
 
+logger = logging.getLogger(__name__)
 
-CICLO_PISO      = datetime.date(2026, 4, 1)
-DEFASAGEM_MESES = 2
-PISO_NEXUS      = datetime.date(2026, 6, 1)
-
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# CONTEXTO DE NEGOCIO — conhecimento que nao esta nas tabelas
-# Manter atualizado. O agente usa isso para nao atribuir a falha de previsao
-# aquilo que foi decisao ou restricao conhecida.
-# ═══════════════════════════════════════════════════════════════════════════
-
-# Restricoes de producao: periodos em que a entrega foi limitada por decisao
-# ou capacidade, nao por erro de plano. Formato:
-#   {"escopo": "categoria"|"segmento"|"sku", "valor": "...",
-#    "ini": "YYYY-MM", "fim": "YYYY-MM", "motivo": "..."}
-RESTRICOES_PRODUCAO: List[Dict[str, Any]] = []   # desativado
-
-# Limites de maturidade do SKU, em meses de historico de venda
-MESES_LANCAMENTO = 6    # ate 6 meses: lancamento
-MESES_RECENTE    = 18   # 7 a 18 meses: recente
+ANOS_YOY      = 4      # ano corrente + 3 anteriores
+TOP_N         = 12     # itens nos rankings
 
 
-def _maturidade(meses_hist: int) -> str:
-    if meses_hist is None:
-        return "Indefinido"
-    if meses_hist <= MESES_LANCAMENTO:
-        return "Lancamento"
-    if meses_hist <= MESES_RECENTE:
-        return "Recente"
-    return "Maduro"
+# =====================================================================
+# DDL DO CACHE
+# =====================================================================
+DDL_CACHE = """
+CREATE TABLE IF NOT EXISTS agente_relatorio_cache (
+    id          SERIAL PRIMARY KEY,
+    ciclo_sop   VARCHAR(10) NOT NULL,
+    chave       VARCHAR(64) NOT NULL,
+    meses       TEXT,
+    base        VARCHAR(20),
+    unidade     VARCHAR(10),
+    relatorio   TEXT        NOT NULL,
+    dataset     TEXT,
+    gerado_por  VARCHAR(120),
+    gerado_em   TIMESTAMP   NOT NULL DEFAULT now(),
+    CONSTRAINT uix_agente_rel UNIQUE (ciclo_sop, chave)
+);
+
+CREATE TABLE IF NOT EXISTS agente_chat_cache (
+    id          SERIAL PRIMARY KEY,
+    ciclo_sop   VARCHAR(10) NOT NULL,
+    chave       VARCHAR(64) NOT NULL,
+    pergunta    TEXT        NOT NULL,
+    resposta    TEXT        NOT NULL,
+    gerado_em   TIMESTAMP   NOT NULL DEFAULT now(),
+    CONSTRAINT uix_agente_chat UNIQUE (ciclo_sop, chave)
+);
+"""
+
+# Chave fixa: um relatorio por ciclo. O relatorio nao depende mais de
+# recorte, entao nao ha o que hashear.
+CHAVE_CICLO = "ciclo"
 
 
-def _restricoes_aplicaveis(categoria: str, segmento: str, sku: str,
-                           meses: List[str]) -> List[Dict[str, Any]]:
-    """Retorna as restricoes de producao que incidem sobre o item no periodo."""
-    achadas = []
-    for r in RESTRICOES_PRODUCAO:
-        alvo = {"categoria": categoria, "segmento": segmento, "sku": sku}.get(r["escopo"])
-        if not alvo or str(alvo).upper() != str(r["valor"]).upper():
-            continue
-        sobrepoe = [m for m in meses if r["ini"] <= m <= r["fim"]]
-        if sobrepoe:
-            achadas.append({
-                "motivo": r["motivo"],
-                "periodo": f"{r['ini']} a {r['fim']}",
-                "meses_afetados_no_recorte": len(sobrepoe),
-            })
-    return achadas
-
-
+# =====================================================================
+# HELPERS
+# =====================================================================
 def _sdiv(num, den, mult=1.0):
+    """Divisao segura: None se denominador <= 0 ou NaN."""
     try:
         d = float(den)
         if d <= 0 or not (d == d):
@@ -91,693 +147,34 @@ def _sdiv(num, den, mult=1.0):
         return None
 
 
+def _corrigir_nome_empresa(texto: str) -> str:
+    """
+    Salvaguarda deterministica pos-geracao.
+
+    'Linea' e nome proprio, mas 'Linha' e palavra comum em portugues
+    (significa 'linha', como em 'linha de producao'). O modelo tende a
+    autocorrigir para a grafia comum mesmo com instrucao explicita no
+    prompt. Instrucao sozinha nao e garantia — aqui a correcao roda
+    sempre, independente do que o modelo escreveu, preservando o padrao
+    de capitalizacao (CAIXA ALTA / Titulo / minusculo) do trecho original.
+    """
+    def _rep(m):
+        original = m.group(0)
+        if original.isupper():
+            return "LINEA ALIMENTOS"
+        if original[0].isupper():
+            return "Linea Alimentos"
+        return "linea alimentos"
+    return re.sub(r'\bLinha\s+Alimentos\b', _rep, texto, flags=re.IGNORECASE)
+
+
+def _r(v, casas=2):
+    """Arredonda tolerando None."""
+    return None if v is None else round(float(v), casas)
+
+
 def _hoje_br() -> datetime.date:
     return (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
-
-
-def _ultimo_mes_fechado() -> str:
-    h = _hoje_br().replace(day=1)
-    return (h - datetime.timedelta(days=1)).strftime("%Y-%m")
-
-
-def _classe(wmape, bias) -> str:
-    if wmape is None or bias is None:
-        return "Sem plano"
-    if wmape <= 20 and abs(bias) <= 10:
-        return "Sob controle"
-    if bias > 10:
-        return "Superestimacao"
-    if bias < -10:
-        return "Subestimacao"
-    return "Disperso"
-
-
-_SQL = """
-    WITH ativos AS (
-        SELECT sku, descricao,
-               COALESCE(categoria,'SEM CATEGORIA') AS categoria,
-               COALESCE(segmento, 'SEM SEGMENTO')  AS segmento,
-               COALESCE(curva, 'SEM CURVA')        AS curva
-        FROM dim_produtos
-        WHERE COALESCE(ativo, FALSE) = TRUE
-    ),
-    primeira_venda AS (
-        SELECT TRIM(v.sku::text) AS sku,
-               MIN(DATE_TRUNC('month', v.data_pedido))::date AS nasceu
-        FROM fato_vendas v
-        JOIN ativos a ON a.sku = TRIM(v.sku::text)
-        GROUP BY 1
-    ),
-    pmv_mes AS (
-        SELECT TRIM(v.sku::text) AS sku,
-               DATE_TRUNC('month', v.data_pedido)::date AS mes,
-               SUM(v.vl_pedido) / NULLIF(SUM(v.qt_pedido), 0) AS pmv
-        FROM fato_vendas v
-        JOIN ativos a ON a.sku = TRIM(v.sku::text)
-        GROUP BY 1, 2
-        HAVING SUM(v.qt_pedido) > 0
-    ),
-    pmv_global AS (
-        SELECT TRIM(v.sku::text) AS sku,
-               SUM(v.vl_pedido) / NULLIF(SUM(v.qt_pedido), 0) AS pmv
-        FROM fato_vendas v
-        JOIN ativos a ON a.sku = TRIM(v.sku::text)
-        GROUP BY 1
-        HAVING SUM(v.qt_pedido) > 0
-    ),
-    realizado AS (
-        SELECT TRIM(v.sku::text) AS sku,
-               DATE_TRUNC('month', v.data_pedido)::date AS mes,
-               SUM(v.{col_vol}) AS vol_real,
-               SUM(v.qt_pedido) AS qt_pedido,
-               SUM(v.qtfatura)  AS qt_fatura,
-               SUM(v.qtcorte)   AS qt_corte
-        FROM fato_vendas v
-        JOIN ativos a ON a.sku = TRIM(v.sku::text)
-        WHERE v.data_pedido >= :ini
-          AND v.data_pedido < (CAST(:fim AS date) + INTERVAL '1 month')
-        GROUP BY 1, 2
-    ),
-    plano_planilha AS (
-        SELECT h.sku, h.mes_projetado::date AS mes, SUM(h.vol_humano) AS vol_plano
-        FROM fato_previsao_humana h
-        JOIN ativos a ON a.sku = h.sku
-        WHERE h.fonte = 'HISTORICO'
-          AND h.mes_projetado >= :ini AND h.mes_projetado <= :fim
-        GROUP BY 1, 2
-    ),
-    plano_nexus AS (
-        SELECT TRIM(i.sku::text) AS sku, i.mes_projetado::date AS mes,
-               SUM(i.vol_final) AS vol_plano
-        FROM fato_ibp_granular i
-        JOIN ativos a ON a.sku = TRIM(i.sku::text)
-        WHERE (EXTRACT(YEAR FROM i.mes_projetado)*12 + EXTRACT(MONTH FROM i.mes_projetado))
-            - (SPLIT_PART(i.ciclo_sop,'/',2)::int*12 + SPLIT_PART(i.ciclo_sop,'/',1)::int) = 2
-          AND i.mes_projetado >= '2026-06-01'
-          AND i.mes_projetado >= :ini AND i.mes_projetado <= :fim
-        GROUP BY 1, 2
-    ),
-    plano AS (
-        SELECT * FROM plano_planilha UNION ALL SELECT * FROM plano_nexus
-    ),
-    ia AS (
-        SELECT TRIM(i.sku::text) AS sku, i.mes_projetado::date AS mes,
-               SUM(i.vol_ia) AS vol_ia
-        FROM fato_ibp_granular i
-        JOIN ativos a ON a.sku = TRIM(i.sku::text)
-        WHERE (EXTRACT(YEAR FROM i.mes_projetado)*12 + EXTRACT(MONTH FROM i.mes_projetado))
-            - (SPLIT_PART(i.ciclo_sop,'/',2)::int*12 + SPLIT_PART(i.ciclo_sop,'/',1)::int) = 2
-          AND i.mes_projetado >= :ini AND i.mes_projetado <= :fim
-        GROUP BY 1, 2
-    )
-    SELECT a.sku, a.descricao, a.categoria, a.segmento, a.curva,
-           pv.nasceu,
-           TO_CHAR(r.mes,'YYYY-MM') AS mes,
-           EXTRACT(YEAR  FROM r.mes)::int AS ano,
-           EXTRACT(MONTH FROM r.mes)::int AS num_mes,
-           r.vol_real, r.qt_pedido, r.qt_fatura, r.qt_corte,
-           p.vol_plano, i.vol_ia,
-           COALESCE(pm.pmv, pg.pmv, 0) AS pmv
-    FROM realizado r
-    JOIN ativos a           ON a.sku = r.sku
-    JOIN primeira_venda pv  ON pv.sku = r.sku AND r.mes >= pv.nasceu
-    LEFT JOIN plano p       ON p.sku = r.sku AND p.mes = r.mes
-    LEFT JOIN ia i          ON i.sku = r.sku AND i.mes = r.mes
-    LEFT JOIN pmv_mes pm    ON pm.sku = r.sku AND pm.mes = r.mes
-    LEFT JOIN pmv_global pg ON pg.sku = r.sku
-    WHERE r.vol_real > 0
-    ORDER BY a.categoria, a.sku, r.mes
-"""
-
-
-def montar_dataset(db: Session, meses: List[str],
-                   base: str = "pedido", unidade: str = "cx") -> Dict[str, Any]:
-    teto = _ultimo_mes_fechado()
-    meses_validos = sorted({m for m in meses if m <= teto})
-    if not meses_validos:
-        return {"erro": "Nenhum mes fechado no periodo selecionado."}
-
-    ini = meses_validos[0]  + "-01"
-    fim = meses_validos[-1] + "-01"
-
-    ano_fim  = int(meses_validos[-1][:4])
-    ini_hist = f"{ano_fim - 3}-01-01"
-
-    col_vol = "qtfatura" if base == "faturado" else "qt_pedido"
-    sql     = text(_SQL.replace("{col_vol}", col_vol))
-
-    rows      = db.execute(sql, {"ini": ini,      "fim": fim}).fetchall()
-    rows_hist = db.execute(sql, {"ini": ini_hist, "fim": fim}).fetchall()
-
-    def _peso(r):
-        return float(r.pmv or 0) if unidade == "rs" else 1.0
-
-    def _agregar(registros, chave_fn, filtro_mes=None):
-        acc: Dict[Any, Dict[str, float]] = {}
-        for r in registros:
-            if filtro_mes and r.mes not in filtro_mes:
-                continue
-            k = chave_fn(r)
-            if k is None:
-                continue
-            a = acc.setdefault(k, {
-                "real": 0.0, "plano": 0.0, "ia": 0.0,
-                "err": 0.0, "err_ia": 0.0,
-                "real_p": 0.0, "real_ia": 0.0,
-                "qt_ped": 0.0, "qt_fat": 0.0, "qt_cor": 0.0,
-                "n_meses": 0, "n_over": 0, "n_under": 0,
-                "meses_hist": set(),
-            })
-            p    = _peso(r)
-            real = float(r.vol_real or 0) * p
-            a["real"]   += real
-            a["qt_ped"] += float(r.qt_pedido or 0)
-            a["qt_fat"] += float(r.qt_fatura or 0)
-            a["qt_cor"] += float(r.qt_corte or 0)
-            a["meses_hist"].add(r.mes)
-
-            if r.vol_plano is not None:
-                pl = float(r.vol_plano) * p
-                a["plano"]   += pl
-                a["err"]     += abs(pl - real)
-                a["real_p"]  += real
-                a["n_meses"] += 1
-                if real > 0:
-                    d = (pl - real) / real
-                    if d >  0.02: a["n_over"]  += 1
-                    if d < -0.02: a["n_under"] += 1
-
-            if r.vol_ia is not None:
-                iv = float(r.vol_ia) * p
-                a["ia"]      += iv
-                a["err_ia"]  += abs(iv - real)
-                a["real_ia"] += real
-        return acc
-
-    def _metricas(a: Dict[str, float]) -> Dict[str, Any]:
-        wm    = _sdiv(a["err"],    a["real_p"],  100)
-        bi    = _sdiv(a["plano"] - a["real_p"], a["real_p"], 100)
-        wm_ia = _sdiv(a["err_ia"], a["real_ia"], 100)
-        bi_ia = _sdiv(a["ia"] - a["real_ia"], a["real_ia"], 100)
-        fva   = round(wm - wm_ia, 1) if (wm is not None and wm_ia is not None) else None
-        n     = a["n_meses"]
-        pers  = None
-        if n > 0 and bi is not None:
-            pers = round((a["n_over"] if bi >= 0 else a["n_under"]) / n * 100)
-        return {
-            "wmape":    round(wm, 1)    if wm    is not None else None,
-            "bias":     round(bi, 1)    if bi    is not None else None,
-            "wmape_ia": round(wm_ia, 1) if wm_ia is not None else None,
-            "bias_ia":  round(bi_ia, 1) if bi_ia is not None else None,
-            "fva_pp":   fva,
-            "volume":   round(a["real"]),
-            "vol_plano": round(a["plano"]) if a.get("plano") else None,
-            "erro_abs": round(a["err"]),
-            "persistencia_pct": pers,
-            "meses_com_plano":  n,
-            "atendimento_pct": round(_sdiv(a["qt_fat"], a["qt_ped"], 100) or 0, 1),
-            "corte_cx": round(a["qt_cor"]),
-        }
-
-    # Portfolio no periodo
-    ag_port = _agregar(rows, lambda r: "T", meses_validos)
-    port = _metricas(ag_port["T"]) if "T" in ag_port else {}
-    port["classe"] = _classe(port.get("wmape"), port.get("bias"))
-
-    # Evolucao ano a ano: mesmos meses do calendario em cada ano
-    meses_num = sorted({int(m[5:7]) for m in meses_validos})
-    ag_ano = _agregar(rows_hist,
-                      lambda r: r.ano if r.num_mes in meses_num else None)
-    evolucao_anual = []
-    anos_ord = sorted(ag_ano.keys())
-    for idx, ano in enumerate(anos_ord):
-        mt = _metricas(ag_ano[ano])
-        delta = None
-        if idx > 0:
-            ant = _metricas(ag_ano[anos_ord[idx-1]])
-            if mt.get("wmape") is not None and ant.get("wmape") is not None:
-                delta = round(mt["wmape"] - ant["wmape"], 1)
-        evolucao_anual.append({
-            "ano": ano, **mt,
-            "delta_wmape_pp": delta,
-            "classe": _classe(mt.get("wmape"), mt.get("bias")),
-        })
-
-    # Meses de historico total de cada SKU (base para maturidade)
-    hist_sku: Dict[str, set] = {}
-    nasc_sku: Dict[str, str] = {}
-    for r in rows_hist:
-        hist_sku.setdefault(r.sku, set()).add(r.mes)
-        if r.nasceu is not None:
-            d = r.nasceu.strftime("%Y-%m")
-            if r.sku not in nasc_sku or d < nasc_sku[r.sku]:
-                nasc_sku[r.sku] = d
-
-    # Serie mensal
-    ag_mes = _agregar(rows, lambda r: r.mes, meses_validos)
-    serie = []
-    for m in meses_validos:
-        if m not in ag_mes:
-            continue
-        mt = _metricas(ag_mes[m])
-        serie.append({"mes": m, "wmape": mt["wmape"], "bias": mt["bias"],
-                      "wmape_ia": mt["wmape_ia"], "volume": mt["volume"],
-                      "atendimento": mt["atendimento_pct"], "corte": mt["corte_cx"]})
-
-    # Categorias com comparativo do ano anterior
-    ano_atual  = ano_fim
-    ag_cat     = _agregar(rows, lambda r: r.categoria, meses_validos)
-    ag_cat_ant = _agregar(
-        rows_hist,
-        lambda r: r.categoria
-        if (r.ano == ano_atual - 1 and r.num_mes in meses_num) else None)
-    # Restricoes que incidem sobre cada categoria — via seus segmentos
-    segs_por_cat: Dict[str, set] = {}
-    for r in rows:
-        segs_por_cat.setdefault(r.categoria, set()).add(r.segmento)
-    restr_cat: Dict[str, List[Dict[str, Any]]] = {}
-    for cat, segs in segs_por_cat.items():
-        achadas = []
-        for sg in segs:
-            for x in _restricoes_aplicaveis(cat, sg, None, meses_validos):
-                x = dict(x); x["segmento"] = sg
-                achadas.append(x)
-        if achadas:
-            restr_cat[cat] = achadas
-
-    categorias = []
-    for cat, a in ag_cat.items():
-        mt  = _metricas(a)
-        ant = _metricas(ag_cat_ant[cat]) if cat in ag_cat_ant else {}
-        delta = None
-        if mt.get("wmape") is not None and ant.get("wmape") is not None:
-            delta = round(mt["wmape"] - ant["wmape"], 1)
-        categorias.append({
-            "categoria": cat, **mt,
-            "classe": _classe(mt.get("wmape"), mt.get("bias")),
-            "wmape_ano_anterior": ant.get("wmape"),
-            "delta_wmape_pp": delta,
-            "restricao_producao": restr_cat.get(cat) or None,
-        })
-    categorias.sort(key=lambda c: c.get("erro_abs") or 0, reverse=True)
-
-    # SKUs
-    ag_sku     = _agregar(rows, lambda r: (r.sku, r.descricao, r.categoria, r.segmento),
-                          meses_validos)
-    ag_sku_ant = _agregar(
-        rows_hist,
-        lambda r: (r.sku, r.descricao, r.categoria, r.segmento)
-        if (r.ano == ano_atual - 1 and r.num_mes in meses_num) else None)
-
-    skus = []
-    for k, a in ag_sku.items():
-        sk, desc, cat, seg = k
-        mt  = _metricas(a)
-        ant = _metricas(ag_sku_ant[k]) if k in ag_sku_ant else {}
-        delta = None
-        if mt.get("wmape") is not None and ant.get("wmape") is not None:
-            delta = round(mt["wmape"] - ant["wmape"], 1)
-
-        n_hist = len(hist_sku.get(sk, set()))
-        restr  = _restricoes_aplicaveis(cat, seg, sk, meses_validos)
-
-        skus.append({
-            "sku": sk, "descricao": desc, "categoria": cat, "segmento": seg, **mt,
-            "classe": _classe(mt.get("wmape"), mt.get("bias")),
-            "wmape_ano_anterior": ant.get("wmape"),
-            "delta_wmape_pp": delta,
-            "primeira_venda": nasc_sku.get(sk),
-            "meses_historico": n_hist,
-            "maturidade": _maturidade(n_hist),
-            "restricao_producao": restr or None,
-        })
-    skus.sort(key=lambda s: s.get("erro_abs") or 0, reverse=True)
-
-    # Itens de lancamento e recentes — nao comparaveis a itens maduros
-    lancamentos = [s for s in skus if s["maturidade"] in ("Lancamento", "Recente")]
-    lancamentos.sort(key=lambda s: (s["meses_historico"], -(s.get("volume") or 0)))
-
-    # Itens sob restricao de producao no periodo
-    sob_restricao = [s for s in skus if s.get("restricao_producao")]
-    sob_restricao.sort(key=lambda s: -(s.get("corte_cx") or 0))
-
-    # ── DETALHE MENSAL — permite responder sobre um mes especifico ────────
-    # Sem isto o agente so enxerga o agregado do periodo e responde de forma
-    # generica quando perguntado sobre um mes isolado.
-    ag_cat_mes = _agregar(rows, lambda r: (r.mes, r.categoria), meses_validos)
-    ag_sku_mes = _agregar(
-        rows, lambda r: (r.mes, r.sku, r.descricao, r.categoria), meses_validos)
-
-    detalhe_mensal = []
-    for m in meses_validos:
-        cats = []
-        for (mm, cat), a in ag_cat_mes.items():
-            if mm != m:
-                continue
-            mt = _metricas(a)
-            cats.append({
-                "categoria": cat, "wmape": mt["wmape"], "bias": mt["bias"],
-                "volume": mt["volume"], "vol_plano": mt["vol_plano"],
-                "erro_abs": mt["erro_abs"],
-                "atendimento": mt["atendimento_pct"], "corte": mt["corte_cx"],
-                "classe": _classe(mt.get("wmape"), mt.get("bias")),
-            })
-        cats.sort(key=lambda x: -(x["erro_abs"] or 0))
-
-        itens = []
-        for (mm, sk, desc, cat), a in ag_sku_mes.items():
-            if mm != m:
-                continue
-            mt = _metricas(a)
-            if not mt.get("erro_abs"):
-                continue
-            itens.append({
-                "sku": sk, "descricao": desc, "categoria": cat,
-                "wmape": mt["wmape"], "bias": mt["bias"],
-                "volume": mt["volume"], "vol_plano": mt["vol_plano"],
-                "erro_abs": mt["erro_abs"],
-                "atendimento": mt["atendimento_pct"], "corte": mt["corte_cx"],
-                "maturidade": _maturidade(len(hist_sku.get(sk, set()))),
-            })
-        itens.sort(key=lambda x: -(x["erro_abs"] or 0))
-
-        mt_mes = _metricas(ag_mes[m]) if m in ag_mes else {}
-        detalhe_mensal.append({
-            "mes": m,
-            "wmape": mt_mes.get("wmape"), "bias": mt_mes.get("bias"),
-            "volume": mt_mes.get("volume"), "erro_abs": mt_mes.get("erro_abs"),
-            "atendimento": mt_mes.get("atendimento_pct"),
-            "corte": mt_mes.get("corte_cx"),
-            "categorias": cats,
-            "top_skus_erro": itens[:15],
-        })
-
-    # Atendimento: leitura de execucao, separada da acuracia
-    ag_at = ag_port.get("T", {})
-    atendimento = {
-        "pedido":       round(ag_at.get("qt_ped", 0)),
-        "entregue":     round(ag_at.get("qt_fat", 0)),
-        "corte":        round(ag_at.get("qt_cor", 0)),
-        "atendimento_pct": round(_sdiv(ag_at.get("qt_fat", 0),
-                                       ag_at.get("qt_ped", 0), 100) or 0, 1),
-        "serie_mensal": [
-            {"mes": s["mes"], "atendimento": s["atendimento"], "corte": s["corte"]}
-            for s in serie
-        ],
-    }
-
-    # Itens com maior corte, separados entre restricao declarada e nao declarada
-    com_corte = [s for s in skus if (s.get("corte_cx") or 0) > 0]
-    com_corte.sort(key=lambda s: -(s.get("corte_cx") or 0))
-    corte_com_restricao = [s for s in com_corte if s.get("restricao_producao")][:10]
-    corte_sem_restricao = [s for s in com_corte if not s.get("restricao_producao")][:10]
-
-    com_delta = [s for s in skus if s.get("delta_wmape_pp") is not None]
-    rankings = {
-        "maior_erro_absoluto": skus[:10],
-        "melhor_evolucao":     sorted(com_delta, key=lambda s: s["delta_wmape_pp"])[:10],
-        "pior_evolucao":       sorted(com_delta, key=lambda s: -s["delta_wmape_pp"])[:10],
-        "vies_sistematico":    sorted(
-            [s for s in skus if (s.get("persistencia_pct") or 0) >= 70
-                             and s["maturidade"] == "Maduro"],
-            key=lambda s: -(s.get("erro_abs") or 0))[:10],
-        "maior_corte_sem_restricao": corte_sem_restricao,
-        "maior_corte_com_restricao": corte_com_restricao,
-    }
-
-    esc = db.execute(text("""
-        SELECT COUNT(*) FILTER (WHERE COALESCE(ativo,FALSE)) AS ativos,
-               COUNT(*) AS total FROM dim_produtos
-    """)).fetchone()
-
-    return {
-        "escopo": {
-            "skus_ativos": esc.ativos,
-            "skus_total_base": esc.total,
-            "meses_analisados": meses_validos,
-            "meses_do_calendario_comparados": meses_num,
-            "anos_na_comparacao": anos_ord,
-            "base_volume": ("demanda pedida pelo cliente" if base == "pedido"
-                            else "volume efetivamente entregue"),
-            "unidade": "caixas" if unidade == "cx" else "R$ (preco medio do pedido)",
-            "plano_congelado_em": "M-2 (dois meses antes do mes de venda)",
-            "previsao_estatistica_disponivel_desde": "2026-06",
-            "granularidade_erro": "erro absoluto computado em (SKU, mes) e agregado depois",
-            "regra_maturidade": (f"Lancamento ate {MESES_LANCAMENTO} meses de historico; "
-                                 f"Recente ate {MESES_RECENTE}; acima disso, Maduro"),
-            "restricoes_de_producao_declaradas": RESTRICOES_PRODUCAO,
-        },
-        "portfolio":      port,
-        "atendimento":    atendimento,
-        "evolucao_anual": evolucao_anual,
-        "serie":          serie,
-        "detalhe_mensal": detalhe_mensal,
-        "categorias":     categorias,
-        "skus":           skus,
-        "lancamentos":    lancamentos,
-        "sob_restricao":  sob_restricao,
-        "rankings":       rankings,
-    }
-
-
-def _contexto_modelo(ds: Dict[str, Any]) -> str:
-    def _s(lst):
-        return [{"sku": s["sku"], "desc": s["descricao"][:38], "cat": s["categoria"],
-                 "seg": s.get("segmento"),
-                 "wmape": s.get("wmape"), "bias": s.get("bias"),
-                 "delta": s.get("delta_wmape_pp"),
-                 "wmape_ant": s.get("wmape_ano_anterior"),
-                 "vol": s.get("volume"), "erro_abs": s.get("erro_abs"),
-                 "persist": s.get("persistencia_pct"),
-                 "atend": s.get("atendimento_pct"), "corte": s.get("corte_cx"),
-                 "maturidade": s.get("maturidade"),
-                 "meses_hist": s.get("meses_historico"),
-                 "restricao": s.get("restricao_producao"),
-                 "classe": s.get("classe")} for s in lst]
-    return json.dumps({
-        "escopo":         ds["escopo"],
-        "portfolio":      ds["portfolio"],
-        "atendimento":    ds["atendimento"],
-        "evolucao_anual": ds["evolucao_anual"],
-        "serie_mensal":   ds["serie"],
-        "categorias":     ds["categorias"],
-        "rankings":       {k: _s(v) for k, v in ds["rankings"].items()},
-        "lancamentos_e_recentes": _s(ds["lancamentos"]),
-        "itens_sob_restricao_de_producao": _s(ds["sob_restricao"]),
-        "total_skus":     len(ds["skus"]),
-    }, ensure_ascii=False, separators=(",", ":"))
-
-
-METODOLOGIA = """
-DEFINICOES
-
-WMAPE = soma dos erros absolutos dividida pela soma do realizado, x100.
-  Computado em (SKU, mes) e agregado depois. O WMAPE de uma categoria nao e a
-  media dos WMAPEs dos SKUs: itens de maior volume pesam proporcionalmente mais.
-
-BIAS = (soma do previsto menos soma do realizado) dividido pela soma do
-  realizado, x100. Positivo indica plano acima do realizado; negativo, abaixo.
-  Erros de sinais opostos se cancelam, portanto um BIAS baixo numa categoria
-  pode conviver com SKUs individualmente muito enviesados.
-
-PERSISTENCIA = percentual de meses em que o erro ocorreu na mesma direcao do
-  BIAS medio. Igual ou acima de 70% caracteriza vies estrutural, nao aleatorio.
-
-FVA = WMAPE do plano menos WMAPE da previsao estatistica.
-  Positivo: o ajuste manual aumentou o erro. Negativo: reduziu.
-
-DIAGNOSTICO WMAPE x BIAS
-  WMAPE alto e BIAS proximo de zero: erro disperso. Volatilidade ou
-    sazonalidade nao capturada pelo metodo de previsao.
-  WMAPE alto e BIAS positivo: superestimacao. Excesso de cobertura e
-    capital imobilizado em estoque.
-  WMAPE alto e BIAS negativo: subestimacao. Risco de ruptura e perda de venda.
-  WMAPE baixo e BIAS proximo de zero: previsao sob controle.
-
-ATENDIMENTO = volume entregue dividido pelo volume pedido. Mede execucao, nao
-  acuracia. Serve para separar erro de previsao de restricao de suprimento:
-  atendimento baixo com BIAS negativo indica plano subdimensionado; atendimento
-  baixo com BIAS neutro indica restricao operacional.
-
-MATURIDADE DO ITEM
-  Lancamento: ate 6 meses de historico de venda. Nao ha serie suficiente para
-    o modelo estatistico aprender padrao. WMAPE alto e esperado e nao indica
-    falha de processo. Cobrar acuracia de item nesta faixa e incorreto.
-  Recente: 7 a 18 meses. Ja ha serie, mas ainda sem ciclo sazonal completo
-    fechado. Comparacao ano a ano pode ser parcial ou inexistente.
-  Maduro: acima de 18 meses. Este e o universo em que a acuracia deve ser
-    cobrada e onde padroes sistematicos sao acionaveis.
-
-"""
-
-SYSTEM_PROMPT = f"""Voce e especialista em S&OP e escreve o relatorio de acuracia de demanda
-para a diretoria e a gerencia da Linea Alimentos.
-
-REGRAS DE REDACAO - obrigatorias:
-- Tom tecnico, factual e imparcial. Descreva o que os dados mostram.
-- PROIBIDO usar adjetivos de julgamento como desastre, pessimo, absurdo,
-  destroi, catastrofico, alarmante. Use linguagem descritiva: "erro de X por
-  cento", "vies de X pontos percentuais", "acima do patamar do portfolio",
-  "abaixo do observado no ano anterior".
-- Nunca cite nomes de tabelas, campos de banco, sistemas ou ferramentas.
-  Nao mencione Nexus, planilha, plataforma, migracao, transicao,
-  parametrizacao ou curva de aprendizado em nenhuma hipotese.
-- NOME DO PRODUTO: use SEMPRE a descricao exata do campo "desc" ou
-  "descricao", sem reescrever, abreviar, traduzir ou padronizar. Se a
-  descricao e "LINEA ADOC SACARINA LIQ 12X100ml", escreva exatamente assim.
-- Todo numero citado deve existir no JSON. Nao estime nem invente.
-- Declare limitacoes de amostra quando existirem.
-- Nao trate de descontos comerciais nem de politica de preco. O escopo e
-  exclusivamente a acuracia da previsao de demanda.
-- NUNCA atribua variacao de resultado a mudanca de sistema, plataforma,
-  ferramenta, metodologia de registro ou origem do plano. Nao especule sobre
-  causas que nao estejam demonstradas nos dados. Quando a causa nao for
-  identificavel, declare isso de forma direta e mostre o que os dados revelam:
-  qual a direcao do erro, quais categorias e itens concentraram o desvio, e
-  qual a contribuicao de cada um no erro absoluto do periodo.
-- Nao trate de restricao de producao: esse tema esta fora do escopo.
-
-{METODOLOGIA}
-
-ESTRUTURA (700 a 900 palavras, prosa densa, sem tabelas, sem markdown):
-
-1. ESCOPO E METODO
-   Periodo medido, quantidade de SKUs, origem do plano em cada janela temporal
-   e limitacao de amostra da previsao estatistica.
-
-2. LEITURA DO PERIODO
-   WMAPE e BIAS do portfolio, classificacao pelo cruzamento e persistencia.
-
-3. EVOLUCAO ANO A ANO
-   Compare cada ano isoladamente, usando os mesmos meses do calendario.
-   Informe se o erro aumentou, diminuiu ou permaneceu estavel, e quanto.
-   PROIBIDO atribuir variacao de indicador a mudanca de sistema, ferramenta,
-   plataforma, metodologia de registro ou origem do plano. Se um mes ou periodo destoa,
-   descreva o que os dados mostram (direcao do erro, categorias que
-   concentraram o desvio, itens com maior contribuicao) e, quando a causa nao
-   estiver nos dados, diga apenas que a causa nao e identificavel pelo recorte
-   disponivel.
-
-4. CONCENTRACAO DO ERRO
-   Onde o erro absoluto se concentra, em categorias e SKUs. Distinga o item que
-   erra muito em percentual do item que erra muito em volume: sao problemas de
-   naturezas diferentes e exigem acoes diferentes.
-   Separe explicitamente os itens maduros dos itens de lancamento: so os
-   primeiros devem entrar na leitura de acuracia do processo.
-
-5. LANCAMENTOS E ITENS RECENTES
-   Liste os itens de lancamento e recentes do periodo, com a descricao completa
-   do produto e quantos meses de historico cada um tem. Declare que o erro
-   deles nao e comparavel ao dos itens maduros e que nao devem entrar na
-   cobranca de acuracia do processo.
-
-6. PADROES SISTEMATICOS
-   Itens MADUROS com persistencia igual ou acima de 70%. Explique a implicacao
-   operacional de cada direcao de vies. Nao inclua lancamentos aqui.
-
-7. ATENDIMENTO E ORIGEM DO CORTE
-   Informe o atendimento do portfolio no periodo e como evoluiu mes a mes.
-   Identifique os itens com maior corte e classifique a origem pelo cruzamento
-   corte x BIAS:
-     - BIAS negativo: o plano subdimensionou e a producao seguiu o plano.
-       A origem esta no planejamento de demanda.
-     - BIAS neutro ou positivo: o plano estava adequado e a limitacao foi de
-       execucao. A origem esta em suprimentos ou producao.
-
-8. PREVISAO ESTATISTICA COMPARADA AO PLANO
-   Onde o FVA indica que o ajuste manual aumentou ou reduziu o erro, sempre
-   com a ressalva sobre o tamanho da amostra disponivel.
-
-9. RECOMENDACOES
-   De quatro a seis itens objetivos. Cada um cita o dado que o sustenta e
-   indica a area responsavel: planejamento de demanda, comercial ou suprimentos.
-
-10. CONSIDERACAO FINAL
-   Um paragrafo unico de fechamento. Responda diretamente: o processo esta
-   melhorando ou piorando, onde esta o maior ganho possivel no proximo ciclo,
-   e qual o principal risco se nada for alterado. Sem repetir numeros ja
-   citados; sintetize a leitura.
-
-IMPORTANTE: complete todas as 10 secoes. Nao interrompa o texto no meio de uma
-frase. Se precisar economizar espaco, encurte as secoes 4 e 5, mas sempre
-entregue a secao 10 completa.
-
-Escreva em portugues do Brasil, paragrafos curtos.
-
-FORMATACAO: escreva prosa limpa, sem markdown. Nao use #, ##, **, ---, *, _,
-crase nem tabelas em pipe. Os titulos das secoes devem ser escritos em
-MAIUSCULAS numa linha isolada, precedidos do numero da secao. Exemplo:
-
-1. ESCOPO E METODO
-
-Nao inclua tabelas no texto: os anexos do documento ja trazem todos os dados
-tabulados. Cite os numeros dentro das frases."""
-
-
-def _chamar_claude(system: str, mensagens: List[Dict[str, str]],
-                   max_tokens: int = 8000) -> str:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY nao configurada no ambiente do servidor.")
-    try:
-        import anthropic
-    except ImportError:
-        raise RuntimeError("Biblioteca 'anthropic' nao instalada.")
-
-    client = anthropic.Anthropic(api_key=api_key)
-    modelos = [
-        os.environ.get("ANTHROPIC_MODEL", "").strip(),
-        "claude-sonnet-4-5",
-        "claude-sonnet-4-20250514",
-        "claude-3-5-sonnet-latest",
-    ]
-    erro = None
-    for modelo in [m for m in modelos if m]:
-        try:
-            resp = client.messages.create(
-                model=modelo, max_tokens=max_tokens,
-                temperature=0,          # determinismo: mesma entrada, mesma saida
-                system=system, messages=mensagens,
-            )
-            return "".join(b.text for b in resp.content
-                           if getattr(b, "type", "") == "text")
-        except Exception as e:
-            erro = e
-            if "model" not in str(e).lower():
-                raise
-    raise RuntimeError(f"Nenhum modelo disponivel. Ultimo erro: {erro}")
-
-
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# CACHE — o relatorio de um ciclo e gerado uma vez e vale para todos
-# ═══════════════════════════════════════════════════════════════════════════
-import hashlib
-
-DDL_CACHE = """
-CREATE TABLE IF NOT EXISTS agente_relatorio_cache (
-    id             SERIAL PRIMARY KEY,
-    ciclo_sop      VARCHAR(10)  NOT NULL,
-    chave          VARCHAR(80)  NOT NULL,
-    meses          TEXT         NOT NULL,
-    base           VARCHAR(20)  NOT NULL,
-    unidade        VARCHAR(10)  NOT NULL,
-    relatorio      TEXT         NOT NULL,
-    gerado_por     VARCHAR(120),
-    gerado_em      TIMESTAMP    NOT NULL DEFAULT now(),
-    CONSTRAINT uix_agente_rel UNIQUE (ciclo_sop, chave)
-);
-CREATE TABLE IF NOT EXISTS agente_chat_cache (
-    id           SERIAL PRIMARY KEY,
-    ciclo_sop    VARCHAR(10)  NOT NULL,
-    chave        VARCHAR(80)  NOT NULL,
-    pergunta     TEXT         NOT NULL,
-    resposta     TEXT         NOT NULL,
-    criado_em    TIMESTAMP    NOT NULL DEFAULT now(),
-    CONSTRAINT uix_agente_chat UNIQUE (ciclo_sop, chave)
-);
-"""
 
 
 def _garantir_tabelas(db: Session) -> None:
@@ -786,8 +183,15 @@ def _garantir_tabelas(db: Session) -> None:
     db.commit()
 
 
+def _ciclo_atual(db: Session) -> str:
+    try:
+        from app.api.routers.shared_ibp import get_current_cycle
+        return get_current_cycle(db)
+    except Exception:
+        return _hoje_br().strftime("%m/%Y")
+
+
 def _normalizar(txt: str) -> str:
-    """Normaliza texto para chave de cache: minusculas, sem acento, sem pontuacao."""
     import unicodedata, re
     t = unicodedata.normalize("NFKD", txt or "")
     t = "".join(ch for ch in t if not unicodedata.combining(ch))
@@ -800,25 +204,665 @@ def _chave(*partes) -> str:
     return hashlib.sha256(bruto.encode("utf-8")).hexdigest()[:40]
 
 
-def _ciclo_atual(db: Session) -> str:
+def janela_do_ciclo(ciclo: str) -> Dict[str, Any]:
+    """
+    Deriva a janela de analise do ciclo ativo.
+
+    Ciclo 08/2026 -> ultimo mes fechado = 07/2026
+      Ano vigente (YTD): Jan a Jul/2026 — do inicio do ano corrente ate o
+        ultimo mes fechado. Usado tanto para o detalhe mes a mes quanto
+        para o lado "ano corrente" da comparacao YoY.
+      YoY: Jan-Jul de 2026, 2025, 2024, 2023 — MESMO recorte de meses em
+        cada ano. Comparar 7 meses contra 12 mediria calendario, nao
+        desempenho.
+
+    As duas janelas usam EXATAMENTE os mesmos meses do ano corrente de
+    proposito: antes o detalhe mes a mes era uma janela fixa de 6 meses
+    (trailing), enquanto o YoY comparava Jan-Jul — o relatorio falava em
+    "Jan-Jul" num paragrafo e o detalhe mensal so cobria Fev-Jul no
+    seguinte, uma inconsistencia visivel para quem lia com atencao.
+    Unificar em YTD elimina a divergencia: e sempre o mesmo periodo.
+    """
+    mes, ano = int(ciclo[:2]), int(ciclo[3:])
+    ref = datetime.date(ano, mes, 1) - relativedelta(months=1)   # ultimo fechado
+
+    # Ano vigente = do dia 1 de janeiro do ano do ultimo mes fechado ate ele
+    # mesmo. Se o ciclo abrir em janeiro (ref = dezembro do ano anterior),
+    # o ano vigente e o ano inteiro que acabou de fechar.
+    ini_det = datetime.date(ref.year, 1, 1)
+    meses_detalhe = []
+    d = ini_det
+    while d <= ref:
+        meses_detalhe.append(d.strftime("%Y-%m"))
+        d += relativedelta(months=1)
+
+    anos = list(range(ref.year - (ANOS_YOY - 1), ref.year + 1))
+    return {
+        "ciclo":          ciclo,
+        "mes_referencia": ref.strftime("%Y-%m"),
+        "mes_num_fim":    ref.month,
+        "anos_yoy":       anos,
+        "meses_detalhe":  meses_detalhe,
+        "ini_detalhe":    ini_det.isoformat(),
+        "fim_detalhe":    ref.isoformat(),
+        "rotulo_yoy":     f"Jan a {ref.strftime('%b')}/{{ano}}",
+    }
+
+
+# =====================================================================
+# DATASET — LE DOS MARTS
+# =====================================================================
+_SQL_YOY = """
+SELECT EXTRACT(YEAR FROM a.mes)::int              AS ano,
+       SUM(a.qt_pedido)                           AS qt_pedido,
+       SUM(a.vl_pedido)                           AS vl_pedido,
+       SUM(a.qt_entregue)                         AS qt_entregue,
+       SUM(a.vl_entregue)                         AS vl_entregue,
+       SUM(a.qt_corte)                            AS qt_corte,
+       SUM(a.vl_corte)                            AS vl_corte,
+       SUM(a.qt_corte_transferencia)               AS qt_corte_transf,
+       SUM(a.vl_corte_transferencia)               AS vl_corte_transf,
+       SUM(a.qt_plano)                            AS qt_plano,
+       SUM(a.erro_abs_cx)                         AS erro_abs,
+       SUM(a.qt_pedido) FILTER (WHERE a.tem_plano) AS qt_com_plano,
+       SUM(a.vl_excesso_plano)                    AS vl_excesso,
+       SUM(a.vl_perda_subplano)                   AS vl_subplano,
+       COUNT(DISTINCT a.sku)                      AS n_skus
+FROM mart_acuracia_sku_mes a
+WHERE a.ativo AND a.qt_pedido > 0
+  AND EXTRACT(MONTH FROM a.mes) <= :mes_fim
+  AND EXTRACT(YEAR  FROM a.mes) = ANY(:anos)
+GROUP BY 1 ORDER BY 1
+"""
+
+_SQL_MENSAL = """
+SELECT TO_CHAR(a.mes, 'YYYY-MM')                  AS mes,
+       SUM(a.qt_pedido)                           AS qt_pedido,
+       SUM(a.vl_pedido)                           AS vl_pedido,
+       SUM(a.qt_entregue)                         AS qt_entregue,
+       SUM(a.vl_entregue)                         AS vl_entregue,
+       SUM(a.qt_corte)                            AS qt_corte,
+       SUM(a.vl_corte)                            AS vl_corte,
+       SUM(a.qt_corte_transferencia)               AS qt_corte_transf,
+       SUM(a.vl_corte_transferencia)               AS vl_corte_transf,
+       SUM(a.qt_plano)                            AS qt_plano,
+       SUM(a.erro_abs_cx)                         AS erro_abs,
+       SUM(a.qt_pedido) FILTER (WHERE a.tem_plano) AS qt_com_plano,
+       SUM(a.vl_excesso_plano)                    AS vl_excesso,
+       SUM(a.vl_perda_subplano)                   AS vl_subplano,
+       -- FVA: as duas pernas na MESMA populacao (onde a IA opinou).
+       SUM(a.erro_abs_cx)  FILTER (WHERE a.qt_ia IS NOT NULL) AS erro_h_ia,
+       SUM(ABS(COALESCE(a.qt_ia,0) - a.qt_pedido))
+           FILTER (WHERE a.qt_ia IS NOT NULL)     AS erro_ia,
+       SUM(a.qt_pedido)    FILTER (WHERE a.qt_ia IS NOT NULL) AS qt_base_ia
+FROM mart_acuracia_sku_mes a
+WHERE a.ativo AND a.qt_pedido > 0
+  AND a.mes >= CAST(:ini AS date) AND a.mes <= CAST(:fim AS date)
+GROUP BY 1 ORDER BY 1
+"""
+
+_SQL_CATEGORIA = """
+SELECT a.categoria,
+       SUM(a.qt_pedido)   AS qt_pedido,
+       SUM(a.vl_pedido)   AS vl_pedido,
+       SUM(a.qt_entregue) AS qt_entregue,
+       SUM(a.qt_corte)    AS qt_corte,
+       SUM(a.vl_corte)    AS vl_corte,
+       SUM(a.qt_corte_transferencia) AS qt_corte_transf,
+       SUM(a.vl_corte_transferencia) AS vl_corte_transf,
+       SUM(a.qt_plano)    AS qt_plano,
+       SUM(a.erro_abs_cx) AS erro_abs,
+       SUM(a.vl_excesso_plano)  AS vl_excesso,
+       SUM(a.vl_perda_subplano) AS vl_subplano,
+       SUM(a.qt_pedido) FILTER (WHERE a.tem_plano) AS qt_com_plano
+FROM mart_acuracia_sku_mes a
+WHERE a.ativo AND a.qt_pedido > 0
+  AND a.mes >= CAST(:ini AS date) AND a.mes <= CAST(:fim AS date)
+GROUP BY 1 ORDER BY SUM(a.erro_abs_cx) DESC
+"""
+
+_SQL_SKU = """
+SELECT a.sku,
+       COALESCE(MAX(p.descricao), a.sku) AS descricao,
+       MAX(a.categoria)   AS categoria,
+       MAX(a.maturidade)  AS maturidade,
+       SUM(a.qt_pedido)   AS qt_pedido,
+       SUM(a.qt_plano)    AS qt_plano,
+       SUM(a.qt_entregue) AS qt_entregue,
+       SUM(a.qt_corte)    AS qt_corte,
+       SUM(a.vl_corte)    AS vl_corte,
+       SUM(a.qt_corte_transferencia) AS qt_corte_transf,
+       SUM(a.vl_corte_transferencia) AS vl_corte_transf,
+       SUM(a.erro_abs_cx) AS erro_abs,
+       SUM(a.vl_excesso_plano)  AS vl_excesso,
+       SUM(a.vl_perda_subplano) AS vl_subplano,
+       AVG(a.pmv)         AS pmv,
+       BOOL_AND(a.tem_plano) AS sempre_com_plano
+FROM mart_acuracia_sku_mes a
+LEFT JOIN dim_produtos p ON p.sku = a.sku
+WHERE a.ativo AND a.qt_pedido > 0
+  AND a.mes >= CAST(:ini AS date) AND a.mes <= CAST(:fim AS date)
+GROUP BY a.sku
+"""
+
+
+def montar_dataset(db: Session, meses: List[str] = None,
+                   base: str = "pedido", unidade: str = "cx",
+                   ciclo: str = None) -> Dict[str, Any]:
+    """
+    Monta o dataset do ciclo ativo.
+
+    `meses`, `base` e `unidade` sao aceitos por compatibilidade com o
+    frontend e IGNORADOS: o relatorio nao depende de filtro. A janela vem
+    do ciclo ativo no painel admin.
+    """
+    ciclo = ciclo or _ciclo_atual(db)
+    jan   = janela_do_ciclo(ciclo)
+
+    p_det = {"ini": jan["ini_detalhe"], "fim": jan["fim_detalhe"]}
+
+    # Total de SKUs ativos no portfolio (dim_produtos), independente de terem
+    # tido pedido no periodo. Um SKU pode estar ativo e nao ter vendido nada
+    # no recorte — n_skus (mais abaixo) conta so quem teve pedido, e os dois
+    # numeros nao sao a mesma coisa. Sem isso o relatorio ja escreveu que
+    # 109 SKUs com pedido "representavam a totalidade do portfolio", quando
+    # o portfolio ativo tinha 112.
+    total_skus_ativos = db.execute(
+        text("SELECT COUNT(*) FROM dim_produtos WHERE ativo = TRUE")
+    ).scalar() or 0
+
+    # ---- YoY: mesmo recorte de meses em cada ano ----
+    yoy = []
+    for r in db.execute(text(_SQL_YOY),
+                        {"mes_fim": jan["mes_num_fim"], "anos": jan["anos_yoy"]}).fetchall():
+        qp = float(r.qt_pedido or 0)
+        yoy.append({
+            "ano":        int(r.ano),
+            "qt_pedido":  round(qp),
+            "vl_pedido":  round(float(r.vl_pedido or 0)),
+            "qt_entregue": round(float(r.qt_entregue or 0)),
+            "vl_entregue": round(float(r.vl_entregue or 0)),
+            "qt_corte":   round(float(r.qt_corte or 0)),
+            "vl_corte":   round(float(r.vl_corte or 0)),
+            "qt_corte_transferencia": round(float(r.qt_corte_transf or 0)),
+            "vl_corte_transferencia": round(float(r.vl_corte_transf or 0)),
+            "qt_plano":   round(float(r.qt_plano or 0)),
+            "wmape":      _r(_sdiv(r.erro_abs, qp, 100)),
+            "bias":       _r(_sdiv(float(r.qt_plano or 0) - qp, qp, 100)),
+            "fill_rate":  _r(_sdiv(r.qt_entregue, qp, 100), 1),
+            "cobertura_plano": _r(_sdiv(r.qt_com_plano, qp, 100), 1),
+            "vl_excesso": round(float(r.vl_excesso or 0)),
+            "vl_subplano": round(float(r.vl_subplano or 0)),
+            "n_skus":     int(r.n_skus or 0),
+        })
+
+    # ---- Mensal: ultimos 6 fechados ----
+    mensal = []
+    for r in db.execute(text(_SQL_MENSAL), p_det).fetchall():
+        qp = float(r.qt_pedido or 0)
+        wm_h = _sdiv(r.erro_h_ia, r.qt_base_ia, 100)
+        wm_i = _sdiv(r.erro_ia,   r.qt_base_ia, 100)
+        mensal.append({
+            "mes":        r.mes,
+            "qt_pedido":  round(qp),
+            "vl_pedido":  round(float(r.vl_pedido or 0)),
+            "qt_entregue": round(float(r.qt_entregue or 0)),
+            "vl_entregue": round(float(r.vl_entregue or 0)),
+            "qt_corte":   round(float(r.qt_corte or 0)),
+            "vl_corte":   round(float(r.vl_corte or 0)),
+            "qt_corte_transferencia": round(float(r.qt_corte_transf or 0)),
+            "vl_corte_transferencia": round(float(r.vl_corte_transf or 0)),
+            "qt_plano":   round(float(r.qt_plano or 0)),
+            "wmape":      _r(_sdiv(r.erro_abs, qp, 100)),
+            "bias":       _r(_sdiv(float(r.qt_plano or 0) - qp, qp, 100)),
+            "fill_rate":  _r(_sdiv(r.qt_entregue, qp, 100), 1),
+            "cobertura_plano": _r(_sdiv(r.qt_com_plano, qp, 100), 1),
+            "vl_excesso": round(float(r.vl_excesso or 0)),
+            "vl_subplano": round(float(r.vl_subplano or 0)),
+            "wmape_h_comparavel": _r(wm_h),
+            "wmape_ia":   _r(wm_i),
+            "fva":        _r(wm_h - wm_i) if (wm_h is not None and wm_i is not None) else None,
+        })
+
+    # ---- Categoria ----
+    categorias = []
+    for r in db.execute(text(_SQL_CATEGORIA), p_det).fetchall():
+        qp = float(r.qt_pedido or 0)
+        categorias.append({
+            "categoria":  r.categoria or "SEM CATEGORIA",
+            "qt_pedido":  round(qp),
+            "vl_pedido":  round(float(r.vl_pedido or 0)),
+            "qt_corte":   round(float(r.qt_corte or 0)),
+            "vl_corte":   round(float(r.vl_corte or 0)),
+            "qt_corte_transferencia": round(float(r.qt_corte_transf or 0)),
+            "vl_corte_transferencia": round(float(r.vl_corte_transf or 0)),
+            "wmape":      _r(_sdiv(r.erro_abs, qp, 100)),
+            "bias":       _r(_sdiv(float(r.qt_plano or 0) - qp, qp, 100)),
+            "fill_rate":  _r(_sdiv(r.qt_entregue, qp, 100), 1),
+            "cobertura_plano": _r(_sdiv(r.qt_com_plano, qp, 100), 1),
+            "vl_excesso": round(float(r.vl_excesso or 0)),
+            "vl_subplano": round(float(r.vl_subplano or 0)),
+        })
+
+    # ---- SKU: rankings ----
+    skus = []
+    for r in db.execute(text(_SQL_SKU), p_det).fetchall():
+        qp = float(r.qt_pedido or 0)
+        skus.append({
+            "sku":        r.sku,
+            "descricao":  r.descricao,
+            "categoria":  r.categoria,
+            "maturidade": r.maturidade,
+            "qt_pedido":  round(qp),
+            "qt_plano":   round(float(r.qt_plano or 0)),
+            "qt_corte":   round(float(r.qt_corte or 0)),
+            "vl_corte":   round(float(r.vl_corte or 0)),
+            "qt_corte_transferencia": round(float(r.qt_corte_transf or 0)),
+            "vl_corte_transferencia": round(float(r.vl_corte_transf or 0)),
+            "erro_abs":   round(float(r.erro_abs or 0)),
+            "vl_excesso": round(float(r.vl_excesso or 0)),
+            "vl_subplano": round(float(r.vl_subplano or 0)),
+            "pmv":        _r(r.pmv, 4),
+            "fill_rate":  _r(_sdiv(r.qt_entregue, qp, 100), 1),
+            "sem_plano":  not bool(r.sempre_com_plano),
+        })
+
+    erro_total = sum(s["erro_abs"] for s in skus) or 1
+    for s in skus:
+        s["pct_erro_total"] = _r(s["erro_abs"] / erro_total * 100, 1)
+
+    top_erro    = sorted(skus, key=lambda x: -x["erro_abs"])[:TOP_N]
+    top_corte   = sorted(skus, key=lambda x: -x["vl_corte"])[:TOP_N]
+    top_excesso = sorted(skus, key=lambda x: -x["vl_excesso"])[:TOP_N]
+    top_subplan = sorted(skus, key=lambda x: -x["vl_subplano"])[:TOP_N]
+    sem_plano   = [s for s in skus if s["sem_plano"]]
+
+    # ---- Totais do periodo detalhado ----
+    tot = {
+        "qt_pedido":   sum(m["qt_pedido"]  for m in mensal),
+        "vl_pedido":   sum(m["vl_pedido"]  for m in mensal),
+        "qt_entregue": sum(m["qt_entregue"] for m in mensal),
+        "vl_entregue": sum(m["vl_entregue"] for m in mensal),
+        "qt_corte":    sum(m["qt_corte"]   for m in mensal),
+        "vl_corte":    sum(m["vl_corte"]   for m in mensal),
+        "qt_corte_transferencia": sum(m["qt_corte_transferencia"] for m in mensal),
+        "vl_corte_transferencia": sum(m["vl_corte_transferencia"] for m in mensal),
+        "vl_excesso":  sum(m["vl_excesso"] for m in mensal),
+        "vl_subplano": sum(m["vl_subplano"] for m in mensal),
+    }
+    tot["fill_rate"] = _r(_sdiv(tot["qt_entregue"], tot["qt_pedido"], 100), 1)
+    tot["pmv_medio"] = _r(_sdiv(tot["vl_pedido"], tot["qt_pedido"]), 4)
+    tot["vl_impacto_total"] = tot["vl_corte"] + tot["vl_excesso"] + tot["vl_subplano"]
+    # Corte real de ruptura, descontada a transferencia de codigo COPA —
+    # a distincao que o relatorio precisa fazer na secao 7.
+    tot["vl_corte_ruptura"] = tot["vl_corte"] - tot["vl_corte_transferencia"]
+
+    # ---- Detalhe por mês: categorias no grão mensal para o chat ----
+    # O chat precisa disto para responder perguntas como "qual categoria
+    # mais contribuiu para o WMAPE de junho?" sem usar o agregado do periodo.
+    detalhe_mensal = {}
+    for m in mensal:
+        mes_str = m["mes"]
+        mes_d = datetime.date.fromisoformat(mes_str + "-01")
+        rows_cat = db.execute(text("""
+            SELECT a.categoria,
+                   SUM(a.qt_pedido)   AS qt_pedido,
+                   SUM(a.qt_plano)    AS qt_plano,
+                   SUM(a.erro_abs_cx) AS erro_abs,
+                   SUM(a.qt_corte)    AS qt_corte,
+                   SUM(a.vl_corte)    AS vl_corte,
+                   SUM(a.qt_corte_transferencia) AS qt_corte_transf,
+                   SUM(a.vl_corte_transferencia) AS vl_corte_transf,
+                   SUM(a.vl_excesso_plano)  AS vl_excesso,
+                   SUM(a.vl_perda_subplano) AS vl_subplano
+            FROM mart_acuracia_sku_mes a
+            WHERE a.ativo AND a.qt_pedido > 0 AND a.mes = CAST(:mes AS date)
+            GROUP BY 1 ORDER BY SUM(a.erro_abs_cx) DESC
+        """), {"mes": mes_d.isoformat()}).fetchall()
+
+        cats = []
+        for r in rows_cat:
+            qp = float(r.qt_pedido or 0)
+            cats.append({
+                "categoria": r.categoria,
+                "qt_pedido": round(qp),
+                "wmape":     _r(_sdiv(r.erro_abs, qp, 100)),
+                "bias":      _r(_sdiv(float(r.qt_plano or 0) - qp, qp, 100)),
+                "qt_corte":  round(float(r.qt_corte or 0)),
+                "vl_corte":  round(float(r.vl_corte or 0)),
+                "qt_corte_transferencia": round(float(r.qt_corte_transf or 0)),
+                "vl_corte_transferencia": round(float(r.vl_corte_transf or 0)),
+                "vl_excesso": round(float(r.vl_excesso or 0)),
+                "vl_subplano": round(float(r.vl_subplano or 0)),
+            })
+        detalhe_mensal[mes_str] = cats
+
+    return {
+        "janela":        jan,
+        "yoy":           yoy,
+        "mensal":        mensal,
+        "categorias":    categorias,
+        "totais":        tot,
+        "top_erro":      top_erro,
+        "top_corte":     top_corte,
+        "top_excesso":   top_excesso,
+        "top_subplano":  top_subplan,
+        "sem_plano":     sorted(sem_plano, key=lambda x: -x["qt_corte"])[:TOP_N],
+        "n_skus":        len(skus),
+        "total_skus_ativos_portfolio": int(total_skus_ativos),
+        "detalhe_mensal": detalhe_mensal,
+    }
+
+
+# =====================================================================
+# PROMPT
+# =====================================================================
+METODOLOGIA = """
+DEFINICOES
+
+NOMENCLATURA — use estas palavras na prosa, nunca "pedido" nem "entregue":
+  qt_pedido / vl_pedido      -> "volume vendido" / "valor vendido"
+  qt_entregue / vl_entregue  -> "volume faturado" / "valor faturado"
+  Os nomes de campo no JSON continuam qt_pedido/qt_entregue — isso e so
+  sobre a palavra que aparece na frase para o leitor humano.
+
+WMAPE = soma dos erros absolutos dividida pela soma do realizado, x100.
+  Computado em (SKU, mes) e agregado depois. O WMAPE de uma categoria nao e a
+  media dos WMAPEs dos SKUs: itens de maior volume pesam proporcionalmente mais.
+  Medido SEMPRE em caixas, plano contra vendido. Nunca contra faturado.
+
+BIAS = (soma do previsto menos soma do realizado) dividido pela soma do
+  realizado, x100. Positivo indica plano acima do realizado; negativo, abaixo.
+  Erros de sinais opostos se cancelam: um BIAS baixo pode conviver com SKUs
+  individualmente muito enviesados.
+
+PERSISTENCIA = percentual de meses em que o erro ocorreu na mesma direcao do
+  BIAS medio. Igual ou acima de 70% caracteriza vies estrutural, nao aleatorio.
+
+FVA = WMAPE do plano humano menos WMAPE da previsao estatistica, na MESMA
+  populacao de SKUs. Positivo: o ajuste manual aumentou o erro. Negativo: reduziu.
+
+FILL RATE = volume faturado dividido por volume vendido, em caixas. Mede
+  execucao, nao acuracia. Serve para separar erro de previsao de restricao
+  de suprimento: fill rate baixo com BIAS negativo indica plano
+  subdimensionado; fill rate baixo com BIAS neutro indica restricao
+  operacional.
+
+DIAGNOSTICO WMAPE x BIAS
+  WMAPE alto e BIAS proximo de zero: erro disperso. Volatilidade ou sazonalidade
+    nao capturada.
+  WMAPE alto e BIAS positivo: superestimacao. Capital imobilizado em excesso.
+  WMAPE alto e BIAS negativo: subestimacao. Risco de ruptura e perda de venda.
+  WMAPE baixo e BIAS proximo de zero: previsao sob controle.
+
+IMPACTO FINANCEIRO (campos novos)
+
+  vl_corte = SOMA DIRETA do campo vlcorte do ERP (fato_vendas), por SKU e mes.
+    NAO HA FORMULA. NAO e diferenca entre vendido e faturado. NAO e
+    multiplicado por PMV. E' um valor que ja vem pronto do ERP, com nota
+    fiscal por tras. Ao citar vl_corte, diga apenas "R$ X em corte, valor
+    registrado no ERP" — NUNCA invente um calculo do tipo "diferenca x PMV"
+    para este campo. Se descrever um calculo para vl_corte que nao seja
+    "soma direta do ERP", a frase esta ERRADA e nao deve ser escrita.
+
+  vl_corte_transferencia = parcela de vl_corte que NAO e ruptura real. Um
+    grupo pequeno de itens (linha liquida STEVIA e SUCRALOSE, entre outros)
+    teve promocao temporaria sob um codigo alternativo; quando a promocao
+    encerra, o pedido feito no codigo promocional e cortado e o mesmo
+    cliente e atendido no codigo regular no mesmo periodo — ele RECEBEU o
+    produto, so que registrado sob outro codigo. Isso aparece no ERP como
+    corte, mas nao e demanda perdida.
+    vl_corte_ruptura = vl_corte - vl_corte_transferencia. Este e o numero
+    que representa ruptura de fato (falta de estoque ou plano insuficiente).
+    Quando vl_corte_transferencia for uma fracao pequena do vl_corte total
+    (a ordem de grandeza tipica e abaixo de 1% no agregado, com picos
+    pontuais em meses de troca de promocao), mencione isso brevemente sem
+    dar peso desproporcional. Quando for uma fracao grande NUM SKU ou
+    CATEGORIA especifico, destaque que aquele corte especifico nao deve
+    ser lido como ruptura de suprimento.
+
+  vl_excesso e vl_subplano SAO CALCULADOS, ao contrario de vl_corte. A conta
+    roda por (SKU, mes) — nunca por categoria ou pelo PMV medio do periodo:
+      vl_excesso   (naquele SKU, naquele mes) = max(qt_plano - qt_pedido, 0) x PMV do SKU naquele mes
+      vl_subplano  (naquele SKU, naquele mes) = max(qt_pedido - qt_plano, 0) x PMV do SKU naquele mes
+    O PMV usado e sempre o do SKU no mes especifico (cascata mes -> 3 meses ->
+    historico), nunca uma media de categoria. Os valores por categoria ou por
+    periodo sao a SOMA dos valores de cada par (SKU, mes) individual — por isso
+    uma categoria pode ter excesso e subplano ao mesmo tempo: SKUs diferentes,
+    ou o mesmo SKU em meses diferentes, podem errar em direcoes opostas.
+    Nenhum dos dois "virou nota fiscal": sao volumes hipoteticos que nunca
+    foram vendidos (excesso) ou nunca foram previstos (subplano).
+
+  REGRA DE CONSISTENCIA — excesso, subplano e BIAS tem que contar a MESMA
+  historia. Antes de escrever qualquer frase interpretativa sobre excesso ou
+  subplano, compare os dois valores e confira contra o sinal do BIAS:
+      vl_excesso MAIOR que vl_subplano  <=>  BIAS deve ser POSITIVO
+          Leitura correta: "superestimacao", "planejamento acima da demanda",
+          "capital potencialmente imobilizado".
+          NUNCA chame isso de "planejamento conservador" — conservador
+          significa planejar por baixo para evitar excesso de estoque, o que
+          produziria subplano dominante, nao excesso dominante. Dizer
+          "excesso domina, logo o planejamento foi conservador" e uma
+          contradicao direta e nao pode aparecer no relatorio.
+      vl_subplano MAIOR que vl_excesso  <=>  BIAS deve ser NEGATIVO
+          Leitura correta: "subestimacao", "planejamento abaixo da demanda",
+          "risco de ruptura por plano insuficiente".
+      Se o sinal do BIAS no JSON nao bater com qual dos dois e maior, NAO
+      escreva uma interpretacao — apenas relate os tres numeros (excesso,
+      subplano, BIAS) sem qualificar a causa, porque algo no recorte precisa
+      de investigacao antes de uma leitura definitiva.
+
+  PMV = vl_pedido / qt_pedido no par (SKU, mes). Razao de totais, nunca media
+    de PMVs de SKU ao agregar categoria.
+
+MATURIDADE DO ITEM
+  Lancamento: ate 6 meses de historico. WMAPE alto e esperado e nao indica
+    falha de processo. Cobrar acuracia de lancamento e incorreto.
+  Recente: 7 a 18 meses. Ja ha serie, mas sem ciclo sazonal completo.
+  Maduro: acima de 18 meses. Universo em que a acuracia deve ser cobrada.
+
+COBERTURA DE PLANEJAMENTO
+  Percentual do volume vendido que tinha plano. Itens sem plano tiveram fill
+  rate de 30% contra 94,9% dos planejados no periodo Jan-Jul/2026. Cobertura
+  baixa antecede e explica parte do problema de fill rate.
+
+"""
+_SYSTEM = f"""Voce e especialista em S&OP e escreve o relatorio de acuracia de demanda
+para a diretoria e a gerencia da Linea Alimentos.
+
+REGRAS DE REDACAO - obrigatorias:
+- Tom tecnico, factual e imparcial. Descreva o que os dados mostram.
+- A empresa se chama "Linea Alimentos" — com E, nao "Linha" (que e uma
+  palavra comum em portugues). Confira a grafia sempre que citar o nome.
+- PROIBIDO adjetivos de julgamento: desastre, pessimo, absurdo, catastrofico.
+  Use: "erro de X porcento", "vies de X pontos percentuais".
+- Nunca cite nomes de tabelas, campos de banco, sistemas ou ferramentas.
+  Nao mencione Nexus, planilha, plataforma, migracao, transicao em nenhuma hipotese.
+- NOME DO PRODUTO: use SEMPRE a descricao exata do campo "descricao",
+  sem reescrever, abreviar, traduzir ou padronizar.
+- Todo numero citado deve existir no JSON. Nao estime nem invente.
+- NUNCA atribua variacao de resultado a mudanca de sistema, plataforma ou metodologia.
+  Quando a causa nao for identificavel pelos dados, declare isso diretamente.
+- vl_corte NAO tem formula: e soma direta do ERP. Nunca descreva um calculo
+  para ele (nada de "diferenca x PMV"). vl_excesso e vl_subplano SAO
+  calculados por (SKU, mes) — veja METODOLOGIA para a formula exata e a
+  regra de consistencia com o sinal do BIAS antes de qualificar qualquer um
+  dos dois como "conservador", "agressivo" ou similar.
+- Todo valor em R$ vem acompanhado da conta que o gerou na mesma frase,
+  EXCETO vl_corte, que e citado como valor direto do ERP sem formula.
+- NUNCA atribua uma recomendacao ou acao a uma area, departamento, cargo ou
+  responsavel especifico (nada de "Planejamento de Demanda deve...",
+  "a area de Suprimentos precisa..."). Descreva a acao e o resultado
+  esperado; quem executa nao e parte do relatorio.
+
+{METODOLOGIA}
+
+ESTRUTURA (700 a 900 palavras, prosa densa):
+
+1. ESCOPO E METODO
+   Periodo medido (o ano vigente, do inicio do ano ate o ultimo mes
+   fechado — e o UNICO periodo do relatorio, use sempre o mesmo recorte
+   ao longo de todo o texto), quantidade de SKUs, origem do plano e
+   limitacoes. Cite os DOIS numeros de SKU do contexto: quantos venderam
+   no periodo e quantos existem no portfolio ativo total. Se forem
+   diferentes, diga "X de Y SKUs ativos venderam no periodo" — PROIBIDO
+   escrever que os SKUs vendidos "representam a totalidade do portfolio"
+   quando os dois numeros nao forem iguais.
+
+2. LEITURA DO PERIODO
+   WMAPE e BIAS do portfolio, classificacao pelo cruzamento e persistencia.
+
+3. EVOLUCAO ANO A ANO
+   Compare cada ano usando os mesmos meses do calendario. Diga se o erro
+   aumentou, diminuiu ou permaneceu estavel, e quanto.
+
+4. CONCENTRACAO DO ERRO
+   Onde o erro absoluto se concentra. Distinga erro percentual de erro em
+   volume. Separe maduros de lancamentos.
+
+5. COBERTURA DE PLANEJAMENTO
+   Percentual do volume vendido com plano, fill rate dos itens sem plano,
+   e o impacto da ausencia de previsao.
+
+6. IMPACTO FINANCEIRO
+   vl_corte (receita perdida, valor DIRETO do ERP — cite sem formula).
+   vl_excesso e vl_subplano (com a formula por SKU-mes). Total e distribuicao
+   por categoria. Ao comentar qual dos dois domina numa categoria, aplique a
+   regra de consistencia com o BIAS da METODOLOGIA antes de escrever.
+
+7. ATENDIMENTO E ORIGEM DO CORTE
+   Fill rate do portfolio e evolucao mes a mes. Maior corte por categoria.
+   Classifique a origem: BIAS negativo indica planejamento; neutro ou positivo
+   indica restricao operacional. Se totais.vl_corte_transferencia for maior
+   que zero, informe o valor e use vl_corte_ruptura (nao vl_corte bruto)
+   como o numero de ruptura real na leitura — ver METODOLOGIA.
+
+8. VALOR AGREGADO DA PREVISAO
+   FVA: onde o ajuste manual aumentou ou reduziu o erro.
+
+9. RECOMENDACOES
+   Quatro a seis itens objetivos e diretos. Cada item traz o dado numerico
+   que o sustenta e o resultado esperado. Descreva O QUE fazer e POR QUE —
+   nunca QUEM deve fazer. Nao atribua a acao a nenhuma area, departamento
+   ou cargo.
+
+10. CONSIDERACAO FINAL
+   Um paragrafo unico. Responda: o processo esta melhorando ou piorando,
+   onde esta o maior ganho no proximo ciclo, e qual o principal risco.
+   Sem repetir numeros ja citados.
+
+IMPORTANTE: complete todas as 10 secoes. Se precisar economizar espaco,
+encurte as secoes 4 e 5, mas sempre entregue a secao 10 completa.
+
+Escreva em portugues do Brasil, paragrafos curtos.
+
+FORMATACAO: prosa limpa, sem markdown. Sem #, **, ---, *, _.
+Titulos em MAIUSCULAS numa linha isolada, precedidos do numero.
+Exemplo: 1. ESCOPO E METODO
+Numeros em padrao brasileiro: 1.234.567 e R$ 1.234.567,89.
+Sem emojis. Sem preambulo. Cite numeros dentro das frases, nao em tabela."""
+
+
+def _contexto_modelo(ds: Dict[str, Any]) -> str:
+    jan = ds["janela"]
+    total_ativos = ds.get("total_skus_ativos_portfolio", ds["n_skus"])
+    rotulo_periodo = (jan["meses_detalhe"][0] + " a " + jan["meses_detalhe"][-1]
+                       if len(jan["meses_detalhe"]) > 1 else jan["meses_detalhe"][0])
+    linhas = [
+        f"CICLO ATIVO: {jan['ciclo']}",
+        f"ULTIMO MES FECHADO: {jan['mes_referencia']}",
+        f"PERIODO ANALISADO (ano vigente, do inicio do ano ate o ultimo mes",
+        f"  fechado): {rotulo_periodo} — {len(jan['meses_detalhe'])} mes(es).",
+        f"  Este e O UNICO periodo do relatorio. O detalhe mes a mes e a",
+        f"  comparacao YoY usam EXATAMENTE os mesmos meses — nao ha uma",
+        f"  janela 'de detalhe' diferente da janela 'do periodo'. Nunca",
+        f"  escreva dois recortes de meses diferentes no mesmo relatorio.",
+        f"COMPARACAO YoY: mesmos meses (01 a {jan['mes_num_fim']:02d}) em cada um",
+        f"  destes anos: {jan['anos_yoy']}.",
+        f"SKUs ATIVOS NO PORTFOLIO (dim_produtos, ativo=true): {total_ativos}",
+        f"SKUs ATIVOS QUE TIVERAM PEDIDO NO PERIODO ANALISADO: {ds['n_skus']}",
+        "  -> Estes dois numeros SAO DIFERENTES por definicao: o primeiro e o",
+        "     portfolio inteiro; o segundo e quem vendeu no recorte. NUNCA",
+        "     diga que o segundo 'representa a totalidade do portfolio' —",
+        f"     diga '{ds['n_skus']} de {total_ativos} SKUs ativos venderam",
+        "     no periodo' quando os dois numeros forem diferentes.",
+        "",
+        "DADOS (JSON):",
+        json.dumps({
+            "yoy":          ds["yoy"],
+            "mensal":       ds["mensal"],
+            "categorias":   ds["categorias"],
+            "totais":       ds["totais"],
+            "top_erro":     ds["top_erro"],
+            "top_corte":    ds["top_corte"],
+            "top_excesso":  ds["top_excesso"],
+            "top_subplano": ds["top_subplano"],
+            "sem_plano":    ds["sem_plano"],
+        }, ensure_ascii=False, separators=(",", ":")),
+    ]
+    return "\n".join(linhas)
+
+
+def _chamar_claude(system: str, mensagens: List[Dict[str, str]],
+                   max_tokens: int = 8000) -> str:
+    """
+    Chama a API Anthropic. Haiku por padrao: o relatorio e prosa sobre um
+    JSON ja preparado — o modelo descreve e cita, nao calcula.
+    """
+    chave = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    if not chave:
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY ausente. Verifique o .env: chave sem espacos "
+            "em volta do '=' e sem quebra de linha no fim."
+        )
+
     try:
-        from app.api.routers.shared_ibp import get_current_cycle
-        return get_current_cycle(db)
-    except Exception:
-        return _hoje_br().strftime("%m/%Y")
+        import anthropic
+    except ImportError:
+        raise RuntimeError("Pacote 'anthropic' nao instalado no container.")
+
+    cliente = anthropic.Anthropic(api_key=chave)
+    modelos = [m for m in [
+        (os.environ.get("ANTHROPIC_MODEL") or "").strip(),
+        "claude-haiku-4-5-20251001",
+        "claude-haiku-4-5",
+    ] if m]
+
+    ultimo_erro = None
+    for modelo in modelos:
+        try:
+            resp = cliente.messages.create(
+                model=modelo,
+                max_tokens=max_tokens,
+                temperature=0,          # relatorio e reproduzivel, nao criativo
+                system=system,
+                messages=mensagens,
+            )
+            return "".join(
+                b.text for b in resp.content if getattr(b, "type", "") == "text"
+            ).strip()
+        except Exception as e:
+            ultimo_erro = e
+            logger.warning("Modelo %s falhou: %s", modelo, e)
+            continue
+
+    raise RuntimeError(f"Nenhum modelo respondeu. Ultimo erro: {ultimo_erro}")
 
 
-def relatorio_existente(db: Session, meses: List[str],
-                        base: str, unidade: str) -> Optional[Dict[str, Any]]:
-    """Retorna o relatorio ja gerado para este ciclo e recorte, se houver."""
+# =====================================================================
+# PERSISTENCIA
+# =====================================================================
+def relatorio_existente(db: Session, meses: List[str] = None,
+                        base: str = "pedido", unidade: str = "cx",
+                        ciclo: str = None) -> Optional[Dict[str, Any]]:
+    """Relatorio ja gravado para o ciclo. Um por ciclo, sem recorte."""
     _garantir_tabelas(db)
-    ciclo = _ciclo_atual(db)
-    ch    = _chave(sorted(meses), base, unidade)
+    ciclo = ciclo or _ciclo_atual(db)
     r = db.execute(text("""
         SELECT relatorio, gerado_por, gerado_em
         FROM agente_relatorio_cache
         WHERE ciclo_sop = :c AND chave = :k
-    """), {"c": ciclo, "k": ch}).fetchone()
+    """), {"c": ciclo, "k": CHAVE_CICLO}).fetchone()
     if not r:
         return None
     return {
@@ -830,493 +874,250 @@ def relatorio_existente(db: Session, meses: List[str],
     }
 
 
-def salvar_relatorio(db: Session, meses: List[str], base: str, unidade: str,
-                     texto: str, usuario: str) -> None:
+def salvar_relatorio(db: Session, texto: str, usuario: str,
+                     ciclo: str, ds: Dict[str, Any] = None) -> None:
+    """
+    Grava o relatorio E o dataset que o originou.
+
+    O dataset fica junto para o chat responder sem remontar tudo: era a
+    montagem ao vivo que deixava a tela travada em "consultando dados".
+    """
     _garantir_tabelas(db)
-    ciclo = _ciclo_atual(db)
-    ch    = _chave(sorted(meses), base, unidade)
+    jan = ds["janela"] if ds else {}
     db.execute(text("""
         INSERT INTO agente_relatorio_cache
-            (ciclo_sop, chave, meses, base, unidade, relatorio, gerado_por)
-        VALUES (:c, :k, :m, :b, :u, :r, :p)
+            (ciclo_sop, chave, meses, base, unidade, relatorio, dataset, gerado_por)
+        VALUES (:c, :k, :m, 'pedido', 'cx', :r, :d, :p)
         ON CONFLICT (ciclo_sop, chave) DO UPDATE SET
             relatorio  = EXCLUDED.relatorio,
+            dataset    = EXCLUDED.dataset,
             gerado_por = EXCLUDED.gerado_por,
             gerado_em  = now()
-    """), {"c": ciclo, "k": ch, "m": ",".join(sorted(meses)),
-           "b": base, "u": unidade, "r": texto, "p": usuario})
+    """), {
+        "c": ciclo, "k": CHAVE_CICLO,
+        "m": ",".join(jan.get("meses_detalhe", [])),
+        "r": texto,
+        "d": json.dumps(ds, ensure_ascii=False) if ds else None,
+        "p": usuario,
+    })
     db.commit()
 
 
-def gerar_relatorio(db: Session, meses: List[str],
+def _dataset_salvo(db: Session, ciclo: str) -> Optional[Dict[str, Any]]:
+    r = db.execute(text("""
+        SELECT dataset FROM agente_relatorio_cache
+        WHERE ciclo_sop = :c AND chave = :k
+    """), {"c": ciclo, "k": CHAVE_CICLO}).fetchone()
+    if r and r.dataset:
+        try:
+            return json.loads(r.dataset)
+        except Exception:
+            return None
+    return None
+
+
+# =====================================================================
+# GERACAO
+# =====================================================================
+def gerar_relatorio(db: Session, meses: List[str] = None,
                     base: str = "pedido", unidade: str = "cx",
-                    usuario: str = "-", forcar: bool = False) -> Dict[str, Any]:
+                    usuario: str = "-", forcar: bool = False,
+                    ciclo: str = None) -> Dict[str, Any]:
     """
-    Gera o relatorio do ciclo. Se ja existe um relatorio para este ciclo e
-    recorte, devolve o mesmo texto — garante que todos os usuarios leem
-    exatamente a mesma analise durante o mes.
-    forcar=True (somente Administrador) refaz a analise e substitui a anterior.
+    Gera (ou devolve do cache) o relatorio do ciclo.
+
+    `meses`, `base` e `unidade` sao ignorados: um ciclo, um relatorio.
     """
-    ds = montar_dataset(db, meses, base, unidade)
-    if ds.get("erro"):
-        return ds
+    ciclo = ciclo or _ciclo_atual(db)
 
     if not forcar:
-        cache = relatorio_existente(db, meses, base, unidade)
+        cache = relatorio_existente(db, ciclo=ciclo)
         if cache:
-            return {**cache, "dataset": ds}
+            return cache
+
+    ds = montar_dataset(db, ciclo=ciclo)
+    if not ds["mensal"]:
+        raise RuntimeError(
+            f"Sem dados fechados para o ciclo {ciclo}. "
+            "Rode o pipeline para atualizar os marts."
+        )
 
     texto = _chamar_claude(
-        SYSTEM_PROMPT,
-        [{"role": "user",
-          "content": "Produza o relatorio de acuracia S&OP a partir destes dados:\n\n"
-                     + _contexto_modelo(ds)}],
-        max_tokens=8000,
+        _SYSTEM,
+        [{"role": "user", "content": _contexto_modelo(ds)}],
     )
-    salvar_relatorio(db, meses, base, unidade, texto, usuario)
-    return {"relatorio": texto, "dataset": ds,
-            "gerado_por": usuario,
-            "gerado_em": datetime.datetime.utcnow().isoformat(),
-            "do_cache": False}
+    texto = _corrigir_nome_empresa(texto)
+    salvar_relatorio(db, texto, usuario, ciclo, ds)
+    return {
+        "relatorio":  texto,
+        "gerado_por": usuario,
+        "gerado_em":  datetime.datetime.utcnow().isoformat(),
+        "ciclo":      ciclo,
+        "do_cache":   False,
+    }
 
 
-def responder_pergunta(db: Session, pergunta: str, meses: List[str],
-                       base: str = "pedido", unidade: str = "cx",
-                       historico: Optional[List[Dict[str, str]]] = None) -> str:
-    ds = montar_dataset(db, meses, base, unidade)
-    if ds.get("erro"):
-        return ds["erro"]
+def gerar_relatorio_ciclo(db: Session, ciclo: str,
+                          usuario: str = "Sistema",
+                          forcar: bool = True) -> Dict[str, Any]:
+    """
+    Atalho chamado pelo pipeline ao abrir um ciclo novo.
 
-    skus = [{"sku": s["sku"], "desc": s["descricao"][:45], "cat": s["categoria"],
-             "seg": s.get("segmento"),
-             "wmape": s.get("wmape"), "bias": s.get("bias"),
-             "erro_abs": s.get("erro_abs"), "vol": s.get("volume"),
-             "delta": s.get("delta_wmape_pp"), "wmape_ant": s.get("wmape_ano_anterior"),
-             "persist": s.get("persistencia_pct"),
-             "atend": s.get("atendimento_pct"), "corte": s.get("corte_cx"),
-             "maturidade": s.get("maturidade"), "meses_hist": s.get("meses_historico"),
-             "restricao": s.get("restricao_producao"),
-             "classe": s.get("classe")} for s in ds["skus"]]
+    forcar=True por padrao: o ciclo acabou de nascer, entao qualquer
+    relatorio anterior com essa chave seria de dados velhos.
+    """
+    r = gerar_relatorio(db, ciclo=ciclo, usuario=usuario, forcar=forcar)
+    # mes_referencia no retorno: o pipeline registra no log qual mes fechado
+    # o relatorio audita, e sem isso o operador nao sabe o que foi gerado.
+    r["mes_referencia"] = janela_do_ciclo(ciclo)["mes_referencia"]
+    return r
 
-    ctx = json.dumps({
-        "escopo": ds["escopo"], "portfolio": ds["portfolio"],
-        "atendimento": ds["atendimento"],
-        "evolucao_anual": ds["evolucao_anual"], "serie_mensal": ds["serie"],
-        "detalhe_por_mes": ds["detalhe_mensal"],
-        "categorias": ds["categorias"], "skus": skus,
-    }, ensure_ascii=False, separators=(",", ":"))
 
-    system = f"""Voce e especialista em S&OP da Linea Alimentos respondendo perguntas
+# =====================================================================
+# CHAT
+# =====================================================================
+_SYSTEM_CHAT = f"""Voce e especialista em S&OP da Linea Alimentos respondendo perguntas
 sobre a acuracia da previsao de demanda.
 
 {METODOLOGIA}
 
 Regras:
-- Responda apenas com base no JSON. Nunca invente numeros.
-- Se o dado nao estiver no recorte, diga isso claramente.
+- Responda APENAS com base no JSON. Nunca invente numeros.
+- Se o dado nao estiver no recorte, diga claramente.
 - Tom tecnico e imparcial, sem adjetivos de julgamento.
-- Nao cite nomes de tabelas nem de sistemas. Nao mencione Nexus, planilha,
-  plataforma, ferramenta, migracao, transicao, parametrizacao ou curva de
-  aprendizado. PROIBIDO atribuir qualquer variacao de resultado a mudanca de
-  sistema ou de metodologia de registro. Se a causa nao estiver nos dados,
-  escreva apenas que nao e identificavel pelo recorte e mostre o que os dados
-  revelam: direcao do erro, categorias e itens que concentraram o desvio.
-- Nao trate de descontos comerciais nem de restricao de producao.
-- NOME DO PRODUTO: use SEMPRE a descricao exata do campo "desc", sem
-  reescrever, abreviar, traduzir ou padronizar. Se a descricao e
-  "LINEA ADOC SACARINA LIQ 12X100ml", escreva exatamente assim. Nunca converta
-  para "Sacarina Liquido 12x100ml" ou variacoes.
-- ESCOPO TEMPORAL DA PERGUNTA: se a pergunta menciona um mes especifico, use
-  o bloco "detalhe_por_mes" daquele mes — ele traz as categorias e os itens
-  com maior erro NAQUELE mes, incluindo "volume" (realizado) e "vol_plano"
-  (planejado) para aquele mes isolado. NAO responda com o agregado do periodo
-  inteiro quando a pergunta e sobre um mes. Se a pergunta nao especifica mes,
-  use o agregado do periodo.
-- JUSTIFICATIVA NUMERICA OBRIGATORIA: toda afirmacao quantitativa deve expor
-  o calculo que a gerou. Use sempre a forma: grandeza_a operacao grandeza_b =
-  resultado. Exemplos:
-    . "plano de 12.500 cx; realizado de 7.862 cx; erro absoluto =
-       |12.500 − 7.862| = 4.638 cx; WMAPE = 4.638 / 7.862 × 100 = 59,0%"
-    . "participacao no erro do mes = 4.638 / 38.200 × 100 = 12,1%"
-    . "BIAS = (12.500 − 7.862) / 7.862 × 100 = +59,0% (superestimacao)"
-  Nunca cite um indicador sem mostrar os numeros que o originaram. Use sempre
-  os campos do bloco correto (mensal ou agregado) — nunca misture os dois.
-- Seja conciso e cite os numeros que fundamentam a resposta.
+- Nao cite nomes de tabelas, sistemas ou ferramentas. Nao mencione Nexus,
+  planilha, plataforma, migracao, transicao ou curva de aprendizado.
+  PROIBIDO atribuir qualquer variacao de resultado a mudanca de sistema.
+- NOME DO PRODUTO: use SEMPRE a descricao exata do campo "descricao",
+  sem reescrever, abreviar, traduzir ou padronizar.
+- ESCOPO TEMPORAL DA PERGUNTA: se a pergunta menciona um mes especifico (ex:
+  "junho", "jun/2026", "no mes passado"), use o bloco "mensal" daquele mes
+  e os dados de "categorias" filtrados para aquele periodo — eles trazem
+  as categorias e os itens com maior erro NAQUELE mes. NAO responda com o
+  agregado do periodo inteiro quando a pergunta e sobre um mes especifico.
+  Se a pergunta nao especifica mes, use o agregado do periodo.
+- vl_corte NAO tem formula: e soma direta do ERP. Nunca invente um calculo
+  para ele. vl_excesso e vl_subplano SAO calculados por (SKU, mes) — antes
+  de chamar um de "conservador" ou "agressivo", confira contra o sinal do
+  BIAS (ver METODOLOGIA): excesso dominante = BIAS positivo = superestimacao,
+  nunca "conservador". Subplano dominante = BIAS negativo = subestimacao.
+- Todo valor em R$ vem acompanhado da conta que o gerou na mesma frase,
+  EXCETO vl_corte, que e citado como valor direto do ERP sem formula.
+- NUNCA atribua uma recomendacao a uma area, departamento ou responsavel
+  especifico. Descreva a acao e o resultado esperado, nao quem executa.
+- Seja conciso. Cite os numeros que fundamentam a resposta.
 
-FORMATO DA RESPOSTA - siga exatamente:
-- Comece com uma frase de resposta direta a pergunta, sem titulo antes dela.
-- Use no maximo dois niveis de titulo, sempre com "## " (dois cerquilhas e um
-  espaco). Nunca use "#" sozinho nem "###".
-- Use **negrito** apenas para numeros-chave e nomes de item. Nunca para frases
-  inteiras.
-- Tabelas: use pipe simples, com cabecalho e linha separadora. Maximo de 6
-  colunas e 10 linhas. Sempre coloque a coluna de maior relevancia analitica
-  (erro absoluto, WMAPE ou volume) como segunda coluna, logo apos o nome.
-  Ordene sempre da maior para a menor contribuicao.
-- Nao use listas com marcador dentro de tabela nem tabela dentro de lista.
-- Termine com uma linha iniciada por "Leitura: " contendo a conclusao pratica
-  em uma frase.
-- Nunca use separadores horizontais como tres tracos.
-- Nao repita em texto o que ja esta na tabela.
-- Sempre conclua o raciocinio. Nunca interrompa a resposta no meio de
-  uma frase ou de uma lista. Se a resposta for longa, priorize os itens
-  mais relevantes e feche com uma sintese.
-
-Dados do recorte:
-{ctx}"""
-
-    # Cache por pergunta normalizada + recorte: mesma pergunta, mesma resposta
-    # para qualquer usuario dentro do mesmo ciclo.
-    usa_cache = not historico          # so cacheia pergunta isolada, nao follow-up
-    ch = _chave(_normalizar(pergunta), sorted(meses), base, unidade)
-    ciclo = _ciclo_atual(db)
-
-    if usa_cache:
-        _garantir_tabelas(db)
-        r = db.execute(text("""
-            SELECT resposta FROM agente_chat_cache
-            WHERE ciclo_sop = :c AND chave = :k
-        """), {"c": ciclo, "k": ch}).fetchone()
-        if r:
-            return r.resposta
-
-    msgs = list(historico or [])
-    msgs.append({"role": "user", "content": pergunta})
-    resposta = _chamar_claude(system, msgs, max_tokens=3000)
-
-    if usa_cache:
-        db.execute(text("""
-            INSERT INTO agente_chat_cache (ciclo_sop, chave, pergunta, resposta)
-            VALUES (:c, :k, :p, :r)
-            ON CONFLICT (ciclo_sop, chave) DO NOTHING
-        """), {"c": ciclo, "k": ch, "p": pergunta, "r": resposta})
-        db.commit()
-
-    return resposta
+FORMATO DA RESPOSTA:
+- Comece com uma frase de resposta direta a pergunta, sem titulo.
+- Use no maximo dois niveis de titulo com "## " (dois cerquilhas e espaco).
+- Use **negrito** apenas para numeros-chave e nomes de item.
+- Tabelas: use pipe simples com cabecalho e linha separadora. Maximo 6
+  colunas e 10 linhas. Ordene da maior para a menor contribuicao.
+- Termine com uma linha iniciada por "Leitura: " contendo a conclusao pratica.
+- Conclua sempre o raciocinio. Nunca interrompa no meio de uma frase.
+"""
 
 
-def gerar_pdf(relatorio: str, ds: Dict[str, Any]) -> bytes:
+def responder_pergunta(db: Session, pergunta: str,
+                       meses: List[str] = None, base: str = "pedido",
+                       unidade: str = "cx", historico: List[dict] = None,
+                       ciclo: str = None) -> Dict[str, Any]:
+    """
+    Responde uma pergunta sobre o ciclo.
+
+    Reaproveita o dataset gravado junto do relatorio. Remontar a cada
+    pergunta era o que deixava a tela travada em "consultando dados".
+    """
+    _garantir_tabelas(db)
+    ciclo = ciclo or _ciclo_atual(db)
+
+    ch = _chave(ciclo, _normalizar(pergunta))
+    r = db.execute(text("""
+        SELECT resposta FROM agente_chat_cache
+        WHERE ciclo_sop = :c AND chave = :k
+    """), {"c": ciclo, "k": ch}).fetchone()
+    if r:
+        return {"resposta": r.resposta, "do_cache": True}
+
+    ds = _dataset_salvo(db, ciclo) or montar_dataset(db, ciclo=ciclo)
+
+    msgs = []
+    for h in (historico or [])[-4:]:
+        papel = "user" if h.get("role") == "user" else "assistant"
+        msgs.append({"role": papel, "content": str(h.get("content", ""))[:2000]})
+    msgs.append({
+        "role": "user",
+        "content": f"{_contexto_modelo(ds)}\n\nDETALHE POR MES:\n{json.dumps(ds.get('detalhe_mensal', {}), ensure_ascii=False, separators=(',', ':'))}\n\nPERGUNTA: {pergunta}",
+    })
+
+    resposta = _chamar_claude(_SYSTEM_CHAT, msgs, max_tokens=1500)
+    resposta = _corrigir_nome_empresa(resposta)
+
+    db.execute(text("""
+        INSERT INTO agente_chat_cache (ciclo_sop, chave, pergunta, resposta)
+        VALUES (:c, :k, :p, :r)
+        ON CONFLICT (ciclo_sop, chave) DO UPDATE SET
+            resposta = EXCLUDED.resposta, gerado_em = now()
+    """), {"c": ciclo, "k": ch, "p": pergunta, "r": resposta})
+    db.commit()
+
+    return {"resposta": resposta, "do_cache": False}
+
+
+# =====================================================================
+# PDF
+# =====================================================================
+def gerar_pdf(relatorio: str, ds: Dict[str, Any] = None) -> bytes:
+    """PDF do relatorio com um resumo numerico no cabecalho."""
     from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import cm
-    from reportlab.lib import colors
+    from reportlab.lib.units import mm
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.enums import TA_JUSTIFY
-    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
-                                    Table, TableStyle, PageBreak)
-    from reportlab.graphics.shapes import Drawing
-    from reportlab.graphics.charts.barcharts import VerticalBarChart
-    from reportlab.graphics.charts.linecharts import HorizontalLineChart
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib import colors
+    import io as _io
 
-    AZ  = colors.HexColor("#2563eb")
-    ROX = colors.HexColor("#7c3aed")
-    CZ  = colors.HexColor("#94a3b8")
-    ESC = colors.HexColor("#1e293b")
-
-    buf = io.BytesIO()
+    buf = _io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4,
-                            leftMargin=1.5*cm, rightMargin=1.5*cm,
-                            topMargin=1.3*cm, bottomMargin=1.3*cm)
+                            leftMargin=18*mm, rightMargin=18*mm,
+                            topMargin=16*mm, bottomMargin=16*mm)
     ss = getSampleStyleSheet()
-    S_TIT = ParagraphStyle("t", parent=ss["Title"], fontSize=15.5,
-                           textColor=colors.HexColor("#0f172a"), spaceAfter=2)
-    S_SUB = ParagraphStyle("s", parent=ss["Normal"], fontSize=8,
-                           textColor=colors.HexColor("#64748b"), spaceAfter=9)
-    S_H2  = ParagraphStyle("h", parent=ss["Heading2"], fontSize=9.6,
-                           textColor=AZ, spaceBefore=8, spaceAfter=4)
-    S_TXT = ParagraphStyle("p", parent=ss["Normal"], fontSize=8.3,
-                           leading=11.8, alignment=TA_JUSTIFY, spaceAfter=4.5)
-    S_NOT = ParagraphStyle("n", parent=ss["Normal"], fontSize=6.5,
-                           textColor=CZ, leading=8.8)
+    st_tit = ParagraphStyle("t", parent=ss["Heading2"], fontSize=10,
+                            textColor=colors.HexColor("#6d28d9"), spaceBefore=10, spaceAfter=5)
+    st_txt = ParagraphStyle("p", parent=ss["BodyText"], fontSize=9,
+                            leading=13.5, alignment=TA_JUSTIFY, spaceAfter=6)
 
-    def f(v, suf="%"):
-        return "-" if v is None else f"{v:.1f}{suf}".replace(".", ",")
+    fluxo = [Paragraph("Relatorio S&OP — Nexus", ss["Heading1"]), Spacer(1, 4)]
 
-    def n(v):
-        return "-" if v is None else f"{int(v):,}".replace(",", ".")
+    if ds and ds.get("totais"):
+        t, jan = ds["totais"], ds.get("janela", {})
+        fluxo.append(Paragraph(
+            f"Ciclo {jan.get('ciclo','-')} · ultimo mes fechado {jan.get('mes_referencia','-')}",
+            st_txt))
+        dados = [
+            ["Vendido (cx)",  f"{t['qt_pedido']:,.0f}".replace(",", ".")],
+            ["Faturado (cx)", f"{t['qt_entregue']:,.0f}".replace(",", ".")],
+            ["Corte (cx)",    f"{t['qt_corte']:,.0f}".replace(",", ".")],
+            ["Fill Rate",     f"{t['fill_rate']}%"],
+            ["Receita vendida (R$)", f"{t['vl_pedido']:,.0f}".replace(",", ".")],
+            ["Perda no corte (R$)",  f"{t['vl_corte']:,.0f}".replace(",", ".")],
+            ["Excesso de plano (R$)", f"{t['vl_excesso']:,.0f}".replace(",", ".")],
+        ]
+        tb = Table(dados, colWidths=[70*mm, 40*mm])
+        tb.setStyle(TableStyle([
+            ("FONTSIZE", (0,0), (-1,-1), 8),
+            ("GRID", (0,0), (-1,-1), 0.3, colors.HexColor("#e2e8f0")),
+            ("BACKGROUND", (0,0), (0,-1), colors.HexColor("#f8fafc")),
+            ("ALIGN", (1,0), (1,-1), "RIGHT"),
+        ]))
+        fluxo += [tb, Spacer(1, 8)]
 
-    esc  = ds["escopo"]
-    port = ds["portfolio"]
-    per  = (f"{esc['meses_analisados'][0]} a {esc['meses_analisados'][-1]}"
-            if esc["meses_analisados"] else "-")
-
-    el = []
-    el.append(Paragraph("Relatorio de Acuracia de Demanda | S&amp;OP", S_TIT))
-    el.append(Paragraph(
-        f"Linea Alimentos &middot; Periodo {per} &middot; Base: {esc['base_volume']} "
-        f"&middot; Unidade: {esc['unidade']} &middot; "
-        f"Emitido em {_hoje_br().strftime('%d/%m/%Y')}", S_SUB))
-
-    at = ds.get("atendimento", {})
-    kpi = [["WMAPE", "BIAS", "Persistencia", "Erro absoluto",
-            "Atendimento", "Corte", "Volume", "Diagnostico"],
-           [f(port.get("wmape")), f(port.get("bias")),
-            f(port.get("persistencia_pct"), "%"), n(port.get("erro_abs")),
-            f(at.get("atendimento_pct")), n(at.get("corte")),
-            n(port.get("volume")), port.get("classe", "-")]]
-    t = Table(kpi, colWidths=[2.25*cm]*8)
-    t.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#f1f5f9")),
-        ("TEXTCOLOR",  (0,0), (-1,0), colors.HexColor("#64748b")),
-        ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE",   (0,0), (-1,0), 6.0),
-        ("FONTNAME",   (0,1), (-1,1), "Helvetica-Bold"),
-        ("FONTSIZE",   (0,1), (-1,1), 10),
-        ("ALIGN",      (0,0), (-1,-1), "CENTER"),
-        ("VALIGN",     (0,0), (-1,-1), "MIDDLE"),
-        ("TOPPADDING", (0,0), (-1,-1), 5),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 5),
-        ("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#e2e8f0")),
-    ]))
-    el.append(t)
-    el.append(Spacer(1, 9))
-
-    # Grafico 1 - WMAPE por ano
-    ev = [e for e in ds["evolucao_anual"] if e.get("wmape") is not None]
-    if len(ev) >= 2:
-        el.append(Paragraph("WMAPE por ano, mesmos meses do calendario", S_H2))
-        d = Drawing(455, 122)
-        bc = VerticalBarChart()
-        bc.x, bc.y, bc.width, bc.height = 32, 20, 400, 86
-        bc.data = [[e["wmape"] for e in ev]]
-        bc.categoryAxis.categoryNames = [str(e["ano"]) for e in ev]
-        bc.categoryAxis.labels.fontSize = 8
-        bc.valueAxis.valueMin = 0
-        bc.valueAxis.valueMax = max(e["wmape"] for e in ev) * 1.3
-        bc.valueAxis.labels.fontSize = 7
-        bc.bars[0].fillColor = AZ
-        bc.barWidth = 11
-        bc.groupSpacing = 26
-        bc.barLabels.fontSize = 7.5
-        bc.barLabelFormat = "%0.1f"
-        bc.barLabels.dy = 5
-        d.add(bc)
-        el.append(d)
-
-    # Grafico 2 - WMAPE mes a mes
-    sm = [s for s in ds["serie"] if s.get("wmape") is not None]
-    if len(sm) >= 3:
-        el.append(Paragraph("WMAPE mes a mes no periodo", S_H2))
-        d2 = Drawing(455, 112)
-        lc = HorizontalLineChart()
-        lc.x, lc.y, lc.width, lc.height = 32, 22, 400, 76
-        lc.data = [[s["wmape"] for s in sm]]
-        lc.categoryAxis.categoryNames = [s["mes"][5:7] + "/" + s["mes"][2:4] for s in sm]
-        lc.categoryAxis.labels.fontSize = 6.2
-        lc.categoryAxis.labels.angle = 45
-        lc.categoryAxis.labels.dy = -7
-        lc.valueAxis.valueMin = 0
-        lc.valueAxis.labels.fontSize = 7
-        lc.lines[0].strokeColor = ROX
-        lc.lines[0].strokeWidth = 1.8
-        d2.add(lc)
-        el.append(d2)
-
-    # Grafico 3 - atendimento mes a mes
-    sa = [s for s in (at.get("serie_mensal") or []) if s.get("atendimento") is not None]
-    if len(sa) >= 3:
-        el.append(Paragraph("Atendimento mes a mes no periodo", S_H2))
-        d3 = Drawing(455, 108)
-        lc3 = HorizontalLineChart()
-        lc3.x, lc3.y, lc3.width, lc3.height = 32, 20, 400, 74
-        lc3.data = [[s["atendimento"] for s in sa]]
-        lc3.categoryAxis.categoryNames = [s["mes"][5:7] + "/" + s["mes"][2:4] for s in sa]
-        lc3.categoryAxis.labels.fontSize = 6.2
-        lc3.categoryAxis.labels.angle = 45
-        lc3.categoryAxis.labels.dy = -7
-        lc3.valueAxis.valueMin = 0
-        lc3.valueAxis.valueMax = 100
-        lc3.valueAxis.labels.fontSize = 7
-        lc3.lines[0].strokeColor = ambar = colors.HexColor("#f97316")
-        lc3.lines[0].strokeWidth = 1.8
-        d3.add(lc3)
-        el.append(d3)
-
-    el.append(Spacer(1, 5))
-
-    for linha in relatorio.split("\n"):
-        b = linha.strip().replace("**", "").replace("&", "&amp;")
-        if not b:
+    for linha in (relatorio or "").split("\n"):
+        t = linha.strip().replace("**", "")
+        if not t:
             continue
-        eh_tit = ((b[:2].rstrip(".").isdigit() and len(b) < 75)
-                  or (b.isupper() and 3 < len(b) < 75))
-        el.append(Paragraph(b.lstrip("#-* ").strip(), S_H2 if eh_tit else S_TXT))
+        eh_titulo = (t[:1].isdigit() and len(t) < 70) or (t == t.upper() and 3 < len(t) < 70)
+        fluxo.append(Paragraph(t, st_tit if eh_titulo else st_txt))
 
-    el.append(Spacer(1, 5))
-    el.append(Paragraph(
-        f"<b>Escopo:</b> {esc['skus_ativos']} SKUs ativos de {esc['skus_total_base']} "
-        f"cadastrados &middot; {esc['granularidade_erro']}.<br/>"
-        f"<b>Plano congelado em:</b> {esc['plano_congelado_em']}.<br/>"
-        f"<b>Previsao estatistica disponivel desde:</b> "
-        f"{esc['previsao_estatistica_disponivel_desde']}.<br/>"
-        f"<b>Comparacao ano a ano:</b> meses "
-        f"{', '.join(f'{m:02d}' for m in esc['meses_do_calendario_comparados'])} de cada ano.",
-        S_NOT))
-
-    # Anexo I - evolucao anual
-    el.append(PageBreak())
-    el.append(Paragraph("Anexo I | Evolucao ano a ano do portfolio", S_H2))
-    cab = ["Ano","Volume","WMAPE","Delta vs ano ant.","BIAS","Persist.",
-           "Erro absoluto","Diagnostico"]
-    dados = [cab] + [[
-        str(e["ano"]), n(e.get("volume")), f(e.get("wmape")),
-        f(e.get("delta_wmape_pp"), " pp"), f(e.get("bias")),
-        f(e.get("persistencia_pct"), "%"), n(e.get("erro_abs")),
-        e.get("classe","-"),
-    ] for e in ds["evolucao_anual"]]
-    ta = Table(dados, colWidths=[1.6*cm,2.4*cm,1.8*cm,2.4*cm,1.7*cm,1.7*cm,
-                                 2.4*cm,3*cm], repeatRows=1)
-    ta.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), ESC),
-        ("TEXTCOLOR",  (0,0), (-1,0), colors.white),
-        ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE",   (0,0), (-1,-1), 6.3),
-        ("ALIGN",      (1,0), (6,-1), "RIGHT"),
-        ("GRID",       (0,0), (-1,-1), 0.3, colors.HexColor("#e2e8f0")),
-        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#f8fafc")]),
-        ("TOPPADDING", (0,0), (-1,-1), 3), ("BOTTOMPADDING", (0,0), (-1,-1), 3),
-    ]))
-    el.append(ta)
-
-    # Anexo II - categorias
-    el.append(Spacer(1, 11))
-    el.append(Paragraph("Anexo II | Categorias, ordenadas por erro absoluto", S_H2))
-    cab2 = ["Categoria","Volume","Erro abs.","WMAPE","Ano ant.","Delta pp",
-            "BIAS","Persist.","WMAPE IA","FVA","Atend.","Diagnostico"]
-    dados2 = [cab2] + [[
-        c["categoria"][:19], n(c.get("volume")), n(c.get("erro_abs")),
-        f(c.get("wmape")), f(c.get("wmape_ano_anterior")),
-        f(c.get("delta_wmape_pp"), ""), f(c.get("bias")),
-        f(c.get("persistencia_pct"), "%"), f(c.get("wmape_ia")),
-        f(c.get("fva_pp"), ""), f(c.get("atendimento_pct")), c.get("classe","-"),
-    ] for c in ds["categorias"]]
-    tc = Table(dados2, colWidths=[2.5*cm,1.7*cm,1.6*cm,1.35*cm,1.35*cm,1.25*cm,
-                                  1.25*cm,1.3*cm,1.4*cm,1.1*cm,1.25*cm,2.1*cm],
-               repeatRows=1)
-    tc.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), ESC),
-        ("TEXTCOLOR",  (0,0), (-1,0), colors.white),
-        ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE",   (0,0), (-1,-1), 5.8),
-        ("ALIGN",      (1,0), (-2,-1), "RIGHT"),
-        ("GRID",       (0,0), (-1,-1), 0.3, colors.HexColor("#e2e8f0")),
-        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#f8fafc")]),
-        ("TOPPADDING", (0,0), (-1,-1), 2.5), ("BOTTOMPADDING", (0,0), (-1,-1), 2.5),
-    ]))
-    el.append(tc)
-
-    # Anexo III - SKUs
-    el.append(PageBreak())
-    el.append(Paragraph(
-        f"Anexo III | {len(ds['skus'])} SKUs, ordenados por erro absoluto", S_H2))
-    cab3 = ["SKU","Descricao","Categoria","Maturid.","Volume","Erro abs.","WMAPE",
-            "Ano ant.","Delta pp","BIAS","Persist.","Atend.","Restr.","Diagnostico"]
-    dados3 = [cab3] + [[
-        s["sku"], (s["descricao"] or "")[:22], (s["categoria"] or "")[:11],
-        (s.get("maturidade") or "-")[:10],
-        n(s.get("volume")), n(s.get("erro_abs")), f(s.get("wmape")),
-        f(s.get("wmape_ano_anterior")), f(s.get("delta_wmape_pp"), ""),
-        f(s.get("bias")), f(s.get("persistencia_pct"), "%"),
-        f(s.get("atendimento_pct")),
-        "Sim" if s.get("restricao_producao") else "-",
-        s.get("classe","-")[:13],
-    ] for s in ds["skus"]]
-    ts = Table(dados3, colWidths=[1.35*cm,2.9*cm,1.6*cm,1.5*cm,1.3*cm,1.25*cm,1.15*cm,
-                                  1.15*cm,1.05*cm,1.05*cm,1.05*cm,1.05*cm,0.85*cm,1.6*cm],
-               repeatRows=1)
-    ts.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), ESC),
-        ("TEXTCOLOR",  (0,0), (-1,0), colors.white),
-        ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE",   (0,0), (-1,-1), 5.0),
-        ("ALIGN",      (4,0), (-2,-1), "RIGHT"),
-        ("GRID",       (0,0), (-1,-1), 0.25, colors.HexColor("#e2e8f0")),
-        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#f8fafc")]),
-        ("TOPPADDING", (0,0), (-1,-1), 1.8), ("BOTTOMPADDING", (0,0), (-1,-1), 1.8),
-    ]))
-    el.append(ts)
-
-    # Anexo IV - lancamentos e restricoes
-    if ds.get("lancamentos") or ds.get("sob_restricao"):
-        el.append(PageBreak())
-        el.append(Paragraph(
-            "Anexo IV | Itens fora do universo comparavel", S_H2))
-        el.append(Paragraph(
-            "Itens de lancamento nao possuem serie suficiente para o modelo "
-            "estatistico aprender padrao — o erro deles nao e comparavel ao de "
-            "itens maduros. Itens sob restricao de producao tiveram a entrega "
-            "limitada por decisao conhecida, e o atendimento baixo nao decorre "
-            "de falha de previsao.", S_NOT))
-        el.append(Spacer(1, 7))
-
-        if ds.get("lancamentos"):
-            el.append(Paragraph("Lancamentos e itens recentes", S_H2))
-            cabL = ["SKU","Descricao","Categoria","1a venda","Meses","Maturid.",
-                    "Volume","WMAPE","BIAS","Atend."]
-            dadosL = [cabL] + [[
-                s["sku"], (s["descricao"] or "")[:30], (s["categoria"] or "")[:14],
-                s.get("primeira_venda") or "-", str(s.get("meses_historico") or "-"),
-                s.get("maturidade","-"), n(s.get("volume")),
-                f(s.get("wmape")), f(s.get("bias")), f(s.get("atendimento_pct")),
-            ] for s in ds["lancamentos"]]
-            tl = Table(dadosL, colWidths=[1.5*cm,4.2*cm,2.1*cm,1.6*cm,1.2*cm,
-                                          1.7*cm,1.5*cm,1.4*cm,1.4*cm,1.4*cm],
-                       repeatRows=1)
-            tl.setStyle(TableStyle([
-                ("BACKGROUND", (0,0), (-1,0), ESC),
-                ("TEXTCOLOR",  (0,0), (-1,0), colors.white),
-                ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
-                ("FONTSIZE",   (0,0), (-1,-1), 5.9),
-                ("ALIGN",      (4,0), (-1,-1), "RIGHT"),
-                ("GRID",       (0,0), (-1,-1), 0.3, colors.HexColor("#e2e8f0")),
-                ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#f8fafc")]),
-                ("TOPPADDING", (0,0), (-1,-1), 2.5), ("BOTTOMPADDING", (0,0), (-1,-1), 2.5),
-            ]))
-            el.append(tl)
-            el.append(Spacer(1, 11))
-
-        if ds.get("sob_restricao"):
-            el.append(Paragraph("Itens sob restricao declarada de producao", S_H2))
-            cabR = ["SKU","Descricao","Categoria","Segmento","Periodo","Motivo",
-                    "Pedido","Corte","Atend.","BIAS"]
-            dadosR = []
-            for s in ds["sob_restricao"]:
-                r0 = (s.get("restricao_producao") or [{}])[0]
-                dadosR.append([
-                    s["sku"], (s["descricao"] or "")[:26], (s["categoria"] or "")[:12],
-                    (s.get("segmento") or "-")[:12],
-                    r0.get("periodo","-"), (r0.get("motivo","-"))[:24],
-                    n(s.get("volume")), n(s.get("corte_cx")),
-                    f(s.get("atendimento_pct")), f(s.get("bias")),
-                ])
-            tr = Table([cabR] + dadosR,
-                       colWidths=[1.4*cm,3.6*cm,1.8*cm,1.8*cm,2.1*cm,3.0*cm,
-                                  1.3*cm,1.3*cm,1.3*cm,1.3*cm],
-                       repeatRows=1)
-            tr.setStyle(TableStyle([
-                ("BACKGROUND", (0,0), (-1,0), ESC),
-                ("TEXTCOLOR",  (0,0), (-1,0), colors.white),
-                ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
-                ("FONTSIZE",   (0,0), (-1,-1), 5.7),
-                ("ALIGN",      (6,0), (-1,-1), "RIGHT"),
-                ("GRID",       (0,0), (-1,-1), 0.3, colors.HexColor("#e2e8f0")),
-                ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#FEF6EC")]),
-                ("TOPPADDING", (0,0), (-1,-1), 2.5), ("BOTTOMPADDING", (0,0), (-1,-1), 2.5),
-            ]))
-            el.append(tr)
-
-    el.append(Spacer(1, 7))
-    el.append(Paragraph(
-        "WMAPE = soma dos erros absolutos / soma do realizado &middot; "
-        "BIAS = (soma do previsto - soma do realizado) / soma do realizado &middot; "
-        "Persistencia = percentual de meses com erro na direcao do BIAS medio &middot; "
-        "FVA = WMAPE do plano - WMAPE da previsao estatistica &middot; "
-        "Atendimento = volume entregue / volume pedido. "
-        "Erro absoluto computado em (SKU, mes) antes de qualquer agregacao. "
-        "Comparacao ano a ano restrita aos mesmos meses do calendario em cada ano. "
-        "Maturidade: Lancamento ate 6 meses de historico, Recente ate 18, Maduro acima disso. "
-        "Itens sob restricao de producao tem o atendimento explicado pela restricao, nao por falha de previsao.",
-        S_NOT))
-
-    doc.build(el)
-    buf.seek(0)
-    return buf.read()
+    doc.build(fluxo)
+    return buf.getvalue()
