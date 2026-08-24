@@ -774,6 +774,30 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
             except (ValueError, KeyError):
                 pass
 
+    # 1c) GARANTE M+0 e M+1 no eixo — fecha o buraco estrutural do gráfico.
+    #
+    # BUG CORRIGIDO: mapa só ganha uma chave por mês em dois casos — (1) há
+    # venda realizada em fato_vendas, ou (2) o mês está em meses_futuros
+    # (que é SEMPRE M+2..M+4, por causa da trava HORIZ_DECISAO da Fase 2).
+    # M+1 (ex.: set/26 no ciclo 08/2026) não se encaixa em nenhum dos dois:
+    # não tem venda ainda (mês futuro) e não está na janela de planejamento
+    # (M+2..M+4 pula ele de propósito, e o ciclo ativo não grava mais linha
+    # própria pra ele desde a Fase 2). A chave do mês nunca nascia — por
+    # isso a correção anterior no lookup de meta/IA (usar ciclo_fonte_do_mes
+    # também para o mês corrente e o seguinte) não tinha efeito nenhum
+    # nesse mês: não havia linha para popular.
+    #
+    # M+0 (mês corrente) normalmente já ganha entrada via 'realizado' acima
+    # (mesmo que a venda do mês esteja parcial), mas um SKU sem nenhuma
+    # venda ainda neste mês ficaria igualmente sem ponto no gráfico — por
+    # isso a garantia cobre os dois, não só M+1.
+    for _off in (0, 1):
+        _md = mes_atual + relativedelta(months=_off)
+        _key = _md.strftime("%Y-%m-01")
+        if _key not in mapa:
+            mapa[_key] = _novo(_key)
+            mapa[_key]["eh_futuro"] = True
+
     # 2) Meses futuros do ciclo ativo (só previsão).
     if meses_futuros:
         for md in meses_futuros:
@@ -782,9 +806,11 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
                 mapa[key] = _novo(key)
                 mapa[key]["eh_futuro"] = md >= mes_atual
 
-    # 2b) Meses adicionais com dados no ciclo ativo que não estão na janela
-    # (ex: set/26 no ciclo 08/2026 — M+5, aparece no fato_ibp_granular mas
-    # não é editável. Deve aparecer no gráfico como previsão futura.)
+    # 2b) Meses adicionais com dados no ciclo ativo que não estão na janela.
+    # Desde a Fase 2 (trava HORIZ_DECISAO = M+2..M+4), o ciclo ativo nunca
+    # tem linha própria fora de M+2..M+4 — esta query é redundante com o
+    # bloco 2) acima na prática (nunca encontra nada que já não esteja em
+    # mapa), mas fica como salvaguarda caso a trava mude no futuro.
     meses_com_previsao = db.execute(text("""
         SELECT DISTINCT TO_CHAR(mes_projetado,'YYYY-MM-01') AS mes
         FROM fato_ibp_granular
@@ -887,17 +913,14 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
             # M+1 — essas linhas simplesmente não existem mais sob o ciclo
             # ativo. O lookup em (ciclo_ativo, key) para o mês corrente e o
             # seguinte sempre retornava None, e a meta/IA sumia do gráfico
-            # exatamente nos dois meses mais recentes. Ninguém pegou isso na
-            # validação dos marts porque o dossiê não foi migrado (é consulta
-            # pontual, não precisava) — mas herdou o efeito colateral da
-            # limpeza mesmo assim.
+            # exatamente nos dois meses mais recentes.
             #
             # A correção: usar ciclo_fonte_do_mes(md) sempre, igual já era
             # feito para meses passados. Para ago/2026, isso resolve para
             # 06/2026 (mes - 2); para set/2026, resolve para 07/2026 — que é
             # exatamente onde o forecaster gravou a previsão M+2 daqueles
-            # meses, e é exatamente o compromisso que deve ser comparado
-            # contra o realizado quando o mês fechar.
+            # meses. Complementar ao bloco 1c) acima, que garante que a
+            # CHAVE do mês existe no mapa antes deste lookup rodar.
             cf = ciclo_fonte_do_mes(md)
             p_hist = prev_idx.get((cf, key))
             if p_hist and p_hist.ia is not None:

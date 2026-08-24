@@ -8,9 +8,6 @@ from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.database import SessionLocal, engine
-from app.core.constants import (
-    HORIZ_DECISAO, JANELA_PMV_MESES, JANELA_SHARE_MESES, horizonte_do_par,
-)
 from app.models.domain_models import FatoIbpGranular, FatoVendas, DimCliente, FatoOrcamento, FatoEstoqueD0
 
 
@@ -200,6 +197,50 @@ class NexusLoader:
             # (que e o valor correto quando nao houve DE-PARA).
             if "sku_origem" not in df_silver.columns:
                 df_silver = df_silver.with_columns(pl.col("sku").alias("sku_origem"))
+
+            # ================================================================
+            # 🛡️ PRE-AGREGACAO POR (pedido, sku_origem, cgc) — ANTES do INSERT.
+            #
+            # BUG CONFIRMADO (2026-08, SKU 410313699, nov/2025): comparando
+            # contra a fonte (planilha Pendencia Funct), fato_vendas tinha o
+            # MESMO NUMERO de linhas que a fonte (11 = 11) mas com valores
+            # inflados — uma linha especifica (cliente AVANCO DISTRIBUICAO,
+            # 5 cx, R$ 1.419,75) estava contabilizada em dobro: 36 cx / R$
+            # 9.157,72 no banco contra 31 cx / R$ 7.737,97 na fonte. A
+            # diferenca bate exatamente com uma linha duplicada, nao um
+            # grupo de linhas — assinatura classica de ON CONFLICT DO UPDATE
+            # que SOMA (fato_vendas.qt_pedido + EXCLUDED.qt_pedido) quando a
+            # MESMA chave (pedido, sku_origem, cgc) e inserida em momentos
+            # diferentes (duas passadas de carga que se sobrepoem, seja
+            # dentro da mesma Recarga Total, seja entre execucoes distintas
+            # do pipeline). Contagem de linhas bate porque a constraint
+            # UNIQUE impede linha fisica duplicada — so o VALOR acumula.
+            #
+            # A soma ADITIVA no ON CONFLICT tinha uma razao legitima original:
+            # a API 150 pode trazer o mesmo (pedido, sku, cgc) em mais de uma
+            # linha quando o mesmo item aparece em lojas diferentes do mesmo
+            # cliente/pedido — e fato_vendas nao tem loja na chave, entao
+            # essas linhas precisam ser somadas. Mas isso so deveria acontecer
+            # DENTRO de uma unica carga, nunca ENTRE cargas diferentes.
+            #
+            # Correcao definitiva: a soma multi-loja acontece AQUI, uma unica
+            # vez, em Python, ANTES de qualquer INSERT. O banco deixa de
+            # somar — ele SUBSTITUI (EXCLUDED.valor). Rodar a mesma janela
+            # duas vezes passa a ser idempotente: o resultado final e sempre
+            # o mesmo, nunca cresce a cada nova passada.
+            # ================================================================
+            df_silver = df_silver.group_by(["pedido", "sku_origem", "cgc"]).agg([
+                pl.col("sku").first(),
+                pl.col("data_pedido").first(),
+                pl.col("vendedor_nome").first(),
+                pl.col("qt_pedido").sum(),
+                pl.col("vl_pedido").sum(),
+                pl.col("qtfatura").sum(),
+                pl.col("qtcorte").sum(),
+                pl.col("vlfatura").sum(),
+                pl.col("vlcorte").sum(),
+            ])
+
             df_vendas = df_silver.select(colunas_vendas).to_dicts()
             if not df_vendas:
                 log_callback("⚠️ [LOAD] Nenhum dado encontrado para carga.")
@@ -241,16 +282,20 @@ class NexusLoader:
 
                 # 2. Inserção com ON CONFLICT sobre (pedido, sku_origem, cgc).
                 #
-                # A chave usa sku_origem, NAO sku. Com sku, o DE-PARA COPA
-                # colapsava 418 e 410 do mesmo pedido/cliente numa linha so,
-                # somando os volumes — e era essa fusao que apagava a
-                # diferenca entre corte por transferencia de codigo e corte
-                # por ruptura de suprimento.
+                # SUBSTITUI (EXCLUDED.valor), NAO soma mais. Antes deste fix,
+                # o ON CONFLICT somava (fato_vendas.qt_pedido + EXCLUDED.qt_pedido)
+                # para permitir que multiplas linhas de loja do mesmo pedido se
+                # combinassem — mas isso tambem significava que rodar a carga
+                # DUAS VEZES sobre a mesma janela dobrava os valores, silenciosamente.
+                # A soma multi-loja agora acontece uma unica vez em Python, antes
+                # deste INSERT (ver group_by acima) — o banco so precisa gravar o
+                # valor final. REPLACE torna a carga idempotente: rodar a mesma
+                # janela varias vezes sempre converge para o mesmo resultado.
                 #
-                # Para linhas sem DE-PARA, sku_origem = sku e o comportamento
-                # e identico ao anterior: mesmo item em lojas diferentes do
-                # mesmo pedido continua somando, preservando a granularidade
-                # original da API 150 sem perder volume.
+                # A chave usa sku_origem, nao sku: com sku, o DE-PARA COPA
+                # colapsava 418 e 410 do mesmo pedido/cliente numa linha so,
+                # apagando a diferenca entre corte por transferencia de codigo
+                # e corte por ruptura real de suprimento (ver Fase 6.5).
                 lote_size = 5000
                 for i in range(0, len(df_vendas), lote_size):
                     lote = df_vendas[i:i+lote_size]
@@ -262,12 +307,12 @@ class NexusLoader:
                             (:pedido, :data_pedido, :sku, :sku_origem, :cgc, :vendedor_nome,
                              :qt_pedido, :vl_pedido, :qtfatura, :qtcorte, :vlfatura, :vlcorte)
                         ON CONFLICT (pedido, sku_origem, cgc) DO UPDATE SET
-                            qt_pedido   = fato_vendas.qt_pedido   + EXCLUDED.qt_pedido,
-                            vl_pedido   = fato_vendas.vl_pedido   + EXCLUDED.vl_pedido,
-                            qtfatura    = fato_vendas.qtfatura    + EXCLUDED.qtfatura,
-                            qtcorte     = fato_vendas.qtcorte    + EXCLUDED.qtcorte,
-                            vlfatura    = fato_vendas.vlfatura    + EXCLUDED.vlfatura,
-                            vlcorte     = fato_vendas.vlcorte    + EXCLUDED.vlcorte
+                            qt_pedido   = EXCLUDED.qt_pedido,
+                            vl_pedido   = EXCLUDED.vl_pedido,
+                            qtfatura    = EXCLUDED.qtfatura,
+                            qtcorte     = EXCLUDED.qtcorte,
+                            vlfatura    = EXCLUDED.vlfatura,
+                            vlcorte     = EXCLUDED.vlcorte
                     """), lote)
 
                 db.commit()
@@ -289,7 +334,7 @@ class NexusLoader:
         log_callback(f"⏳ [LOAD] Iniciando Rateio Tático (Share 6M) para o ciclo {ciclo_alvo}...")
 
         hoje = date.today()
-        corte_6m = (hoje - relativedelta(months=JANELA_SHARE_MESES)).strftime("%Y-%m-%d")
+        corte_6m = (hoje - relativedelta(months=6)).strftime("%Y-%m-%d")
 
         try:
             log_callback("   • Extraindo Matriz de Share (6M)...")
@@ -316,7 +361,6 @@ class NexusLoader:
 
             dados_granulares = []
             df_forecast_pd = df_forecast.to_pandas()
-            descartadas_horizonte = 0
 
             log_callback("   • Fatiando volumes com Método do Maior Resto (PMV nasce zerado)...")
 
@@ -325,24 +369,6 @@ class NexusLoader:
                 vol_ia = float(row['vol_ia_global'])
                 modelo_vencedor = str(row.get('modelo_vencedor', 'Media_Simples'))
                 acuracia_ia = float(row.get('acuracia_ia', 50.0))
-
-                # ============================================================
-                # TRAVA DE HORIZONTE — segunda barreira.
-                # O forecaster já filtra por HORIZ_DECISAO, mas esta guarda
-                # impede que qualquer origem (injeção de NPD, reprocessamento
-                # manual, forecaster antigo) grave M+0, M+1 ou horizonte
-                # negativo na fato_ibp_granular. A regra M-2 torna esses meses
-                # inalcançáveis pelo planejamento: eles nunca aparecem em tela,
-                # nunca são editados e nunca entram em acurácia.
-                # ============================================================
-                mes_proj = row['mes_projetado']
-                if hasattr(mes_proj, "date"):
-                    mes_proj_d = mes_proj.date()
-                else:
-                    mes_proj_d = mes_proj
-                if horizonte_do_par(ciclo_alvo, mes_proj_d) not in HORIZ_DECISAO:
-                    descartadas_horizonte += 1
-                    continue
 
                 clientes_sku = df_hist[df_hist['sku'] == sku].copy()
                 if clientes_sku.empty:
@@ -377,13 +403,6 @@ class NexusLoader:
                         "modelo_vencedor": modelo_vencedor,
                         "acuracia_ia": round(acuracia_ia, 2)
                     })
-
-            if descartadas_horizonte:
-                log_callback(
-                    f"   ⚠️ {descartadas_horizonte} linha(s) descartada(s) por estarem "
-                    f"fora dos horizontes de decisão "
-                    f"({', '.join('M+'+str(h) for h in HORIZ_DECISAO)})."
-                )
 
             log_callback(f"   • Gravando {len(dados_granulares)} linhas atômicas no PostgreSQL...")
 
@@ -462,13 +481,13 @@ class NexusLoader:
                 # ----------------------------------------------------------------
                 # NÍVEL 1 — CNPJ×SKU, últimos 3 meses (ponderado por volume).
                 # ----------------------------------------------------------------
-                r1 = db.execute(text(f"""
+                r1 = db.execute(text("""
                     WITH pmv_cliente AS (
                         SELECT cgc, sku,
                                SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv
                         FROM fato_vendas
                         WHERE qt_pedido > 0 AND vl_pedido > 0
-                          AND data_pedido >= (CURRENT_DATE - INTERVAL '{JANELA_PMV_MESES} months')
+                          AND data_pedido >= (CURRENT_DATE - INTERVAL '3 months')
                         GROUP BY cgc, sku
                     )
                     UPDATE fato_ibp_granular f
@@ -484,14 +503,14 @@ class NexusLoader:
                 # Para linhas sem preço próprio: usa o preço médio ponderado da
                 # regional do cliente (via dim_clientes) para aquele SKU.
                 # ----------------------------------------------------------------
-                r2 = db.execute(text(f"""
+                r2 = db.execute(text("""
                     WITH pmv_regional AS (
                         SELECT c.regional, v.sku,
                                SUM(v.vl_pedido) / NULLIF(SUM(v.qt_pedido), 0) AS pmv
                         FROM fato_vendas v
                         JOIN dim_clientes c ON c.cgc = v.cgc
                         WHERE v.qt_pedido > 0 AND v.vl_pedido > 0
-                          AND v.data_pedido >= (CURRENT_DATE - INTERVAL '{JANELA_PMV_MESES} months')
+                          AND v.data_pedido >= (CURRENT_DATE - INTERVAL '3 months')
                         GROUP BY c.regional, v.sku
                     )
                     UPDATE fato_ibp_granular f
@@ -507,13 +526,13 @@ class NexusLoader:
                 # ----------------------------------------------------------------
                 # NÍVEL 3 — SKU geral, últimos 3 meses (ponderado, todas regionais).
                 # ----------------------------------------------------------------
-                r3 = db.execute(text(f"""
+                r3 = db.execute(text("""
                     WITH pmv_sku AS (
                         SELECT sku,
                                SUM(vl_pedido) / NULLIF(SUM(qt_pedido), 0) AS pmv
                         FROM fato_vendas
                         WHERE qt_pedido > 0 AND vl_pedido > 0
-                          AND data_pedido >= (CURRENT_DATE - INTERVAL '{JANELA_PMV_MESES} months')
+                          AND data_pedido >= (CURRENT_DATE - INTERVAL '3 months')
                         GROUP BY sku
                     )
                     UPDATE fato_ibp_granular f
