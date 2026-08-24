@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import {
-  X, TrendingUp, TrendingDown, Minus, AlertTriangle, Loader2,
+  X, Loader2, Sparkles,
 } from 'lucide-react';
 import {
   ComposedChart, Bar, Line, Cell, XAxis, YAxis,
@@ -15,18 +15,12 @@ import {
 
 const fmtCx  = (n: number | null) => n == null ? '—' : new Intl.NumberFormat('pt-BR').format(Math.round(n));
 const fmtPct = (n: number | null) => n == null ? '—' : `${(n * 100).toFixed(1)}%`;
-const sinal  = (n: number | null, casas = 1) =>
-  n == null ? '—' : `${n >= 0 ? '+' : ''}${n.toFixed(casas).replace('.', ',')}%`;
 
 const mesCurto = (iso: string) => {
   const [y, m] = iso.split('-');
   const nomes = ['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez'];
   return `${nomes[parseInt(m) - 1]}/${y.slice(2)}`;
 };
-const tendIcon = (t: string) =>
-  t === 'CRESCIMENTO' ? <TrendingUp className="w-4 h-4 text-emerald-600" /> :
-  t === 'DECLINIO'    ? <TrendingDown className="w-4 h-4 text-rose-600" /> :
-  <Minus className="w-4 h-4 text-slate-400" />;
 
 // ── Tooltip do gráfico principal ──────────────────────────────────────────
 const TooltipPrincipal = ({ active, payload, label }: any) => {
@@ -87,6 +81,22 @@ export default function DossieInferior({
   const [d, setD]             = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
+  // Avaliação do Planejador de Demanda — gerada em lote por categoria a
+  // cada ciclo novo (ver planejador_demanda.py), lida aqui do cache, nunca
+  // chamada na hora. O gráfico abaixo continua exatamente como era; isto
+  // é um bloco novo, não uma alteração do que já existia.
+  const [aval, setAval]               = useState<any>(null);
+  const [avalLoading, setAvalLoading] = useState(true);
+
+  useEffect(() => {
+    setAvalLoading(true);
+    const tipoAval = tipo === 'categoria' ? 'categoria' : 'sku';
+    axios.get(`/api/v1/assistente/avaliacao?tipo=${tipoAval}&id=${encodeURIComponent(id)}`)
+      .then(r => setAval(r.data))
+      .catch(() => setAval(null))
+      .finally(() => setAvalLoading(false));
+  }, [tipo, id]);
+
   useEffect(() => {
     setLoading(true);
     const rota  = tipo === 'categoria' ? 'dossie-categoria' : 'dossie';
@@ -128,7 +138,6 @@ export default function DossieInferior({
   });
 
   const marcoHoje = d?.marco_hoje ? mesCurto(d.marco_hoje) : null;
-  const comps     = d?.comparacoes_por_mes || (d?.comparacoes ? [d.comparacoes] : []);
 
   return (
     <div
@@ -147,6 +156,32 @@ export default function DossieInferior({
         <button onClick={onFechar} className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-200 shrink-0">
           <X className="w-4 h-4" />
         </button>
+      </div>
+
+      {/* AVALIAÇÃO DO PLANEJADOR DE DEMANDA — gerada por categoria a cada
+          ciclo novo (ver planejador_demanda.py). Estado próprio, não
+          depende do carregamento do gráfico abaixo. */}
+      <div className="px-5 pt-4">
+        <div className="rounded-xl border border-violet-100 bg-violet-50/60 p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Sparkles className="w-3.5 h-3.5 text-violet-500 shrink-0" />
+            <span className="text-[10px] font-black uppercase tracking-widest text-violet-500">
+              Avaliação do Planejador de Demanda
+            </span>
+          </div>
+          {avalLoading ? (
+            <div className="flex items-center gap-2 text-violet-400 text-xs font-bold py-0.5">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" /> Carregando avaliação…
+            </div>
+          ) : aval?.avaliacao ? (
+            <p className="text-[12.5px] leading-relaxed text-slate-700">{aval.avaliacao}</p>
+          ) : (
+            <p className="text-xs font-bold text-slate-400">
+              Ainda não avaliado neste ciclo. A avaliação é gerada automaticamente
+              sempre que um novo ciclo é aberto.
+            </p>
+          )}
+        </div>
       </div>
 
       {loading ? (
@@ -253,228 +288,17 @@ export default function DossieInferior({
             <span className="text-blue-400 font-bold"> azul</span> = meta abaixo · tracejado em ±20%
           </div>
 
-          {/* ── ACURÁCIA DOS ÚLTIMOS 6 MESES ── */}
-          {tipo !== 'categoria' && (d.historico_12m || []).length > 0 && (
-            <div className="rounded-xl bg-white border border-slate-100 overflow-hidden mb-5">
-              <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-100">
-                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
-                  Acurácia — últimos {d.historico_12m.length} meses fechados
-                </div>
-                <div className="text-[10px] text-slate-400">
-                  BIAS = (meta − vendido) / vendido ·
-                  <span className="text-rose-500 font-bold"> vermelho</span> = meta acima do vendido ·
-                  <span className="text-blue-500 font-bold"> azul</span> = meta abaixo do vendido
-                </div>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full" style={{ borderCollapse: 'collapse', fontSize: 12 }}>
-                  <thead>
-                    <tr className="border-b border-slate-100">
-                      {/* células vazias: Mês + Vendido + Meta H + Meta IA */}
-                      <th colSpan={4} style={{ padding: '4px 12px', background: '#fff', borderBottom: '1px solid #f1f5f9' }} />
-                      <th colSpan={2} style={{ padding: '4px 12px', textAlign: 'center', fontSize: 9,
-                        fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em',
-                        color: '#6366f1', borderBottom: '1px solid #e0e7ff', background: '#f5f3ff',
-                        whiteSpace: 'nowrap' }}>Humano</th>
-                      <th colSpan={3} style={{ padding: '4px 12px', textAlign: 'center', fontSize: 9,
-                        fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em',
-                        color: '#7c3aed', borderBottom: '1px solid #ede9fe', background: '#f5f3ff',
-                        whiteSpace: 'nowrap' }}>IA</th>
-                      <th style={{ padding: '4px 12px', textAlign: 'center', fontSize: 9,
-                        fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em',
-                        color: '#0891b2', borderBottom: '1px solid #cffafe', background: '#ecfeff',
-                        whiteSpace: 'nowrap' }}>FVA</th>
-                    </tr>
-                    <tr className="border-b border-slate-100">
-                      {[
-                        { h: 'Mês',           align: 'left'  },
-                        { h: 'Vendido (cx)',   align: 'right' },
-                        { h: 'Meta H (cx)',    align: 'right' },
-                        { h: 'Meta IA (cx)',   align: 'right' },
-                        { h: 'BIAS %',         align: 'right' },
-                        { h: 'WMAPE %',        align: 'right' },
-                        { h: 'BIAS IA %',      align: 'right' },
-                        { h: 'WMAPE IA %',     align: 'right' },
-                        { h: 'FVA pp',         align: 'right' },
-                      ].map(({ h, align }) => (
-                        <th key={h} style={{
-                          padding: '5px 12px', textAlign: align as any,
-                          fontSize: 10, fontWeight: 800, textTransform: 'uppercase',
-                          letterSpacing: '.05em', color: '#94a3b8', whiteSpace: 'nowrap',
-                        }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(d.historico_12m || []).map((row: any, idx: number) => {
-                      // Mês com venda mas sem plano registrado — exibe mas sem métricas
-                      if (row.sem_meta) {
-                        return (
-                          <tr key={row.mes} style={{ background: idx % 2 ? '#f9fafb' : '#fff', borderBottom: '1px solid #f1f5f9' }}>
-                            <td style={{ padding: '7px 12px', fontWeight: 700, color: '#334155' }}>{row.mes_label}</td>
-                            <td style={{ padding: '7px 12px', textAlign: 'right', color: '#475569' }}>
-                              {new Intl.NumberFormat('pt-BR').format(row.vendido_cx)}
-                            </td>
-                            <td colSpan={7} style={{ padding: '7px 12px', textAlign: 'center' }}>
-                              <span style={{ fontSize: 10, fontWeight: 700, color: '#94a3b8',
-                                background: '#f1f5f9', borderRadius: 6, padding: '2px 8px' }}>
-                                sem plano registrado
-                              </span>
-                            </td>
-                          </tr>
-                        );
-                      }
-                      const b    = row.delta_pct;
-                      const corB = b > 15 ? '#e11d48' : b < -15 ? '#2563eb' : '#059669';
-                      const corW = row.wmape_pct <= 20 ? '#059669' : row.wmape_pct <= 35 ? '#d97706' : '#e11d48';
-                      const bIA  = row.bias_ia_pct;
-                      const corBIA = bIA == null ? '#94a3b8' : bIA > 15 ? '#e11d48' : bIA < -15 ? '#2563eb' : '#059669';
-                      const wIA  = row.wmape_ia_pct;
-                      const corWIA = wIA == null ? '#94a3b8' : wIA <= 20 ? '#059669' : wIA <= 35 ? '#d97706' : '#e11d48';
-                      const fva  = row.fva_pct;
-                      const corFVA = fva == null ? '#94a3b8' : fva > 0 ? '#6366f1' : fva < 0 ? '#7c3aed' : '#64748b';
-                      return (
-                        <tr key={row.mes} style={{ background: idx % 2 ? '#f9fafb' : '#fff', borderBottom: '1px solid #f1f5f9' }}>
-                          <td style={{ padding: '7px 12px', fontWeight: 700, color: '#334155' }}>{row.mes_label}</td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', color: '#475569' }}>
-                            {new Intl.NumberFormat('pt-BR').format(row.vendido_cx)}
-                          </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', color: '#475569' }}>
-                            {new Intl.NumberFormat('pt-BR').format(row.meta_cx)}
-                          </td>
-                          {/* Meta IA (cx) — só disponível a partir de jun/26 */}
-                          <td style={{ padding: '7px 12px', textAlign: 'right', color: '#7c3aed', fontWeight: 600 }}>
-                            {row.ia_cx != null
-                              ? new Intl.NumberFormat('pt-BR').format(row.ia_cx)
-                              : '—'}
-                          </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corB }}>
-                            {b >= 0 ? '+' : ''}{b?.toFixed(1).replace('.', ',')}%
-                          </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corW }}>
-                            {row.wmape_pct?.toFixed(1).replace('.', ',')}%
-                          </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corBIA }}>
-                            {bIA == null ? '—' : `${bIA >= 0 ? '+' : ''}${bIA.toFixed(1).replace('.', ',')}%`}
-                          </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corWIA }}>
-                            {wIA == null ? '—' : `${wIA.toFixed(1).replace('.', ',')}%`}
-                          </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corFVA, fontSize: 10 }}>
-                            {fva == null ? '—' : `${fva >= 0 ? '+' : ''}${fva.toFixed(1).replace('.', ',')} pp`}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                  {/* Totalizador */}
-                  {(() => {
-                    const rows  = d.historico_12m || [];
-                    // Vendido total = TODOS os meses (incluindo sem_meta)
-                    const totV  = rows.reduce((s: number, r: any) => s + (r.vendido_cx || 0), 0);
-                    // Métricas de acurácia só sobre meses com meta válida
-                    const rowsComMeta = rows.filter((r: any) => !r.sem_meta && r.meta_cx != null && r.meta_cx > 0);
-                    const totM  = rowsComMeta.reduce((s: number, r: any) => s + r.meta_cx, 0);
-                    const totD  = rowsComMeta.reduce((s: number, r: any) => s + r.delta_cx, 0);
-                    const totVMeta = rowsComMeta.reduce((s: number, r: any) => s + r.vendido_cx, 0);
-                    const biasT = totVMeta > 0 ? totD / totVMeta * 100 : 0;
-                    const wmT   = totVMeta > 0 ? Math.abs(totD) / totVMeta * 100 : 0;
-                    const corBT = biasT > 15 ? '#e11d48' : biasT < -15 ? '#2563eb' : '#059669';
-                    const corWT = wmT <= 20 ? '#059669' : wmT <= 35 ? '#d97706' : '#e11d48';
-                    // Acumulado IA — só sobre meses com dado de IA E com meta
-                    const rowsIA = rowsComMeta.filter((r: any) => r.ia_cx != null);
-                    const totIA  = rowsIA.reduce((s: number, r: any) => s + (r.ia_cx || 0), 0);
-                    const totVIA = rowsIA.reduce((s: number, r: any) => s + r.vendido_cx, 0);
-                    const biasIA = totVIA > 0 ? (totIA - totVIA) / totVIA * 100 : null;
-                    const wmIA   = biasIA != null ? Math.abs(biasIA) : null;
-                    const corBIA = biasIA == null ? '#94a3b8' : biasIA > 15 ? '#e11d48' : biasIA < -15 ? '#2563eb' : '#059669';
-                    const corWIA = wmIA == null ? '#94a3b8' : wmIA <= 20 ? '#059669' : wmIA <= 35 ? '#d97706' : '#e11d48';
-                    // FVA acumulado (media simples dos meses com dado)
-                    const fvaRows = rowsComMeta.filter((r: any) => r.fva_pct != null);
-                    const fvaAcc  = fvaRows.length > 0
-                      ? fvaRows.reduce((s: number, r: any) => s + r.fva_pct, 0) / fvaRows.length
-                      : null;
-                    const corFVA = fvaAcc == null ? '#94a3b8' : fvaAcc > 0 ? '#6366f1' : fvaAcc < 0 ? '#7c3aed' : '#64748b';
-                    return (
-                      <tfoot>
-                        <tr style={{ background: '#f0f9ff', borderTop: '2px solid #bae6fd' }}>
-                          <td style={{ padding: '7px 12px', fontWeight: 800, fontSize: 11, color: '#0284c7' }}>Acumulado</td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800 }}>
-                            {new Intl.NumberFormat('pt-BR').format(totV)}
-                          </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800 }}>
-                            {new Intl.NumberFormat('pt-BR').format(totM)}
-                          </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: '#7c3aed' }}>
-                            {rowsIA.length > 0 ? new Intl.NumberFormat('pt-BR').format(Math.round(totIA)) : '—'}
-                          </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corBT }}>
-                            {biasT >= 0 ? '+' : ''}{biasT.toFixed(1).replace('.', ',')}%
-                          </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corWT }}>
-                            {wmT.toFixed(1).replace('.', ',')}%
-                          </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corBIA }}>
-                            {biasIA == null ? '—' : `${biasIA >= 0 ? '+' : ''}${biasIA.toFixed(1).replace('.', ',')}%`}
-                          </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corWIA }}>
-                            {wmIA == null ? '—' : `${wmIA.toFixed(1).replace('.', ',')}%`}
-                          </td>
-                          <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 800, color: corFVA, fontSize: 10 }}>
-                            {fvaAcc == null ? '—' : `${fvaAcc >= 0 ? '+' : ''}${fvaAcc.toFixed(1).replace('.', ',')} pp`}
-                          </td>
-                        </tr>
-                      </tfoot>
-                    );
-                  })()}
-                </table>
-              </div>
-            </div>
-          )}
+          {/* Tabela de Acurácia dos últimos meses foi removida daqui — a
+              avaliação do Planejador de Demanda (bloco acima, no topo do
+              painel) já cobre esta análise em texto, gerada pelo agente
+              a cada ciclo novo. */}
 
           {/* ── 3 BLOCOS ── */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 gap-4">
 
-            {/* BLOCO A — Plano vs Ano anterior · mês a mês */}
-            {comps.length > 0 && (
-              <div className="rounded-xl bg-white border border-slate-100 p-4">
-                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-3">
-                  Plano vs ano anterior
-                </div>
-                <div>
-                  {comps.map((comp: any, idx: number) => {
-                    const delta = comp.ano_ant_cx > 0
-                      ? (comp.final_cx - comp.ano_ant_cx) / comp.ano_ant_cx * 100
-                      : null;
-                    return (
-                      <div key={comp.mes_foco || idx}
-                        className={`py-2.5 ${idx < comps.length - 1 ? 'border-b border-slate-100' : ''}`}>
-                        <div className="text-[10px] font-black text-indigo-600 mb-1">{comp.mes_label}</div>
-                        <div className="flex items-baseline justify-between gap-2">
-                          <div>
-                            <div className="text-[9px] text-slate-400 font-bold">Meta</div>
-                            <div className="text-base font-black text-slate-900">{fmtCx(comp.final_cx)} cx</div>
-                          </div>
-                          {comp.ano_ant_cx > 0 && (
-                            <div className="text-right">
-                              <div className="text-[9px] text-slate-400 font-bold">Ano ant.</div>
-                              <div className="text-sm font-bold text-slate-500">{fmtCx(comp.ano_ant_cx)} cx</div>
-                              {delta != null && (
-                                <div className={`text-[11px] font-black ${delta >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
-                                  {sinal(delta)}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* BLOCO B — Top SKUs da categoria */}
+            {/* BLOCO B — Top SKUs da categoria (único bloco que sobrou;
+                Plano vs Ano Anterior e Trajetória plurianual foram
+                removidos pelo mesmo motivo da tabela de Acurácia acima) */}
             {d.composicao ? (
               <div className="rounded-xl bg-white border border-slate-100 p-4">
                 <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
@@ -495,43 +319,6 @@ export default function DossieInferior({
                 </div>
               </div>
             ) : null}
-
-            {/* BLOCO C — Trajetória plurianual */}
-            {d.plurianual && (
-              <div className="rounded-xl bg-white border border-slate-100 p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
-                    Trajetória · {d.plurianual.periodo_label || 'anual'}
-                  </div>
-                  <div className="flex items-center gap-2 text-[10px] font-bold">
-                    <span className="flex items-center gap-0.5 text-slate-500">Vol {tendIcon(d.plurianual.tendencia_volume)}</span>
-                    <span className="flex items-center gap-0.5 text-slate-500">PMV {tendIcon(d.plurianual.tendencia_pmv)}</span>
-                  </div>
-                </div>
-                {d.plurianual.alerta_historico && (
-                  <div className="mb-2 flex items-center gap-1.5 text-[10px] font-bold text-amber-700 bg-amber-50 rounded px-2 py-1">
-                    <AlertTriangle className="w-3 h-3 shrink-0" /> {d.plurianual.alerta_historico}
-                  </div>
-                )}
-                <div>
-                  <div className="grid grid-cols-4 gap-1 px-1 text-[9px] font-black uppercase tracking-wider text-slate-300 mb-0.5">
-                    <div>Ano</div><div className="text-right">Vol</div>
-                    <div className="text-right">PMV</div><div className="text-right">Cli</div>
-                  </div>
-                  {(d.plurianual.anos || []).slice(-4).map((a: any, i: number, arr: any[]) => {
-                    const ehUlt = i >= arr.length - 2;
-                    return (
-                      <div key={a.ano} className={`grid grid-cols-4 gap-1 px-1 py-1 rounded text-[11px] ${ehUlt ? 'bg-slate-50 font-bold' : 'opacity-60'}`}>
-                        <div className="text-slate-500">{a.ano}</div>
-                        <div className="text-right text-slate-700">{fmtCx(a.vendido_cx)}</div>
-                        <div className="text-right text-slate-700">{a.pmv?.toFixed(0)}</div>
-                        <div className="text-right text-slate-400">{a.razoes_sociais}</div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
           </div>
 
         </div>

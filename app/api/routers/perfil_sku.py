@@ -871,30 +871,42 @@ def serie_dossie(db: Session, sku: str, ciclo_ativo: str, meses_futuros=None,
                 linha["ia_rs"]    = round(float(p_ativo.ia_rs or 0), 2)
                 linha["final_rs"] = _meta_rs(p_ativo, coluna_meta)
         else:
-            # Meses passados ou futuros fora da janela ativa:
-            # Para meses PASSADOS: usa ciclo_fonte_do_mes (M-2 histórico)
-            # Para meses FUTUROS fora da janela (ex: set/26 no ciclo 08/2026):
-            # usa o ciclo ativo mesmo — são previsões válidas para visualização,
-            # mas não entram em BIAS nem acurácia (eh_futuro=True).
-            if md >= mes_atual:
-                # Mês futuro fora da janela ativa — tenta ciclo ativo
-                p_fut = prev_idx.get((ciclo_ativo, key))
-                if p_fut and (p_fut.ia is not None or p_fut.final is not None):
-                    linha["ia_cx"]    = int(p_fut.ia or 0)
-                    linha["final_cx"] = _meta_cx(p_fut, coluna_meta)  # pode ser None
-                    linha["ia_rs"]    = round(float(p_fut.ia_rs or 0), 2)
-                    linha["final_rs"] = _meta_rs(p_fut, coluna_meta)
-            else:
-                # Mês passado: M-2 histórico (vol_final — o compromisso original)
-                cf = ciclo_fonte_do_mes(md)
-                p_hist = prev_idx.get((cf, key))
-                if p_hist and p_hist.ia is not None:
-                    linha["ia_cx"] = int(p_hist.ia or 0)
-                    linha["ia_rs"] = round(float(p_hist.ia_rs or 0), 2)
-                    linha["ciclo_fonte"] = cf
-                if p_hist and p_hist.final is not None:
-                    linha["final_cx"] = int(p_hist.final) if p_hist.final is not None else None
-                    linha["final_rs"] = round(float(p_hist.final_rs or 0), 2)
+            # Meses fora da janela ativa: passados, o mês corrente, ou o mês
+            # seguinte. A regra M-2 é UNIFORME nos três casos — não existe
+            # "mês corrente usa o ciclo ativo direto".
+            #
+            # BUG CORRIGIDO (achado por inspeção visual do gráfico: ago/26 e
+            # set/26 apareciam sem meta nem IA): antes deste fix, meses com
+            # md >= mes_atual (incluindo o próprio mês corrente) buscavam em
+            # prev_idx.get((ciclo_ativo, key)) — o ciclo ATIVO. Isso fazia
+            # sentido ANTES da Fase 2, quando o ciclo ativo gravava M+0..M+4
+            # e portanto tinha linha própria para o mês corrente e o seguinte.
+            #
+            # Depois da Fase 2 (trava HORIZ_DECISAO = M+2..M+4, ver
+            # app/core/constants.py), o ciclo ativo NUNCA MAIS grava M+0 nem
+            # M+1 — essas linhas simplesmente não existem mais sob o ciclo
+            # ativo. O lookup em (ciclo_ativo, key) para o mês corrente e o
+            # seguinte sempre retornava None, e a meta/IA sumia do gráfico
+            # exatamente nos dois meses mais recentes. Ninguém pegou isso na
+            # validação dos marts porque o dossiê não foi migrado (é consulta
+            # pontual, não precisava) — mas herdou o efeito colateral da
+            # limpeza mesmo assim.
+            #
+            # A correção: usar ciclo_fonte_do_mes(md) sempre, igual já era
+            # feito para meses passados. Para ago/2026, isso resolve para
+            # 06/2026 (mes - 2); para set/2026, resolve para 07/2026 — que é
+            # exatamente onde o forecaster gravou a previsão M+2 daqueles
+            # meses, e é exatamente o compromisso que deve ser comparado
+            # contra o realizado quando o mês fechar.
+            cf = ciclo_fonte_do_mes(md)
+            p_hist = prev_idx.get((cf, key))
+            if p_hist and p_hist.ia is not None:
+                linha["ia_cx"] = int(p_hist.ia or 0)
+                linha["ia_rs"] = round(float(p_hist.ia_rs or 0), 2)
+                linha["ciclo_fonte"] = cf
+            if p_hist and p_hist.final is not None:
+                linha["final_cx"] = int(p_hist.final) if p_hist.final is not None else None
+                linha["final_rs"] = round(float(p_hist.final_rs or 0), 2)
 
         # LINHA B — ciclo ANTERIOR como referência.
         # Regra: só mostra nos meses da JANELA ATIVA do ciclo corrente

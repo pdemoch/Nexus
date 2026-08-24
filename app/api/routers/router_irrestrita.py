@@ -195,17 +195,22 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_irrestrita))
 
     # ── Monta árvore ──────────────────────────────────────────────────────
     tree: dict = {}
-    tot: dict = {mi: {"ia": 0, "topdown": 0, "bottomup": 0, "fat_bu": 0.0} for mi in meses_iso}
+    tot: dict = {mi: {"ia": 0, "topdown": 0, "bottomup": 0, "fat_bu": 0.0,
+                       "cx_ap": 0, "rs_ap": 0.0} for mi in meses_iso}
 
-    # Totais do ano anterior por mês — soma direta de realizado_ap (todos os SKUs)
-    for m in meses:
-        mi = m.strftime("%Y-%m-%d")
-        tot[mi]["cx_ap"] = sum(
-            v[mi]["cx"] for v in realizado_ap.values() if mi in v
-        )
-        tot[mi]["rs_ap"] = round(sum(
-            v[mi]["rs"] for v in realizado_ap.values() if mi in v
-        ), 2)
+    # NOTA: os totais de "real. ano ant." (cx_ap / rs_ap) são acumulados
+    # DENTRO do loop abaixo, célula por célula — igual ia/topdown/bottomup —
+    # em vez de somados direto de realizado_ap.values() antes do loop.
+    #
+    # BUG CORRIGIDO: a versão anterior somava TODO realizado_ap.values(),
+    # que contém qualquer SKU com venda no fato_vendas naquele mês do ano
+    # passado — incluindo os ~393 SKUs descontinuados/inativos do portfólio
+    # (dim_produtos tem 505 SKUs no total, só 112 ativos). O card comparava
+    # "Comercial" (só SKUs ativos do ciclo, via plano) contra "real. ano
+    # ant." (a empresa inteira, histórico completo) — inflando o valor do
+    # ano anterior de forma sistemática. Cada CÉLULA individual da tabela
+    # já buscava certo (realizado_ap.get(r.sku, ...) só para SKUs de
+    # `plano`); só o total do card estava fora de escopo.
 
     for r in plano:
         ia  = int(r.ia or 0)
@@ -218,19 +223,28 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_irrestrita))
         sk  = seg["skus"].setdefault(r.sku, {
             "sku": r.sku, "descricao": r.descricao, "meses": {}
         })
+        realizado_ap_cel = realizado_ap.get(r.sku, {}).get(r.mes)
         sk["meses"][r.mes] = {
             "ia":          ia,
             "topdown":     td,
             "bottomup":    bu,
             "pmv":         round(pmv, 2),
             "orcamento":   orc_idx.get(r.sku, {}).get(r.mes),
-            "realizado_ap": realizado_ap.get(r.sku, {}).get(r.mes),
+            "realizado_ap": realizado_ap_cel,
             # realizado_ap = {"cx": int, "rs": float} — valor real do ano passado
         }
         tot[r.mes]["ia"]       += ia
         tot[r.mes]["topdown"]  += td
         tot[r.mes]["bottomup"] += bu
         tot[r.mes]["fat_bu"]   += bu * pmv
+        # Mesmo escopo do card "Comercial": só soma se o SKU está em plano
+        # (ativo, faz parte do ciclo). Nunca lê realizado_ap.values() direto.
+        if realizado_ap_cel:
+            tot[r.mes]["cx_ap"] += realizado_ap_cel["cx"]
+            tot[r.mes]["rs_ap"] += realizado_ap_cel["rs"]
+
+    for mi in tot:
+        tot[mi]["rs_ap"] = round(tot[mi]["rs_ap"], 2)
 
     # Serializa
     categorias = []
