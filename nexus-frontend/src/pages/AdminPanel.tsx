@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import axios from 'axios';
 import { 
-  Settings, RefreshCw, Terminal, Play, ShieldAlert, Loader2, Download, 
+  Settings, RefreshCw, Terminal, Play, ShieldAlert, Loader2, Download, DollarSign,
   UserPlus, Check, X, Unlock, Calendar, Users, KeyRound, Database, Shield, History, Search, ArrowRight, TrendingUp, TrendingDown, Trash2, BrainCircuit 
 } from 'lucide-react';
 
@@ -16,6 +16,10 @@ export default function AdminPanel() {
   const [logs, setLogs] = useState<string[]>([]);
   const [isPipelineRunning, setIsPipelineRunning] = useState(false);
   const [isRecargaTotal, setIsRecargaTotal] = useState(false);
+  // Pipeline Financeiro (estado independente do S&OP)
+  const [logsFinanceiro, setLogsFinanceiro]             = useState<string[]>([]);
+  const [isFinanceiroRunning, setIsFinanceiroRunning]   = useState(false);
+  const [isFinanceiroRecarga, setIsFinanceiroRecarga]   = useState(false);
   const terminalScrollRef = useRef<HTMLDivElement>(null);
 
   // ESTADOS DE ACESSOS E USUÁRIOS
@@ -97,6 +101,50 @@ export default function AdminPanel() {
 
     return () => clearInterval(interval);
   }, [fetchData]);
+
+  // Polling financeiro — mesmo intervalo de 3s
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const res = await axios.get('/api/v1/financeiro/status');
+        setLogsFinanceiro(res.data.logs || []);
+        setIsFinanceiroRunning(res.data.is_running);
+        if (!res.data.is_running) setIsFinanceiroRecarga(false);
+      } catch(e) {}
+    }, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleFinanceiroAtualizar = async () => {
+    if (isFinanceiroRunning) return;
+    setIsFinanceiroRunning(true);
+    setLogsFinanceiro(['[FINANCEIRO] Iniciando atualizacao dos ultimos 3 meses...']);
+    try {
+      await axios.post('/api/v1/financeiro/pipeline');
+    } catch(e: any) {
+      setLogsFinanceiro([e?.response?.data?.detail || 'Erro ao iniciar atualizacao financeira.']);
+      setIsFinanceiroRunning(false);
+    }
+  };
+
+  const handleFinanceiroRecarga = async () => {
+    if (isFinanceiroRunning) return;
+    const ok = window.confirm(
+      'Recarga Total Financeira: extraira todo o historico desde jan/2023.\n' +
+      'Operacao longa (pode levar varios minutos). Confirma?'
+    );
+    if (!ok) return;
+    setIsFinanceiroRunning(true);
+    setIsFinanceiroRecarga(true);
+    setLogsFinanceiro(['[FINANCEIRO] Iniciando recarga total desde jan/2023...']);
+    try {
+      await axios.post('/api/v1/financeiro/pipeline/recarga');
+    } catch(e: any) {
+      setLogsFinanceiro([e?.response?.data?.detail || 'Erro ao iniciar recarga financeira.']);
+      setIsFinanceiroRunning(false);
+      setIsFinanceiroRecarga(false);
+    }
+  };
 
   const handleRunPipeline = async () => {
     const msgConfirmacao = `⚠️ EXECUÇÃO DO MOTOR DE DADOS:
@@ -464,6 +512,62 @@ Confirma a RECARGA TOTAL?`
                             )}
                         </div>
                     </div>
+                </div>
+            </div>
+        )}
+
+        {/* PIPELINE FINANCEIRO - mesmo padrao visual do Pipeline S&OP */}
+        {activeTab === 'motor' && (
+            <div className="bg-slate-950 rounded-[32px] border border-slate-800 flex flex-col overflow-hidden mt-6" style={{ minHeight: 260 }}>
+                <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between flex-shrink-0 flex-wrap gap-3">
+                    <div className="flex items-center gap-3">
+                        <DollarSign className={`w-4 h-4 text-violet-400 ${isFinanceiroRunning ? 'animate-pulse' : ''}`} />
+                        <span className="text-xs font-black text-slate-400 uppercase tracking-widest">Dados Financeiros - Gobi API</span>
+                    </div>
+                    <div className="flex gap-2">
+                        {/* Recarga Total Financeira */}
+                        <button
+                            onClick={handleFinanceiroRecarga}
+                            disabled={isFinanceiroRunning || isPipelineRunning}
+                            title="Extrai historico completo desde jan/2023. Operacao longa."
+                            className="flex items-center gap-2 bg-rose-600 hover:bg-rose-500 text-white px-4 py-2.5 rounded-xl text-xs font-black tracking-widest uppercase transition-all shadow-[0_0_16px_rgba(225,29,72,0.2)] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap border border-rose-500"
+                        >
+                            <ShieldAlert className="w-3.5 h-3.5" />
+                            Recarga 2023+
+                        </button>
+                        {/* Atualizacao rolling 3 meses */}
+                        <button
+                            onClick={handleFinanceiroAtualizar}
+                            disabled={isFinanceiroRunning || isPipelineRunning}
+                            className="flex items-center gap-2 bg-violet-600 hover:bg-violet-500 text-white px-5 py-2.5 rounded-xl text-xs font-black tracking-widest uppercase transition-all shadow-[0_0_16px_rgba(124,58,237,0.25)] disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                        >
+                            {isFinanceiroRunning
+                                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Processando...</>
+                                : <><RefreshCw className="w-3.5 h-3.5" /> Atualizar (3 meses)</>
+                            }
+                        </button>
+                    </div>
+                </div>
+
+                {isFinanceiroRecarga && (
+                    <div className="mx-6 mt-4 flex items-center gap-3 bg-rose-950/60 border border-rose-800 rounded-xl px-4 py-3 flex-shrink-0">
+                        <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
+                        <p className="text-[11px] font-bold text-rose-300 leading-snug">
+                            Recarga financeira em andamento — extraindo historico completo desde jan/2023. Nao feche esta janela.
+                        </p>
+                    </div>
+                )}
+
+                <div className="flex-1 overflow-y-auto font-mono text-xs text-violet-400/90 p-6 space-y-1 custom-scrollbar">
+                    {logsFinanceiro.length === 0 ? (
+                        <div className="h-full flex items-center justify-center text-slate-800 font-bold uppercase tracking-widest">Aguardando Execucao...</div>
+                    ) : (
+                        logsFinanceiro.map((log, i) => (
+                            <div key={i} className={`${log.includes('ERRO') ? 'text-rose-400' : log.includes('OK') || log.includes('concluida') ? 'text-cyan-400' : log.includes('RECARGA') ? 'text-rose-300' : 'text-violet-400/80'} py-0.5 border-l-2 border-slate-800 pl-3 break-words`}>
+                                {log}
+                            </div>
+                        ))
+                    )}
                 </div>
             </div>
         )}
