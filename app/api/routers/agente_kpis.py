@@ -633,6 +633,28 @@ IMPACTO FINANCEIRO (campos novos)
     Nenhum dos dois "virou nota fiscal": sao volumes hipoteticos que nunca
     foram vendidos (excesso) ou nunca foram previstos (subplano).
 
+  REGRA ANTI-RACIONALIZACAO — se voce vai citar vl_excesso ou vl_subplano
+    de um SKU especifico, os tres componentes (qt_plano, qt_pedido, pmv) DEVEM
+    vir do JSON de entrada, NAO de memoria ou estimativa propria.
+    Antes de escrever a frase, confira mentalmente: gap × pmv bate com o valor
+    do campo no JSON? Se nao bater, cite apenas o valor final do campo e omita
+    a conta — nao invente premissas para fazer a conta parecer consistente.
+
+    ERRADO (caso real detectado):
+      "plano de 38.859 cx contra 7.862 vendidos, excesso de R$ 1.760.997
+       calculado como diferenca x PMV de R$ 48,65"
+      → 30.997 × 48,65 = R$ 1.508.004, NAO R$ 1.760.997. A conta nao fecha.
+      → Na fonte: plano era 45.437 cx, PMV era R$ 46,87. O modelo inventou
+        premissas plausíveis mas erradas para justificar um numero correto.
+
+    CERTO — quando os tres campos estao no JSON e a conta fecha:
+      "plano de 45.437 cx contra 7.862 vendidos (gap de 37.575 cx),
+       excesso de R$ 1.761.000 (37.575 × R$ 46,87)"
+
+    CERTO — quando os campos de detalhe nao estao disponiveis:
+      "excesso de R$ 1.761.000 registrado no período"
+      (sem descrever a conta — melhor omitir do que inventar)
+
   REGRA DE CONSISTENCIA — excesso, subplano e BIAS tem que contar a MESMA
   historia. Antes de escrever qualquer frase interpretativa sobre excesso ou
   subplano, compare os dois valores e confira contra o sinal do BIAS:
@@ -726,9 +748,13 @@ ESTRUTURA (700 a 900 palavras, prosa densa):
 
 6. IMPACTO FINANCEIRO
    vl_corte (receita perdida, valor DIRETO do ERP — cite sem formula).
-   vl_excesso e vl_subplano (com a formula por SKU-mes). Total e distribuicao
-   por categoria. Ao comentar qual dos dois domina numa categoria, aplique a
-   regra de consistencia com o BIAS da METODOLOGIA antes de escrever.
+   vl_excesso e vl_subplano: cite o valor do campo. Se quiser descrever a
+   conta (gap × PMV), verifique primeiro que qt_plano, qt_pedido e pmv do
+   JSON multiplicados fecham com o campo — se nao fechar, cite so o valor
+   final sem a conta. Nunca invente premissas para fazer a conta parecer
+   consistente. Total e distribuicao por categoria. Ao comentar qual dos
+   dois domina numa categoria, aplique a regra de consistencia com o BIAS
+   da METODOLOGIA antes de escrever.
 
 7. ATENDIMENTO E ORIGEM DO CORTE
    Fill rate do portfolio e evolucao mes a mes. Maior corte por categoria.

@@ -397,7 +397,11 @@ REGRAS INEGOCIAVEIS
   abreviar, traduzir ou padronizar.
 - vl_corte NAO tem formula: e soma direta do ERP. vl_excesso e vl_subplano SAO calculados
   por (SKU, mes) — confira o sinal contra o BIAS antes de qualificar como excesso ou falta
-  (ver METODOLOGIA).
+  (ver METODOLOGIA). Se quiser descrever a conta (gap × PMV), verifique que os tres
+  componentes do JSON (qt_plano, qt_pedido, pmv) multiplicados fecham com o campo — se
+  nao fecharem ou se os componentes nao estiverem no JSON, cite so o valor final sem
+  descrever a conta. NUNCA invente premissas (plano, vendido, PMV) para fazer a conta
+  parecer consistente com o total.
 - qt_corte_transferencia / vl_corte_transferencia: parte do corte que e transferencia de
   codigo promocional (COPA), nao ruptura real — o cliente recebeu o produto sob outro
   codigo. Quando for parte relevante do corte do item, diga isso em vez de tratar como
