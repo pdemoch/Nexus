@@ -14,6 +14,7 @@ import SupplyReviewArena from './pages/SupplyReviewArena';   // -> Supply Review
 import GlobalDashboard from './pages/GlobalDashboard';       // -> Demanda Final
 import NPDArena from './pages/NPDArena';
 import AuditoriaArena from './pages/AuditoriaArena';         // KPIs
+import FinanceiroArena from './pages/FinanceiroArena'; 
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
@@ -86,6 +87,7 @@ export default function App() {
       case 'supply': return <SupplyReviewArena />;
       case 'npd': return <NPDArena />;
       case 'auditoria': return <AuditoriaArena />;
+      case 'financeiro': return <FinanceiroArena />;
       case 'admin': return <AdminPanel />;
       default: return <AdminPanel />;
     }
