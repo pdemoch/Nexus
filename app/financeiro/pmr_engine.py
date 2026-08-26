@@ -8,39 +8,32 @@ Três métricas de PMR, todas calculadas como média ponderada por valor:
   PMR = SUM( dias_i * e1_valor_i ) / SUM( e1_valor_i )
 
 Datas de referência:
-  pmr_pagamento   -> e5_data_ponderada (data de liquidação na SE5)
-  pmr_vencimento  -> e1_vencrea        (vencimento real, SE1)
-  pmr_cond_pag    -> e1_vencto         (vencimento da condição de pagamento, SE1)
+  pmr_pagamento   → e5_data_ponderada (data de liquidação na SE5)
+  pmr_vencimento  → e1_vencrea        (vencimento real, SE1)
+  pmr_cond_pag    → e1_vencto         (vencimento da condição de pagamento, SE1)
 
 Regra de negócio crítica:
   As três métricas usam APENAS notas que tenham movimentação bancária
   registrada (INNER JOIN com SE5). Notas ainda não liquidadas são
   excluídas do cálculo e do denominador.
 
+  Motivação: comparar PMR Pagamento vs PMR Vencimento vs PMR Cond.Pag
+  sobre a mesma base de notas é a única forma de o delta entre elas
+  ser interpretável — se as bases diferissem, a comparação seria inválida.
+
 Múltiplos SE5 por Chave_E5 (decisão B — data ponderada por valor):
   Um único título pode ter dois registros de liquidação no mesmo dia
-  ou em datas diferentes. Usamos a média ponderada das datas pelos
-  valores, representando a "data efetiva de recebimento".
+  (caixa + banco, por ex.), ou em datas diferentes (pagamento parcelado).
+  Em ambos os casos, usamos a média ponderada das datas pelos valores,
+  o que representa a "data efetiva de recebimento" do valor total.
 
 Cadeia de joins:
-  SF2 ------- SE1   (via Chave_F2, INNER)
-  SE1 ------- SA1   (via Chave_A1, LEFT)
-  SE1 ------- SE5   (via Chave_E5, INNER: exclui não liquidadas)
-
-=====================================================================
-PERFORMANCE (2 correções)
-=====================================================================
-1. _agregar_se5 VETORIZADO: o loop Python grupo-a-grupo sobre ~406k
-   linhas custava ~140s. groupby().agg() roda em <1s, idêntico.
-
-2. CACHE EM MEMÓRIA de SE1, SE5-agregado e SA1: carregam TODO o
-   histórico do S3 (~9s) e só mudam quando o pipeline roda. Cache no
-   processo, invalidado por invalidar_cache() (chamada pelo router
-   após executar_pipeline). Cold: ~10s. Warm: <0.1s.
+  SF2 ─────── SE1   (via Chave_F2, INNER: toda nota tem pelo menos 1 SE1)
+  SE1 ─────── SA1   (via Chave_A1, LEFT: enriquece regional/nome)
+  SE1 ─────── SE5   (via Chave_E5, INNER: exclui não liquidadas)
 """
 
 import logging
-import threading
 from datetime import date
 from typing import Any
 
@@ -59,59 +52,7 @@ _EPOCH = pd.Timestamp("1970-01-01")
 
 
 # =====================================================================
-# CACHE EM MEMÓRIA — SE1, SE5 agregado, SA1
-# =====================================================================
-
-_cache_lock = threading.Lock()
-_cache: dict[str, Any] = {"se1": None, "se5_agg": None, "sa1": None}
-
-
-def invalidar_cache() -> None:
-    """
-    Zera o cache de SE1/SE5/SA1. DEVE ser chamada após o pipeline
-    financeiro atualizar os parquets no S3, senão as telas servem
-    dados desatualizados até o restart do processo.
-    """
-    with _cache_lock:
-        _cache["se1"] = None
-        _cache["se5_agg"] = None
-        _cache["sa1"] = None
-    logger.info("PMR cache: SE1/SE5_agg/SA1 invalidados.")
-
-
-def _get_se1() -> pd.DataFrame:
-    """SE1 (contas a receber) completo, com cache."""
-    with _cache_lock:
-        if _cache["se1"] is None:
-            logger.info("PMR cache: carregando SE1 do S3 (cold)...")
-            _cache["se1"] = carregar_todos_mensal("contas_receber")
-        return _cache["se1"]
-
-
-def _get_se5_agg() -> pd.DataFrame:
-    """
-    SE5 (movimentação bancária) já AGREGADO por Chave_E5, com cache.
-    A agregação é o passo mais caro; cacheá-la evita recalcular.
-    """
-    with _cache_lock:
-        if _cache["se5_agg"] is None:
-            logger.info("PMR cache: carregando + agregando SE5 do S3 (cold)...")
-            se5_raw = carregar_todos_mensal("movimentacao_bancaria")
-            _cache["se5_agg"] = _agregar_se5(se5_raw)
-        return _cache["se5_agg"]
-
-
-def _get_sa1() -> pd.DataFrame:
-    """SA1 (cadastro de clientes) completo, com cache."""
-    with _cache_lock:
-        if _cache["sa1"] is None:
-            logger.info("PMR cache: carregando SA1 do S3 (cold)...")
-            _cache["sa1"] = carregar_clientes()
-        return _cache["sa1"]
-
-
-# =====================================================================
-# CORE — data ponderada dos registros SE5  (VETORIZADO)
+# CORE — data ponderada dos registros SE5
 # =====================================================================
 
 def _agregar_se5(se5: pd.DataFrame) -> pd.DataFrame:
@@ -121,40 +62,86 @@ def _agregar_se5(se5: pd.DataFrame) -> pd.DataFrame:
 
     data_pond = EPOCH + Timedelta( SUM(dias_i * valor_i) / SUM(valor_i) )
 
-    Registros com e5_valor <= 0 são descartados.
-
-    VETORIZADO: groupby().agg() em vez de loop Python. ~406k linhas em
-    <1s (antes ~140s). Resultado numérico idêntico.
+    Registros com e5_valor ≤ 0 são descartados (estornos ou zeros).
     """
-    cols_vazio = ["Chave_E5", "e5_data_pond", "e5_valor_total"]
     if se5.empty:
-        return pd.DataFrame(columns=cols_vazio)
+        return pd.DataFrame(columns=["Chave_E5", "e5_data_pond", "e5_valor_total"])
 
     se5 = se5.copy()
     se5["e5_data"] = pd.to_datetime(se5["e5_data"], errors="coerce")
     se5 = se5[se5["e5_data"].notna() & (se5["e5_valor"] > 0)]
 
     if se5.empty:
-        return pd.DataFrame(columns=cols_vazio)
+        return pd.DataFrame(columns=["Chave_E5", "e5_data_pond", "e5_valor_total"])
 
     se5["e5_dias"] = (se5["e5_data"] - _EPOCH).dt.days.astype(float)
-    se5["_num_pond"] = se5["e5_dias"] * se5["e5_valor"]
 
-    agg = (
-        se5.groupby("Chave_E5", sort=False)
-           .agg(_num_sum=("_num_pond", "sum"),
-                e5_valor_total=("e5_valor", "sum"))
-           .reset_index()
+    rows = []
+    for chave, g in se5.groupby("Chave_E5"):
+        total_val = g["e5_valor"].sum()
+        if total_val <= 0:
+            continue
+        dias_pond = float((g["e5_dias"] * g["e5_valor"]).sum() / total_val)
+        rows.append({
+            "Chave_E5":       chave,
+            "e5_data_pond":   _EPOCH + pd.Timedelta(days=dias_pond),
+            "e5_valor_total": total_val,
+        })
+
+    return pd.DataFrame(rows)
+
+
+# =====================================================================
+# VALOR CAIXA AR — cash recebido no período (SE5 × SE1 por e5_data)
+# =====================================================================
+
+def _valor_caixa_ar(
+    se5: pd.DataFrame,
+    se1: pd.DataFrame,
+    sa1: pd.DataFrame,
+    data_ini: date,
+    data_fim: date,
+    segmento: str = None,
+    regional: str = None,
+) -> float:
+    """
+    Soma de e5_valor da SE5 onde:
+      - e5_data está em [data_ini, data_fim]
+      - e5_valor > 0
+      - Chave_E5 existe na SE1 (é um recebível de cliente, não tesouraria)
+      - Chave_A1 do cliente atende aos filtros opcionais segmento/regional
+
+    Este valor representa o cash de AR efetivamente recebido no período
+    e é o número exibido no card global (ex: R$ 136 M para 2026 completo).
+    É independente do universo de f2_emissao do PMR.
+    """
+    if se5.empty or se1.empty:
+        return 0.0
+
+    s = se5.copy()
+    s["e5_data"]  = pd.to_datetime(s["e5_data"],  errors="coerce")
+    s["e5_valor"] = pd.to_numeric(s["e5_valor"],  errors="coerce")
+
+    chaves_se1 = set(se1["Chave_E5"].dropna().unique())
+
+    mask = (
+        (s["e5_data"] >= pd.Timestamp(data_ini))
+        & (s["e5_data"] <= pd.Timestamp(data_fim))
+        & (s["e5_valor"] > 0)
+        & s["Chave_E5"].isin(chaves_se1)
     )
+    s = s[mask].copy()
 
-    agg = agg[agg["e5_valor_total"] > 0].copy()
-    if agg.empty:
-        return pd.DataFrame(columns=cols_vazio)
+    # Filtros opcionais via SA1 — precisa do Chave_A1 da SE5
+    if (segmento or regional) and not sa1.empty and "Chave_A1" in s.columns:
+        sa1_d = sa1[["Chave_A1", "regional", "segmento"]].drop_duplicates("Chave_A1")
+        s = s.merge(sa1_d, on="Chave_A1", how="left")
+        if segmento:
+            s = s[s["segmento"].fillna("").str.upper() == segmento.upper()]
+        if regional:
+            s = s[s["regional"].fillna("").str.upper() == regional.upper()]
 
-    dias_pond = agg["_num_sum"] / agg["e5_valor_total"]
-    agg["e5_data_pond"] = _EPOCH + pd.to_timedelta(dias_pond, unit="D")
-
-    return agg[["Chave_E5", "e5_data_pond", "e5_valor_total"]]
+    return float(s["e5_valor"].sum())
 
 
 # =====================================================================
@@ -162,15 +149,19 @@ def _agregar_se5(se5: pd.DataFrame) -> pd.DataFrame:
 # =====================================================================
 
 def _pmr(df: pd.DataFrame, col_dias: str) -> float:
-    """PMR ponderado por e1_valor. Retorna 0.0 se denominador for zero."""
-    total = df["e1_valor"].sum()
+    """PMR ponderado por e5_valor_total (cash recebido, liquido de desconto).
+    Retorna 0.0 se denominador for zero."""
+    total = df["e5_valor_total"].sum()
     if total == 0:
         return 0.0
-    return float((df[col_dias] * df["e1_valor"]).sum() / total)
+    return float((df[col_dias] * df["e5_valor_total"]).sum() / total)
 
 
 def _calcular_dias(df: pd.DataFrame) -> pd.DataFrame:
-    """Adiciona as três colunas de dias ao DataFrame já joinado."""
+    """
+    Adiciona as três colunas de dias ao DataFrame já joinado.
+    Todos os dias são calculados como (data_ref - f2_emissao).days.
+    """
     df = df.copy()
     df["f2_emissao"]   = pd.to_datetime(df["f2_emissao"],   errors="coerce")
     df["e5_data_pond"] = pd.to_datetime(df["e5_data_pond"], errors="coerce")
@@ -181,6 +172,8 @@ def _calcular_dias(df: pd.DataFrame) -> pd.DataFrame:
     df["dias_vencimento"] = (df["e1_vencrea"]   - df["f2_emissao"]).dt.days
     df["dias_cond_pag"]   = (df["e1_vencto"]    - df["f2_emissao"]).dt.days
 
+    # Clipa negativos a zero (pagamentos antecipados são legítimos mas
+    # não devem diminuir o PMR — eles representam crédito, não atraso)
     df["dias_pagamento"]  = df["dias_pagamento"].clip(lower=0)
 
     return df[df["f2_emissao"].notna() & df["e5_data_pond"].notna()]
@@ -193,8 +186,9 @@ def _calcular_dias(df: pd.DataFrame) -> pd.DataFrame:
 def _carregar_base(data_ini: date, data_fim: date,
                    segmento: str = None, regional: str = None) -> pd.DataFrame:
     """
-    Monta a base analítica cruzando as quatro fontes.
-    SF2 é period-specific (carregado direto). SE1/SE5_agg/SA1 vêm do cache.
+    Monta a base analítica cruzando as quatro fontes do S3.
+    Retorna apenas registros de notas liquidadas (INNER com SE5).
+    Filtros opcionais: segmento e regional (aplicados após join com SA1).
     """
     sf2 = carregar_mensal("notas_saida", data_ini, data_fim)
     if sf2.empty:
@@ -203,8 +197,11 @@ def _carregar_base(data_ini: date, data_fim: date,
 
     logger.info("PMR: %d notas carregadas (%s -> %s)", len(sf2), data_ini, data_fim)
 
-    se1 = _get_se1()
-    sa1 = _get_sa1()
+    se1 = carregar_todos_mensal("contas_receber")
+    se5 = carregar_todos_mensal("movimentacao_bancaria")
+    sa1 = carregar_clientes()
+
+    valor_caixa = _valor_caixa_ar(se5, se1, sa1, data_ini, data_fim, segmento, regional)
 
     if se1.empty:
         logger.warning("PMR: contas_receber vazio no S3")
@@ -213,9 +210,7 @@ def _carregar_base(data_ini: date, data_fim: date,
     se1_f = se1[["Chave_F2", "Chave_E5", "e1_valor", "e1_vencto", "e1_vencrea", "Chave_A1"]].copy()
     se1_f = se1_f.drop_duplicates("Chave_F2")
 
-    # drop Chave_A1 do SF2 antes do merge: SE1 já traz Chave_A1 e a colisão
-    # geraria Chave_A1_x / Chave_A1_y, quebrando o merge seguinte com SA1
-    base = sf2.drop(columns=["Chave_A1"], errors="ignore").merge(se1_f, on="Chave_F2", how="inner")
+    base = sf2.merge(se1_f, on="Chave_F2", how="inner")
     logger.info("PMR: apos join SF2->SE1: %d registros", len(base))
 
     if not sa1.empty:
@@ -225,12 +220,13 @@ def _carregar_base(data_ini: date, data_fim: date,
         for col in ["a1_nome", "a1_cgc", "regional", "segmento"]:
             base[col] = None
 
+    # Filtros opcionais — aplicados antes do join com SE5 para reduzir volume
     if segmento:
         base = base[base["segmento"].fillna("").str.upper() == segmento.upper()]
     if regional:
         base = base[base["regional"].fillna("").str.upper() == regional.upper()]
 
-    se5_agg = _get_se5_agg()
+    se5_agg = _agregar_se5(se5)
     if se5_agg.empty:
         logger.warning("PMR: nenhum registro de movimentacao bancaria no S3")
         return pd.DataFrame()
@@ -239,7 +235,7 @@ def _carregar_base(data_ini: date, data_fim: date,
     logger.info("PMR: apos inner join com SE5: %d de %d notas (%d%% liquidadas)",
                 len(pago), len(base), int(len(pago) / max(len(base), 1) * 100))
 
-    return _calcular_dias(pago)
+    return _calcular_dias(pago), valor_caixa
 
 
 # =====================================================================
@@ -249,7 +245,7 @@ def _carregar_base(data_ini: date, data_fim: date,
 def calcular_pmr_global(data_ini: date, data_fim: date,
                         segmento: str = None, regional: str = None) -> dict[str, Any]:
     """Cards de topo: PMR global nos três critérios."""
-    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional)
+    base, valor_caixa = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional)
     if base.empty:
         return _resposta_vazia(data_ini, data_fim)
 
@@ -257,7 +253,7 @@ def calcular_pmr_global(data_ini: date, data_fim: date,
         "periodo":        {"data_ini": str(data_ini), "data_fim": str(data_fim)},
         "notas_base":     int(base["Chave_F2"].nunique()),
         "notas_pagas":    int(len(base)),
-        "valor_total":    round(float(base["e1_valor"].sum()), 2),
+        "valor_total":    round(valor_caixa, 2),
         "pmr_pagamento":  round(_pmr(base, "dias_pagamento"),  2),
         "pmr_vencimento": round(_pmr(base, "dias_vencimento"), 2),
         "pmr_cond_pag":   round(_pmr(base, "dias_cond_pag"),   2),
@@ -268,7 +264,7 @@ def calcular_pmr_global(data_ini: date, data_fim: date,
 def calcular_pmr_regional(data_ini: date, data_fim: date,
                           segmento: str = None) -> dict[str, Any]:
     """PMR detalhado por regional."""
-    base = _carregar_base(data_ini, data_fim, segmento=segmento)
+    base, _ = _carregar_base(data_ini, data_fim, segmento=segmento)
     if base.empty:
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "regionais": []}
 
@@ -291,18 +287,22 @@ def calcular_pmr_regional(data_ini: date, data_fim: date,
 def calcular_pmr_clientes(data_ini: date, data_fim: date,
                           segmento: str = None, regional: str = None,
                           limit: int = 50, offset: int = 0) -> dict[str, Any]:
-    """PMR por RAZAO SOCIAL (a1_cgc + a1_nome), paginado, ordenado por valor desc."""
-    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional)
+    """
+    PMR por RAZAO SOCIAL (a1_cgc + a1_nome), paginado, ordenado por valor_total desc.
+    Consolida todas as filiais/lojas do mesmo CNPJ em um único registro.
+    """
+    base, _ = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional)
     if base.empty:
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
                 "total": 0, "clientes": []}
 
     rows = []
+    # Agrupa por CNPJ (a1_cgc) + nome — consolida filiais do mesmo grupo
     chave_cols = ["a1_cgc", "a1_nome"]
     for chave, g in base.fillna({"a1_cgc": "SEM_CGC", "a1_nome": "SEM_NOME"}).groupby(chave_cols, dropna=False):
         cgc, nome = chave
-        reg  = g["regional"].mode().iloc[0]  if not g["regional"].isna().all() else "-"
-        seg  = g["segmento"].mode().iloc[0]  if not g["segmento"].isna().all() else "-"
+        reg  = g["regional"].mode().iloc[0]  if not g["regional"].isna().all() else "—"
+        seg  = g["segmento"].mode().iloc[0]  if not g["segmento"].isna().all() else "—"
         rows.append({
             "cgc":            str(cgc),
             "nome":           str(nome),
@@ -328,19 +328,17 @@ def calcular_pmr_clientes(data_ini: date, data_fim: date,
 def listar_filtros(data_ini: date, data_fim: date) -> dict[str, Any]:
     """Retorna os valores únicos de regional e segmento disponíveis no período."""
     sf2 = carregar_mensal("notas_saida", data_ini, data_fim)
-    sa1 = _get_sa1()
+    sa1 = carregar_clientes()
     if sf2.empty or sa1.empty:
         return {"regionais": [], "segmentos": []}
 
-    se1 = _get_se1()
+    se1 = carregar_todos_mensal("contas_receber")
     if se1.empty:
         return {"regionais": [], "segmentos": []}
 
     se1_f = se1[["Chave_F2", "Chave_A1"]].drop_duplicates("Chave_F2")
     sa1_d = sa1[["Chave_A1", "regional", "segmento"]].drop_duplicates("Chave_A1")
-    base  = (sf2.drop(columns=["Chave_A1"], errors="ignore")
-                .merge(se1_f, on="Chave_F2", how="inner")
-                .merge(sa1_d, on="Chave_A1", how="left"))
+    base  = sf2.merge(se1_f, on="Chave_F2", how="inner").merge(sa1_d, on="Chave_A1", how="left")
 
     regionais = sorted(base["regional"].dropna().unique().tolist())
     segmentos = sorted(base["segmento"].dropna().unique().tolist())
@@ -349,8 +347,11 @@ def listar_filtros(data_ini: date, data_fim: date) -> dict[str, Any]:
 
 def obter_dados_brutos(data_ini: date, data_fim: date,
                        segmento: str = None, regional: str = None) -> pd.DataFrame:
-    """Retorna o DataFrame linha a linha para exportacao Excel."""
-    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional)
+    """
+    Retorna o DataFrame linha a linha para exportacao Excel.
+    Inclui todas as variaveis que compoem o calculo do PMR.
+    """
+    base, _ = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional)
     if base.empty:
         return pd.DataFrame()
 
@@ -361,9 +362,11 @@ def obter_dados_brutos(data_ini: date, data_fim: date,
         "e5_data_pond", "e5_valor_total",
         "dias_pagamento", "dias_vencimento", "dias_cond_pag",
     ]
+    # Apenas colunas que existem no DataFrame
     cols_existentes = [c for c in cols if c in base.columns]
     df = base[cols_existentes].copy()
 
+    # Nomes amigáveis para o Excel
     rename = {
         "f2_filial":     "Filial",
         "f2_doc":        "Num. NF",
