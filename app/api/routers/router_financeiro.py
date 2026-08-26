@@ -157,6 +157,7 @@ def _run_pipeline(recarga_total: bool) -> None:
         _log(f"ERRO inesperado no pipeline: {e}")
         logger.exception("pipeline_financeiro falhou: %s", e)
     finally:
+        _engine().limpar_cache()
         FinanceiroState.pipeline_rodando  = False
         FinanceiroState.is_recarga_total  = False
 
