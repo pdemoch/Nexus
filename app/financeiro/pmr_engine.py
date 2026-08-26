@@ -8,34 +8,27 @@ Três métricas de PMR, todas calculadas como média ponderada por valor:
   PMR = SUM( dias_i * e1_valor_i ) / SUM( e1_valor_i )
 
 Datas de referência:
-  pmr_pagamento   → e5_data_ponderada (data de liquidação na SE5)
-  pmr_vencimento  → e1_vencrea        (vencimento real, SE1)
-  pmr_cond_pag    → e1_vencto         (vencimento da condição de pagamento, SE1)
+  pmr_pagamento   -> e5_data_ponderada (data de liquidação na SE5)
+  pmr_vencimento  -> e1_vencrea        (vencimento real, SE1)
+  pmr_cond_pag    -> e1_vencto         (vencimento da condição de pagamento, SE1)
 
 Regra de negócio crítica:
   As três métricas usam APENAS notas que tenham movimentação bancária
   registrada (INNER JOIN com SE5). Notas ainda não liquidadas são
   excluídas do cálculo e do denominador.
 
-  Motivação: comparar PMR Pagamento vs PMR Vencimento vs PMR Cond.Pag
-  sobre a mesma base de notas é a única forma de o delta entre elas
-  ser interpretável — se as bases diferissem, a comparação seria inválida.
-
-Múltiplos SE5 por Chave_E5 (decisão B — data ponderada por valor):
-  Um único título pode ter dois registros de liquidação no mesmo dia
-  (caixa + banco, por ex.), ou em datas diferentes (pagamento parcelado).
-  Em ambos os casos, usamos a média ponderada das datas pelos valores,
-  o que representa a "data efetiva de recebimento" do valor total.
-
 Cadeia de joins:
-  SF2 ─────── SE1   (via Chave_F2, INNER: toda nota tem pelo menos 1 SE1)
-  SE1 ─────── SA1   (via Chave_A1, LEFT: enriquece regional/nome)
-  SE1 ─────── SE5   (via Chave_E5, INNER: exclui não liquidadas)
+  SF2 ─── SE1   (via Chave_F2, INNER)
+  SE1 ─── SA1   (via Chave_A1, LEFT: enriquece regional/nome)
+  SE1 ─── SE5   (via Chave_E5, INNER: exclui não liquidadas)
+
+FIX de colisão: SF2 tambem carrega Chave_A1; descartada antes do merge
+com SE1 para nao gerar Chave_A1_x/_y e quebrar o join com SA1.
 """
 
 import logging
 from datetime import date
-from typing import Any
+from typing import Any, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -50,6 +43,9 @@ logger = logging.getLogger(__name__)
 
 _EPOCH = pd.Timestamp("1970-01-01")
 
+# Aceita filtro como string unica OU lista de strings
+FiltroValor = Optional[Union[str, list]]
+
 
 # =====================================================================
 # CORE — data ponderada dos registros SE5
@@ -58,11 +54,7 @@ _EPOCH = pd.Timestamp("1970-01-01")
 def _agregar_se5(se5: pd.DataFrame) -> pd.DataFrame:
     """
     Para cada Chave_E5, calcula a data de recebimento ponderada pelos
-    valores dos registros SE5 (decisão B).
-
-    data_pond = EPOCH + Timedelta( SUM(dias_i * valor_i) / SUM(valor_i) )
-
-    Registros com e5_valor ≤ 0 são descartados (estornos ou zeros).
+    valores dos registros SE5. Registros com e5_valor <= 0 descartados.
     """
     if se5.empty:
         return pd.DataFrame(columns=["Chave_E5", "e5_data_pond", "e5_valor_total"])
@@ -104,10 +96,7 @@ def _pmr(df: pd.DataFrame, col_dias: str) -> float:
 
 
 def _calcular_dias(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Adiciona as três colunas de dias ao DataFrame já joinado.
-    Todos os dias são calculados como (data_ref - f2_emissao).days.
-    """
+    """Adiciona as três colunas de dias ao DataFrame já joinado."""
     df = df.copy()
     df["f2_emissao"]   = pd.to_datetime(df["f2_emissao"],   errors="coerce")
     df["e5_data_pond"] = pd.to_datetime(df["e5_data_pond"], errors="coerce")
@@ -118,11 +107,26 @@ def _calcular_dias(df: pd.DataFrame) -> pd.DataFrame:
     df["dias_vencimento"] = (df["e1_vencrea"]   - df["f2_emissao"]).dt.days
     df["dias_cond_pag"]   = (df["e1_vencto"]    - df["f2_emissao"]).dt.days
 
-    # Clipa negativos a zero (pagamentos antecipados são legítimos mas
-    # não devem diminuir o PMR — eles representam crédito, não atraso)
     df["dias_pagamento"]  = df["dias_pagamento"].clip(lower=0)
 
     return df[df["f2_emissao"].notna() & df["e5_data_pond"].notna()]
+
+
+def _aplicar_filtro(base: pd.DataFrame, coluna: str, valor: FiltroValor) -> pd.DataFrame:
+    """
+    Filtra 'base' por 'coluna' aceitando str unica OU lista de strings.
+    Comparacao case-insensitive. Valor vazio/None nao filtra.
+    """
+    if not valor:
+        return base
+    col = base[coluna].fillna("").str.upper().str.strip()
+    if isinstance(valor, str):
+        alvos = [v.strip().upper() for v in valor.split(",") if v.strip()]
+    else:
+        alvos = [str(v).strip().upper() for v in valor if str(v).strip()]
+    if not alvos:
+        return base
+    return base[col.isin(alvos)]
 
 
 # =====================================================================
@@ -130,11 +134,13 @@ def _calcular_dias(df: pd.DataFrame) -> pd.DataFrame:
 # =====================================================================
 
 def _carregar_base(data_ini: date, data_fim: date,
-                   segmento: str = None, regional: str = None) -> pd.DataFrame:
+                   segmento: FiltroValor = None,
+                   regional: FiltroValor = None,
+                   cgc: FiltroValor = None) -> pd.DataFrame:
     """
     Monta a base analítica cruzando as quatro fontes do S3.
     Retorna apenas registros de notas liquidadas (INNER com SE5).
-    Filtros opcionais: segmento e regional (aplicados após join com SA1).
+    Filtros opcionais (str ou lista): segmento, regional, cgc.
     """
     sf2 = carregar_mensal("notas_saida", data_ini, data_fim)
     if sf2.empty:
@@ -151,11 +157,11 @@ def _carregar_base(data_ini: date, data_fim: date,
         logger.warning("PMR: contas_receber vazio no S3")
         return pd.DataFrame()
 
-    se1_f = se1[["Chave_F2", "Chave_E5", "e1_valor", "e1_vencto", "e1_vencrea", "Chave_A1"]].copy()
+    se1_f = se1[["Chave_F2", "Chave_E5", "e1_num", "e1_prefixo", "e1_parcela",
+                 "e1_valor", "e1_vencto", "e1_vencrea", "Chave_A1"]].copy()
     se1_f = se1_f.drop_duplicates("Chave_F2")
 
-    # FIX colisao de coluna: SF2 tambem carrega Chave_A1; se nao descartar,
-    # o merge com SE1 gera Chave_A1_x/_y e o join seguinte com SA1 quebra.
+    # FIX colisao: descarta Chave_A1 do SF2 antes do merge (canonica vem da SE1)
     base = sf2.drop(columns=["Chave_A1"], errors="ignore").merge(se1_f, on="Chave_F2", how="inner")
     logger.info("PMR: apos join SF2->SE1: %d registros", len(base))
 
@@ -166,11 +172,13 @@ def _carregar_base(data_ini: date, data_fim: date,
         for col in ["a1_nome", "a1_cgc", "regional", "segmento"]:
             base[col] = None
 
-    # Filtros opcionais — aplicados antes do join com SE5 para reduzir volume
-    if segmento:
-        base = base[base["segmento"].fillna("").str.upper() == segmento.upper()]
-    if regional:
-        base = base[base["regional"].fillna("").str.upper() == regional.upper()]
+    # Filtros opcionais (str ou lista) — antes do join com SE5
+    base = _aplicar_filtro(base, "segmento", segmento)
+    base = _aplicar_filtro(base, "regional", regional)
+    base = _aplicar_filtro(base, "a1_cgc",   cgc)
+
+    if base.empty:
+        return pd.DataFrame()
 
     se5_agg = _agregar_se5(se5)
     if se5_agg.empty:
@@ -189,17 +197,29 @@ def _carregar_base(data_ini: date, data_fim: date,
 # =====================================================================
 
 def calcular_pmr_global(data_ini: date, data_fim: date,
-                        segmento: str = None, regional: str = None) -> dict[str, Any]:
-    """Cards de topo: PMR global nos três critérios."""
-    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional)
+                        segmento: FiltroValor = None,
+                        regional: FiltroValor = None,
+                        cgc: FiltroValor = None) -> dict[str, Any]:
+    """
+    Cards de topo: PMR global nos três critérios.
+    Inclui 'valor_por_dia' = valor_total / dias_periodo (impacto de 1 dia de
+    PMR no capital de giro — ganho one-off de caixa por dia reduzido).
+    """
+    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, cgc=cgc)
     if base.empty:
         return _resposta_vazia(data_ini, data_fim)
 
+    valor_total = float(base["e1_valor"].sum())
+    dias_periodo = max((data_fim - data_ini).days, 1)
+    valor_por_dia = valor_total / dias_periodo
+
     return {
-        "periodo":        {"data_ini": str(data_ini), "data_fim": str(data_fim)},
+        "periodo":        {"data_ini": str(data_ini), "data_fim": str(data_fim),
+                           "dias_periodo": dias_periodo},
         "notas_base":     int(base["Chave_F2"].nunique()),
         "notas_pagas":    int(len(base)),
-        "valor_total":    round(float(base["e1_valor"].sum()), 2),
+        "valor_total":    round(valor_total, 2),
+        "valor_por_dia":  round(valor_por_dia, 2),
         "pmr_pagamento":  round(_pmr(base, "dias_pagamento"),  2),
         "pmr_vencimento": round(_pmr(base, "dias_vencimento"), 2),
         "pmr_cond_pag":   round(_pmr(base, "dias_cond_pag"),   2),
@@ -208,7 +228,7 @@ def calcular_pmr_global(data_ini: date, data_fim: date,
 
 
 def calcular_pmr_regional(data_ini: date, data_fim: date,
-                          segmento: str = None) -> dict[str, Any]:
+                          segmento: FiltroValor = None) -> dict[str, Any]:
     """PMR detalhado por regional."""
     base = _carregar_base(data_ini, data_fim, segmento=segmento)
     if base.empty:
@@ -231,7 +251,8 @@ def calcular_pmr_regional(data_ini: date, data_fim: date,
 
 
 def calcular_pmr_clientes(data_ini: date, data_fim: date,
-                          segmento: str = None, regional: str = None,
+                          segmento: FiltroValor = None,
+                          regional: FiltroValor = None,
                           limit: int = 50, offset: int = 0) -> dict[str, Any]:
     """
     PMR por RAZAO SOCIAL (a1_cgc + a1_nome), paginado, ordenado por valor_total desc.
@@ -243,7 +264,6 @@ def calcular_pmr_clientes(data_ini: date, data_fim: date,
                 "total": 0, "clientes": []}
 
     rows = []
-    # Agrupa por CNPJ (a1_cgc) + nome — consolida filiais do mesmo grupo
     chave_cols = ["a1_cgc", "a1_nome"]
     for chave, g in base.fillna({"a1_cgc": "SEM_CGC", "a1_nome": "SEM_NOME"}).groupby(chave_cols, dropna=False):
         cgc, nome = chave
@@ -271,6 +291,52 @@ def calcular_pmr_clientes(data_ini: date, data_fim: date,
     }
 
 
+def calcular_pmr_mensal(data_ini: date, data_fim: date,
+                        segmento: FiltroValor = None,
+                        regional: FiltroValor = None,
+                        cgc: FiltroValor = None) -> dict[str, Any]:
+    """
+    Evolução mês a mês, AGRUPADA PELO MÊS DE PAGAMENTO (e5_data_pond).
+
+    Para as notas cujo pagamento caiu no mês M, calcula os três PMRs
+    (todos contados a partir da emissão f2_emissao) e o valor recebido.
+    Responde: "quanto de caixa entrou no mês M e com que atraso vieram
+    as notas pagas nesse mês".
+
+    ATENCAO (survivor bias): os meses mais recentes tendem a exibir PMR
+    menor porque as notas de pagadores lentos ainda nao foram liquidadas.
+    O campo 'em_maturacao' marca os 2 ultimos meses do recorte.
+    """
+    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, cgc=cgc)
+    if base.empty:
+        return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "meses": []}
+
+    base = base.copy()
+    base["mes_pag"] = base["e5_data_pond"].dt.to_period("M")
+
+    meses = []
+    for mes, g in base.groupby("mes_pag", sort=True):
+        meses.append({
+            "mes":            mes.strftime("%Y-%m"),
+            "notas_pagas":    int(len(g)),
+            "valor_total":    round(float(g["e1_valor"].sum()), 2),
+            "valor_recebido": round(float(g["e5_valor_total"].sum()), 2),
+            "pmr_pagamento":  round(_pmr(g, "dias_pagamento"),  2),
+            "pmr_vencimento": round(_pmr(g, "dias_vencimento"), 2),
+            "pmr_cond_pag":   round(_pmr(g, "dias_cond_pag"),   2),
+            "delta_atraso":   round(_pmr(g, "dias_pagamento") - _pmr(g, "dias_cond_pag"), 2),
+        })
+
+    meses.sort(key=lambda m: m["mes"])
+    # Marca os 2 ultimos meses como em maturacao (survivor bias)
+    for m in meses[-2:]:
+        m["em_maturacao"] = True
+    for m in meses[:-2]:
+        m["em_maturacao"] = False
+
+    return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "meses": meses}
+
+
 def listar_filtros(data_ini: date, data_fim: date) -> dict[str, Any]:
     """Retorna os valores únicos de regional e segmento disponíveis no período."""
     sf2 = carregar_mensal("notas_saida", data_ini, data_fim)
@@ -285,8 +351,7 @@ def listar_filtros(data_ini: date, data_fim: date) -> dict[str, Any]:
     se1_f = se1[["Chave_F2", "Chave_A1"]].drop_duplicates("Chave_F2")
     sa1_d = sa1[["Chave_A1", "regional", "segmento"]].drop_duplicates("Chave_A1")
 
-    # FIX colisao de coluna: SF2 tambem carrega Chave_A1; descartamos antes
-    # do merge com SE1 para evitar Chave_A1_x/_y e o KeyError no join com SA1.
+    # FIX colisao: descarta Chave_A1 do SF2 antes do merge
     base = (
         sf2.drop(columns=["Chave_A1"], errors="ignore")
         .merge(se1_f, on="Chave_F2", how="inner")
@@ -298,28 +363,102 @@ def listar_filtros(data_ini: date, data_fim: date) -> dict[str, Any]:
     return {"regionais": regionais, "segmentos": segmentos}
 
 
+def listar_clientes_busca(data_ini: date, data_fim: date,
+                          q: str = "", limit: int = 20) -> list[dict]:
+    """
+    Autocomplete do filtro de cliente: busca por razao social OU CNPJ.
+    Retorna ate 'limit' clientes (a1_cgc + a1_nome) presentes no periodo.
+    """
+    base = _carregar_base(data_ini, data_fim)
+    if base.empty:
+        return []
+
+    cli = (base[["a1_cgc", "a1_nome"]]
+           .fillna({"a1_cgc": "", "a1_nome": ""})
+           .drop_duplicates("a1_cgc"))
+
+    if q:
+        qu = q.strip().upper()
+        mask = (cli["a1_cgc"].str.upper().str.contains(qu, na=False, regex=False) |
+                cli["a1_nome"].str.upper().str.contains(qu, na=False, regex=False))
+        cli = cli[mask]
+
+    cli = cli.sort_values("a1_nome").head(limit)
+    return [{"cgc": str(r.a1_cgc), "nome": str(r.a1_nome)} for r in cli.itertuples(index=False)]
+
+
+def obter_notas_cliente(data_ini: date, data_fim: date, cgc: str) -> dict[str, Any]:
+    """
+    Drill-down: todas as parcelas (nivel SE1) de um cliente no periodo,
+    com SF2 (NF/emissao), SE1 (titulo/vencimentos) e SE5 (pagamento).
+    Ordenado por data de emissao. Uma linha por parcela.
+    """
+    base = _carregar_base(data_ini, data_fim, cgc=cgc)
+    if base.empty:
+        return {"cgc": cgc, "nome": None, "notas": []}
+
+    base = base.sort_values("f2_emissao")
+    nome = base["a1_nome"].dropna().iloc[0] if base["a1_nome"].notna().any() else None
+
+    def _s(v):
+        return "" if pd.isna(v) else str(v)
+
+    def _d(v):
+        return None if pd.isna(v) else pd.to_datetime(v).strftime("%Y-%m-%d")
+
+    notas = []
+    for r in base.itertuples(index=False):
+        notas.append({
+            "nf":             _s(getattr(r, "f2_doc", "")),
+            "serie":          _s(getattr(r, "f2_serie", "")),
+            "emissao":        _d(getattr(r, "f2_emissao", None)),
+            "titulo":         _s(getattr(r, "e1_num", "")),
+            "prefixo":        _s(getattr(r, "e1_prefixo", "")),
+            "parcela":        _s(getattr(r, "e1_parcela", "")).strip(),
+            "valor_titulo":   round(float(getattr(r, "e1_valor", 0) or 0), 2),
+            "vencto_cond":    _d(getattr(r, "e1_vencto", None)),
+            "vencto_real":    _d(getattr(r, "e1_vencrea", None)),
+            "data_pagamento": _d(getattr(r, "e5_data_pond", None)),
+            "valor_recebido": round(float(getattr(r, "e5_valor_total", 0) or 0), 2),
+            "dias_pagamento": int(getattr(r, "dias_pagamento", 0)),
+            "dias_cond_pag":  int(getattr(r, "dias_cond_pag", 0)),
+            "delta_atraso":   int(getattr(r, "dias_pagamento", 0)) - int(getattr(r, "dias_cond_pag", 0)),
+        })
+
+    return {
+        "cgc":   cgc,
+        "nome":  None if nome is None else str(nome),
+        "total": len(notas),
+        "resumo": {
+            "valor_titulo":   round(float(base["e1_valor"].sum()), 2),
+            "valor_recebido": round(float(base["e5_valor_total"].sum()), 2),
+            "pmr_pagamento":  round(_pmr(base, "dias_pagamento"),  2),
+            "pmr_vencimento": round(_pmr(base, "dias_vencimento"), 2),
+            "pmr_cond_pag":   round(_pmr(base, "dias_cond_pag"),   2),
+        },
+        "notas": notas,
+    }
+
+
 def obter_dados_brutos(data_ini: date, data_fim: date,
-                       segmento: str = None, regional: str = None) -> pd.DataFrame:
-    """
-    Retorna o DataFrame linha a linha para exportacao Excel.
-    Inclui todas as variaveis que compoem o calculo do PMR.
-    """
-    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional)
+                       segmento: FiltroValor = None,
+                       regional: FiltroValor = None,
+                       cgc: FiltroValor = None) -> pd.DataFrame:
+    """DataFrame linha a linha para exportacao Excel."""
+    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, cgc=cgc)
     if base.empty:
         return pd.DataFrame()
 
     cols = [
         "f2_filial", "f2_doc", "f2_serie", "f2_emissao", "f2_valbrut",
         "a1_cgc", "a1_nome", "regional", "segmento",
-        "e1_valor", "e1_vencto", "e1_vencrea",
+        "e1_num", "e1_parcela", "e1_valor", "e1_vencto", "e1_vencrea",
         "e5_data_pond", "e5_valor_total",
         "dias_pagamento", "dias_vencimento", "dias_cond_pag",
     ]
-    # Apenas colunas que existem no DataFrame
     cols_existentes = [c for c in cols if c in base.columns]
     df = base[cols_existentes].copy()
 
-    # Nomes amigáveis para o Excel
     rename = {
         "f2_filial":     "Filial",
         "f2_doc":        "Num. NF",
@@ -330,6 +469,8 @@ def obter_dados_brutos(data_ini: date, data_fim: date,
         "a1_nome":       "Razao Social",
         "regional":      "Regional",
         "segmento":      "Segmento",
+        "e1_num":        "Num. Titulo",
+        "e1_parcela":    "Parcela",
         "e1_valor":      "Valor Titulo (R$)",
         "e1_vencto":     "Vencimento Cond.Pag.",
         "e1_vencrea":    "Vencimento Real",
@@ -344,11 +485,14 @@ def obter_dados_brutos(data_ini: date, data_fim: date,
 
 def _resposta_vazia(data_ini: date, data_fim: date) -> dict:
     return {
-        "periodo":        {"data_ini": str(data_ini), "data_fim": str(data_fim)},
+        "periodo":        {"data_ini": str(data_ini), "data_fim": str(data_fim),
+                           "dias_periodo": max((data_fim - data_ini).days, 1)},
         "notas_base":     0,
         "notas_pagas":    0,
         "valor_total":    0.0,
+        "valor_por_dia":  0.0,
         "pmr_pagamento":  None,
         "pmr_vencimento": None,
         "pmr_cond_pag":   None,
+        "delta_atraso":   None,
     }
