@@ -23,9 +23,9 @@ router = APIRouter(prefix="/api/v1/financeiro", tags=["Financeiro - PMR"])
 # ------------------------------------------------------------
 
 class FinanceiroState:
-    pipeline_rodando:  bool = False
-    is_recarga_total:  bool = False
-    logs:              list = []
+    pipeline_rodando:  bool      = False
+    is_recarga_total:  bool      = False
+    logs:              list      = []
 
 
 # ------------------------------------------------------------
@@ -62,6 +62,13 @@ def _so_admin(usuario: dict) -> None:
 
 @router.get("/status")
 async def status(_: dict = Depends(get_current_user)):
+    """
+    Retorna:
+      - is_running: pipeline financeiro em execucao
+      - is_recarga_total: recarga completa ou rolling
+      - logs: linhas do console geradas ate o momento
+      - parquets: meses disponiveis no S3 por fonte
+    """
     def _check():
         store = _store()
         fontes = ["notas_saida", "contas_receber", "movimentacao_bancaria"]
@@ -87,6 +94,10 @@ async def pmr_global(
     data_fim: date = Query(..., description="Fim da janela (f2_emissao)"),
     _: dict = Depends(get_current_user),
 ):
+    """
+    Tres PMRs globais para o periodo selecionado.
+    Apenas notas com movimentacao bancaria sao consideradas.
+    """
     _validar_datas(data_ini, data_fim)
     try:
         return await asyncio.to_thread(_engine().calcular_pmr_global, data_ini, data_fim)
@@ -105,6 +116,7 @@ async def pmr_regional(
     data_fim: date = Query(...),
     _: dict = Depends(get_current_user),
 ):
+    """PMR detalhado por regional, ordenado por valor_total desc."""
     _validar_datas(data_ini, data_fim)
     try:
         return await asyncio.to_thread(_engine().calcular_pmr_regional, data_ini, data_fim)
@@ -125,6 +137,7 @@ async def pmr_clientes(
     offset:   int  = Query(0,  ge=0),
     _: dict = Depends(get_current_user),
 ):
+    """PMR por cliente, paginado, ordenado por valor_total desc."""
     _validar_datas(data_ini, data_fim)
     try:
         return await asyncio.to_thread(
@@ -140,6 +153,7 @@ async def pmr_clientes(
 # ------------------------------------------------------------
 
 def _run_pipeline(recarga_total: bool) -> None:
+    """Executa o pipeline e atualiza FinanceiroState em tempo real."""
     from app.financeiro.pipeline_financeiro import executar_pipeline
 
     FinanceiroState.pipeline_rodando  = True
@@ -152,6 +166,13 @@ def _run_pipeline(recarga_total: bool) -> None:
 
     try:
         executar_pipeline(recarga_total=recarga_total, log_callback=_log)
+        # Invalida o cache do PMR: os parquets no S3 mudaram, o cache em
+        # memoria (SE1/SE5/SA1) precisa ser recarregado na proxima consulta.
+        try:
+            _engine().invalidar_cache()
+            _log("Cache PMR invalidado apos atualizacao dos parquets.")
+        except Exception as e:
+            logger.warning("Falha ao invalidar cache PMR: %s", e)
     except Exception as e:
         _log(f"ERRO inesperado no pipeline: {e}")
         logger.exception("pipeline_financeiro falhou: %s", e)
@@ -165,6 +186,11 @@ async def pipeline_atualizar(
     background_tasks: BackgroundTasks,
     usuario: dict = Depends(get_current_user),
 ):
+    """
+    Atualizacao Rolling - apaga e re-extrai os ultimos 3 meses + clientes.
+    Consulte GET /status para acompanhar o progresso.
+    Apenas Administradores.
+    """
     _so_admin(usuario)
     if FinanceiroState.pipeline_rodando:
         raise HTTPException(409, "Pipeline financeiro ja esta em execucao.")
@@ -177,6 +203,10 @@ async def pipeline_recarga(
     background_tasks: BackgroundTasks,
     usuario: dict = Depends(get_current_user),
 ):
+    """
+    Recarga Completa - extrai historico completo desde jan/2023 + clientes.
+    Operacao longa. Apenas Administradores.
+    """
     _so_admin(usuario)
     if FinanceiroState.pipeline_rodando:
         raise HTTPException(409, "Pipeline financeiro ja esta em execucao.")
@@ -186,75 +216,78 @@ async def pipeline_recarga(
 
 # ------------------------------------------------------------
 # Filtros disponiveis (regionais e segmentos do periodo)
-# Retorna o objeto direto — sem envelope {"status","data"} —
-# para ser consistente com os demais endpoints PMR.
 # ------------------------------------------------------------
 
 @router.get("/pmr/filtros")
 async def get_pmr_filtros(
-    data_ini: date = Query(..., description="Data de início (YYYY-MM-DD)"),
+    data_ini: date = Query(..., description="Data de inicio (YYYY-MM-DD)"),
     data_fim: date = Query(..., description="Data de fim (YYYY-MM-DD)"),
     _: dict = Depends(get_current_user),
 ):
+    """Retorna o dict cru {regionais, segmentos} — sem envelope."""
+    _validar_datas(data_ini, data_fim)
     try:
         return await asyncio.to_thread(_engine().listar_filtros, data_ini, data_fim)
     except Exception as e:
-        logger.exception("pmr_filtros: %s", e)
+        logger.exception("get_pmr_filtros: %s", e)
         raise HTTPException(500, f"Erro ao listar filtros: {e}")
 
 
 @router.get("/pmr/global-filtrado")
 async def get_pmr_global_filtrado(
-    data_ini: date = Query(...),
-    data_fim: date = Query(...),
-    regional: str  = Query(None),
-    segmento: str  = Query(None),
+    data_ini: date = Query(..., description="Data de inicio (YYYY-MM-DD)"),
+    data_fim: date = Query(..., description="Data de fim (YYYY-MM-DD)"),
+    regional: str = Query(None, description="Filtro opcional de regional"),
+    segmento: str = Query(None, description="Filtro opcional de segmento"),
     _: dict = Depends(get_current_user),
 ):
+    """PMR global com filtros. Retorna o dict cru — sem envelope."""
     _validar_datas(data_ini, data_fim)
     try:
         return await asyncio.to_thread(
             _engine().calcular_pmr_global, data_ini, data_fim, segmento, regional
         )
     except Exception as e:
-        logger.exception("pmr_global_filtrado: %s", e)
+        logger.exception("get_pmr_global_filtrado: %s", e)
         raise HTTPException(500, f"Erro ao calcular PMR global: {e}")
 
 
 @router.get("/pmr/regional-filtrado")
 async def get_pmr_regional_filtrado(
-    data_ini: date = Query(...),
-    data_fim: date = Query(...),
-    segmento: str  = Query(None),
+    data_ini: date = Query(..., description="Data de inicio (YYYY-MM-DD)"),
+    data_fim: date = Query(..., description="Data de fim (YYYY-MM-DD)"),
+    segmento: str = Query(None, description="Filtro opcional de segmento"),
     _: dict = Depends(get_current_user),
 ):
+    """PMR por regional com filtro. Retorna o dict cru — sem envelope."""
     _validar_datas(data_ini, data_fim)
     try:
         return await asyncio.to_thread(
             _engine().calcular_pmr_regional, data_ini, data_fim, segmento
         )
     except Exception as e:
-        logger.exception("pmr_regional_filtrado: %s", e)
+        logger.exception("get_pmr_regional_filtrado: %s", e)
         raise HTTPException(500, f"Erro ao calcular PMR regional: {e}")
 
 
 @router.get("/pmr/clientes-filtrado")
 async def get_pmr_clientes_filtrado(
-    data_ini: date = Query(...),
-    data_fim: date = Query(...),
-    regional: str  = Query(None),
-    segmento: str  = Query(None),
-    limit:    int  = Query(50, ge=1, le=500),
-    offset:   int  = Query(0,  ge=0),
+    data_ini: date = Query(..., description="Data de inicio (YYYY-MM-DD)"),
+    data_fim: date = Query(..., description="Data de fim (YYYY-MM-DD)"),
+    regional: str = Query(None, description="Filtro opcional de regional"),
+    segmento: str = Query(None, description="Filtro opcional de segmento"),
+    limit: int = Query(50, description="Limite de registros retornados"),
+    offset: int = Query(0, description="Deslocamento para paginacao"),
     _: dict = Depends(get_current_user),
 ):
+    """PMR por cliente com filtros. Retorna o dict cru — sem envelope."""
     _validar_datas(data_ini, data_fim)
     try:
         return await asyncio.to_thread(
             _engine().calcular_pmr_clientes, data_ini, data_fim, segmento, regional, limit, offset
         )
     except Exception as e:
-        logger.exception("pmr_clientes_filtrado: %s", e)
+        logger.exception("get_pmr_clientes_filtrado: %s", e)
         raise HTTPException(500, f"Erro ao calcular PMR por cliente: {e}")
 
 
@@ -266,10 +299,17 @@ async def get_pmr_clientes_filtrado(
 async def pmr_exportar(
     data_ini: date = Query(...),
     data_fim: date = Query(...),
-    segmento: str  = Query(None),
-    regional: str  = Query(None),
+    segmento: str = Query(None),
+    regional: str = Query(None),
     _: dict = Depends(get_current_user),
 ):
+    """
+    Gera um Excel com 4 abas para validacao pelo time financeiro:
+      1. Dados Brutos     - linha a linha com todas as variaveis do calculo
+      2. Por Regional     - PMR agregado por regional
+      3. Por Cliente      - PMR agregado por razao social (CNPJ)
+      4. Metodologia      - explicacao do calculo e das tres metricas
+    """
     import io
     from fastapi.responses import StreamingResponse
 
@@ -280,13 +320,13 @@ async def pmr_exportar(
         from openpyxl.styles import Font, PatternFill, Alignment
 
         engine = _engine()
-        df_bruto   = engine.obter_dados_brutos(data_ini, data_fim, segmento, regional)
-        d_regional = engine.calcular_pmr_regional(data_ini, data_fim, segmento)
-        d_clientes = engine.calcular_pmr_clientes(data_ini, data_fim, segmento, regional, limit=5000)
+        df_bruto    = engine.obter_dados_brutos(data_ini, data_fim, segmento, regional)
+        d_regional  = engine.calcular_pmr_regional(data_ini, data_fim, segmento)
+        d_clientes  = engine.calcular_pmr_clientes(data_ini, data_fim, segmento, regional, limit=5000)
 
         wb = openpyxl.Workbook()
 
-        # ── ABA 1: Dados Brutos ──
+        # -- ABA 1: Dados Brutos --
         ws1 = wb.active
         ws1.title = "Dados Brutos"
         hdr_fill = PatternFill("solid", fgColor="1E3A5F")
@@ -300,7 +340,7 @@ async def pmr_exportar(
                 for j, v in enumerate(row, 1):
                     ws1.cell(row=i, column=j, value=v)
 
-        # ── ABA 2: Por Regional ──
+        # -- ABA 2: Por Regional --
         ws2 = wb.create_sheet("Por Regional")
         hdrs2 = ["Regional", "Notas Pagas", "Valor NF (R$)",
                  "PMR Pagamento (dias)", "PMR Vencimento (dias)", "PMR Cond.Pag. (dias)", "Delta Atraso (dias)"]
@@ -316,7 +356,7 @@ async def pmr_exportar(
             ws2.cell(row=i, column=6, value=r["pmr_cond_pag"])
             ws2.cell(row=i, column=7, value=r["delta_atraso"])
 
-        # ── ABA 3: Por Cliente ──
+        # -- ABA 3: Por Cliente --
         ws3 = wb.create_sheet("Por Cliente")
         hdrs3 = ["CNPJ", "Razao Social", "Regional", "Segmento",
                  "Notas Pagas", "Valor NF (R$)",
@@ -336,7 +376,7 @@ async def pmr_exportar(
             ws3.cell(row=i, column=9, value=r["pmr_cond_pag"])
             ws3.cell(row=i, column=10, value=r["delta_atraso"])
 
-        # ── ABA 4: Metodologia ──
+        # -- ABA 4: Metodologia --
         ws4 = wb.create_sheet("Metodologia")
         titulo_font = Font(bold=True, size=12, color="1E3A5F")
         texto = [
