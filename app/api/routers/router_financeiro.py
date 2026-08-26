@@ -7,7 +7,7 @@ Registrar em main.py:
   from app.api.routers import router_financeiro
   app.include_router(router_financeiro.router)
 """
-
+import traceback
 import asyncio
 import logging
 from datetime import date
@@ -214,24 +214,24 @@ async def pipeline_recarga(
 # Filtros disponiveis (regionais e segmentos do periodo)
 # ------------------------------------------------------------
 
+
 @router.get("/pmr/filtros")
-async def pmr_filtros(
-    data_ini: date = Query(...),
-    data_fim: date = Query(...),
-    _: dict = Depends(get_current_user),
+async def get_pmr_filtros(
+    data_ini: str = Query("2026-01-01"),
+    data_fim: str = Query("2026-07-31")
 ):
-    """Retorna os valores unicos de regional e segmento disponiveis no periodo."""
-    _validar_datas(data_ini, data_fim)
     try:
-        return await asyncio.to_thread(_engine().listar_filtros, data_ini, data_fim)
+        # MANTENHA O SEU CÓDIGO ORIGINAL AQUI DENTRO
+        filtros = obter_filtros_disponiveis(data_ini, data_fim)
+        return {"status": "success", "data": filtros}
+        
     except Exception as e:
-        raise HTTPException(500, f"Erro ao listar filtros: {e}")
-
-
-# ------------------------------------------------------------
-# Endpoints de consulta atualizados com filtros opcionais
-# (substituem as versoes sem filtro acima — mesmas URLs)
-# ------------------------------------------------------------
+        # ISSO VAI FORÇAR O ERRO A APARECER NO DOCKER LOGS
+        print("===" * 20)
+        print("ERRO FATAL NO PMR FILTROS:")
+        traceback.print_exc() 
+        print("===" * 20)
+        return {"status": "error", "detail": str(e)}
 
 @router.get("/pmr/global-filtrado")
 async def pmr_global_filtrado(

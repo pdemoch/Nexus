@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { 
   BarChart3, Users, LayoutDashboard, Settings, Rocket, LogOut, 
   UserCircle, ShieldAlert, Factory, Activity, Crosshair, Database, 
-  ChevronLeft, ChevronRight, Landmark, Zap
+  ChevronLeft, ChevronRight, Landmark, Zap,
+  Coins
 } from 'lucide-react';
 import AssistenteChat from './AssistenteChat';
 
@@ -20,7 +21,7 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
     { id: 'npd', label: 'Inovações', icon: Rocket, roles: ['Administrador', 'Marketing'] },
     { id: 'supply', label: 'Supply Review', icon: Factory, roles: ['Administrador', 'Supply Chain'] },
     { id: 'admin', label: 'Painel Admin', icon: Settings, roles: ['Administrador'] },
-    { id: 'financeiro', label: 'Painel Financeiro', icon: Database, roles: ['Administrador', 'C-Level'] },
+    { id: 'financeiro', label: 'Painel Financeiro', icon: Coins, roles: ['Administrador', 'C-Level'] },
   ];
 
   // Filtra os itens baseado no papel do usuário
