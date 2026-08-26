@@ -74,19 +74,19 @@ def _agregar_se5(se5: pd.DataFrame) -> pd.DataFrame:
 
     se5["e5_dias"] = (se5["e5_data"] - _EPOCH).dt.days.astype(float)
 
-    rows = []
-    for chave, g in se5.groupby("Chave_E5"):
-        total_val = g["e5_valor"].sum()
-        if total_val <= 0:
-            continue
-        dias_pond = float((g["e5_dias"] * g["e5_valor"]).sum() / total_val)
-        rows.append({
-            "Chave_E5":       chave,
-            "e5_data_pond":   _EPOCH + pd.Timedelta(days=dias_pond),
-            "e5_valor_total": total_val,
-        })
-
-    return pd.DataFrame(rows)
+    grouped = se5.assign(
+        valor_ponderado=se5["e5_dias"] * se5["e5_valor"]
+    ).groupby("Chave_E5", as_index=False).agg(
+        e5_valor_total=("e5_valor", "sum"),
+        dias_ponderados=("valor_ponderado", "sum"),
+    )
+    grouped = grouped[grouped["e5_valor_total"] > 0].copy()
+    grouped["e5_data_pond"] = (
+        _EPOCH + pd.to_timedelta(
+            grouped["dias_ponderados"] / grouped["e5_valor_total"], unit="D"
+        )
+    )
+    return grouped[["Chave_E5", "e5_data_pond", "e5_valor_total"]]
 
 
 # =====================================================================
