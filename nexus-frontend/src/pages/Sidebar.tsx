@@ -20,6 +20,7 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
     { id: 'npd', label: 'Inovações', icon: Rocket, roles: ['Administrador', 'Marketing'] },
     { id: 'supply', label: 'Supply Review', icon: Factory, roles: ['Administrador', 'Supply Chain'] },
     { id: 'admin', label: 'Painel Admin', icon: Settings, roles: ['Administrador'] },
+    { id: 'financeiro', label: 'Painel Financeiro', icon: Database, roles: ['Administrador', 'C-Level'] },
   ];
 
   // Filtra os itens baseado no papel do usuário

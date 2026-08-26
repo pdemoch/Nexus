@@ -3,7 +3,6 @@ __pycache__/
 .venv/
 venv/
 env/
-.env
 nexus_local.db
 alembic/versions/*.py
 nexus-frontend/
