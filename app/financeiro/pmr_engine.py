@@ -280,14 +280,15 @@ def listar_filtros(data_ini: date, data_fim: date) -> dict[str, Any]:
     if se1.empty:
         return {"regionais": [], "segmentos": []}
 
-    se1_f = se1[["Chave_F2", "Chave_A1"]].drop_duplicates("Chave_F2")
+    # Correção: sf2 já possui Chave_A1. Trazemos apenas Chave_F2 de se1 para evitar colisão (_x / _y)
+    se1_f = se1[["Chave_F2"]].drop_duplicates("Chave_F2")
     sa1_d = sa1[["Chave_A1", "regional", "segmento"]].drop_duplicates("Chave_A1")
-    base  = sf2.merge(se1_f, on="Chave_F2", how="inner").merge(sa1_d, on="Chave_A1", how="left")
+    
+    base = sf2.merge(se1_f, on="Chave_F2", how="inner").merge(sa1_d, on="Chave_A1", how="left")
 
     regionais = sorted(base["regional"].dropna().unique().tolist())
     segmentos = sorted(base["segmento"].dropna().unique().tolist())
     return {"regionais": regionais, "segmentos": segmentos}
-
 
 def obter_dados_brutos(data_ini: date, data_fim: date,
                        segmento: str = None, regional: str = None) -> pd.DataFrame:
