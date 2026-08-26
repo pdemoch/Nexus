@@ -11,9 +11,7 @@ import traceback
 import asyncio
 import logging
 from datetime import date
-
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
-
 from app.api.routers.router_auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -217,76 +215,78 @@ async def pipeline_recarga(
 
 @router.get("/pmr/filtros")
 async def get_pmr_filtros(
-    data_ini: str = Query("2026-01-01"),
-    data_fim: str = Query("2026-07-31")
+    data_ini: date = Query(..., description="Data de início (YYYY-MM-DD)"),
+    data_fim: date = Query(..., description="Data de fim (YYYY-MM-DD)")
 ):
+    # Lazy import mapeado para o nome real da função no engine
+    from app.financeiro.pmr_engine import listar_filtros 
+    
     try:
-        # MANTENHA O SEU CÓDIGO ORIGINAL AQUI DENTRO
-        filtros = obter_filtros_disponiveis(data_ini, data_fim)
+        filtros = listar_filtros(data_ini, data_fim)
         return {"status": "success", "data": filtros}
-        
     except Exception as e:
-        # ISSO VAI FORÇAR O ERRO A APARECER NO DOCKER LOGS
-        print("===" * 20)
-        print("ERRO FATAL NO PMR FILTROS:")
-        traceback.print_exc() 
-        print("===" * 20)
+        print("\n" + "="*50)
+        print("🔥 ERRO DETECTADO NA ROTA DE FILTROS 🔥")
+        traceback.print_exc()
+        print("="*50 + "\n")
         return {"status": "error", "detail": str(e)}
 
 @router.get("/pmr/global-filtrado")
-async def pmr_global_filtrado(
-    data_ini: date = Query(...),
-    data_fim: date = Query(...),
-    segmento: str = Query(None),
-    regional: str = Query(None),
-    _: dict = Depends(get_current_user),
+async def get_pmr_global(
+    data_ini: date = Query(..., description="Data de início (YYYY-MM-DD)"),
+    data_fim: date = Query(..., description="Data de fim (YYYY-MM-DD)"),
+    regional: str = Query(None, description="Filtro opcional de regional"),
+    segmento: str = Query(None, description="Filtro opcional de segmento")
 ):
-    """PMR global com filtros opcionais de segmento e regional."""
-    _validar_datas(data_ini, data_fim)
+    # Lazy import
+    from app.financeiro.pmr_engine import calcular_pmr_global
+    
     try:
-        return await asyncio.to_thread(
-            _engine().calcular_pmr_global, data_ini, data_fim, segmento, regional
-        )
+        dados = calcular_pmr_global(data_ini, data_fim, segmento=segmento, regional=regional)
+        return {"status": "success", "data": dados}
     except Exception as e:
-        raise HTTPException(500, f"Erro ao calcular PMR: {e}")
+        return {"status": "error", "detail": str(e)}
 
 
 @router.get("/pmr/regional-filtrado")
-async def pmr_regional_filtrado(
-    data_ini: date = Query(...),
-    data_fim: date = Query(...),
-    segmento: str = Query(None),
-    _: dict = Depends(get_current_user),
+async def get_pmr_regional(
+    data_ini: date = Query(..., description="Data de início (YYYY-MM-DD)"),
+    data_fim: date = Query(..., description="Data de fim (YYYY-MM-DD)"),
+    segmento: str = Query(None, description="Filtro opcional de segmento")
 ):
-    """PMR por regional com filtro opcional de segmento."""
-    _validar_datas(data_ini, data_fim)
+    # Lazy import
+    from app.financeiro.pmr_engine import calcular_pmr_regional
+    
     try:
-        return await asyncio.to_thread(
-            _engine().calcular_pmr_regional, data_ini, data_fim, segmento
-        )
+        dados = calcular_pmr_regional(data_ini, data_fim, segmento=segmento)
+        return {"status": "success", "data": dados}
     except Exception as e:
-        raise HTTPException(500, f"Erro ao calcular PMR regional: {e}")
+        return {"status": "error", "detail": str(e)}
 
 
 @router.get("/pmr/clientes-filtrado")
-async def pmr_clientes_filtrado(
-    data_ini: date = Query(...),
-    data_fim: date = Query(...),
-    segmento: str = Query(None),
-    regional: str = Query(None),
-    limit:    int  = Query(100, ge=1, le=1000),
-    offset:   int  = Query(0,   ge=0),
-    _: dict = Depends(get_current_user),
+async def get_pmr_clientes(
+    data_ini: date = Query(..., description="Data de início (YYYY-MM-DD)"),
+    data_fim: date = Query(..., description="Data de fim (YYYY-MM-DD)"),
+    regional: str = Query(None, description="Filtro opcional de regional"),
+    segmento: str = Query(None, description="Filtro opcional de segmento"),
+    limit: int = Query(50, description="Limite de registros retornados"),
+    offset: int = Query(0, description="Deslocamento para paginação")
 ):
-    """PMR por razao social (CNPJ), com filtros opcionais."""
-    _validar_datas(data_ini, data_fim)
+    # Lazy import
+    from app.financeiro.pmr_engine import calcular_pmr_clientes
+    
     try:
-        return await asyncio.to_thread(
-            _engine().calcular_pmr_clientes,
-            data_ini, data_fim, segmento, regional, limit, offset
+        dados = calcular_pmr_clientes(
+            data_ini, data_fim, 
+            segmento=segmento, 
+            regional=regional, 
+            limit=limit, 
+            offset=offset
         )
+        return {"status": "success", "data": dados}
     except Exception as e:
-        raise HTTPException(500, f"Erro ao calcular PMR clientes: {e}")
+        return {"status": "error", "detail": str(e)}
 
 
 # ------------------------------------------------------------
