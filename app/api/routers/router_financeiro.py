@@ -263,8 +263,9 @@ async def get_pmr_regional_filtrado(
 ):
     try:
         seg = _split(segmentos) or segmento
+        reg = _split(regionais)
         dados = await asyncio.to_thread(
-            _engine().calcular_pmr_regional, data_ini, data_fim, seg
+            _engine().calcular_pmr_regional, data_ini, data_fim, seg, reg
         )
         return dados  # {"periodo": {...}, "regionais": [...]}
     except Exception as e:
@@ -306,7 +307,7 @@ async def get_pmr_evolucao(
     segmentos: str = Query(None, description="Multiplos segmentos separados por virgula"),
     cgc:       str = Query(None, description="Filtro opcional por CNPJ do cliente"),
 ):
-    """Evolucao mes a mes, agrupada pelo mes de pagamento (e5_data_pond)."""
+    """Evolucao mes a mes, agrupada pelo mes de recebimento (e5_data)."""
     try:
         reg = _split(regionais) or regional
         seg = _split(segmentos) or segmento
@@ -372,7 +373,7 @@ async def pmr_exportar(
         seg = _split(segmentos) or segmento
 
         df_bruto    = engine.obter_dados_brutos(data_ini, data_fim, seg, reg)
-        d_regional  = engine.calcular_pmr_regional(data_ini, data_fim, seg)
+        d_regional  = engine.calcular_pmr_regional(data_ini, data_fim, seg, reg)
         d_clientes  = engine.calcular_pmr_clientes(data_ini, data_fim, seg, reg, limit=5000)
         d_global    = engine.calcular_pmr_global(data_ini, data_fim, seg, reg)
         d_mensal    = engine.calcular_pmr_mensal(data_ini, data_fim, seg, reg)
@@ -395,7 +396,7 @@ async def pmr_exportar(
 
         # ABA 2: Por Regional
         ws2 = wb.create_sheet("Por Regional")
-        hdrs2 = ["Regional", "Notas Pagas", "Valor NF (R$)",
+        hdrs2 = ["Regional", "Movimentos E5", "Valor Recebido E5 (R$)",
                  "PMR Pagamento (dias)", "PMR Vencimento (dias)", "PMR Cond.Pag. (dias)", "Delta Atraso (dias)"]
         for j, h in enumerate(hdrs2, 1):
             c = ws2.cell(row=1, column=j, value=h); c.fill, c.font = hdr_fill, hdr_font
@@ -410,7 +411,7 @@ async def pmr_exportar(
 
         # ABA 3: Por Cliente
         ws3 = wb.create_sheet("Por Cliente")
-        hdrs3 = ["CNPJ", "Razao Social", "Regional", "Segmento", "Notas Pagas", "Valor NF (R$)",
+        hdrs3 = ["CNPJ", "Razao Social", "Regional", "Segmento", "Movimentos E5", "Valor Recebido E5 (R$)",
                  "PMR Pagamento (dias)", "PMR Vencimento (dias)", "PMR Cond.Pag. (dias)", "Delta Atraso (dias)"]
         for j, h in enumerate(hdrs3, 1):
             c = ws3.cell(row=1, column=j, value=h); c.fill, c.font = hdr_fill, hdr_font
@@ -428,7 +429,7 @@ async def pmr_exportar(
 
         # ABA 4: Evolucao Mensal
         ws5 = wb.create_sheet("Evolucao Mensal")
-        hdrs5 = ["Mes Pagamento", "Notas Pagas", "Valor NF (R$)", "Valor Recebido (R$)",
+        hdrs5 = ["Mes Recebimento E5", "Movimentos E5", "Valor Recebido E5 (R$)", "Valor Recebido (R$)",
                  "PMR Pagamento (dias)", "PMR Vencimento (dias)", "PMR Cond.Pag. (dias)",
                  "Delta Atraso (dias)", "Em Maturacao?"]
         for j, h in enumerate(hdrs5, 1):
@@ -457,13 +458,13 @@ async def pmr_exportar(
             ("CALCULO DO PMR (Prazo Medio de Recebimento)", True),
             ("", False),
             ("O PMR mede, em dias, o tempo medio entre a emissao da NF e o recebimento.", False),
-            ("E' uma media PONDERADA pelo valor do titulo (e1_valor).", False),
+            ("E' uma media PONDERADA pelo valor efetivamente recebido na E5 (e5_valor).", False),
             ("", False),
             ("FORMULA GERAL:", True),
-            ("PMR = SUM( dias_i * e1_valor_i ) / SUM( e1_valor_i )", False),
+            ("PMR = SUM( dias_i * e5_valor_i ) / SUM( e5_valor_i )", False),
             ("", False),
             ("TRES METRICAS (todas contadas a partir de f2_emissao):", True),
-            ("1. PMR Pagamento:  dias = e5_data_ponderada - f2_emissao (recebimento real no banco).", False),
+            ("1. PMR Pagamento:  dias = e5_data - f2_emissao (recebimento real no banco).", False),
             ("2. PMR Vencimento: dias = e1_vencrea - f2_emissao (vencimento real negociado).", False),
             ("3. PMR Cond.Pag.:  dias = e1_vencto - f2_emissao (vencimento contratual).", False),
             ("", False),
@@ -487,7 +488,7 @@ async def pmr_exportar(
             ("ordem de grandeza para decisao, nao um numero contabil ao centavo.", False),
             ("", False),
             ("EVOLUCAO MENSAL (aba Evolucao Mensal):", True),
-            ("Agrupada pelo MES DE PAGAMENTO (mes de e5_data_ponderada). Para as notas pagas no", False),
+            ("Agrupada pelo MES DE RECEBIMENTO (mes de e5_data). Para os movimentos E5 no", False),
             ("mes M, calcula os 3 PMRs (sempre desde a emissao) e o valor recebido no mes.", False),
             ("ATENCAO - survivor bias: os 2 ultimos meses (flag 'Em Maturacao? = SIM') tendem a", False),
             ("mostrar PMR menor porque as notas de pagadores lentos ainda nao foram liquidadas.", False),

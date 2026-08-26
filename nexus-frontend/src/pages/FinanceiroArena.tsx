@@ -4,7 +4,7 @@
 //   - Cards KPI (PMR Pagamento, PMR Vencimento, PMR Cond.Pag., Delta Atraso)
 //   - Card de impacto: quanto vale 1 dia de PMR no capital de giro
 //   - Grafico de EVOLUCAO MENSAL (barras = valor recebido, linhas = 3 PMRs)
-//   - Grafico misto por Regional (barras = Valor NF, linhas = 3 PMRs)
+//   - Grafico misto por Regional (barras = Valor Recebido E5, linhas = 3 PMRs)
 //   - Tabela de clientes por Razao Social (CNPJ consolidado) — clicavel
 //   - Painel de DETALHE de notas do cliente selecionado (nivel parcela)
 //   - Filtros: data, MULTI-regional, MULTI-segmento, busca de cliente
@@ -18,7 +18,7 @@ import {
 } from 'recharts';
 import {
   Download, RefreshCw, Loader2, TrendingDown, TrendingUp,
-  Clock, DollarSign, Filter, AlertTriangle, ChevronDown, X, Search,
+  Clock, DollarSign, Filter, AlertTriangle, ChevronDown, X, Search, ArrowUpDown,
 } from 'lucide-react';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -142,6 +142,8 @@ export default function FinanceiroArena() {
   // ── Detalhe do cliente ──
   const [notasCli, setNotasCli]   = useState<any>(null);
   const [loadingNotas, setLoadingNotas] = useState(false);
+  const [sortClientes, setSortClientes] = useState<{ key: string; dir: 1 | -1 }>({ key: 'valor_total', dir: -1 });
+  const [sortNotas, setSortNotas] = useState<{ key: string; dir: 1 | -1 }>({ key: 'emissao', dir: 1 });
 
   const dataIni = mesAno2Date(mesIni, anoIni);
   const dataFim = mesAno2Date(mesFim, anoFim, true);
@@ -240,11 +242,11 @@ export default function FinanceiroArena() {
   // ─── Dados dos graficos ──────────────────────────────────────────────────────
   const dadosGrafico = regionais.map(r => ({
     regional: abrevReg(r.regional),
-    valor_nf: Math.round(r.valor_total),
+    valor_recebido: Math.round(r.valor_total),
     pmr_pag:  r.pmr_pagamento,
     pmr_vnc:  r.pmr_vencimento,
     pmr_cond: r.pmr_cond_pag,
-  }));
+  })).sort((a, b) => (b.pmr_pag ?? -Infinity) - (a.pmr_pag ?? -Infinity));
   const maxPMR = Math.max(...dadosGrafico.flatMap(d => [d.pmr_pag, d.pmr_vnc, d.pmr_cond]), 60);
 
   const dadosEvolucao = evolucao.map(m => ({
@@ -256,6 +258,24 @@ export default function FinanceiroArena() {
     maturacao: m.em_maturacao,
   }));
   const maxPMREvol = Math.max(...dadosEvolucao.flatMap(d => [d.pmr_pag, d.pmr_vnc, d.pmr_cond]), 60);
+  const ordenar = (key: string, atual: { key: string; dir: 1 | -1 }, setAtual: (v: { key: string; dir: 1 | -1 }) => void) => {
+    setAtual({ key, dir: atual.key === key ? (atual.dir * -1) as 1 | -1 : 1 });
+  };
+  const clientesOrdenados = [...clientes].sort((a, b) => {
+    const av = a[sortClientes.key] ?? '';
+    const bv = b[sortClientes.key] ?? '';
+    return (typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv), 'pt-BR')) * sortClientes.dir;
+  });
+  const notasOrdenadas = [...(notasCli?.notas || [])].sort((a, b) => {
+    const av = a[sortNotas.key] ?? '';
+    const bv = b[sortNotas.key] ?? '';
+    return (typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv), 'pt-BR')) * sortNotas.dir;
+  });
+  const SortHeader = ({ label, onSort, align = 'right' }: { label: string; onSort: () => void; align?: 'left' | 'right' }) => (
+    <button onClick={onSort} className="inline-flex items-center gap-1 font-inherit" style={{ textAlign: align }}>
+      {label}<ArrowUpDown className="w-2.5 h-2.5" />
+    </button>
+  );
 
   // ─── Tooltips ─────────────────────────────────────────────────────────────
   const TooltipCustom = ({ active, payload, label }: any) => {
@@ -497,10 +517,10 @@ export default function FinanceiroArena() {
           <div className="grid grid-cols-1 xl:grid-cols-5 gap-4">
             <div className="xl:col-span-3 bg-white rounded-2xl border border-slate-100 p-5">
               <div className="text-xs font-black uppercase tracking-widest text-slate-400 mb-1">
-                Valor NF e PMR por Regional
+                Valor Recebido E5 e PMR por Regional
               </div>
               <div className="text-[10px] text-slate-400 mb-4">
-                Barras = Valor NF (eixo esq.) · Linhas = PMR em dias (eixo dir.)
+                Barras = Valor Recebido E5 (eixo esq.) · Linhas = PMR em dias (eixo dir.)
               </div>
               {loading ? (
                 <div className="flex items-center justify-center h-64 text-slate-300"><Loader2 className="w-6 h-6 animate-spin" /></div>
@@ -517,7 +537,7 @@ export default function FinanceiroArena() {
                       tick={{ fontSize: 10, fill: '#64748b' }} unit=" d" width={42} />
                     <Tooltip content={<TooltipCustom />} />
                     <Legend wrapperStyle={{ fontSize: 10, fontWeight: 700 }} />
-                    <Bar yAxisId="left" dataKey="valor_nf" name="Valor NF" fill="#c7d2fe" radius={[4, 4, 0, 0]} maxBarSize={48} />
+                    <Bar yAxisId="left" dataKey="valor_recebido" name="Valor Recebido E5" fill="#c7d2fe" radius={[4, 4, 0, 0]} maxBarSize={48} />
                     <Line yAxisId="right" type="monotone" dataKey="pmr_pag" name="PMR Pagamento"
                       stroke="#7c3aed" strokeWidth={2.5} dot={{ r: 4, fill: '#7c3aed' }} />
                     <Line yAxisId="right" type="monotone" dataKey="pmr_vnc" name="PMR Vencimento"
@@ -542,15 +562,17 @@ export default function FinanceiroArena() {
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
                     <thead>
                       <tr style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
-                        {['Razão Social', 'Segmento', 'Valor NF', 'PMR Pag.', 'PMR Vnc.', 'PMR Cond.'].map(h => (
+                        {[['Razão Social','nome'], ['Segmento','segmento'], ['Valor Recebido E5','valor_total'], ['PMR Pag.','pmr_pagamento'], ['PMR Vnc.','pmr_vencimento'], ['PMR Cond.','pmr_cond_pag']].map(([h,key]) => (
                           <th key={h} style={{ padding: '7px 10px', textAlign: h === 'Razão Social' || h === 'Segmento' ? 'left' : 'right',
                             fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.04em',
-                            color: '#94a3b8', borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>{h}</th>
+                            color: '#94a3b8', borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>
+                            <SortHeader label={h} onSort={() => ordenar(key, sortClientes, setSortClientes)} align={h === 'Razão Social' || h === 'Segmento' ? 'left' : 'right'} />
+                          </th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
-                      {clientes.slice(0, 50).map((c: any, i: number) => (
+                      {clientesOrdenados.slice(0, 50).map((c: any, i: number) => (
                         <tr key={c.cgc}
                           onClick={() => abrirCliente(c.cgc, c.nome)}
                           style={{ background: clienteSel?.cgc === c.cgc ? '#f5f3ff' : i % 2 ? '#f9fafb' : '#fff',
@@ -604,15 +626,22 @@ export default function FinanceiroArena() {
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
                     <thead>
                       <tr style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
-                        {['NF', 'Parc.', 'Emissão', 'Valor Título', 'Vencto Cond.', 'Vencto Real', 'Pagamento', 'Recebido', 'PMR Pag.', 'Delta'].map(h => (
+                        {[
+                          ['NF', 'nf'], ['Parc.', 'parcela'], ['Emissão', 'emissao'],
+                          ['Valor Título', 'valor_titulo'], ['Vencto Cond.', 'vencto_cond'],
+                          ['Vencto Real', 'vencto_real'], ['Pagamento', 'data_pagamento'],
+                          ['Recebido', 'valor_recebido'], ['PMR Pag.', 'dias_pagamento'], ['Delta', 'delta_atraso'],
+                        ].map(([h, key]) => (
                           <th key={h} style={{ padding: '7px 10px', textAlign: ['NF', 'Parc.', 'Emissão', 'Vencto Cond.', 'Vencto Real', 'Pagamento'].includes(h) ? 'left' : 'right',
                             fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.04em',
-                            color: '#94a3b8', borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>{h}</th>
+                            color: '#94a3b8', borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>
+                            <SortHeader label={h} onSort={() => ordenar(key, sortNotas, setSortNotas)} align={['NF', 'Parc.', 'Emissão', 'Vencto Cond.', 'Vencto Real', 'Pagamento'].includes(h) ? 'left' : 'right'} />
+                          </th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
-                      {notasCli.notas.map((n: any, i: number) => (
+                      {notasOrdenadas.map((n: any, i: number) => (
                         <tr key={`${n.nf}-${n.parcela}-${i}`} style={{ background: i % 2 ? '#f9fafb' : '#fff', borderBottom: '1px solid #f1f5f9' }}>
                           <td style={{ padding: '6px 10px', fontWeight: 700, color: '#334155', whiteSpace: 'nowrap' }}>{n.nf}/{n.serie}</td>
                           <td style={{ padding: '6px 10px', color: '#64748b' }}>{n.parcela || '—'}</td>
