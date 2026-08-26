@@ -30,6 +30,7 @@ import io
 import os
 import logging
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Optional
 
@@ -180,15 +181,19 @@ def carregar_todos_mensal(fonte: str) -> pd.DataFrame:
         paginator = s3.get_paginator("list_objects_v2")
         pages = paginator.paginate(Bucket=_BUCKET, Prefix=prefix)
 
-        frames = []
-        for page in pages:
-            for obj in page.get("Contents", []):
-                key = obj["Key"]
-                if not key.endswith(".parquet"):
-                    continue
-                df = _baixar_parquet(key)
-                if df is not None and not df.empty:
-                    frames.append(df)
+        keys = [
+            obj["Key"]
+            for page in pages
+            for obj in page.get("Contents", [])
+            if obj["Key"].endswith(".parquet")
+        ]
+        # S3 downloads are I/O-bound; fetching independent monthly partitions
+        # concurrently avoids making the first PMR request exceed the proxy timeout.
+        with ThreadPoolExecutor(max_workers=min(8, max(len(keys), 1))) as pool:
+            frames = [
+                df for df in pool.map(_baixar_parquet, keys)
+                if df is not None and not df.empty
+            ]
 
         if not frames:
             return pd.DataFrame()
