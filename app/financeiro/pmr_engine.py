@@ -27,6 +27,9 @@ com SE1 para nao gerar Chave_A1_x/_y e quebrar o join com SA1.
 """
 
 import logging
+import os
+import threading
+import time
 from datetime import date
 from typing import Any, Optional, Union
 
@@ -42,6 +45,9 @@ from app.financeiro.s3_store import (
 logger = logging.getLogger(__name__)
 
 _EPOCH = pd.Timestamp("1970-01-01")
+_BASE_CACHE_TTL = max(float(os.getenv("PMR_CACHE_TTL_SECONDS", "300")), 0)
+_BASE_CACHE: dict[tuple[date, date], tuple[float, pd.DataFrame]] = {}
+_BASE_CACHE_LOCK = threading.Lock()
 
 # Aceita filtro como string unica OU lista de strings
 FiltroValor = Optional[Union[str, list]]
@@ -133,14 +139,10 @@ def _aplicar_filtro(base: pd.DataFrame, coluna: str, valor: FiltroValor) -> pd.D
 # CARREGAMENTO DOS DADOS DO S3
 # =====================================================================
 
-def _carregar_base(data_ini: date, data_fim: date,
-                   segmento: FiltroValor = None,
-                   regional: FiltroValor = None,
-                   cgc: FiltroValor = None) -> pd.DataFrame:
+def _carregar_base_sem_filtros(data_ini: date, data_fim: date) -> pd.DataFrame:
     """
     Monta a base analítica cruzando as quatro fontes do S3.
     Retorna apenas registros de notas liquidadas (INNER com SE5).
-    Filtros opcionais (str ou lista): segmento, regional, cgc.
     """
     sf2 = carregar_mensal("notas_saida", data_ini, data_fim)
     if sf2.empty:
@@ -172,11 +174,6 @@ def _carregar_base(data_ini: date, data_fim: date,
         for col in ["a1_nome", "a1_cgc", "regional", "segmento"]:
             base[col] = None
 
-    # Filtros opcionais (str ou lista) — antes do join com SE5
-    base = _aplicar_filtro(base, "segmento", segmento)
-    base = _aplicar_filtro(base, "regional", regional)
-    base = _aplicar_filtro(base, "a1_cgc",   cgc)
-
     if base.empty:
         return pd.DataFrame()
 
@@ -190,6 +187,37 @@ def _carregar_base(data_ini: date, data_fim: date,
                 len(pago), len(base), int(len(pago) / max(len(base), 1) * 100))
 
     return _calcular_dias(pago)
+
+
+def limpar_cache() -> None:
+    """Descarta bases PMR para que leituras posteriores reflitam o S3 atualizado."""
+    with _BASE_CACHE_LOCK:
+        _BASE_CACHE.clear()
+    logger.info("PMR: cache da base analítica invalidado")
+
+
+def _carregar_base(data_ini: date, data_fim: date,
+                   segmento: FiltroValor = None,
+                   regional: FiltroValor = None,
+                   cgc: FiltroValor = None) -> pd.DataFrame:
+    """Carrega a base compartilhada e aplica os filtros específicos da consulta."""
+    chave = (data_ini, data_fim)
+    agora = time.monotonic()
+
+    with _BASE_CACHE_LOCK:
+        entrada = _BASE_CACHE.get(chave)
+        if entrada and (_BASE_CACHE_TTL == 0 or agora - entrada[0] < _BASE_CACHE_TTL):
+            base = entrada[1].copy()
+            logger.info("PMR: cache reutilizado para %s -> %s", data_ini, data_fim)
+        else:
+            base = _carregar_base_sem_filtros(data_ini, data_fim)
+            _BASE_CACHE[chave] = (agora, base.copy())
+            logger.info("PMR: base armazenada em cache para %s -> %s", data_ini, data_fim)
+
+    base = _aplicar_filtro(base, "segmento", segmento)
+    base = _aplicar_filtro(base, "regional", regional)
+    base = _aplicar_filtro(base, "a1_cgc", cgc)
+    return base
 
 
 # =====================================================================
