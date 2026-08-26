@@ -1,5 +1,13 @@
 // FinanceiroArena.tsx — Dashboard PMR / CCC
 // Destino: src/pages/FinanceiroArena.tsx (ou src/components/)
+//
+// Layout replicando o PowerBI do usuario:
+//   - Cards KPI (PMR Pagamento, PMR Vencimento, PMR Cond.Pag., Delta Atraso)
+//   - Grafico misto por Regional (barras = Valor NF, linhas = 3 PMRs)
+//   - Tabela de clientes por Razao Social (CNPJ consolidado)
+//   - Filtros: data, regional, segmento
+//   - Toggle: PMR | PMP | PME | CCC
+//   - Exportar Excel
 
 import { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
@@ -12,29 +20,21 @@ import {
   Clock, DollarSign, Filter, AlertTriangle,
 } from 'lucide-react';
 
-// ─── Helpers Blindados ────────────────────────────────────────────────────────
-const fmtRs = (v?: number) => {
-  if (v == null || isNaN(v)) return 'R$ 0';
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+const fmtRs = (v: number) => {
   if (v >= 1e9) return `R$ ${(v / 1e9).toFixed(2)} Bi`;
   if (v >= 1e6) return `R$ ${(v / 1e6).toFixed(2)} Mi`;
   if (v >= 1e3) return `R$ ${(v / 1e3).toFixed(0)} K`;
   return `R$ ${v.toFixed(0)}`;
 };
+const fmtRsFull = (v: number) =>
+  `R$ ${v.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`;
+const corDias = (d: number) =>
+  d <= 30 ? '#059669' : d <= 60 ? '#d97706' : '#e11d48';
+const corDelta = (d: number) =>
+  d < 0 ? '#059669' : d <= 10 ? '#d97706' : '#e11d48';
 
-const fmtRsFull = (v?: number) =>
-  `R$ ${(v ?? 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`;
-
-const corDias = (d?: number) => {
-  if (d == null) return '#64748b';
-  return d <= 30 ? '#059669' : d <= 60 ? '#d97706' : '#e11d48';
-};
-
-const corDelta = (d?: number) => {
-  if (d == null) return '#64748b';
-  return d < 0 ? '#059669' : d <= 10 ? '#d97706' : '#e11d48';
-};
-
-// Abrevia nome regional para caber no eixo X
+// Abbrevia nome regional para caber no eixo X
 const abrevReg = (r: string) => {
   const map: Record<string, string> = {
     'KEY ACCOUNT': 'KEY ACC',
@@ -56,7 +56,7 @@ const MESES = Array.from({ length: 12 }, (_, i) =>
 const ANOS = ['2023', '2024', '2025', '2026'];
 const mesAno2Date = (mes: string, ano: string, fim = false) => {
   if (!fim) return `${ano}-${mes}-01`;
-  const d = new Date(Number(ano), Number(mes), 0);
+  const d = new Date(Number(ano), Number(mes), 0); // último dia do mês
   return `${ano}-${mes}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
@@ -98,10 +98,11 @@ export default function FinanceiroArena() {
         axios.get('/api/v1/financeiro/pmr/regional-filtrado', { params }),
         axios.get('/api/v1/financeiro/pmr/clientes-filtrado', { params: { ...params, limit: 100 } }),
       ]);
-      setGlobal(gRes?.data || null);
-      setRegionais(rRes?.data?.regionais || []);
-      setClientes(cRes?.data?.clientes || []);
-      if (!gRes?.data?.notas_pagas) setSemDados(true);
+      // CORREÇÃO: rotas -filtrado envolvem o payload em { status, data: {...} }
+      setGlobal(gRes.data.data);
+      setRegionais(rRes.data.data?.regionais || []);
+      setClientes(cRes.data.data?.clientes || []);
+      if (!gRes.data.data?.notas_pagas) setSemDados(true);
     } catch {
       setSemDados(true);
     } finally {
@@ -114,10 +115,9 @@ export default function FinanceiroArena() {
       const r = await axios.get('/api/v1/financeiro/pmr/filtros', {
         params: { data_ini: dataIni, data_fim: dataFim },
       });
-      setFiltros(r?.data || { regionais: [], segmentos: [] });
-    } catch {
-      setFiltros({ regionais: [], segmentos: [] });
-    }
+      // CORREÇÃO: rota de filtros também usa envelope { status, data: {...} }
+      setFiltros(r.data.data || { regionais: [], segmentos: [] });
+    } catch {}
   }, [dataIni, dataFim]);
 
   useEffect(() => { buscarFiltros(); }, [buscarFiltros]);
@@ -140,15 +140,16 @@ export default function FinanceiroArena() {
   };
 
   // ─── Dados do gráfico ────────────────────────────────────────────────────
-  const dadosGrafico = (regionais || []).map(r => ({
-    regional: abrevReg(r?.regional || ''),
-    valor_nf: Math.round(r?.valor_total || 0),
-    pmr_pag:  r?.pmr_pagamento || 0,
-    pmr_vnc:  r?.pmr_vencimento || 0,
-    pmr_cond: r?.pmr_cond_pag || 0,
+  const dadosGrafico = regionais.map(r => ({
+    regional: abrevReg(r.regional),
+    valor_nf: Math.round(r.valor_total),
+    pmr_pag:  r.pmr_pagamento,
+    pmr_vnc:  r.pmr_vencimento,
+    pmr_cond: r.pmr_cond_pag,
   }));
 
-  const maxPMR = Math.max(...dadosGrafico.flatMap(d => [d.pmr_pag, d.pmr_vnc, d.pmr_cond]), 60);
+  const maxValor = Math.max(...dadosGrafico.map(d => d.valor_nf), 1);
+  const maxPMR   = Math.max(...dadosGrafico.flatMap(d => [d.pmr_pag, d.pmr_vnc, d.pmr_cond]), 60);
 
   // ─── Tooltip customizado ─────────────────────────────────────────────────
   const TooltipCustom = ({ active, payload, label }: any) => {
@@ -188,6 +189,7 @@ export default function FinanceiroArena() {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          {/* Toggle PMR / PMP / PME / CCC */}
           {(['PMR', 'PMP', 'PME', 'CCC'] as const).map(t => (
             <button key={t}
               onClick={() => setToggleAtivo(t)}
@@ -223,6 +225,7 @@ export default function FinanceiroArena() {
       <div className="bg-white rounded-2xl border border-slate-100 px-4 py-3 mb-5 flex flex-wrap items-center gap-4">
         <Filter className="w-4 h-4 text-slate-400 shrink-0" />
 
+        {/* Periodo De */}
         <div className="flex items-center gap-1.5">
           <span className="text-[10px] font-black text-slate-400 uppercase tracking-wide">De</span>
           <select value={mesIni} onChange={e => setMesIni(e.target.value)}
@@ -235,6 +238,7 @@ export default function FinanceiroArena() {
           </select>
         </div>
 
+        {/* Periodo Ate */}
         <div className="flex items-center gap-1.5">
           <span className="text-[10px] font-black text-slate-400 uppercase tracking-wide">Até</span>
           <select value={mesFim} onChange={e => setMesFim(e.target.value)}
@@ -249,16 +253,18 @@ export default function FinanceiroArena() {
 
         <div className="h-6 w-px bg-slate-200" />
 
+        {/* Regional */}
         <select value={regional} onChange={e => setRegional(e.target.value)}
           className="text-xs font-bold border border-slate-200 rounded-lg px-2 py-1.5 text-slate-700 focus:outline-none focus:ring-2 focus:ring-violet-300">
           <option value="">Todas as Regionais</option>
-          {(filtros?.regionais || []).map((r: string) => <option key={r} value={r}>{r}</option>)}
+          {filtros.regionais.map((r: string) => <option key={r} value={r}>{r}</option>)}
         </select>
 
+        {/* Segmento */}
         <select value={segmento} onChange={e => setSegmento(e.target.value)}
           className="text-xs font-bold border border-slate-200 rounded-lg px-2 py-1.5 text-slate-700 focus:outline-none focus:ring-2 focus:ring-violet-300">
           <option value="">Todos os Segmentos</option>
-          {(filtros?.segmentos || []).map((s: string) => <option key={s} value={s}>{s}</option>)}
+          {filtros.segmentos.map((s: string) => <option key={s} value={s}>{s}</option>)}
         </select>
 
         <button onClick={buscarDados} disabled={loading}
@@ -269,6 +275,7 @@ export default function FinanceiroArena() {
 
       {toggleAtivo === 'PMR' && (
         <>
+          {/* SEM DADOS */}
           {semDados && !loading && (
             <div className="flex items-center gap-3 bg-amber-50 border border-amber-200 rounded-2xl px-5 py-4 mb-5 text-sm font-bold text-amber-800">
               <AlertTriangle className="w-5 h-5 shrink-0" />
@@ -280,11 +287,11 @@ export default function FinanceiroArena() {
           {global && (
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
               {[
-                { label: 'PMR Pagamento', val: global?.pmr_pagamento, icon: Clock, desc: 'Emissão → pagamento real', cor: '#7c3aed' },
-                { label: 'PMR Vencimento', val: global?.pmr_vencimento, icon: Clock, desc: 'Emissão → vencimento real', cor: '#2563eb' },
-                { label: 'PMR Cond. Pag.', val: global?.pmr_cond_pag, icon: Clock, desc: 'Emissão → vencimento contratual', cor: '#0891b2' },
-                { label: 'Delta Atraso', val: global?.delta_atraso, icon: (global?.delta_atraso ?? 0) > 0 ? TrendingUp : TrendingDown,
-                  desc: 'PMR Pag. − PMR Cond. (+ = cliente paga tarde)', cor: corDelta(global?.delta_atraso) },
+                { label: 'PMR Pagamento', val: global.pmr_pagamento, icon: Clock, desc: 'Emissão → pagamento real', cor: '#7c3aed' },
+                { label: 'PMR Vencimento', val: global.pmr_vencimento, icon: Clock, desc: 'Emissão → vencimento real', cor: '#2563eb' },
+                { label: 'PMR Cond. Pag.', val: global.pmr_cond_pag, icon: Clock, desc: 'Emissão → vencimento contratual', cor: '#0891b2' },
+                { label: 'Delta Atraso', val: global.delta_atraso, icon: global.delta_atraso > 0 ? TrendingUp : TrendingDown,
+                  desc: 'PMR Pag. − PMR Cond. (+ = cliente paga tarde)', cor: corDelta(global.delta_atraso) },
               ].map(({ label, val, icon: Icon, desc, cor }) => (
                 <div key={label} className="bg-white rounded-2xl border border-slate-100 p-4">
                   <div className="flex items-center gap-2 mb-1">
@@ -292,13 +299,13 @@ export default function FinanceiroArena() {
                     <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</span>
                   </div>
                   <div className="text-3xl font-black mt-1" style={{ color: cor }}>
-                    {val != null ? Number(val).toFixed(2).replace('.', ',') : '—'}
+                    {val != null ? val.toFixed(2).replace('.', ',') : '—'}
                     <span className="text-sm font-bold text-slate-400 ml-1">dias</span>
                   </div>
                   <div className="text-[10px] text-slate-400 mt-1">{desc}</div>
-                  {label === 'PMR Pagamento' && (global?.notas_pagas ?? 0) > 0 && (
+                  {label === 'PMR Pagamento' && global.notas_pagas > 0 && (
                     <div className="text-[10px] text-slate-400 mt-1 font-bold">
-                      {Number(global.notas_pagas).toLocaleString('pt-BR')} NFs · {fmtRsFull(global?.valor_total)}
+                      {global.notas_pagas.toLocaleString('pt-BR')} NFs · {fmtRsFull(global.valor_total)}
                     </div>
                   )}
                 </div>
@@ -380,22 +387,22 @@ export default function FinanceiroArena() {
                       </tr>
                     </thead>
                     <tbody>
-                      {(clientes || []).slice(0, 30).map((c: any, i: number) => (
-                        <tr key={c?.cgc || i} style={{ background: i % 2 ? '#f9fafb' : '#fff', borderBottom: '1px solid #f1f5f9' }}>
+                      {clientes.slice(0, 30).map((c: any, i: number) => (
+                        <tr key={c.cgc} style={{ background: i % 2 ? '#f9fafb' : '#fff', borderBottom: '1px solid #f1f5f9' }}>
                           <td style={{ padding: '6px 10px', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis',
                             whiteSpace: 'nowrap', fontWeight: 700, color: '#334155' }}
-                            title={c?.nome}>{c?.nome || '—'}</td>
+                            title={c.nome}>{c.nome}</td>
                           <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 700, color: '#475569', whiteSpace: 'nowrap' }}>
-                            {fmtRs(c?.valor_total)}
+                            {fmtRs(c.valor_total)}
                           </td>
-                          <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 900, color: corDias(c?.pmr_pagamento) }}>
-                            {c?.pmr_pagamento != null ? Number(c.pmr_pagamento).toFixed(0) : '—'}
-                          </td>
-                          <td style={{ padding: '6px 10px', textAlign: 'right', color: '#64748b' }}>
-                            {c?.pmr_vencimento != null ? Number(c.pmr_vencimento).toFixed(0) : '—'}
+                          <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 900, color: corDias(c.pmr_pagamento) }}>
+                            {c.pmr_pagamento?.toFixed(0)}
                           </td>
                           <td style={{ padding: '6px 10px', textAlign: 'right', color: '#64748b' }}>
-                            {c?.pmr_cond_pag != null ? Number(c.pmr_cond_pag).toFixed(0) : '—'}
+                            {c.pmr_vencimento?.toFixed(0)}
+                          </td>
+                          <td style={{ padding: '6px 10px', textAlign: 'right', color: '#64748b' }}>
+                            {c.pmr_cond_pag?.toFixed(0)}
                           </td>
                         </tr>
                       ))}
@@ -431,6 +438,7 @@ export default function FinanceiroArena() {
         </>
       )}
 
+      {/* PLACEHOLDERS FUTUROS */}
       {toggleAtivo !== 'PMR' && (
         <div className="flex flex-col items-center justify-center h-64 bg-white rounded-2xl border border-slate-100 text-slate-400">
           <DollarSign className="w-10 h-10 mb-3 opacity-20" />
