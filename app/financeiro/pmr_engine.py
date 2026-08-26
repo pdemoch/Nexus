@@ -151,7 +151,10 @@ def _carregar_base(data_ini: date, data_fim: date,
         logger.warning("PMR: contas_receber vazio no S3")
         return pd.DataFrame()
 
-    se1_f = se1[["Chave_F2", "Chave_E5", "e1_valor", "e1_vencto", "e1_vencrea", "Chave_A1"]].copy()
+    # Correção: sf2 já possui Chave_A1. NÃO trazemos Chave_A1 de se1 para
+    # evitar colisão (_x / _y) no merge por Chave_F2 — que fazia o
+    # join seguinte com SA1 (on="Chave_A1") levantar KeyError e deixar a tela em branco.
+    se1_f = se1[["Chave_F2", "Chave_E5", "e1_valor", "e1_vencto", "e1_vencrea"]].copy()
     se1_f = se1_f.drop_duplicates("Chave_F2")
 
     base = sf2.merge(se1_f, on="Chave_F2", how="inner")
@@ -283,12 +286,12 @@ def listar_filtros(data_ini: date, data_fim: date) -> dict[str, Any]:
     # Correção: sf2 já possui Chave_A1. Trazemos apenas Chave_F2 de se1 para evitar colisão (_x / _y)
     se1_f = se1[["Chave_F2"]].drop_duplicates("Chave_F2")
     sa1_d = sa1[["Chave_A1", "regional", "segmento"]].drop_duplicates("Chave_A1")
-    
     base = sf2.merge(se1_f, on="Chave_F2", how="inner").merge(sa1_d, on="Chave_A1", how="left")
 
     regionais = sorted(base["regional"].dropna().unique().tolist())
     segmentos = sorted(base["segmento"].dropna().unique().tolist())
     return {"regionais": regionais, "segmentos": segmentos}
+
 
 def obter_dados_brutos(data_ini: date, data_fim: date,
                        segmento: str = None, regional: str = None) -> pd.DataFrame:
