@@ -1,6 +1,5 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
 # =========================================================================
 # ROTAS — Nexus IBP 3.0 (núcleo reconstruído, enxuto)
 # Só o que foi reconstruído e validado. Os módulos de apoio antigos (SOE,
@@ -19,7 +18,7 @@ from app.api.routers import (
     router_npd,             # NPD / Inovações
     router_kpis,            # Auditoria / KPIs
     router_assistente,
-    router_financeiro,      
+    router_financeiro,
 )
 from app.core.config import settings
 from app.models.domain_models import Base
@@ -35,6 +34,10 @@ app = FastAPI(
 
 # =========================================================================
 # CORS
+# IMPORTANTE: allow_methods=["*"] e allow_headers=["*"] são inválidos pelo
+# spec CORS quando allow_credentials=True — o browser rejeita o preflight
+# OPTIONS sem Access-Control-Allow-Methods reconhecível. Sempre listar
+# métodos e headers explicitamente com credenciais ativas.
 # =========================================================================
 origins = [
     "https://lineanexus.com.br",
@@ -42,12 +45,13 @@ origins = [
     "http://localhost:5173",
     "http://localhost:3000",
 ]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"],
 )
 
 # =========================================================================
@@ -67,6 +71,7 @@ app.include_router(router_npd.router)
 app.include_router(router_kpis.router)
 app.include_router(router_assistente.router)
 app.include_router(router_financeiro.router)
+
 
 @app.get("/", tags=["Health Check"])
 async def root():
