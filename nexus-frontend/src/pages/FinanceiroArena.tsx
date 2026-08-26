@@ -99,10 +99,10 @@ export default function FinanceiroArena() {
         axios.get('/api/v1/financeiro/pmr/clientes-filtrado', { params: { ...params, limit: 100 } }),
       ]);
       // CORREÇÃO: rotas -filtrado envolvem o payload em { status, data: {...} }
-      setGlobal(gRes.data.data);
-      setRegionais(rRes.data.data?.regionais || []);
-      setClientes(cRes.data.data?.clientes || []);
-      if (!gRes.data.data?.notas_pagas) setSemDados(true);
+      setGlobal(gRes.data);
+      setRegionais(rRes.data?.regionais || []);
+      setClientes(cRes.data?.clientes || []);
+      if (!gRes.data?.notas_pagas) setSemDados(true);
     } catch {
       setSemDados(true);
     } finally {
@@ -116,7 +116,7 @@ export default function FinanceiroArena() {
         params: { data_ini: dataIni, data_fim: dataFim },
       });
       // CORREÇÃO: rota de filtros também usa envelope { status, data: {...} }
-      setFiltros(r.data.data || { regionais: [], segmentos: [] });
+      setFiltros(r.data || { regionais: [], segmentos: [] });
     } catch {}
   }, [dataIni, dataFim]);
 
