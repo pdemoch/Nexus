@@ -37,7 +37,7 @@ app = FastAPI(
 # IMPORTANTE: allow_methods=["*"] e allow_headers=["*"] são inválidos pelo
 # spec CORS quando allow_credentials=True — o browser rejeita o preflight
 # OPTIONS sem Access-Control-Allow-Methods reconhecível. Sempre listar
-# métodos e headers explicitamente com credenciais ativas.
+# métodos e headers explicitamente com credenciais ativas
 # =========================================================================
 origins = [
     "https://lineanexus.com.br",
