@@ -211,6 +211,11 @@ async def pipeline_recarga(
 # ------------------------------------------------------------
 # Filtros disponiveis (regionais e segmentos do periodo)
 # ------------------------------------------------------------
+# NOTA DE CONTRATO: as 4 rotas abaixo retornam o objeto de dados DIRETO
+# (sem envelope {"status":"success","data":...}), pois o frontend consome
+# r.data.regionais / r.data.clientes / r.data.notas_pagas diretamente.
+# Em caso de erro, /pmr/filtros devolve listas vazias (nunca undefined)
+# para o .map() do frontend jamais receber undefined.
 
 @router.get("/pmr/filtros")
 async def get_pmr_filtros(
@@ -219,13 +224,14 @@ async def get_pmr_filtros(
 ):
     try:
         filtros = await asyncio.to_thread(_engine().listar_filtros, data_ini, data_fim)
-        return {"status": "success", "data": filtros}
+        return filtros  # objeto direto: {"regionais": [...], "segmentos": [...]}
     except Exception as e:
         print("\n" + "="*50)
         print("🔥 ERRO DETECTADO NA ROTA DE FILTROS 🔥")
         traceback.print_exc()
         print("="*50 + "\n")
-        return {"status": "error", "detail": str(e)}
+        # Fallback seguro: frontend faz filtros.regionais.map(); nunca devolver undefined
+        return {"regionais": [], "segmentos": []}
 
 @router.get("/pmr/global-filtrado")
 async def get_pmr_global_filtrado(
@@ -238,9 +244,12 @@ async def get_pmr_global_filtrado(
         dados = await asyncio.to_thread(
             _engine().calcular_pmr_global, data_ini, data_fim, segmento, regional
         )
-        return {"status": "success", "data": dados}
+        return dados  # objeto direto
     except Exception as e:
-        return {"status": "error", "detail": str(e)}
+        logger.exception("global-filtrado: %s", e)
+        return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
+                "notas_base": 0, "notas_pagas": 0, "valor_total": 0.0,
+                "pmr_pagamento": None, "pmr_vencimento": None, "pmr_cond_pag": None}
 
 @router.get("/pmr/regional-filtrado")
 async def get_pmr_regional_filtrado(
@@ -252,9 +261,10 @@ async def get_pmr_regional_filtrado(
         dados = await asyncio.to_thread(
             _engine().calcular_pmr_regional, data_ini, data_fim, segmento
         )
-        return {"status": "success", "data": dados}
+        return dados  # objeto direto: {"periodo": {...}, "regionais": [...]}
     except Exception as e:
-        return {"status": "error", "detail": str(e)}
+        logger.exception("regional-filtrado: %s", e)
+        return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "regionais": []}
 
 @router.get("/pmr/clientes-filtrado")
 async def get_pmr_clientes_filtrado(
@@ -269,9 +279,11 @@ async def get_pmr_clientes_filtrado(
         dados = await asyncio.to_thread(
             _engine().calcular_pmr_clientes, data_ini, data_fim, segmento, regional, limit, offset
         )
-        return {"status": "success", "data": dados}
+        return dados  # objeto direto: {"periodo": {...}, "total": N, "clientes": [...]}
     except Exception as e:
-        return {"status": "error", "detail": str(e)}
+        logger.exception("clientes-filtrado: %s", e)
+        return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
+                "total": 0, "clientes": []}
 
 
 # ------------------------------------------------------------
@@ -309,7 +321,7 @@ async def pmr_exportar(
 
         wb = openpyxl.Workbook()
 
-        # ── ABA 1: Dados Brutos ──
+        # -- ABA 1: Dados Brutos --
         ws1 = wb.active
         ws1.title = "Dados Brutos"
         hdr_fill = PatternFill("solid", fgColor="1E3A5F")
@@ -323,7 +335,7 @@ async def pmr_exportar(
                 for j, v in enumerate(row, 1):
                     ws1.cell(row=i, column=j, value=v)
 
-        # ── ABA 2: Por Regional ──
+        # -- ABA 2: Por Regional --
         ws2 = wb.create_sheet("Por Regional")
         hdrs2 = ["Regional", "Notas Pagas", "Valor NF (R$)",
                  "PMR Pagamento (dias)", "PMR Vencimento (dias)", "PMR Cond.Pag. (dias)", "Delta Atraso (dias)"]
@@ -339,7 +351,7 @@ async def pmr_exportar(
             ws2.cell(row=i, column=6, value=r["pmr_cond_pag"])
             ws2.cell(row=i, column=7, value=r["delta_atraso"])
 
-        # ── ABA 3: Por Cliente ──
+        # -- ABA 3: Por Cliente --
         ws3 = wb.create_sheet("Por Cliente")
         hdrs3 = ["CNPJ", "Razao Social", "Regional", "Segmento",
                  "Notas Pagas", "Valor NF (R$)",
@@ -359,17 +371,17 @@ async def pmr_exportar(
             ws3.cell(row=i, column=9, value=r["pmr_cond_pag"])
             ws3.cell(row=i, column=10, value=r["delta_atraso"])
 
-        # ── ABA 4: Metodologia ──
+        # -- ABA 4: Metodologia --
         ws4 = wb.create_sheet("Metodologia")
         titulo_font = Font(bold=True, size=12, color="1E3A5F")
         texto = [
             ("CALCULO DO PMR (Prazo Medio de Recebimento)", True),
             ("", False),
             ("O PMR mede, em dias, o tempo medio entre a emissao da nota fiscal e o recebimento.", False),
-            ("E' uma media ponderada pelo valor recebido (e5_valor_total, cash liquido de desconto).", False),
+            ("E' uma media ponderada pelo valor do titulo (e1_valor).", False),
             ("", False),
             ("FORMULA GERAL:", True),
-            ("PMR = SUM( dias_i * e5_valor_total_i ) / SUM( e5_valor_total_i )", False),
+            ("PMR = SUM( dias_i * e1_valor_i ) / SUM( e1_valor_i )", False),
             ("", False),
             ("TRES METRICAS:", True),
             ("1. PMR Pagamento:  dias = e5_data_ponderada - f2_emissao", False),
@@ -391,10 +403,6 @@ async def pmr_exportar(
             ("- Notas ainda nao pagas sao excluidas de TODAS as tres metricas.", False),
             ("- A razao social agrega todas as filiais/lojas do mesmo CNPJ.", False),
             ("- Delta Atraso = PMR Pagamento - PMR Cond.Pag. (positivo = cliente paga com atraso).", False),
-            ("- O peso do PMR e o cash recebido (e5_valor_total), ja liquido de desconto na origem.", False),
-            ("- O 'valor total' do card e o caixa de AR recebido no periodo (SE5 x SE1 por data de", False),
-            ("  pagamento) e pode diferir da soma da coluna 'Valor Recebido' desta planilha, que soma", False),
-            ("  os titulos emitidos no recorte.", False),
         ]
         for i, (txt, bold) in enumerate(texto, 1):
             c = ws4.cell(row=i, column=1, value=txt)

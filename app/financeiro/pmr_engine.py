@@ -92,69 +92,15 @@ def _agregar_se5(se5: pd.DataFrame) -> pd.DataFrame:
 
 
 # =====================================================================
-# VALOR CAIXA AR — cash recebido no período (SE5 × SE1 por e5_data)
-# =====================================================================
-
-def _valor_caixa_ar(
-    se5: pd.DataFrame,
-    se1: pd.DataFrame,
-    sa1: pd.DataFrame,
-    data_ini: date,
-    data_fim: date,
-    segmento: str = None,
-    regional: str = None,
-) -> float:
-    """
-    Soma de e5_valor da SE5 onde:
-      - e5_data está em [data_ini, data_fim]
-      - e5_valor > 0
-      - Chave_E5 existe na SE1 (é um recebível de cliente, não tesouraria)
-      - Chave_A1 do cliente atende aos filtros opcionais segmento/regional
-
-    Este valor representa o cash de AR efetivamente recebido no período
-    e é o número exibido no card global (ex: R$ 136 M para 2026 completo).
-    É independente do universo de f2_emissao do PMR.
-    """
-    if se5.empty or se1.empty:
-        return 0.0
-
-    s = se5.copy()
-    s["e5_data"]  = pd.to_datetime(s["e5_data"],  errors="coerce")
-    s["e5_valor"] = pd.to_numeric(s["e5_valor"],  errors="coerce")
-
-    chaves_se1 = set(se1["Chave_E5"].dropna().unique())
-
-    mask = (
-        (s["e5_data"] >= pd.Timestamp(data_ini))
-        & (s["e5_data"] <= pd.Timestamp(data_fim))
-        & (s["e5_valor"] > 0)
-        & s["Chave_E5"].isin(chaves_se1)
-    )
-    s = s[mask].copy()
-
-    # Filtros opcionais via SA1 — precisa do Chave_A1 da SE5
-    if (segmento or regional) and not sa1.empty and "Chave_A1" in s.columns:
-        sa1_d = sa1[["Chave_A1", "regional", "segmento"]].drop_duplicates("Chave_A1")
-        s = s.merge(sa1_d, on="Chave_A1", how="left")
-        if segmento:
-            s = s[s["segmento"].fillna("").str.upper() == segmento.upper()]
-        if regional:
-            s = s[s["regional"].fillna("").str.upper() == regional.upper()]
-
-    return float(s["e5_valor"].sum())
-
-
-# =====================================================================
 # CÁLCULO DO PMR
 # =====================================================================
 
 def _pmr(df: pd.DataFrame, col_dias: str) -> float:
-    """PMR ponderado por e5_valor_total (cash recebido, liquido de desconto).
-    Retorna 0.0 se denominador for zero."""
-    total = df["e5_valor_total"].sum()
+    """PMR ponderado por e1_valor. Retorna 0.0 se denominador for zero."""
+    total = df["e1_valor"].sum()
     if total == 0:
         return 0.0
-    return float((df[col_dias] * df["e5_valor_total"]).sum() / total)
+    return float((df[col_dias] * df["e1_valor"]).sum() / total)
 
 
 def _calcular_dias(df: pd.DataFrame) -> pd.DataFrame:
@@ -201,8 +147,6 @@ def _carregar_base(data_ini: date, data_fim: date,
     se5 = carregar_todos_mensal("movimentacao_bancaria")
     sa1 = carregar_clientes()
 
-    valor_caixa = _valor_caixa_ar(se5, se1, sa1, data_ini, data_fim, segmento, regional)
-
     if se1.empty:
         logger.warning("PMR: contas_receber vazio no S3")
         return pd.DataFrame()
@@ -210,7 +154,9 @@ def _carregar_base(data_ini: date, data_fim: date,
     se1_f = se1[["Chave_F2", "Chave_E5", "e1_valor", "e1_vencto", "e1_vencrea", "Chave_A1"]].copy()
     se1_f = se1_f.drop_duplicates("Chave_F2")
 
-    base = sf2.merge(se1_f, on="Chave_F2", how="inner")
+    # FIX colisao de coluna: SF2 tambem carrega Chave_A1; se nao descartar,
+    # o merge com SE1 gera Chave_A1_x/_y e o join seguinte com SA1 quebra.
+    base = sf2.drop(columns=["Chave_A1"], errors="ignore").merge(se1_f, on="Chave_F2", how="inner")
     logger.info("PMR: apos join SF2->SE1: %d registros", len(base))
 
     if not sa1.empty:
@@ -235,7 +181,7 @@ def _carregar_base(data_ini: date, data_fim: date,
     logger.info("PMR: apos inner join com SE5: %d de %d notas (%d%% liquidadas)",
                 len(pago), len(base), int(len(pago) / max(len(base), 1) * 100))
 
-    return _calcular_dias(pago), valor_caixa
+    return _calcular_dias(pago)
 
 
 # =====================================================================
@@ -245,7 +191,7 @@ def _carregar_base(data_ini: date, data_fim: date,
 def calcular_pmr_global(data_ini: date, data_fim: date,
                         segmento: str = None, regional: str = None) -> dict[str, Any]:
     """Cards de topo: PMR global nos três critérios."""
-    base, valor_caixa = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional)
+    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional)
     if base.empty:
         return _resposta_vazia(data_ini, data_fim)
 
@@ -253,7 +199,7 @@ def calcular_pmr_global(data_ini: date, data_fim: date,
         "periodo":        {"data_ini": str(data_ini), "data_fim": str(data_fim)},
         "notas_base":     int(base["Chave_F2"].nunique()),
         "notas_pagas":    int(len(base)),
-        "valor_total":    round(valor_caixa, 2),
+        "valor_total":    round(float(base["e1_valor"].sum()), 2),
         "pmr_pagamento":  round(_pmr(base, "dias_pagamento"),  2),
         "pmr_vencimento": round(_pmr(base, "dias_vencimento"), 2),
         "pmr_cond_pag":   round(_pmr(base, "dias_cond_pag"),   2),
@@ -264,7 +210,7 @@ def calcular_pmr_global(data_ini: date, data_fim: date,
 def calcular_pmr_regional(data_ini: date, data_fim: date,
                           segmento: str = None) -> dict[str, Any]:
     """PMR detalhado por regional."""
-    base, _ = _carregar_base(data_ini, data_fim, segmento=segmento)
+    base = _carregar_base(data_ini, data_fim, segmento=segmento)
     if base.empty:
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "regionais": []}
 
@@ -291,7 +237,7 @@ def calcular_pmr_clientes(data_ini: date, data_fim: date,
     PMR por RAZAO SOCIAL (a1_cgc + a1_nome), paginado, ordenado por valor_total desc.
     Consolida todas as filiais/lojas do mesmo CNPJ em um único registro.
     """
-    base, _ = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional)
+    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional)
     if base.empty:
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
                 "total": 0, "clientes": []}
@@ -338,7 +284,14 @@ def listar_filtros(data_ini: date, data_fim: date) -> dict[str, Any]:
 
     se1_f = se1[["Chave_F2", "Chave_A1"]].drop_duplicates("Chave_F2")
     sa1_d = sa1[["Chave_A1", "regional", "segmento"]].drop_duplicates("Chave_A1")
-    base  = sf2.merge(se1_f, on="Chave_F2", how="inner").merge(sa1_d, on="Chave_A1", how="left")
+
+    # FIX colisao de coluna: SF2 tambem carrega Chave_A1; descartamos antes
+    # do merge com SE1 para evitar Chave_A1_x/_y e o KeyError no join com SA1.
+    base = (
+        sf2.drop(columns=["Chave_A1"], errors="ignore")
+        .merge(se1_f, on="Chave_F2", how="inner")
+        .merge(sa1_d, on="Chave_A1", how="left")
+    )
 
     regionais = sorted(base["regional"].dropna().unique().tolist())
     segmentos = sorted(base["segmento"].dropna().unique().tolist())
@@ -351,7 +304,7 @@ def obter_dados_brutos(data_ini: date, data_fim: date,
     Retorna o DataFrame linha a linha para exportacao Excel.
     Inclui todas as variaveis que compoem o calculo do PMR.
     """
-    base, _ = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional)
+    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional)
     if base.empty:
         return pd.DataFrame()
 
