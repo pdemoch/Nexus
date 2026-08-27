@@ -21,6 +21,14 @@ REGRAS:
 - Use somente os numeros do CONTEXTO FINANCEIRO calculado pelo servidor.
 - PMR usa cada movimento efetivo da E5, e5_data como periodo e e5_valor como
   peso. E1 fornece vencimentos e SF2 fornece a emissao.
+- A E1 e considerada somente quando e1_tipo = NF; nao existe filtro separado de
+  tipo E1 no painel.
+- O status e associado ao CNPJ: ATIVO, INATIVO ou SEM STATUS. O filtro e
+  aplicado antes do calculo.
+- O motivo E5 (e5_motbx) e textual, aceita multiplas selecoes (OR) e tambem e
+  aplicado antes do calculo. Filtros diferentes combinam com AND.
+- Depois dos filtros, os resultados sao consolidados por razao social; o
+  detalhamento pode reunir varios CNPJs e lojas da mesma razao social.
 - Em simulacoes, compare sempre faturamento, recebimento, PMR e caixa liberado.
   Nao diga que uma decisao e positiva sem explicitar o trade-off.
 - PMP, PME e CCC indisponiveis devem ser declarados como limitacao, nunca
@@ -42,14 +50,15 @@ def construir_contexto(
     regional: Any = None,
     cgc: Optional[str] = None,
     status: Any = None,
+    motivo: Any = None,
 ) -> dict[str, Any]:
     """Calcula o dataset financeiro que fundamenta cada resposta do agente."""
     from app.financeiro import pmr_engine as engine
 
     started = time.perf_counter()
-    base = engine._carregar_base(data_ini, data_fim, segmento, regional, status=status)
+    base = engine._carregar_base(data_ini, data_fim, segmento, regional, status=status, motivo=motivo)
     base_escopo = (
-        engine._carregar_base(data_ini, data_fim, segmento, regional, cgc, status)
+        engine._carregar_base(data_ini, data_fim, segmento, regional, cgc, status, motivo)
         if cgc else base
     )
     contexto: dict[str, Any] = {
@@ -66,6 +75,7 @@ def construir_contexto(
             "segmentos": segmento,
             "regionais": regional,
             "status": status,
+            "motivos_e5": motivo,
             "status_opcoes": ["ATIVO", "INATIVO", "SEM STATUS"],
         },
         "indicadores_disponiveis": ["PMR"],
@@ -76,17 +86,21 @@ def construir_contexto(
         contexto.update({"global": {}, "mensal": [], "regionais": [], "clientes": []})
         return contexto
 
-    contexto["global"] = engine.calcular_pmr_global(data_ini, data_fim, segmento, regional, status=status)
+    contexto["global"] = engine.calcular_pmr_global(
+        data_ini, data_fim, segmento, regional, status=status, motivo=motivo
+    )
     contexto["mensal"] = engine.calcular_pmr_mensal(
-        data_ini, data_fim, segmento, regional, status=status
+        data_ini, data_fim, segmento, regional, status=status, motivo=motivo
     ).get("meses", [])
     contexto["regionais"] = engine.calcular_pmr_regional(
-        data_ini, data_fim, segmento, regional, status
+        data_ini, data_fim, segmento, regional, status, motivo
     ).get("regionais", [])
     if cgc:
         contexto["cliente_selecionado"] = {
             "cgc": cgc,
-            "dados": engine.calcular_pmr_global(data_ini, data_fim, segmento, regional, cgc),
+            "dados": engine.calcular_pmr_global(
+                data_ini, data_fim, segmento, regional, cgc, status, motivo
+            ),
             "simulacao_exclusao": {
                 "recebimento_e5_removido": _round(base_escopo["e5_valor"].sum()),
                 "faturamento_sf2_removido": _round(base_escopo.drop_duplicates("Chave_F2")["f2_valbrut"].sum()),
@@ -96,8 +110,12 @@ def construir_contexto(
 
     # Uma nota pode ter vários movimentos E5. Faturamento é contado uma vez
     # por nota, enquanto recebimento soma cada movimento efetivo.
-    chaves_cliente = ["a1_cgc", "a1_nome"]
+    # O mesmo criterio da tela: uma linha por razao social, reunindo seus CNPJs.
     base_clientes = base.copy()
+    base_clientes["_razao_key"] = (
+        base_clientes["a1_nome"].fillna("SEM_NOME").astype(str).str.strip().str.upper()
+    )
+    chaves_cliente = ["_razao_key"]
     base_clientes[chaves_cliente] = base_clientes[chaves_cliente].fillna("")
     base_clientes["_dias_x_valor"] = (
         base_clientes["dias_pagamento"] * base_clientes["e5_valor"]
@@ -116,6 +134,11 @@ def construir_contexto(
         faturamento_sf2=("f2_valbrut", "sum"),
     ).reset_index()
     clientes_df = recebimentos.merge(faturamentos, on=chaves_cliente, how="left")
+    nomes = base_clientes.groupby("_razao_key", as_index=False).agg(
+        a1_nome=("a1_nome", "first"),
+        cnpjs=("a1_cgc", lambda s: sorted({str(v).strip() for v in s.dropna() if str(v).strip()})),
+    )
+    clientes_df = clientes_df.merge(nomes, on="_razao_key", how="left")
     clientes_df["faturamento_sf2"] = clientes_df["faturamento_sf2"].fillna(0)
     clientes_df["pmr_pagamento"] = (
         clientes_df["dias_x_valor"] / clientes_df["recebimento_e5"].where(
@@ -126,7 +149,7 @@ def construir_contexto(
     clientes = []
     for row in clientes_df.sort_values("recebimento_e5", ascending=False).head(200).to_dict("records"):
         clientes.append({
-            "cgc": str(row["a1_cgc"]), "nome": str(row["a1_nome"]),
+            "cgc": ", ".join(row.get("cnpjs") or []), "nome": str(row["a1_nome"]),
             "regional": str(row["regional"]) if row["regional"] else "SEM REGIONAL",
             "segmento": str(row["segmento"]) if row["segmento"] else "SEM SEGMENTO",
             "movimentos_e5": int(row["movimentos_e5"]), "notas_sf2": int(row["notas_pagas"]),

@@ -304,6 +304,7 @@ export default function FinanceiroArena() {
         segmentos: segmentosSel.length ? segmentosSel.join(',') : undefined,
         regionais: regionaisSel.length ? regionaisSel.join(',') : undefined,
         status: statusSel.length ? statusSel.join(',') : undefined,
+        motivos: motivosSel.length ? motivosSel.join(',') : undefined,
         cgc: clienteSel?.cgc,
       });
       setChatAgente([...historico, { role: 'assistant', content: r.data.resposta }]);

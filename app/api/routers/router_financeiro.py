@@ -29,6 +29,7 @@ class PerguntaFinanceira(BaseModel):
     segmentos: Optional[str] = None
     regionais: Optional[str] = None
     status: Optional[str] = None
+    motivos: Optional[str] = None
     cgc: Optional[str] = None
     historico: Optional[list[dict]] = None
 
@@ -48,7 +49,7 @@ async def agente_chat(
         regional = _split(payload.regionais)
         contexto = await asyncio.to_thread(
             construir_contexto, payload.data_ini, payload.data_fim, segmento, regional, payload.cgc,
-            _split(payload.status)
+            _split(payload.status), _split(payload.motivos)
         )
         return {"resposta": await asyncio.to_thread(
             responder_pergunta, pergunta, contexto, payload.historico
