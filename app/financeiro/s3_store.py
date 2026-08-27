@@ -169,11 +169,11 @@ def carregar_mensal(fonte: str,
     return resultado.reset_index(drop=True)
 
 
-def carregar_todos_mensal(fonte: str) -> pd.DataFrame:
+def carregar_todos_mensal(fonte: str, data_fim: Optional[date] = None) -> pd.DataFrame:
     """
     Carrega TODOS os parquets disponíveis para uma fonte, sem filtro de data.
-    Usado pelo PMR engine para SE1 e SE5 (pagamentos podem chegar meses
-    depois das notas, então carregar apenas o intervalo da query perderia dados).
+    Usado pelo PMR engine para SF2 e SE1. Quando data_fim e informado, meses
+    posteriores ao fim da consulta nao sao baixados.
     """
     try:
         s3 = _s3()
@@ -187,6 +187,15 @@ def carregar_todos_mensal(fonte: str) -> pd.DataFrame:
             for obj in page.get("Contents", [])
             if obj["Key"].endswith(".parquet")
         ]
+        if data_fim:
+            limite = (data_fim.year, data_fim.month)
+            keys = [
+                key for key in keys
+                if len(key.split("/")) >= 4
+                and key.split("/")[2].isdigit()
+                and key.split("/")[3][:2].isdigit()
+                and (int(key.split("/")[2]), int(key.split("/")[3][:2])) <= limite
+            ]
         # S3 downloads are I/O-bound; fetching independent monthly partitions
         # concurrently avoids making the first PMR request exceed the proxy timeout.
         with ThreadPoolExecutor(max_workers=min(8, max(len(keys), 1))) as pool:

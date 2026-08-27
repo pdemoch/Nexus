@@ -10,6 +10,8 @@ import time
 from datetime import date
 from typing import Any, Optional
 
+import pandas as pd
+
 from app.api.routers.agente_kpis import _chamar_claude
 
 

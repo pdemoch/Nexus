@@ -114,14 +114,14 @@ def _carregar_base_sem_filtros(data_ini: date, data_fim: date) -> pd.DataFrame:
     Retorna apenas registros de notas liquidadas (INNER com SE5).
     """
     # O período é o recebimento: notas e títulos devem ser históricos.
-    sf2 = carregar_todos_mensal("notas_saida")
+    sf2 = carregar_todos_mensal("notas_saida", data_fim)
     if sf2.empty:
         logger.warning("PMR: nenhuma nota encontrada em %s -> %s", data_ini, data_fim)
         return pd.DataFrame()
 
     logger.info("PMR: %d notas carregadas (%s -> %s)", len(sf2), data_ini, data_fim)
 
-    se1 = carregar_todos_mensal("contas_receber")
+    se1 = carregar_todos_mensal("contas_receber", data_fim)
     se5 = carregar_mensal("movimentacao_bancaria", data_ini, data_fim)
     sa1 = carregar_clientes()
 
