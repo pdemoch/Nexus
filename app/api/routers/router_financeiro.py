@@ -277,14 +277,16 @@ async def get_pmr_global_filtrado(
     regionais: str = Query(None, description="Multiplas regionais separadas por virgula"),
     segmentos: str = Query(None, description="Multiplos segmentos separados por virgula"),
     status: str = Query(None, description="Status do cliente"),
+    motivos: str = Query(None, description="Multiplos motivos da E5"),
     cgc:       str = Query(None, description="Filtro opcional por CNPJ do cliente"),
 ):
     try:
         reg = _split(regionais) or regional
         seg = _split(segmentos) or segmento
         stat = _split(status) or status
+        mot = _split(motivos) or motivos
         dados = await asyncio.to_thread(
-            _engine().calcular_pmr_global, data_ini, data_fim, seg, reg, cgc, stat
+            _engine().calcular_pmr_global, data_ini, data_fim, seg, reg, cgc, stat, mot
         )
         return dados
     except Exception as e:
@@ -305,13 +307,15 @@ async def get_pmr_regional_filtrado(
     regional:   str = Query(None, description="Uma regional (compat)"),
     regionais:  str = Query(None, description="Multiplas regionais separadas por virgula"),
     status:     str = Query(None, description="Status do cliente"),
+    motivos:    str = Query(None, description="Multiplos motivos da E5"),
 ):
     try:
         seg = _split(segmentos) or segmento
         reg = _split(regionais) or regional
         stat = _split(status) or status
+        mot = _split(motivos) or motivos
         dados = await asyncio.to_thread(
-            _engine().calcular_pmr_regional, data_ini, data_fim, seg, reg, stat
+            _engine().calcular_pmr_regional, data_ini, data_fim, seg, reg, stat, mot
         )
         return dados  # {"periodo": {...}, "regionais": [...]}
     except Exception as e:
@@ -328,6 +332,7 @@ async def get_pmr_clientes_filtrado(
     regionais: str = Query(None, description="Multiplas regionais separadas por virgula"),
     segmentos: str = Query(None, description="Multiplos segmentos separados por virgula"),
     status: str = Query(None, description="Status do cliente"),
+    motivos: str = Query(None, description="Multiplos motivos da E5"),
     limit: int = Query(50),
     offset: int = Query(0),
 ):
@@ -335,8 +340,9 @@ async def get_pmr_clientes_filtrado(
         reg = _split(regionais) or regional
         seg = _split(segmentos) or segmento
         stat = _split(status) or status
+        mot = _split(motivos) or motivos
         dados = await asyncio.to_thread(
-            _engine().calcular_pmr_clientes, data_ini, data_fim, seg, reg, limit, offset, stat
+            _engine().calcular_pmr_clientes, data_ini, data_fim, seg, reg, limit, offset, stat, mot
         )
         return dados  # {"periodo": {...}, "total": N, "clientes": [...]}
     except Exception as e:
@@ -355,14 +361,16 @@ async def get_pmr_evolucao(
     segmentos: str = Query(None, description="Multiplos segmentos separados por virgula"),
     cgc:       str = Query(None, description="Filtro opcional por CNPJ do cliente"),
     status:    str = Query(None, description="Status do cliente"),
+    motivos:   str = Query(None, description="Multiplos motivos da E5"),
 ):
     """Evolucao mes a mes, agrupada pelo mes de recebimento (e5_data)."""
     try:
         reg = _split(regionais) or regional
         seg = _split(segmentos) or segmento
         stat = _split(status) or status
+        mot = _split(motivos) or motivos
         dados = await asyncio.to_thread(
-            _engine().calcular_pmr_mensal, data_ini, data_fim, seg, reg, cgc, stat
+            _engine().calcular_pmr_mensal, data_ini, data_fim, seg, reg, cgc, stat, mot
         )
         return dados  # {"periodo": {...}, "meses": [...]}
     except Exception as e:
@@ -379,6 +387,7 @@ async def get_pmr_notas(
     segmentos: str = Query(None, description="Segmentos aplicados ao detalhe"),
     regionais: str = Query(None, description="Regionais aplicadas ao detalhe"),
     status: str = Query(None, description="Status aplicado ao detalhe"),
+    motivos: str = Query(None, description="Motivos E5 aplicados ao detalhe"),
 ):
     """Drill-down: parcelas de todos os CNPJs de uma razao social."""
     try:
@@ -387,7 +396,7 @@ async def get_pmr_notas(
         if razao_social:
             dados = await asyncio.to_thread(
                 _engine().obter_notas_razao_social, data_ini, data_fim,
-                razao_social, _split(segmentos), _split(regionais), _split(status)
+                razao_social, _split(segmentos), _split(regionais), _split(status), _split(motivos)
             )
         else:
             dados = await asyncio.to_thread(_engine().obter_notas_cliente, data_ini, data_fim, cgc)
@@ -410,6 +419,7 @@ async def pmr_exportar(
     segmentos: str = Query(None),
     regionais: str = Query(None),
     status: str = Query(None, description="Status do cliente"),
+    motivos: str = Query(None, description="Multiplos motivos da E5"),
     _: dict = Depends(get_current_user),
 ):
     """
@@ -433,12 +443,13 @@ async def pmr_exportar(
         reg = _split(regionais) or regional
         seg = _split(segmentos) or segmento
         stat = _split(status) or status
+        mot = _split(motivos) or motivos
 
-        df_bruto    = engine.obter_dados_brutos(data_ini, data_fim, seg, reg, status=stat)
-        d_regional  = engine.calcular_pmr_regional(data_ini, data_fim, seg, reg, stat)
-        d_clientes  = engine.calcular_pmr_clientes(data_ini, data_fim, seg, reg, 100000, 0, stat)
-        d_global    = engine.calcular_pmr_global(data_ini, data_fim, seg, reg, status=stat)
-        d_mensal    = engine.calcular_pmr_mensal(data_ini, data_fim, seg, reg, status=stat)
+        df_bruto    = engine.obter_dados_brutos(data_ini, data_fim, seg, reg, status=stat, motivo=mot)
+        d_regional  = engine.calcular_pmr_regional(data_ini, data_fim, seg, reg, stat, mot)
+        d_clientes  = engine.calcular_pmr_clientes(data_ini, data_fim, seg, reg, 100000, 0, stat, mot)
+        d_global    = engine.calcular_pmr_global(data_ini, data_fim, seg, reg, status=stat, motivo=mot)
+        d_mensal    = engine.calcular_pmr_mensal(data_ini, data_fim, seg, reg, status=stat, motivo=mot)
 
         wb = openpyxl.Workbook()
         hdr_fill = PatternFill("solid", fgColor="1E3A5F")
@@ -534,6 +545,25 @@ async def pmr_exportar(
             ("Cada linha do resumo pode reunir varios CNPJs e codigos de cliente; o detalhe preserva cada loja.", False),
             ("O filtro ATIVO/INATIVO/SEM STATUS e aplicado nos pagamentos E5 antes de recalcular os PMRs.", False),
             ("", False),
+            ("COMO OS FILTROS FUNCIONAM:", True),
+            ("Os dados sao cruzados no menor grao: cada movimento de E5 ligado ao titulo E1 e a NF SF2.", False),
+            ("E1_tipo e mantido exclusivamente como NF (regra da extracao); nao existe selecao de outros tipos.", False),
+            ("Status e definido por CNPJ na dim_clientes; CNPJ sem correspondencia recebe SEM STATUS.", False),
+            ("Cada filtro aceita varias opcoes com OU dentro do proprio filtro.", False),
+            ("Filtros diferentes funcionam com E: status E motivo E regional E segmento.", False),
+            ("Apos filtrar os movimentos E5, todos os PMRs e totais sao recalculados.", False),
+            ("A consolidacao por Razao Social acontece somente depois dos filtros.", False),
+            ("Ex.: Status ATIVO + Motivos NOR,DEB = somente pagamentos E5 ativos cujo motivo seja NOR OU DEB.", False),
+            ("Ex.: selecionar apenas Motivo FAT remove os demais pagamentos E5 e pode alterar valor e PMR.", False),
+            ("Ex.: uma razao social com 5 CNPJs pode aparecer com menos CNPJs ao selecionar apenas ATIVO.", False),
+            ("", False),
+            ("EXEMPLO DE RECALCULO POR FILTRO:", True),
+            ("Base: A=R$100.000 em 40d, motivo NOR; B=R$50.000 em 50d, motivo DEB; C=R$10.000 em 65d, motivo FAT.", False),
+            ("Sem filtro: (40x100.000 + 50x50.000 + 65x10.000) / 160.000 = 44,7 dias.", False),
+            ("Motivos NOR e DEB: (40x100.000 + 50x50.000) / 150.000 = 43,3 dias.", False),
+            ("Somente motivo FAT: (65x10.000) / 10.000 = 65,0 dias.", False),
+            ("O mesmo calculo vale para PMR Pagamento, Vencimento, Cond.Pagamento e Delta.", False),
+            ("", False),
             ("EXEMPLO NUMERICO (3 parcelas ficticias):", True),
             ("Parcela A: emissao 01/03, pago 10/04 (40d), R$ 100.000  ->  40 x 100.000 = 4.000.000", False),
             ("Parcela B: emissao 01/03, pago 20/04 (50d), R$  50.000  ->  50 x  50.000 = 2.500.000", False),
@@ -575,6 +605,8 @@ async def pmr_exportar(
             ("- O filtro de status e aplicado por CNPJ no nivel dos pagamentos E5 antes da consolidacao.", False),
             ("- Delta Atraso = PMR Pagamento - PMR Cond.Pag. (positivo = cliente paga com atraso).", False),
             ("- e5_valor e' liquido de desconto (e5_valor - e5_vldesco), filtrado > 0 na extracao.", False),
+            ("- O filtro Motivo E5 usa o campo e5_motbx e aceita multiplas selecoes.", False),
+            ("- A E1 e extraida apenas com e1_tipo = NF; outros tipos nao fazem parte da base.", False),
         ]
         for i, (txt, bold) in enumerate(texto, 1):
             c = ws4.cell(row=i, column=1, value=txt)

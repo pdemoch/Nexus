@@ -123,6 +123,7 @@ export default function FinanceiroArena() {
   const [segmentosSel, setSegmentosSel] = useState<string[]>([]);
   const [regionaisSel, setRegionaisSel] = useState<string[]>([]);
   const [statusSel, setStatusSel] = useState<string[]>([]);
+  const [motivosSel, setMotivosSel] = useState<string[]>([]);
   const [toggleAtivo, setToggleAtivo]   = useState<'PMR' | 'PMP' | 'PME' | 'CCC'>('PMR');
 
   // ── Busca de cliente ──
@@ -162,6 +163,7 @@ export default function FinanceiroArena() {
     ...(segmentosSel.length ? { segmentos: segmentosSel.join(',') } : {}),
     ...(regionaisSel.length ? { regionais: regionaisSel.join(',') } : {}),
     ...(statusSel.length ? { status: statusSel.join(',') } : {}),
+    ...(motivosSel.length ? { motivos: motivosSel.join(',') } : {}),
   };
 
   // ─── Fetch principal ───────────────────────────────────────────────────────
@@ -186,7 +188,7 @@ export default function FinanceiroArena() {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dataIni, dataFim, segmentosSel, regionaisSel, statusSel]);
+  }, [dataIni, dataFim, segmentosSel, regionaisSel, statusSel, motivosSel]);
 
   const buscarFiltros = useCallback(async () => {
     try {
@@ -227,6 +229,7 @@ export default function FinanceiroArena() {
           segmentos: segmentosSel.length ? segmentosSel.join(',') : undefined,
           regionais: regionaisSel.length ? regionaisSel.join(',') : undefined,
           status: statusSel.length ? statusSel.join(',') : undefined,
+          motivos: motivosSel.length ? motivosSel.join(',') : undefined,
         },
       });
       setNotasCli(r.data);
@@ -235,7 +238,7 @@ export default function FinanceiroArena() {
     } finally {
       setLoadingNotas(false);
     }
-  }, [dataIni, dataFim, statusSel]);
+  }, [dataIni, dataFim, segmentosSel, regionaisSel, statusSel, motivosSel]);
 
   const exportar = async () => {
     setBaixando(true);
@@ -448,6 +451,8 @@ export default function FinanceiroArena() {
           value={segmentosSel} onChange={setSegmentosSel} />
         <MultiSelect label="Status" options={filtros.status || []}
           value={statusSel} onChange={setStatusSel} />
+        <MultiSelect label="Motivo E5" options={filtros.motivos || []}
+          value={motivosSel} onChange={setMotivosSel} />
 
         {/* Busca de cliente */}
         <div className="relative">

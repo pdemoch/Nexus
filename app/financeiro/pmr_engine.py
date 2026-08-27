@@ -228,7 +228,8 @@ def _carregar_base(data_ini: date, data_fim: date,
                    segmento: FiltroValor = None,
                    regional: FiltroValor = None,
                    cgc: FiltroValor = None,
-                   status: FiltroValor = None) -> pd.DataFrame:
+                   status: FiltroValor = None,
+                   motivo: FiltroValor = None) -> pd.DataFrame:
     """Carrega a base compartilhada e aplica os filtros específicos da consulta."""
     chave = (data_ini, data_fim)
     agora = time.monotonic()
@@ -247,6 +248,9 @@ def _carregar_base(data_ini: date, data_fim: date,
     base = _aplicar_filtro(base, "regional", regional)
     base = _aplicar_filtro(base, "a1_cgc", cgc)
     base = _aplicar_filtro(base, "status_cliente", status)
+    if "e5_motbx" in base.columns:
+        base["e5_motbx"] = base["e5_motbx"].fillna("").astype(str).str.strip().replace("", "SEM MOTIVO")
+    base = _aplicar_filtro(base, "e5_motbx", motivo)
     return base
 
 
@@ -258,13 +262,14 @@ def calcular_pmr_global(data_ini: date, data_fim: date,
                         segmento: FiltroValor = None,
                         regional: FiltroValor = None,
                         cgc: FiltroValor = None,
-                        status: FiltroValor = None) -> dict[str, Any]:
+                        status: FiltroValor = None,
+                        motivo: FiltroValor = None) -> dict[str, Any]:
     """
     Cards de topo: PMR global nos três critérios.
     Inclui 'valor_por_dia' = valor_total / dias_periodo (impacto de 1 dia de
     PMR no capital de giro — ganho one-off de caixa por dia reduzido).
     """
-    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, cgc=cgc, status=status)
+    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, cgc=cgc, status=status, motivo=motivo)
     if base.empty:
         return _resposta_vazia(data_ini, data_fim)
 
@@ -289,9 +294,10 @@ def calcular_pmr_global(data_ini: date, data_fim: date,
 def calcular_pmr_regional(data_ini: date, data_fim: date,
                           segmento: FiltroValor = None,
                           regional: FiltroValor = None,
-                          status: FiltroValor = None) -> dict[str, Any]:
+                          status: FiltroValor = None,
+                          motivo: FiltroValor = None) -> dict[str, Any]:
     """PMR detalhado por regional."""
-    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, status=status)
+    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, status=status, motivo=motivo)
     if base.empty:
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "regionais": []}
 
@@ -315,14 +321,15 @@ def calcular_pmr_clientes(data_ini: date, data_fim: date,
                           segmento: FiltroValor = None,
                           regional: FiltroValor = None,
                           limit: int = 50, offset: int = 0,
-                          status: FiltroValor = None) -> dict[str, Any]:
+                          status: FiltroValor = None,
+                          motivo: FiltroValor = None) -> dict[str, Any]:
     """
     PMR por RAZAO SOCIAL, paginado, ordenado por valor_total desc.
     O filtro de status ja foi aplicado no menor grao (pagamento E5) antes
     desta consolidacao. CNPJs e codigos de cliente ficam disponiveis para o
     drill-down.
     """
-    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, status=status)
+    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, status=status, motivo=motivo)
     if base.empty:
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
                 "total": 0, "clientes": []}
@@ -368,7 +375,8 @@ def calcular_pmr_mensal(data_ini: date, data_fim: date,
                         segmento: FiltroValor = None,
                         regional: FiltroValor = None,
                         cgc: FiltroValor = None,
-                        status: FiltroValor = None) -> dict[str, Any]:
+                        status: FiltroValor = None,
+                        motivo: FiltroValor = None) -> dict[str, Any]:
     """
     Evolução mês a mês, agrupada pelo mês de recebimento (e5_data).
 
@@ -381,7 +389,7 @@ def calcular_pmr_mensal(data_ini: date, data_fim: date,
     menor porque as notas de pagadores lentos ainda nao foram liquidadas.
     O campo 'em_maturacao' marca os 2 ultimos meses do recorte.
     """
-    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, cgc=cgc, status=status)
+    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, cgc=cgc, status=status, motivo=motivo)
     if base.empty:
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "meses": []}
 
@@ -420,7 +428,8 @@ def listar_filtros(data_ini: date, data_fim: date) -> dict[str, Any]:
     regionais = sorted(base["regional"].dropna().unique().tolist())
     segmentos = sorted(base["segmento"].dropna().unique().tolist())
     status = sorted(base["status_cliente"].dropna().unique().tolist())
-    return {"regionais": regionais, "segmentos": segmentos, "status": status}
+    motivos = sorted(base["e5_motbx"].fillna("").astype(str).str.strip().replace("", "SEM MOTIVO").unique().tolist())
+    return {"regionais": regionais, "segmentos": segmentos, "status": status, "motivos": motivos}
 
 
 def listar_clientes_busca(data_ini: date, data_fim: date,
@@ -479,6 +488,7 @@ def obter_notas_cliente(data_ini: date, data_fim: date, cgc: str) -> dict[str, A
             "codigo_cliente": _s(getattr(r, "a1_cod", "")),
             "loja":           _s(getattr(r, "a1_loja", "")),
             "status_cliente": _s(getattr(r, "status_cliente", "")),
+            "motivo":         _s(getattr(r, "e5_motbx", "")),
             "nf":             _s(getattr(r, "f2_doc", "")),
             "serie":          _s(getattr(r, "f2_serie", "")),
             "emissao":        _d(getattr(r, "f2_emissao", None)),
@@ -515,9 +525,10 @@ def obter_notas_razao_social(data_ini: date, data_fim: date,
                              razao_social: str,
                              segmento: FiltroValor = None,
                              regional: FiltroValor = None,
-                             status: FiltroValor = None) -> dict[str, Any]:
+                             status: FiltroValor = None,
+                             motivo: FiltroValor = None) -> dict[str, Any]:
     """Detalhamento de todos os CNPJs de uma razao social."""
-    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, status=status)
+    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, status=status, motivo=motivo)
     if base.empty:
         return {"nome": razao_social, "total": 0, "resumo": {}, "notas": []}
 
@@ -527,10 +538,7 @@ def obter_notas_razao_social(data_ini: date, data_fim: date,
     if grupo.empty:
         return {"nome": razao_social, "total": 0, "resumo": {}, "notas": []}
 
-    return obter_notas_cliente(
-        data_ini, data_fim,
-        ",".join(sorted({str(v).strip() for v in grupo["a1_cgc"].dropna() if str(v).strip()})),
-    ) if len(grupo["a1_cgc"].dropna().unique()) == 1 else _obter_notas_base(grupo, razao_social)
+    return _obter_notas_base(grupo, razao_social)
 
 
 def _obter_notas_base(base: pd.DataFrame, razao_social: str) -> dict[str, Any]:
@@ -550,6 +558,7 @@ def _obter_notas_base(base: pd.DataFrame, razao_social: str) -> dict[str, Any]:
             "codigo_cliente": _s(getattr(r, "a1_cod", "")),
             "loja": _s(getattr(r, "a1_loja", "")),
             "status_cliente": _s(getattr(r, "status_cliente", "")),
+            "motivo": _s(getattr(r, "e5_motbx", "")),
             "nf": _s(getattr(r, "f2_doc", "")), "serie": _s(getattr(r, "f2_serie", "")),
             "emissao": _d(getattr(r, "f2_emissao", None)),
             "titulo": _s(getattr(r, "e1_num", "")), "prefixo": _s(getattr(r, "e1_prefixo", "")),
@@ -580,10 +589,11 @@ def obter_dados_brutos(data_ini: date, data_fim: date,
                        segmento: FiltroValor = None,
                        regional: FiltroValor = None,
                        cgc: FiltroValor = None,
-                       status: FiltroValor = None) -> pd.DataFrame:
+                       status: FiltroValor = None,
+                       motivo: FiltroValor = None) -> pd.DataFrame:
     """DataFrame linha a linha para exportacao Excel."""
     base = _carregar_base(
-        data_ini, data_fim, segmento=segmento, regional=regional, cgc=cgc, status=status
+        data_ini, data_fim, segmento=segmento, regional=regional, cgc=cgc, status=status, motivo=motivo
     )
     if base.empty:
         return pd.DataFrame()
@@ -611,6 +621,7 @@ def obter_dados_brutos(data_ini: date, data_fim: date,
         "e1_vencrea":    "Vencimento Real",
         "e5_data":       "Data Pagamento (E5)",
         "e5_valor":      "Valor Recebido E5 (R$)",
+        "e5_motbx":      "Motivo E5",
         "dias_pagamento": "Dias PMR Pagamento",
         "dias_vencimento":"Dias PMR Vencimento",
         "dias_cond_pag":  "Dias PMR Cond.Pag.",
