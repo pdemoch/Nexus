@@ -298,10 +298,12 @@ async def get_pmr_regional_filtrado(
     data_fim: date = Query(...),
     segmento:  str = Query(None),
     segmentos: str = Query(None, description="Multiplos segmentos separados por virgula"),
+    regional:   str = Query(None, description="Uma regional (compat)"),
+    regionais:  str = Query(None, description="Multiplas regionais separadas por virgula"),
 ):
     try:
         seg = _split(segmentos) or segmento
-        reg = _split(regionais)
+        reg = _split(regionais) or regional
         dados = await asyncio.to_thread(
             _engine().calcular_pmr_regional, data_ini, data_fim, seg, reg
         )
