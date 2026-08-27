@@ -259,12 +259,18 @@ export default function FinanceiroArena() {
   // ─── Dados dos graficos ──────────────────────────────────────────────────────
   const dadosGrafico = regionais.map(r => ({
     regional: abrevReg(r.regional),
+    regionalOriginal: r.regional,
     valor_recebido: Math.round(r.valor_total),
     pmr_pag:  r.pmr_pagamento,
     pmr_vnc:  r.pmr_vencimento,
     pmr_cond: r.pmr_cond_pag,
   })).sort((a, b) => (b.pmr_pag ?? -Infinity) - (a.pmr_pag ?? -Infinity));
   const maxPMR = Math.max(...dadosGrafico.flatMap(d => [d.pmr_pag, d.pmr_vnc, d.pmr_cond]), 60);
+  const selecionarRegionalNoGrafico = (state: any) => {
+    const regional = state?.activePayload?.[0]?.payload?.regionalOriginal;
+    if (!regional) return;
+    setRegionaisSel(atual => atual.length === 1 && atual[0] === regional ? [] : [regional]);
+  };
 
   const dadosEvolucao = evolucao.map(m => ({
     mes: m.mes,
@@ -593,15 +599,17 @@ export default function FinanceiroArena() {
                 Valor Recebido E5 e PMR por Regional
               </div>
               <div className="text-[10px] text-slate-400 mb-4">
-                Barras = Valor Recebido E5 (eixo esq.) · Linhas = PMR em dias (eixo dir.)
+                Barras = Valor Recebido E5 (eixo esq.) · Linhas = PMR em dias (eixo dir.) ·
+                <span className="text-violet-500 font-bold"> clique em uma regional para filtrar</span>
               </div>
               {loading ? (
                 <div className="flex items-center justify-center h-64 text-slate-300"><Loader2 className="w-6 h-6 animate-spin" /></div>
               ) : dadosGrafico.length === 0 ? (
                 <div className="flex items-center justify-center h-64 text-slate-300 text-xs font-bold">Sem dados</div>
               ) : (
-                <ResponsiveContainer width="100%" height={300}>
-                  <ComposedChart data={dadosGrafico} margin={{ top: 10, right: 20, left: 0, bottom: 30 }}>
+                <ResponsiveContainer width="100%" height={340}>
+                  <ComposedChart data={dadosGrafico} margin={{ top: 10, right: 20, left: 0, bottom: 65 }}
+                    onClick={selecionarRegionalNoGrafico}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                     <XAxis dataKey="regional" tick={{ fontSize: 10, fontWeight: 700, fill: '#64748b' }}
                       angle={-30} textAnchor="end" interval={0} />
@@ -609,8 +617,9 @@ export default function FinanceiroArena() {
                     <YAxis yAxisId="right" orientation="right" domain={[0, Math.ceil(maxPMR * 1.2)]}
                       tick={{ fontSize: 10, fill: '#64748b' }} unit=" d" width={42} />
                     <Tooltip content={<TooltipCustom />} />
-                    <Legend wrapperStyle={{ fontSize: 10, fontWeight: 700 }} />
-                    <Bar yAxisId="left" dataKey="valor_recebido" name="Valor Recebido E5" fill="#c7d2fe" radius={[4, 4, 0, 0]} maxBarSize={48} />
+                    <Legend wrapperStyle={{ fontSize: 10, fontWeight: 700, paddingTop: 16 }} />
+                    <Bar yAxisId="left" dataKey="valor_recebido" name="Valor Recebido E5" fill="#c7d2fe"
+                      radius={[4, 4, 0, 0]} maxBarSize={48} cursor="pointer" />
                     <Line yAxisId="right" type="monotone" dataKey="pmr_pag" name="PMR Pagamento"
                       stroke="#7c3aed" strokeWidth={2.5} dot={{ r: 4, fill: '#7c3aed' }} />
                     <Line yAxisId="right" type="monotone" dataKey="pmr_vnc" name="PMR Vencimento"
