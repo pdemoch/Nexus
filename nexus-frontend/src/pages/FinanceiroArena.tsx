@@ -124,6 +124,9 @@ export default function FinanceiroArena() {
   const [regionaisSel, setRegionaisSel] = useState<string[]>([]);
   const [statusSel, setStatusSel] = useState<string[]>([]);
   const [motivosSel, setMotivosSel] = useState<string[]>([]);
+  const [pmpMotivosSel, setPmpMotivosSel] = useState<string[]>([]);
+  const [pmpTiposSel, setPmpTiposSel] = useState<string[]>([]);
+  const [pmpFornecedoresSel, setPmpFornecedoresSel] = useState<string[]>([]);
   const [toggleAtivo, setToggleAtivo]   = useState<'PMR' | 'PMP' | 'PME' | 'CCC'>('PMR');
 
   // ── Busca de cliente ──
@@ -134,12 +137,15 @@ export default function FinanceiroArena() {
 
   // ── Dados ──
   const [global, setGlobal]       = useState<any>(null);
+  const [pmpGlobal, setPmpGlobal] = useState<any>(null);
+  const [pmpFornecedores, setPmpFornecedores] = useState<any[]>([]);
   const [regionais, setRegionais] = useState<any[]>([]);
   const [clientes, setClientes]   = useState<any[]>([]);
   const [evolucao, setEvolucao]   = useState<any[]>([]);
   const [filtros, setFiltros]     = useState<any>({
     regionais: [], segmentos: [], status: ['ATIVO', 'INATIVO', 'SEM STATUS'],
   });
+  const [pmpFiltros, setPmpFiltros] = useState<any>({ motivos: [], tipos: [], fornecedores: [], clifor: [] });
   const [loading, setLoading]     = useState(false);
   const [baixando, setBaixando]   = useState(false);
   const [semDados, setSemDados]   = useState(false);
@@ -164,6 +170,12 @@ export default function FinanceiroArena() {
     ...(regionaisSel.length ? { regionais: regionaisSel.join(',') } : {}),
     ...(statusSel.length ? { status: statusSel.join(',') } : {}),
     ...(motivosSel.length ? { motivos: motivosSel.join(',') } : {}),
+  };
+  const pmpParams: any = {
+    data_ini: dataIni, data_fim: dataFim,
+    ...(pmpMotivosSel.length ? { e5_motbx: pmpMotivosSel.join(',') } : {}),
+    ...(pmpTiposSel.length ? { d1_tp: pmpTiposSel.join(',') } : {}),
+    ...(pmpFornecedoresSel.length ? { fornecedor: pmpFornecedoresSel.join(',') } : {}),
   };
 
   // ─── Fetch principal ───────────────────────────────────────────────────────
@@ -190,6 +202,24 @@ export default function FinanceiroArena() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dataIni, dataFim, segmentosSel, regionaisSel, statusSel, motivosSel]);
 
+  const buscarPmp = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = pmpParams;
+      const [gRes, fRes] = await Promise.all([
+        axios.get('/api/v1/financeiro/pmp/global-filtrado', { params }),
+        axios.get('/api/v1/financeiro/pmp/fornecedores-filtrado', { params: { ...params, limit: 100 } }),
+      ]);
+      setPmpGlobal(gRes.data);
+      setPmpFornecedores(fRes.data.fornecedores || []);
+    } catch {
+      setPmpGlobal(null);
+      setPmpFornecedores([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [dataIni, dataFim, pmpMotivosSel, pmpTiposSel, pmpFornecedoresSel]);
+
   const buscarFiltros = useCallback(async () => {
     try {
       const r = await axios.get('/api/v1/financeiro/pmr/filtros', {
@@ -200,7 +230,19 @@ export default function FinanceiroArena() {
   }, [dataIni, dataFim]);
 
   useEffect(() => { buscarFiltros(); }, [buscarFiltros]);
-  useEffect(() => { if (toggleAtivo === 'PMR') buscarDados(); }, [buscarDados, toggleAtivo]);
+  const buscarPmpFiltros = useCallback(async () => {
+    try {
+      const r = await axios.get('/api/v1/financeiro/pmp/filtros', {
+        params: { data_ini: dataIni, data_fim: dataFim },
+      });
+      setPmpFiltros(r.data || { motivos: [], tipos: [], fornecedores: [], clifor: [] });
+    } catch {}
+  }, [dataIni, dataFim]);
+  useEffect(() => { buscarPmpFiltros(); }, [buscarPmpFiltros]);
+  useEffect(() => {
+    if (toggleAtivo === 'PMR') buscarDados();
+    if (toggleAtivo === 'PMP') buscarPmp();
+  }, [buscarDados, buscarPmp, toggleAtivo]);
 
   // ─── Autocomplete de cliente (debounced) ─────────────────────────────────────
   useEffect(() => {
@@ -243,13 +285,14 @@ export default function FinanceiroArena() {
   const exportar = async () => {
     setBaixando(true);
     try {
-      const r = await axios.get('/api/v1/financeiro/pmr/exportar', {
-        params: paramsBase, responseType: 'blob',
+      const isPmp = toggleAtivo === 'PMP';
+      const r = await axios.get(isPmp ? '/api/v1/financeiro/pmp/exportar' : '/api/v1/financeiro/pmr/exportar', {
+        params: isPmp ? pmpParams : paramsBase, responseType: 'blob',
       });
       const url = window.URL.createObjectURL(new Blob([r.data]));
       const a = document.createElement('a');
       a.href = url;
-      a.download = `PMR_${dataIni}_${dataFim}.xlsx`;
+      a.download = `${isPmp ? 'PMP' : 'PMR'}_${dataIni}_${dataFim}.xlsx`;
       a.click();
       window.URL.revokeObjectURL(url);
     } catch {}
@@ -345,7 +388,7 @@ export default function FinanceiroArena() {
     );
   };
 
-  const isEmBreve = (t: string) => ['PMP', 'PME', 'CCC'].includes(t);
+  const isEmBreve = (t: string) => ['PME', 'CCC'].includes(t);
 
   return (
     <div className="min-h-screen bg-slate-50 p-4 md:p-6">
@@ -409,12 +452,12 @@ export default function FinanceiroArena() {
               )}
             </button>
           ))}
-          <button onClick={exportar} disabled={baixando || !global}
+          <button onClick={exportar} disabled={baixando || (toggleAtivo === 'PMR' ? !global : toggleAtivo !== 'PMP' || !pmpGlobal)}
             className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest disabled:opacity-50 transition-all">
             {baixando ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
             Excel
           </button>
-          <button onClick={buscarDados} disabled={loading}
+          <button onClick={toggleAtivo === 'PMP' ? buscarPmp : buscarDados} disabled={loading}
             className="p-2 bg-white border border-slate-200 rounded-xl text-slate-500 hover:bg-slate-50 transition-all">
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -451,18 +494,19 @@ export default function FinanceiroArena() {
 
         <div className="h-6 w-px bg-slate-200" />
 
-        {/* MULTI Regional / Segmento */}
-        <MultiSelect label="Regionais" options={filtros.regionais || []}
-          value={regionaisSel} onChange={setRegionaisSel} />
-        <MultiSelect label="Segmentos" options={filtros.segmentos || []}
-          value={segmentosSel} onChange={setSegmentosSel} />
-        <MultiSelect label="Status" options={filtros.status || []}
-          value={statusSel} onChange={setStatusSel} />
-        <MultiSelect label="Motivo E5" options={filtros.motivos || []}
-          value={motivosSel} onChange={setMotivosSel} />
+        {toggleAtivo === 'PMR' && (<>
+          {/* MULTI Regional / Segmento */}
+          <MultiSelect label="Regionais" options={filtros.regionais || []}
+            value={regionaisSel} onChange={setRegionaisSel} />
+          <MultiSelect label="Segmentos" options={filtros.segmentos || []}
+            value={segmentosSel} onChange={setSegmentosSel} />
+          <MultiSelect label="Status" options={filtros.status || []}
+            value={statusSel} onChange={setStatusSel} />
+          <MultiSelect label="Motivo E5" options={filtros.motivos || []}
+            value={motivosSel} onChange={setMotivosSel} />
 
-        {/* Busca de cliente */}
-        <div className="relative">
+          {/* Busca de cliente */}
+          <div className="relative">
           <div className="flex items-center gap-1.5 border border-slate-200 rounded-lg px-2 py-1.5 focus-within:ring-2 focus-within:ring-violet-300">
             <Search className="w-3.5 h-3.5 text-slate-400" />
             <input value={buscaCli}
@@ -487,9 +531,18 @@ export default function FinanceiroArena() {
               ))}
             </div>
           )}
-        </div>
+          </div>
+        </>)}
+        {toggleAtivo === 'PMP' && (<>
+           <MultiSelect label="Motivo E5" options={pmpFiltros.e5_motbx || pmpFiltros.motivos || []}
+             value={pmpMotivosSel} onChange={setPmpMotivosSel} />
+           <MultiSelect label="Tipo D1" options={pmpFiltros.d1_tp || pmpFiltros.tipos || []}
+             value={pmpTiposSel} onChange={setPmpTiposSel} />
+           <MultiSelect label="Fornecedor/CLIFOR" options={pmpFiltros.fornecedor || pmpFiltros.fornecedores || pmpFiltros.clifor || []}
+             value={pmpFornecedoresSel} onChange={setPmpFornecedoresSel} />
+        </>)}
 
-        <button onClick={buscarDados} disabled={loading}
+        <button onClick={toggleAtivo === 'PMP' ? buscarPmp : buscarDados} disabled={loading}
           className="ml-auto bg-violet-600 hover:bg-violet-500 text-white px-5 py-1.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all disabled:opacity-50">
           {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Aplicar'}
         </button>
@@ -773,12 +826,72 @@ export default function FinanceiroArena() {
         </>
       )}
 
-      {toggleAtivo !== 'PMR' && (
+      {toggleAtivo === 'PMP' && (
+        <div className="space-y-4">
+          {pmpGlobal && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              {[
+                { label: 'PMP Global', value: pmpGlobal.pmp, color: '#7c3aed', icon: Clock },
+                { label: 'Pagamentos', value: pmpGlobal.pagamentos, color: '#2563eb', icon: DollarSign },
+                { label: 'Valor Pago', value: pmpGlobal.valor_total, color: '#059669', icon: TrendingDown },
+              ].map(({ label, value, color, icon: Icon }) => (
+                <div key={label} className="bg-white rounded-2xl border border-slate-100 p-4">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Icon className="w-3.5 h-3.5" style={{ color }} />
+                    <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</span>
+                  </div>
+                  <div className="text-3xl font-black mt-1" style={{ color }}>
+                    {label === 'Valor Pago' ? fmtRsFull(value || 0) : Number(value || 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 })}
+                    {label === 'PMP Global' && <span className="text-sm font-bold text-slate-400 ml-1">dias</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="bg-white rounded-2xl border border-slate-100 overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-100">
+              <div className="text-xs font-black uppercase tracking-widest text-slate-400">Pagamentos por Fornecedor</div>
+              <div className="text-[10px] text-slate-400">Agrupado exclusivamente por CLIFOR · {pmpFornecedores.length} fornecedores exibidos</div>
+            </div>
+            {loading ? (
+              <div className="flex items-center justify-center h-40 text-slate-300"><Loader2 className="w-5 h-5 animate-spin" /></div>
+            ) : !pmpFornecedores.length ? (
+              <div className="flex items-center justify-center h-24 text-slate-300 text-xs font-bold">Sem dados</div>
+            ) : (
+              <div className="overflow-auto">
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                  <thead>
+                    <tr style={{ background: '#f8fafc' }}>
+                      {['CLIFOR', 'Fornecedor', 'Pagamentos', 'Valor Pago', 'PMP'].map((h, i) => (
+                        <th key={h} style={{ padding: '8px 12px', textAlign: i < 2 ? 'left' : 'right', fontSize: 9,
+                          fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.04em', color: '#94a3b8',
+                          borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pmpFornecedores.map((f: any, i: number) => (
+                      <tr key={`${f.clifor}-${i}`} style={{ background: i % 2 ? '#f9fafb' : '#fff', borderBottom: '1px solid #f1f5f9' }}>
+                        <td style={{ padding: '7px 12px', color: '#64748b', whiteSpace: 'nowrap' }}>{f.clifor}</td>
+                        <td style={{ padding: '7px 12px', fontWeight: 700, color: '#334155' }}>{f.nome || '—'}</td>
+                        <td style={{ padding: '7px 12px', textAlign: 'right', color: '#475569' }}>{f.pagamentos?.toLocaleString('pt-BR')}</td>
+                        <td style={{ padding: '7px 12px', textAlign: 'right', color: '#475569' }}>{fmtRs(f.valor_total || 0)}</td>
+                        <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 900, color: corDias(f.pmp) }}>{Number(f.pmp || 0).toFixed(2)} d</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {(toggleAtivo === 'PME' || toggleAtivo === 'CCC') && (
         <div className="flex flex-col items-center justify-center h-64 bg-white rounded-2xl border border-slate-100 text-slate-400">
           <DollarSign className="w-10 h-10 mb-3 opacity-20" />
           <div className="text-sm font-black text-slate-600">{toggleAtivo} — Em desenvolvimento</div>
           <div className="text-xs text-slate-400 mt-1 max-w-xs text-center">
-            {toggleAtivo === 'PMP' && 'Prazo Médio de Pagamento a Fornecedores. Requer SE2 (Contas a Pagar) + NF de Entrada.'}
             {toggleAtivo === 'PME' && 'Prazo Médio de Estoque. Requer snapshot de estoque (SB2) e CMV.'}
             {toggleAtivo === 'CCC' && 'CCC = PME + PMR − PMP. Disponível quando PMP e PME estiverem prontos.'}
           </div>

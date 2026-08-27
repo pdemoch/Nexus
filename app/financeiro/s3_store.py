@@ -50,6 +50,8 @@ _DATA_COL: dict[str, str] = {
     "notas_saida":            "f2_emissao",
     "contas_receber":         "e1_emissao",
     "movimentacao_bancaria":  "e5_data",
+    "notas_entrada":          "f1_emissao",
+    "contas_pagar":           "e2_emissao",
 }
 
 
@@ -68,6 +70,24 @@ def _chave(fonte: str, ano: int, mes: int) -> str:
 
 def _chave_clientes() -> str:
     return f"{_PREFIX}/clientes/latest.parquet"
+
+def salvar_fornecedores(df: pd.DataFrame) -> bool:
+    """Snapshot SA2 (latest), separado do cadastro de clientes/PMR."""
+    if df is None:
+        return False
+    buf = io.BytesIO()
+    df.to_parquet(buf, index=False, engine="pyarrow")
+    try:
+        _s3().put_object(Bucket=_BUCKET, Key=f"{_PREFIX}/fornecedores/latest.parquet",
+                         Body=buf.getvalue())
+        return True
+    except Exception as e:
+        logger.error("S3 fornecedores/latest: %s", e)
+        return False
+
+def carregar_fornecedores() -> pd.DataFrame:
+    df = _baixar_parquet(f"{_PREFIX}/fornecedores/latest.parquet")
+    return df if df is not None else pd.DataFrame()
 
 
 # ─── Escrita ──────────────────────────────────────────────────────────────────

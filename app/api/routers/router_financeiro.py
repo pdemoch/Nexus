@@ -83,6 +83,10 @@ def _store():
     from app.financeiro import s3_store
     return s3_store
 
+def _pmp():
+    from app.financeiro import pmp_engine
+    return pmp_engine
+
 
 # ------------------------------------------------------------
 # Helpers
@@ -114,7 +118,8 @@ def _split(v):
 async def status(_: dict = Depends(get_current_user)):
     def _check():
         store = _store()
-        fontes = ["notas_saida", "contas_receber", "movimentacao_bancaria"]
+        fontes = ["notas_saida", "contas_receber", "movimentacao_bancaria",
+                  "notas_entrada", "contas_pagar"]
         return {
             "is_running":       FinanceiroState.pipeline_rodando,
             "is_recarga_total": FinanceiroState.is_recarga_total,
@@ -123,8 +128,134 @@ async def status(_: dict = Depends(get_current_user)):
                 fonte: [f"{a}/{m:02d}" for a, m in store.meses_disponiveis(fonte)]
                 for fonte in fontes
             },
+            "latest": {
+                "fornecedores": "fornecedores/latest.parquet",
+                "produtos": "sb1/latest.parquet",
+                "lista_tecnica": "sg1/latest.parquet",
+            },
+            # Cadastros sem coluna de data não aparecem em ``meses_disponiveis``:
+            # o indicador explícito evita que consumidores os tratem como
+            # partições mensais.
+            "snapshots": {
+                "fornecedores": "latest",
+                "produtos": "latest (SB1)",
+                "lista_tecnica": "latest (SG1)",
+            },
+            "latest_only": ["fornecedores", "produtos", "lista_tecnica"],
         }
     return await asyncio.to_thread(_check)
+
+
+@router.get("/pmp/global")
+async def pmp_global(data_ini: date = Query(...), data_fim: date = Query(...),
+                     e5_motbx: str = Query(None), d1_tp: str = Query(None),
+                     fornecedor: str = Query(None), _: dict = Depends(get_current_user)):
+    _validar_datas(data_ini, data_fim)
+    return await asyncio.to_thread(_pmp().calcular_pmp_global, data_ini, data_fim,
+                                   _split(e5_motbx), _split(d1_tp), _split(fornecedor))
+
+
+@router.get("/pmp/fornecedores")
+async def pmp_fornecedores(data_ini: date = Query(...), data_fim: date = Query(...),
+                           limit: int = Query(100, ge=1, le=500),
+                           offset: int = Query(0, ge=0),
+                           e5_motbx: str = Query(None), d1_tp: str = Query(None),
+                           fornecedor: str = Query(None),
+                           _: dict = Depends(get_current_user)):
+    _validar_datas(data_ini, data_fim)
+    return await asyncio.to_thread(
+        _pmp().calcular_pmp_fornecedores, data_ini, data_fim, limit, offset,
+        _split(e5_motbx), _split(d1_tp), _split(fornecedor)
+    )
+
+
+def _pmp_filters(motivos, tipos, fornecedores, clifor):
+    return (_split(motivos), _split(tipos), _split(fornecedores), _split(clifor))
+
+
+@router.get("/pmp/filtros")
+async def pmp_filtros(data_ini: date = Query(...), data_fim: date = Query(...),
+                      _: dict = Depends(get_current_user)):
+    def listar():
+        base = _pmp()._base(data_ini, data_fim)
+        if base.empty:
+            return {"e5_motbx": [], "d1_tp": [], "fornecedor": [], "motivos": [], "tipos": [], "fornecedores": [], "clifor": []}
+        valores = lambda col: sorted(_pmp()._norm_key(_pmp()._col(base, col)).replace("", "SEM VALOR").unique().tolist())
+        fornecedores = valores("clifor")
+        motivos = valores("e5_motbx")
+        tipos = valores("d1_tp")
+        return {"e5_motbx": motivos, "d1_tp": tipos, "fornecedor": fornecedores,
+                "motivos": motivos, "tipos": tipos, "fornecedores": fornecedores, "clifor": fornecedores}
+    return await asyncio.to_thread(listar)
+
+
+@router.get("/pmp/global-filtrado")
+async def pmp_global_filtrado(data_ini: date = Query(...), data_fim: date = Query(...),
+                              motivos: str = Query(None), tipos: str = Query(None),
+                              fornecedores: str = Query(None), clifor: str = Query(None),
+                              e5_motbx: str = Query(None), d1_tp: str = Query(None),
+                              fornecedor: str = Query(None),
+                              _: dict = Depends(get_current_user)):
+    _validar_datas(data_ini, data_fim)
+    f = _pmp_filters(motivos or e5_motbx, tipos or d1_tp, fornecedores or fornecedor, clifor)
+    return await asyncio.to_thread(_pmp().calcular_pmp_global, data_ini, data_fim, *f)
+
+
+@router.get("/pmp/fornecedores-filtrado")
+async def pmp_fornecedores_filtrado(data_ini: date = Query(...), data_fim: date = Query(...),
+                                    motivos: str = Query(None), tipos: str = Query(None),
+                                    fornecedores: str = Query(None), clifor: str = Query(None),
+                                    e5_motbx: str = Query(None), d1_tp: str = Query(None),
+                                    fornecedor: str = Query(None),
+                                    limit: int = Query(100, ge=1, le=500),
+                                    offset: int = Query(0, ge=0),
+                                    _: dict = Depends(get_current_user)):
+    _validar_datas(data_ini, data_fim)
+    f = _pmp_filters(motivos or e5_motbx, tipos or d1_tp, fornecedores or fornecedor, clifor)
+    return await asyncio.to_thread(_pmp().calcular_pmp_fornecedores, data_ini, data_fim, limit, offset, *f)
+
+
+@router.get("/pmp/exportar")
+async def pmp_exportar(data_ini: date = Query(...), data_fim: date = Query(...),
+                       motivos: str = Query(None), tipos: str = Query(None),
+                       fornecedores: str = Query(None), clifor: str = Query(None),
+                       e5_motbx: str = Query(None), d1_tp: str = Query(None),
+                       fornecedor: str = Query(None),
+                       _: dict = Depends(get_current_user)):
+    import io
+    from fastapi.responses import StreamingResponse
+    _validar_datas(data_ini, data_fim)
+    f = _pmp_filters(motivos or e5_motbx, tipos or d1_tp, fornecedores or fornecedor, clifor)
+
+    def gerar():
+        import pandas as pd
+        base = _pmp()._base(data_ini, data_fim, *f)
+        fornecedores_data = _pmp().calcular_pmp_fornecedores(data_ini, data_fim, 100000, 0, *f)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            # O bruto permanece no grão E5; abas separadas facilitam a
+            # reconciliação com SE2, SF1 e SD1 sem alterar o PMP.
+            base.to_excel(writer, index=False, sheet_name="Pagamentos E5")
+            for prefix, sheet in (("e2_", "Titulos SE2"), ("f1_", "Notas SF1"),
+                                  ("d1_", "Itens SD1")):
+                cols = [c for c in base.columns if c.startswith(prefix)]
+                if cols:
+                    base[cols].to_excel(writer, index=False, sheet_name=sheet)
+            pd.DataFrame(fornecedores_data["fornecedores"]).to_excel(
+                writer, index=False, sheet_name="Fornecedores")
+            pd.DataFrame({
+                "Metodologia": [
+                    "PMP = SUM(dias_pagamento * e5_valor) / SUM(e5_valor).",
+                    "E5 é o menor grão e seu valor é o peso; movimentos não são deduplicados.",
+                    "SF1 f1_valbrut é valor no nível da NF; SD1 é apenas detalhe itemizado.",
+                    "Produto PMP/SG1: metodologia de custo ainda não implementada (placeholder).",
+                ]
+            }).to_excel(writer, index=False, sheet_name="Metodologia")
+        output.seek(0)
+        return output
+    output = await asyncio.to_thread(gerar)
+    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f'attachment; filename="PMP_{data_ini}_{data_fim}.xlsx"'})
 
 
 # ------------------------------------------------------------

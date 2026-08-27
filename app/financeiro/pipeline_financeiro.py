@@ -96,6 +96,20 @@ def executar_pipeline(
             log_callback(f"   ⚠️  {msg}")
             erros.append(msg)
 
+        for extrator, fonte, rotulo in (
+            (gc.extrair_notas_entrada, "notas_entrada", "notas_entrada"),
+            (gc.extrair_contas_pagar, "contas_pagar", "contas_pagar"),
+        ):
+            log_callback(f"   {prefixo} — extraindo {rotulo}...")
+            try:
+                df = extrator(d_ini, d_fim)
+                store.salvar_mensal(df, fonte, ano, mes)
+                log_callback(f"   {prefixo} ✔ {rotulo} ({len(df)} linhas)")
+            except Exception as e:
+                msg = f"{prefixo} ✘ {rotulo}: {e}"
+                log_callback(f"   ⚠️  {msg}")
+                erros.append(msg)
+
     # ── Clientes: sempre apaga e re-baixa completo ─────────────────────
     log_callback("   → Atualizando cadastro de clientes (snapshot completo)...")
     try:
@@ -106,6 +120,33 @@ def executar_pipeline(
         msg = f"clientes: {e}"
         log_callback(f"   ⚠️  {msg}")
         erros.append(msg)
+
+    log_callback("   → Atualizando fornecedores (snapshot SA2)...")
+    try:
+        df_fornecedores = gc.extrair_fornecedores()
+        if not store.salvar_fornecedores(df_fornecedores):
+            raise RuntimeError("snapshot vazio ou não gravado")
+        log_callback(f"   ✔ fornecedores/latest ({len(df_fornecedores)} registros)")
+    except Exception as e:
+        msg = f"fornecedores/latest: {e}"
+        log_callback(f"   ⚠️  {msg}")
+        erros.append(msg)
+
+    # SB1/SG1 são cadastros sem data: sempre substitui o snapshot mais recente,
+    # tanto na recarga total quanto na janela móvel.
+    for extrator, fonte, rotulo in (
+        (gc.extrair_sb1, "sb1", "SB1 produtos"),
+        (gc.extrair_sg1, "sg1", "SG1 estrutura"),
+    ):
+        log_callback(f"   → Atualizando snapshot {rotulo}...")
+        try:
+            if not store.salvar_snapshot(extrator(), fonte):
+                raise RuntimeError("snapshot vazio ou não gravado")
+            log_callback(f"   ✔ {fonte}/latest ({rotulo})")
+        except Exception as e:
+            msg = f"{fonte}/latest ({rotulo}): {e}"
+            log_callback(f"   ⚠️  {msg}")
+            erros.append(msg)
 
     # ── Resumo final ───────────────────────────────────────────────────
     if erros:
