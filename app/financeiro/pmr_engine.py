@@ -30,7 +30,7 @@ import logging
 import os
 import threading
 import time
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Optional, Union
 
 import numpy as np
@@ -385,9 +385,9 @@ def calcular_pmr_mensal(data_ini: date, data_fim: date,
     Responde: "quanto de caixa entrou no mês M e com que atraso vieram
     as notas pagas nesse mês".
 
-    ATENCAO (survivor bias): os meses mais recentes tendem a exibir PMR
-    menor porque as notas de pagadores lentos ainda nao foram liquidadas.
-    O campo 'em_maturacao' marca os 2 ultimos meses do recorte.
+    ATENCAO (survivor bias): o mes corrente pode exibir PMR menor porque as
+    notas de pagadores lentos ainda nao foram liquidadas. Meses encerrados nao
+    sao marcados como maturacao, mesmo que estejam entre os ultimos do recorte.
     """
     base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, cgc=cgc, status=status, motivo=motivo)
     if base.empty:
@@ -410,11 +410,9 @@ def calcular_pmr_mensal(data_ini: date, data_fim: date,
         })
 
     meses.sort(key=lambda m: m["mes"])
-    # Marca os 2 ultimos meses como em maturacao (survivor bias)
-    for m in meses[-2:]:
-        m["em_maturacao"] = True
-    for m in meses[:-2]:
-        m["em_maturacao"] = False
+    mes_corrente = pd.Timestamp(datetime.now().date()).to_period("M")
+    for m in meses:
+        m["em_maturacao"] = pd.Period(m["mes"], freq="M") >= mes_corrente
 
     return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "meses": meses}
 

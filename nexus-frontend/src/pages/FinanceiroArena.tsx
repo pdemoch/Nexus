@@ -564,7 +564,7 @@ export default function FinanceiroArena() {
             </div>
             <div className="text-[10px] text-slate-400 mb-4">
               Agrupado por mês de pagamento · Barras = valor recebido · Linhas = PMR em dias ·
-              <span className="text-amber-500 font-bold"> os 2 últimos meses estão em maturação (viés de sobrevivência)</span>
+              <span className="text-amber-500 font-bold"> o mês corrente está em maturação (viés de sobrevivência)</span>
             </div>
             {loading ? (
               <div className="flex items-center justify-center h-64 text-slate-300"><Loader2 className="w-6 h-6 animate-spin" /></div>

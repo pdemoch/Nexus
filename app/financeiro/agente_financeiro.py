@@ -29,6 +29,12 @@ REGRAS:
   aplicado antes do calculo. Filtros diferentes combinam com AND.
 - Depois dos filtros, os resultados sao consolidados por razao social; o
   detalhamento pode reunir varios CNPJs e lojas da mesma razao social.
+- Sempre apresente, quando disponivel, a composicao da razao social por
+  status (ATIVO, INATIVO e SEM STATUS) e seus respectivos valores.
+- Faturamento SF2 e recebimento E5 sao medidas diferentes. Se recebimento
+  superar faturamento no contexto, sinalize como divergencia a investigar
+  (possivel rateio, estorno, adiantamento ou duplicidade de vinculo); nao
+  afirme que e impossivel nem invente uma correcao.
 - Em simulacoes, compare sempre faturamento, recebimento, PMR e caixa liberado.
   Nao diga que uma decisao e positiva sem explicitar o trade-off.
 - PMP, PME e CCC indisponiveis devem ser declarados como limitacao, nunca
@@ -139,6 +145,26 @@ def construir_contexto(
         cnpjs=("a1_cgc", lambda s: sorted({str(v).strip() for v in s.dropna() if str(v).strip()})),
     )
     clientes_df = clientes_df.merge(nomes, on="_razao_key", how="left")
+    status_df = base_clientes.assign(
+        _status=base_clientes["status_cliente"].fillna("SEM STATUS").astype(str).str.upper().str.strip()
+    )
+    status_df["_status"] = status_df["_status"].where(
+        status_df["_status"].isin(["ATIVO", "INATIVO", "SEM STATUS"]), "SEM STATUS"
+    )
+    status_resumo = status_df.groupby(["_razao_key", "_status"], dropna=False).agg(
+        valor=("e5_valor", "sum"),
+        cnpjs=("a1_cgc", lambda s: sorted({str(v).strip() for v in s.dropna() if str(v).strip()})),
+    ).reset_index()
+    status_por_razao: dict[str, dict[str, Any]] = {}
+    for row in status_resumo.to_dict("records"):
+        status_por_razao.setdefault(row["_razao_key"], {})[str(row["_status"])] = {
+            "valor_recebido_e5": _round(row["valor"]),
+            "cnpjs": row["cnpjs"],
+        }
+    status_resumo = pd.DataFrame(
+        [{"_razao_key": key, "status_por_cnpj": value} for key, value in status_por_razao.items()]
+    )
+    clientes_df = clientes_df.merge(status_resumo, on="_razao_key", how="left")
     clientes_df["faturamento_sf2"] = clientes_df["faturamento_sf2"].fillna(0)
     clientes_df["pmr_pagamento"] = (
         clientes_df["dias_x_valor"] / clientes_df["recebimento_e5"].where(
@@ -156,6 +182,10 @@ def construir_contexto(
             "faturamento_sf2": _round(row["faturamento_sf2"]),
             "recebimento_e5": _round(row["recebimento_e5"]),
             "pmr_pagamento": _round(row["pmr_pagamento"]),
+            "status_por_cnpj": row.get("status_por_cnpj") or {},
+            "divergencia_recebimento_faturamento": _round(
+                row["recebimento_e5"] - row["faturamento_sf2"]
+            ),
         })
     clientes.sort(key=lambda row: row["recebimento_e5"], reverse=True)
     contexto["clientes"] = clientes
@@ -163,6 +193,7 @@ def construir_contexto(
         "notas_sf2": int(base["Chave_F2"].nunique()),
         "titulos_e1": int(base["Chave_E5"].nunique()),
         "recebimento_e5": _round(base["e5_valor"].sum()),
+        "faturamento_sf2": _round(base.drop_duplicates("Chave_F2")["f2_valbrut"].sum()),
     })
     contexto["desempenho"] = {"coleta_calculo_segundos": _round(time.perf_counter() - started, 3)}
     return contexto
