@@ -374,13 +374,23 @@ async def get_pmr_evolucao(
 async def get_pmr_notas(
     data_ini: date = Query(...),
     data_fim: date = Query(...),
-    cgc:      str  = Query(..., description="CNPJ do cliente (obrigatorio)"),
+    cgc:      str  = Query(None, description="CNPJ do cliente (compatibilidade)"),
+    razao_social: str = Query(None, description="Razao social consolidada"),
+    segmentos: str = Query(None, description="Segmentos aplicados ao detalhe"),
+    regionais: str = Query(None, description="Regionais aplicadas ao detalhe"),
+    status: str = Query(None, description="Status aplicado ao detalhe"),
 ):
-    """Drill-down: parcelas (SE1) de um cliente no periodo, com SF2 e SE5."""
+    """Drill-down: parcelas de todos os CNPJs de uma razao social."""
     try:
-        dados = await asyncio.to_thread(
-            _engine().obter_notas_cliente, data_ini, data_fim, cgc
-        )
+        if not razao_social and not cgc:
+            raise HTTPException(422, "Informe razao_social ou cgc.")
+        if razao_social:
+            dados = await asyncio.to_thread(
+                _engine().obter_notas_razao_social, data_ini, data_fim,
+                razao_social, _split(segmentos), _split(regionais), _split(status)
+            )
+        else:
+            dados = await asyncio.to_thread(_engine().obter_notas_cliente, data_ini, data_fim, cgc)
         return dados  # {"cgc", "nome", "total", "resumo", "notas": [...]}
     except Exception as e:
         logger.exception("notas: %s", e)
@@ -406,7 +416,7 @@ async def pmr_exportar(
     Gera um Excel com 5 abas para validacao e para servir de base ao agente de IA:
       1. Dados Brutos     - linha a linha (nivel parcela) com todas as variaveis
       2. Por Regional     - PMR agregado por regional
-      3. Por Cliente      - PMR agregado por razao social (CNPJ)
+      3. Resumo por Cliente - PMR agregado por razao social
       4. Evolucao Mensal  - PMR mes a mes por mes de pagamento (+ flag maturacao)
       5. Metodologia      - explicacao + exemplos numericos provados
     """
@@ -426,7 +436,7 @@ async def pmr_exportar(
 
         df_bruto    = engine.obter_dados_brutos(data_ini, data_fim, seg, reg, status=stat)
         d_regional  = engine.calcular_pmr_regional(data_ini, data_fim, seg, reg, stat)
-        d_clientes  = engine.calcular_pmr_clientes(data_ini, data_fim, seg, reg, 5000, 0, stat)
+        d_clientes  = engine.calcular_pmr_clientes(data_ini, data_fim, seg, reg, 100000, 0, stat)
         d_global    = engine.calcular_pmr_global(data_ini, data_fim, seg, reg, status=stat)
         d_mensal    = engine.calcular_pmr_mensal(data_ini, data_fim, seg, reg, status=stat)
 
@@ -461,23 +471,24 @@ async def pmr_exportar(
             ws2.cell(row=i, column=6, value=r["pmr_cond_pag"])
             ws2.cell(row=i, column=7, value=r["delta_atraso"])
 
-        # ABA 3: Por Cliente
-        ws3 = wb.create_sheet("Por Cliente")
-        hdrs3 = ["CNPJ", "Razao Social", "Regional", "Segmento", "Movimentos E5", "Valor Recebido E5 (R$)",
+        # ABA 3: Resumo por Cliente
+        ws3 = wb.create_sheet("Resumo por Cliente")
+        hdrs3 = ["Razao Social", "CNPJs", "Codigos Cliente", "Regional", "Segmento", "Movimentos E5", "Valor Recebido E5 (R$)",
                  "PMR Pagamento (dias)", "PMR Vencimento (dias)", "PMR Cond.Pag. (dias)", "Delta Atraso (dias)"]
         for j, h in enumerate(hdrs3, 1):
             c = ws3.cell(row=1, column=j, value=h); c.fill, c.font = hdr_fill, hdr_font
         for i, r in enumerate(d_clientes.get("clientes", []), 2):
-            ws3.cell(row=i, column=1, value=r["cgc"])
-            ws3.cell(row=i, column=2, value=r["nome"])
-            ws3.cell(row=i, column=3, value=r["regional"])
-            ws3.cell(row=i, column=4, value=r["segmento"])
-            ws3.cell(row=i, column=5, value=r["notas_pagas"])
-            ws3.cell(row=i, column=6, value=r["valor_total"])
-            ws3.cell(row=i, column=7, value=r["pmr_pagamento"])
-            ws3.cell(row=i, column=8, value=r["pmr_vencimento"])
-            ws3.cell(row=i, column=9, value=r["pmr_cond_pag"])
-            ws3.cell(row=i, column=10, value=r["delta_atraso"])
+            ws3.cell(row=i, column=1, value=r["nome"])
+            ws3.cell(row=i, column=2, value=", ".join(r.get("cnpjs", [])))
+            ws3.cell(row=i, column=3, value=", ".join(r.get("codigos_cliente", [])))
+            ws3.cell(row=i, column=4, value=r["regional"])
+            ws3.cell(row=i, column=5, value=r["segmento"])
+            ws3.cell(row=i, column=6, value=r["notas_pagas"])
+            ws3.cell(row=i, column=7, value=r["valor_total"])
+            ws3.cell(row=i, column=8, value=r["pmr_pagamento"])
+            ws3.cell(row=i, column=9, value=r["pmr_vencimento"])
+            ws3.cell(row=i, column=10, value=r["pmr_cond_pag"])
+            ws3.cell(row=i, column=11, value=r["delta_atraso"])
 
         # ABA 4: Evolucao Mensal
         ws5 = wb.create_sheet("Evolucao Mensal")
@@ -519,6 +530,9 @@ async def pmr_exportar(
             ("1. PMR Pagamento:  dias = e5_data - f2_emissao (recebimento real no banco).", False),
             ("2. PMR Vencimento: dias = e1_vencrea - f2_emissao (vencimento real negociado).", False),
             ("3. PMR Cond.Pag.:  dias = e1_vencto - f2_emissao (vencimento contratual).", False),
+            ("A consolidacao por cliente e feita pela Razao Social, apos o filtro de status por CNPJ.", False),
+            ("Cada linha do resumo pode reunir varios CNPJs e codigos de cliente; o detalhe preserva cada loja.", False),
+            ("O filtro ATIVO/INATIVO/SEM STATUS e aplicado nos pagamentos E5 antes de recalcular os PMRs.", False),
             ("", False),
             ("EXEMPLO NUMERICO (3 parcelas ficticias):", True),
             ("Parcela A: emissao 01/03, pago 10/04 (40d), R$ 100.000  ->  40 x 100.000 = 4.000.000", False),
@@ -557,7 +571,8 @@ async def pmr_exportar(
             ("- Apenas notas com movimentacao bancaria registrada entram no calculo.", False),
             ("- Notas ainda nao pagas sao excluidas de TODAS as tres metricas.", False),
             ("- A tabela Dados Brutos esta ao nivel de PARCELA (SE1), nao de NF.", False),
-            ("- A aba Por Cliente agrega todas as filiais/lojas do mesmo CNPJ.", False),
+            ("- A aba Resumo por Cliente agrega todos os CNPJs e lojas da mesma Razao Social.", False),
+            ("- O filtro de status e aplicado por CNPJ no nivel dos pagamentos E5 antes da consolidacao.", False),
             ("- Delta Atraso = PMR Pagamento - PMR Cond.Pag. (positivo = cliente paga com atraso).", False),
             ("- e5_valor e' liquido de desconto (e5_valor - e5_vldesco), filtrado > 0 na extracao.", False),
         ]

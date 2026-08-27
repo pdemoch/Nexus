@@ -317,8 +317,10 @@ def calcular_pmr_clientes(data_ini: date, data_fim: date,
                           limit: int = 50, offset: int = 0,
                           status: FiltroValor = None) -> dict[str, Any]:
     """
-    PMR por RAZAO SOCIAL (a1_cgc + a1_nome), paginado, ordenado por valor_total desc.
-    Consolida todas as filiais/lojas do mesmo CNPJ em um único registro.
+    PMR por RAZAO SOCIAL, paginado, ordenado por valor_total desc.
+    O filtro de status ja foi aplicado no menor grao (pagamento E5) antes
+    desta consolidacao. CNPJs e codigos de cliente ficam disponiveis para o
+    drill-down.
     """
     base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, status=status)
     if base.empty:
@@ -326,13 +328,22 @@ def calcular_pmr_clientes(data_ini: date, data_fim: date,
                 "total": 0, "clientes": []}
 
     rows = []
-    chave_cols = ["a1_cgc", "a1_nome"]
-    for chave, g in base.fillna({"a1_cgc": "SEM_CGC", "a1_nome": "SEM_NOME"}).groupby(chave_cols, dropna=False):
-        cgc, nome = chave
+    base = base.copy()
+    base["_razao_key"] = (
+        base["a1_nome"].fillna("SEM_NOME").astype(str).str.strip().str.upper()
+    )
+    for _, g in base.groupby("_razao_key", dropna=False):
+        nome = g["a1_nome"].dropna().astype(str).str.strip().iloc[0] if g["a1_nome"].notna().any() else "SEM_NOME"
         reg  = g["regional"].mode().iloc[0]  if not g["regional"].isna().all() else "—"
         seg  = g["segmento"].mode().iloc[0]  if not g["segmento"].isna().all() else "—"
+        cgcs = sorted({str(v).strip() for v in g["a1_cgc"].dropna() if str(v).strip()})
+        codigos = sorted({str(v).strip() for v in g["a1_cod"].dropna() if str(v).strip()})
+        statuses = sorted({str(v).strip() for v in g["status_cliente"].dropna() if str(v).strip()})
         rows.append({
-            "cgc":            str(cgc),
+            "cgc":            cgcs[0] if len(cgcs) == 1 else "",
+            "cnpjs":          cgcs,
+            "codigos_cliente": codigos,
+            "status": statuses,
             "nome":           str(nome),
             "regional":       str(reg),
             "segmento":       str(seg),
@@ -422,9 +433,12 @@ def listar_clientes_busca(data_ini: date, data_fim: date,
     if base.empty:
         return []
 
-    cli = (base[["a1_cgc", "a1_nome"]]
-           .fillna({"a1_cgc": "", "a1_nome": ""})
-           .drop_duplicates("a1_cgc"))
+    cli = base[["a1_cgc", "a1_nome"]].fillna({"a1_cgc": "", "a1_nome": ""}).copy()
+    cli["_razao_key"] = cli["a1_nome"].str.strip().str.upper()
+    cli = cli.groupby("_razao_key", as_index=False).agg(
+        a1_nome=("a1_nome", "first"),
+        a1_cgc=("a1_cgc", lambda s: ", ".join(sorted({v for v in s if v}))),
+    )
 
     if q:
         qu = q.strip().upper()
@@ -433,7 +447,8 @@ def listar_clientes_busca(data_ini: date, data_fim: date,
         cli = cli[mask]
 
     cli = cli.sort_values("a1_nome").head(limit)
-    return [{"cgc": str(r.a1_cgc), "nome": str(r.a1_nome)} for r in cli.itertuples(index=False)]
+    return [{"cgc": str(r.a1_cgc), "nome": str(r.a1_nome),
+             "razao_social": str(r.a1_nome)} for r in cli.itertuples(index=False)]
 
 
 def obter_notas_cliente(data_ini: date, data_fim: date, cgc: str) -> dict[str, Any]:
@@ -442,6 +457,8 @@ def obter_notas_cliente(data_ini: date, data_fim: date, cgc: str) -> dict[str, A
     com SF2 (NF/emissao), SE1 (titulo/vencimentos) e SE5 (pagamento).
     Ordenado por data de emissao. Uma linha por parcela.
     """
+    # O resumo e consolidado por razao social; o detalhe precisa recuperar
+    # todos os CNPJs pertencentes a ela. Mantemos cgc como fallback compat.
     base = _carregar_base(data_ini, data_fim, cgc=cgc)
     if base.empty:
         return {"cgc": cgc, "nome": None, "notas": []}
@@ -458,6 +475,10 @@ def obter_notas_cliente(data_ini: date, data_fim: date, cgc: str) -> dict[str, A
     notas = []
     for r in base.itertuples(index=False):
         notas.append({
+            "cnpj":           _s(getattr(r, "a1_cgc", "")),
+            "codigo_cliente": _s(getattr(r, "a1_cod", "")),
+            "loja":           _s(getattr(r, "a1_loja", "")),
+            "status_cliente": _s(getattr(r, "status_cliente", "")),
             "nf":             _s(getattr(r, "f2_doc", "")),
             "serie":          _s(getattr(r, "f2_serie", "")),
             "emissao":        _d(getattr(r, "f2_emissao", None)),
@@ -470,6 +491,7 @@ def obter_notas_cliente(data_ini: date, data_fim: date, cgc: str) -> dict[str, A
             "data_pagamento": _d(getattr(r, "e5_data", None)),
             "valor_recebido": round(float(getattr(r, "e5_valor", 0) or 0), 2),
             "dias_pagamento": int(getattr(r, "dias_pagamento", 0)),
+            "dias_vencimento": int(getattr(r, "dias_vencimento", 0)),
             "dias_cond_pag":  int(getattr(r, "dias_cond_pag", 0)),
             "delta_atraso":   int(getattr(r, "dias_pagamento", 0)) - int(getattr(r, "dias_cond_pag", 0)),
         })
@@ -489,6 +511,71 @@ def obter_notas_cliente(data_ini: date, data_fim: date, cgc: str) -> dict[str, A
     }
 
 
+def obter_notas_razao_social(data_ini: date, data_fim: date,
+                             razao_social: str,
+                             segmento: FiltroValor = None,
+                             regional: FiltroValor = None,
+                             status: FiltroValor = None) -> dict[str, Any]:
+    """Detalhamento de todos os CNPJs de uma razao social."""
+    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, status=status)
+    if base.empty:
+        return {"nome": razao_social, "total": 0, "resumo": {}, "notas": []}
+
+    alvo = razao_social.strip().upper()
+    base["_razao_key"] = base["a1_nome"].fillna("SEM_NOME").astype(str).str.strip().str.upper()
+    grupo = base[base["_razao_key"] == alvo]
+    if grupo.empty:
+        return {"nome": razao_social, "total": 0, "resumo": {}, "notas": []}
+
+    return obter_notas_cliente(
+        data_ini, data_fim,
+        ",".join(sorted({str(v).strip() for v in grupo["a1_cgc"].dropna() if str(v).strip()})),
+    ) if len(grupo["a1_cgc"].dropna().unique()) == 1 else _obter_notas_base(grupo, razao_social)
+
+
+def _obter_notas_base(base: pd.DataFrame, razao_social: str) -> dict[str, Any]:
+    """Serializa um conjunto de parcelas ja filtrado por razao social."""
+    base = base.sort_values("f2_emissao")
+
+    def _s(v):
+        return "" if pd.isna(v) else str(v)
+
+    def _d(v):
+        return None if pd.isna(v) else pd.to_datetime(v).strftime("%Y-%m-%d")
+
+    notas = []
+    for r in base.itertuples(index=False):
+        notas.append({
+            "cnpj": _s(getattr(r, "a1_cgc", "")),
+            "codigo_cliente": _s(getattr(r, "a1_cod", "")),
+            "loja": _s(getattr(r, "a1_loja", "")),
+            "status_cliente": _s(getattr(r, "status_cliente", "")),
+            "nf": _s(getattr(r, "f2_doc", "")), "serie": _s(getattr(r, "f2_serie", "")),
+            "emissao": _d(getattr(r, "f2_emissao", None)),
+            "titulo": _s(getattr(r, "e1_num", "")), "prefixo": _s(getattr(r, "e1_prefixo", "")),
+            "parcela": _s(getattr(r, "e1_parcela", "")).strip(),
+            "valor_titulo": round(float(getattr(r, "e1_valor", 0) or 0), 2),
+            "vencto_cond": _d(getattr(r, "e1_vencto", None)),
+            "vencto_real": _d(getattr(r, "e1_vencrea", None)),
+            "data_pagamento": _d(getattr(r, "e5_data", None)),
+            "valor_recebido": round(float(getattr(r, "e5_valor", 0) or 0), 2),
+            "dias_pagamento": int(getattr(r, "dias_pagamento", 0)),
+            "dias_vencimento": int(getattr(r, "dias_vencimento", 0)),
+            "dias_cond_pag": int(getattr(r, "dias_cond_pag", 0)),
+            "delta_atraso": int(getattr(r, "dias_pagamento", 0)) - int(getattr(r, "dias_cond_pag", 0)),
+        })
+    return {
+        "nome": razao_social, "total": len(notas), "notas": notas,
+        "resumo": {
+            "valor_titulo": round(float(base["e1_valor"].sum()), 2),
+            "valor_recebido": round(float(base["e5_valor"].sum()), 2),
+            "pmr_pagamento": round(_pmr(base, "dias_pagamento"), 2),
+            "pmr_vencimento": round(_pmr(base, "dias_vencimento"), 2),
+            "pmr_cond_pag": round(_pmr(base, "dias_cond_pag"), 2),
+        },
+    }
+
+
 def obter_dados_brutos(data_ini: date, data_fim: date,
                        segmento: FiltroValor = None,
                        regional: FiltroValor = None,
@@ -501,15 +588,9 @@ def obter_dados_brutos(data_ini: date, data_fim: date,
     if base.empty:
         return pd.DataFrame()
 
-    cols = [
-        "f2_filial", "f2_doc", "f2_serie", "f2_emissao", "f2_valbrut",
-        "a1_cgc", "a1_nome", "regional", "segmento", "status_cliente",
-        "e1_num", "e1_parcela", "e1_valor", "e1_vencto", "e1_vencrea",
-        "e5_data", "e5_valor",
-        "dias_pagamento", "dias_vencimento", "dias_cond_pag",
-    ]
-    cols_existentes = [c for c in cols if c in base.columns]
-    df = base[cols_existentes].copy()
+    # Exporta o menor grao disponivel, incluindo as chaves dos tres sistemas.
+    cols = [c for c in base.columns if c != "_razao_key"]
+    df = base[cols].copy()
 
     rename = {
         "f2_filial":     "Filial",
@@ -517,6 +598,8 @@ def obter_dados_brutos(data_ini: date, data_fim: date,
         "f2_serie":      "Serie",
         "f2_emissao":    "Data Emissao",
         "f2_valbrut":    "Valor Bruto NF (R$)",
+        "a1_cod":         "Codigo Cliente",
+        "a1_loja":        "Loja",
         "a1_cgc":        "CNPJ",
         "a1_nome":       "Razao Social",
         "regional":      "Regional",

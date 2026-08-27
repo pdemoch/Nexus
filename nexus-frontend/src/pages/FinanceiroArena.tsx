@@ -222,7 +222,12 @@ export default function FinanceiroArena() {
     setNotasCli(null);
     try {
       const r = await axios.get('/api/v1/financeiro/pmr/notas', {
-        params: { data_ini: dataIni, data_fim: dataFim, cgc },
+        params: {
+          data_ini: dataIni, data_fim: dataFim, razao_social: nome,
+          segmentos: segmentosSel.length ? segmentosSel.join(',') : undefined,
+          regionais: regionaisSel.length ? regionaisSel.join(',') : undefined,
+          status: statusSel.length ? statusSel.join(',') : undefined,
+        },
       });
       setNotasCli(r.data);
     } catch {
@@ -230,7 +235,7 @@ export default function FinanceiroArena() {
     } finally {
       setLoadingNotas(false);
     }
-  }, [dataIni, dataFim]);
+  }, [dataIni, dataFim, statusSel]);
 
   const exportar = async () => {
     setBaixando(true);
@@ -624,7 +629,7 @@ export default function FinanceiroArena() {
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
                     <thead>
                       <tr style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
-                        {[['Razão Social','nome'], ['Segmento','segmento'], ['Valor Recebido E5','valor_total'], ['PMR Pag.','pmr_pagamento'], ['PMR Vnc.','pmr_vencimento'], ['PMR Cond.','pmr_cond_pag']].map(([h,key]) => (
+                        {[['Razão Social','nome'], ['Códigos','codigos_cliente'], ['Segmento','segmento'], ['Valor Recebido E5','valor_total'], ['PMR Pag.','pmr_pagamento'], ['PMR Vnc.','pmr_vencimento'], ['PMR Cond.','pmr_cond_pag']].map(([h,key]) => (
                           <th key={h} style={{ padding: '7px 10px', textAlign: h === 'Razão Social' || h === 'Segmento' ? 'left' : 'right',
                             fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.04em',
                             color: '#94a3b8', borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>
@@ -635,12 +640,13 @@ export default function FinanceiroArena() {
                     </thead>
                     <tbody>
                       {clientesOrdenados.slice(0, 50).map((c: any, i: number) => (
-                        <tr key={c.cgc}
+                        <tr key={`${c.nome}-${i}`}
                           onClick={() => abrirCliente(c.cgc, c.nome)}
-                          style={{ background: clienteSel?.cgc === c.cgc ? '#f5f3ff' : i % 2 ? '#f9fafb' : '#fff',
+                          style={{ background: clienteSel?.nome === c.nome ? '#f5f3ff' : i % 2 ? '#f9fafb' : '#fff',
                             borderBottom: '1px solid #f1f5f9', cursor: 'pointer' }}>
                           <td style={{ padding: '6px 10px', maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis',
                             whiteSpace: 'nowrap', fontWeight: 700, color: '#334155' }} title={c.nome}>{c.nome}</td>
+                          <td style={{ padding: '6px 10px', fontSize: 10, color: '#64748b', whiteSpace: 'nowrap', maxWidth: 110, overflow: 'hidden', textOverflow: 'ellipsis' }}>{(c.codigos_cliente || []).join(', ') || '—'}</td>
                           <td style={{ padding: '6px 10px', fontSize: 10, color: '#94a3b8', whiteSpace: 'nowrap', maxWidth: 90, overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.segmento}</td>
                           <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 700, color: '#475569', whiteSpace: 'nowrap' }}>{fmtRs(c.valor_total)}</td>
                           <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 900, color: corDias(c.pmr_pagamento) }}>{c.pmr_pagamento?.toFixed(0)}</td>
@@ -669,7 +675,7 @@ export default function FinanceiroArena() {
                     Notas de {clienteSel.nome}
                   </div>
                   <div className="text-[10px] text-slate-400">
-                    CNPJ {clienteSel.cgc} · nível parcela (SE1) com NF (SF2) e pagamento (SE5)
+                    Todos os CNPJs e lojas · nível parcela (SE1) com NF (SF2) e pagamento (SE5)
                     {notasCli?.resumo && (
                       <> · <b>{notasCli.total}</b> parcelas · recebido {fmtRs(notasCli.resumo.valor_recebido)} ·
                       PMR Pag. <b>{notasCli.resumo.pmr_pagamento?.toFixed(1)}d</b></>
@@ -689,15 +695,17 @@ export default function FinanceiroArena() {
                     <thead>
                       <tr style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
                         {[
+                          ['CNPJ', 'cnpj'], ['Cliente', 'codigo_cliente'], ['Loja', 'loja'],
                           ['NF', 'nf'], ['Parc.', 'parcela'], ['Emissão', 'emissao'],
                           ['Valor Título', 'valor_titulo'], ['Vencto Cond.', 'vencto_cond'],
                           ['Vencto Real', 'vencto_real'], ['Pagamento', 'data_pagamento'],
-                          ['Recebido', 'valor_recebido'], ['PMR Pag.', 'dias_pagamento'], ['Delta', 'delta_atraso'],
+                          ['Recebido', 'valor_recebido'], ['PMR Pag.', 'dias_pagamento'],
+                          ['PMR Venc.', 'dias_vencimento'], ['PMR Cond.', 'dias_cond_pag'], ['Delta', 'delta_atraso'],
                         ].map(([h, key]) => (
-                          <th key={h} style={{ padding: '7px 10px', textAlign: ['NF', 'Parc.', 'Emissão', 'Vencto Cond.', 'Vencto Real', 'Pagamento'].includes(h) ? 'left' : 'right',
+                          <th key={h} style={{ padding: '7px 10px', textAlign: ['CNPJ', 'Cliente', 'Loja', 'NF', 'Parc.', 'Emissão', 'Vencto Cond.', 'Vencto Real', 'Pagamento'].includes(h) ? 'left' : 'right',
                             fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.04em',
                             color: '#94a3b8', borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>
-                            <SortHeader label={h} onSort={() => ordenar(key, sortNotas, setSortNotas)} align={['NF', 'Parc.', 'Emissão', 'Vencto Cond.', 'Vencto Real', 'Pagamento'].includes(h) ? 'left' : 'right'} />
+                            <SortHeader label={h} onSort={() => ordenar(key, sortNotas, setSortNotas)} align={['CNPJ', 'Cliente', 'Loja', 'NF', 'Parc.', 'Emissão', 'Vencto Cond.', 'Vencto Real', 'Pagamento'].includes(h) ? 'left' : 'right'} />
                           </th>
                         ))}
                       </tr>
@@ -705,6 +713,9 @@ export default function FinanceiroArena() {
                     <tbody>
                       {notasOrdenadas.map((n: any, i: number) => (
                         <tr key={`${n.nf}-${n.parcela}-${i}`} style={{ background: i % 2 ? '#f9fafb' : '#fff', borderBottom: '1px solid #f1f5f9' }}>
+                          <td style={{ padding: '6px 10px', color: '#64748b', whiteSpace: 'nowrap' }}>{n.cnpj}</td>
+                          <td style={{ padding: '6px 10px', color: '#64748b', whiteSpace: 'nowrap' }}>{n.codigo_cliente}</td>
+                          <td style={{ padding: '6px 10px', color: '#64748b', whiteSpace: 'nowrap' }}>{n.loja}</td>
                           <td style={{ padding: '6px 10px', fontWeight: 700, color: '#334155', whiteSpace: 'nowrap' }}>{n.nf}/{n.serie}</td>
                           <td style={{ padding: '6px 10px', color: '#64748b' }}>{n.parcela || '—'}</td>
                           <td style={{ padding: '6px 10px', color: '#64748b', whiteSpace: 'nowrap' }}>{n.emissao}</td>
@@ -714,6 +725,8 @@ export default function FinanceiroArena() {
                           <td style={{ padding: '6px 10px', color: '#334155', fontWeight: 600, whiteSpace: 'nowrap' }}>{n.data_pagamento}</td>
                           <td style={{ padding: '6px 10px', textAlign: 'right', color: '#475569', whiteSpace: 'nowrap' }}>{fmtRs(n.valor_recebido)}</td>
                           <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 900, color: corDias(n.dias_pagamento) }}>{n.dias_pagamento}</td>
+                          <td style={{ padding: '6px 10px', textAlign: 'right', color: '#64748b' }}>{n.dias_vencimento}</td>
+                          <td style={{ padding: '6px 10px', textAlign: 'right', color: '#64748b' }}>{n.dias_cond_pag}</td>
                           <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 900, color: corDelta(n.delta_atraso) }}>
                             {n.delta_atraso > 0 ? '+' : ''}{n.delta_atraso}
                           </td>
