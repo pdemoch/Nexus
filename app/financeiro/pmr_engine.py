@@ -48,6 +48,7 @@ _EPOCH = pd.Timestamp("1970-01-01")
 _BASE_CACHE_TTL = max(float(os.getenv("PMR_CACHE_TTL_SECONDS", "300")), 0)
 _BASE_CACHE: dict[tuple[date, date], tuple[float, pd.DataFrame]] = {}
 _BASE_CACHE_LOCK = threading.Lock()
+_STATUS_CACHE: Optional[pd.DataFrame] = None
 
 # Aceita filtro como string unica OU lista de strings
 FiltroValor = Optional[Union[str, list]]
@@ -138,11 +139,21 @@ def _carregar_base_sem_filtros(data_ini: date, data_fim: date) -> pd.DataFrame:
     logger.info("PMR: apos join SF2->SE1: %d registros", len(base))
 
     if not sa1.empty:
-        sa1_d = sa1[["Chave_A1", "a1_nome", "a1_cgc", "regional", "segmento"]].drop_duplicates("Chave_A1")
+        sa1_d = sa1[["Chave_A1", "a1_cod", "a1_loja", "a1_nome", "a1_cgc", "regional", "segmento"]].drop_duplicates("Chave_A1")
         base = base.merge(sa1_d, on="Chave_A1", how="left")
     else:
         for col in ["a1_nome", "a1_cgc", "regional", "segmento"]:
             base[col] = None
+
+    # O status operacional vem da dim_clientes e é consolidado por CNPJ/CGC.
+    status_clientes = _carregar_status_clientes()
+    if not status_clientes.empty:
+        base["a1_cgc"] = base["a1_cgc"].fillna("").astype(str).str.strip()
+        base = base.merge(status_clientes, left_on="a1_cgc", right_on="cgc", how="left")
+        base["status_cliente"] = base["status_cliente"].fillna("SEM STATUS")
+        base = base.drop(columns=["cgc"], errors="ignore")
+    else:
+        base["status_cliente"] = "SEM STATUS"
 
     if base.empty:
         return pd.DataFrame()
@@ -162,17 +173,62 @@ def _carregar_base_sem_filtros(data_ini: date, data_fim: date) -> pd.DataFrame:
     return _calcular_dias(pago)
 
 
+def _carregar_status_clientes() -> pd.DataFrame:
+    global _STATUS_CACHE
+    if _STATUS_CACHE is not None:
+        return _STATUS_CACHE.copy()
+    try:
+        from app.core.database import SessionLocal
+        from sqlalchemy import text
+        with SessionLocal() as db:
+            rows = db.execute(text(
+                "SELECT TRIM(cgc) AS cgc, bloqueado FROM dim_clientes"
+            )).mappings().all()
+        raw = pd.DataFrame(rows, columns=["cgc", "bloqueado"])
+        if raw.empty:
+            _STATUS_CACHE = pd.DataFrame(columns=["cgc", "status_cliente"])
+            return _STATUS_CACHE.copy()
+        raw["cgc"] = raw["cgc"].astype(str).str.strip()
+        raw["bloqueado"] = raw["bloqueado"].fillna("").astype(str).str.upper().str.strip()
+
+        def consolidar_status(grupo: pd.Series) -> str:
+            valores = set(grupo)
+            if "INATIVO" in valores:
+                return "INATIVO"
+            if "ATIVO" in valores:
+                return "ATIVO"
+            return "SEM STATUS"
+
+        _STATUS_CACHE = (
+            raw.groupby("cgc", as_index=False)["bloqueado"]
+            .agg(consolidar_status)
+            .rename(columns={"bloqueado": "status_cliente"})
+        )
+        if not _STATUS_CACHE.empty:
+            _STATUS_CACHE["cgc"] = _STATUS_CACHE["cgc"].astype(str).str.strip()
+            _STATUS_CACHE["status_cliente"] = (
+                _STATUS_CACHE["status_cliente"].astype(str).str.upper().str.strip()
+            )
+    except Exception:
+        logger.exception("PMR: nao foi possivel carregar status da dim_clientes")
+        _STATUS_CACHE = pd.DataFrame(columns=["cgc", "status_cliente"])
+    return _STATUS_CACHE.copy()
+
+
 def limpar_cache() -> None:
     """Descarta bases PMR para que leituras posteriores reflitam o S3 atualizado."""
     with _BASE_CACHE_LOCK:
         _BASE_CACHE.clear()
+    global _STATUS_CACHE
+    _STATUS_CACHE = None
     logger.info("PMR: cache da base analítica invalidado")
 
 
 def _carregar_base(data_ini: date, data_fim: date,
                    segmento: FiltroValor = None,
                    regional: FiltroValor = None,
-                   cgc: FiltroValor = None) -> pd.DataFrame:
+                   cgc: FiltroValor = None,
+                   status: FiltroValor = None) -> pd.DataFrame:
     """Carrega a base compartilhada e aplica os filtros específicos da consulta."""
     chave = (data_ini, data_fim)
     agora = time.monotonic()
@@ -190,6 +246,7 @@ def _carregar_base(data_ini: date, data_fim: date,
     base = _aplicar_filtro(base, "segmento", segmento)
     base = _aplicar_filtro(base, "regional", regional)
     base = _aplicar_filtro(base, "a1_cgc", cgc)
+    base = _aplicar_filtro(base, "status_cliente", status)
     return base
 
 
@@ -200,13 +257,14 @@ def _carregar_base(data_ini: date, data_fim: date,
 def calcular_pmr_global(data_ini: date, data_fim: date,
                         segmento: FiltroValor = None,
                         regional: FiltroValor = None,
-                        cgc: FiltroValor = None) -> dict[str, Any]:
+                        cgc: FiltroValor = None,
+                        status: FiltroValor = None) -> dict[str, Any]:
     """
     Cards de topo: PMR global nos três critérios.
     Inclui 'valor_por_dia' = valor_total / dias_periodo (impacto de 1 dia de
     PMR no capital de giro — ganho one-off de caixa por dia reduzido).
     """
-    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, cgc=cgc)
+    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, cgc=cgc, status=status)
     if base.empty:
         return _resposta_vazia(data_ini, data_fim)
 
@@ -230,9 +288,10 @@ def calcular_pmr_global(data_ini: date, data_fim: date,
 
 def calcular_pmr_regional(data_ini: date, data_fim: date,
                           segmento: FiltroValor = None,
-                          regional: FiltroValor = None) -> dict[str, Any]:
+                          regional: FiltroValor = None,
+                          status: FiltroValor = None) -> dict[str, Any]:
     """PMR detalhado por regional."""
-    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional)
+    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, status=status)
     if base.empty:
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "regionais": []}
 
@@ -255,12 +314,13 @@ def calcular_pmr_regional(data_ini: date, data_fim: date,
 def calcular_pmr_clientes(data_ini: date, data_fim: date,
                           segmento: FiltroValor = None,
                           regional: FiltroValor = None,
-                          limit: int = 50, offset: int = 0) -> dict[str, Any]:
+                          limit: int = 50, offset: int = 0,
+                          status: FiltroValor = None) -> dict[str, Any]:
     """
     PMR por RAZAO SOCIAL (a1_cgc + a1_nome), paginado, ordenado por valor_total desc.
     Consolida todas as filiais/lojas do mesmo CNPJ em um único registro.
     """
-    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional)
+    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, status=status)
     if base.empty:
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
                 "total": 0, "clientes": []}
@@ -296,7 +356,8 @@ def calcular_pmr_clientes(data_ini: date, data_fim: date,
 def calcular_pmr_mensal(data_ini: date, data_fim: date,
                         segmento: FiltroValor = None,
                         regional: FiltroValor = None,
-                        cgc: FiltroValor = None) -> dict[str, Any]:
+                        cgc: FiltroValor = None,
+                        status: FiltroValor = None) -> dict[str, Any]:
     """
     Evolução mês a mês, agrupada pelo mês de recebimento (e5_data).
 
@@ -309,7 +370,7 @@ def calcular_pmr_mensal(data_ini: date, data_fim: date,
     menor porque as notas de pagadores lentos ainda nao foram liquidadas.
     O campo 'em_maturacao' marca os 2 ultimos meses do recorte.
     """
-    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, cgc=cgc)
+    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, cgc=cgc, status=status)
     if base.empty:
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "meses": []}
 
@@ -347,7 +408,8 @@ def listar_filtros(data_ini: date, data_fim: date) -> dict[str, Any]:
 
     regionais = sorted(base["regional"].dropna().unique().tolist())
     segmentos = sorted(base["segmento"].dropna().unique().tolist())
-    return {"regionais": regionais, "segmentos": segmentos}
+    status = sorted(base["status_cliente"].dropna().unique().tolist())
+    return {"regionais": regionais, "segmentos": segmentos, "status": status}
 
 
 def listar_clientes_busca(data_ini: date, data_fim: date,
@@ -430,15 +492,18 @@ def obter_notas_cliente(data_ini: date, data_fim: date, cgc: str) -> dict[str, A
 def obter_dados_brutos(data_ini: date, data_fim: date,
                        segmento: FiltroValor = None,
                        regional: FiltroValor = None,
-                       cgc: FiltroValor = None) -> pd.DataFrame:
+                       cgc: FiltroValor = None,
+                       status: FiltroValor = None) -> pd.DataFrame:
     """DataFrame linha a linha para exportacao Excel."""
-    base = _carregar_base(data_ini, data_fim, segmento=segmento, regional=regional, cgc=cgc)
+    base = _carregar_base(
+        data_ini, data_fim, segmento=segmento, regional=regional, cgc=cgc, status=status
+    )
     if base.empty:
         return pd.DataFrame()
 
     cols = [
         "f2_filial", "f2_doc", "f2_serie", "f2_emissao", "f2_valbrut",
-        "a1_cgc", "a1_nome", "regional", "segmento",
+        "a1_cgc", "a1_nome", "regional", "segmento", "status_cliente",
         "e1_num", "e1_parcela", "e1_valor", "e1_vencto", "e1_vencrea",
         "e5_data", "e5_valor",
         "dias_pagamento", "dias_vencimento", "dias_cond_pag",

@@ -41,13 +41,17 @@ def construir_contexto(
     segmento: Any = None,
     regional: Any = None,
     cgc: Optional[str] = None,
+    status: Any = None,
 ) -> dict[str, Any]:
     """Calcula o dataset financeiro que fundamenta cada resposta do agente."""
     from app.financeiro import pmr_engine as engine
 
     started = time.perf_counter()
-    base = engine._carregar_base(data_ini, data_fim, segmento, regional)
-    base_escopo = engine._carregar_base(data_ini, data_fim, segmento, regional, cgc) if cgc else base
+    base = engine._carregar_base(data_ini, data_fim, segmento, regional, status=status)
+    base_escopo = (
+        engine._carregar_base(data_ini, data_fim, segmento, regional, cgc, status)
+        if cgc else base
+    )
     contexto: dict[str, Any] = {
         "metodologia": {
             "periodo_filtro": "e5_data",
@@ -58,7 +62,12 @@ def construir_contexto(
             "vinculo": "E5 -> E1 -> SF2",
         },
         "periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
-        "filtros": {"segmentos": segmento, "regionais": regional},
+        "filtros": {
+            "segmentos": segmento,
+            "regionais": regional,
+            "status": status,
+            "status_opcoes": ["ATIVO", "INATIVO", "SEM STATUS"],
+        },
         "indicadores_disponiveis": ["PMR"],
         "indicadores_futuros": ["PMP", "PME", "CCC"],
         "reconciliacao": {"movimentos_validos": len(base)},
@@ -67,9 +76,13 @@ def construir_contexto(
         contexto.update({"global": {}, "mensal": [], "regionais": [], "clientes": []})
         return contexto
 
-    contexto["global"] = engine.calcular_pmr_global(data_ini, data_fim, segmento, regional)
-    contexto["mensal"] = engine.calcular_pmr_mensal(data_ini, data_fim, segmento, regional).get("meses", [])
-    contexto["regionais"] = engine.calcular_pmr_regional(data_ini, data_fim, segmento, regional).get("regionais", [])
+    contexto["global"] = engine.calcular_pmr_global(data_ini, data_fim, segmento, regional, status=status)
+    contexto["mensal"] = engine.calcular_pmr_mensal(
+        data_ini, data_fim, segmento, regional, status=status
+    ).get("meses", [])
+    contexto["regionais"] = engine.calcular_pmr_regional(
+        data_ini, data_fim, segmento, regional, status
+    ).get("regionais", [])
     if cgc:
         contexto["cliente_selecionado"] = {
             "cgc": cgc,

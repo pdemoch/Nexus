@@ -122,6 +122,7 @@ export default function FinanceiroArena() {
   const [anoIni, setAnoIni]   = useState('2026');
   const [segmentosSel, setSegmentosSel] = useState<string[]>([]);
   const [regionaisSel, setRegionaisSel] = useState<string[]>([]);
+  const [statusSel, setStatusSel] = useState<string[]>([]);
   const [toggleAtivo, setToggleAtivo]   = useState<'PMR' | 'PMP' | 'PME' | 'CCC'>('PMR');
 
   // ── Busca de cliente ──
@@ -135,7 +136,9 @@ export default function FinanceiroArena() {
   const [regionais, setRegionais] = useState<any[]>([]);
   const [clientes, setClientes]   = useState<any[]>([]);
   const [evolucao, setEvolucao]   = useState<any[]>([]);
-  const [filtros, setFiltros]     = useState<any>({ regionais: [], segmentos: [] });
+  const [filtros, setFiltros]     = useState<any>({
+    regionais: [], segmentos: [], status: ['ATIVO', 'INATIVO', 'SEM STATUS'],
+  });
   const [loading, setLoading]     = useState(false);
   const [baixando, setBaixando]   = useState(false);
   const [semDados, setSemDados]   = useState(false);
@@ -158,6 +161,7 @@ export default function FinanceiroArena() {
     data_fim: dataFim,
     ...(segmentosSel.length ? { segmentos: segmentosSel.join(',') } : {}),
     ...(regionaisSel.length ? { regionais: regionaisSel.join(',') } : {}),
+    ...(statusSel.length ? { status: statusSel.join(',') } : {}),
   };
 
   // ─── Fetch principal ───────────────────────────────────────────────────────
@@ -182,7 +186,7 @@ export default function FinanceiroArena() {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dataIni, dataFim, segmentosSel, regionaisSel]);
+  }, [dataIni, dataFim, segmentosSel, regionaisSel, statusSel]);
 
   const buscarFiltros = useCallback(async () => {
     try {
@@ -291,6 +295,7 @@ export default function FinanceiroArena() {
         data_fim: dataFim,
         segmentos: segmentosSel.length ? segmentosSel.join(',') : undefined,
         regionais: regionaisSel.length ? regionaisSel.join(',') : undefined,
+        status: statusSel.length ? statusSel.join(',') : undefined,
         cgc: clienteSel?.cgc,
       });
       setChatAgente([...historico, { role: 'assistant', content: r.data.resposta }]);
@@ -436,6 +441,8 @@ export default function FinanceiroArena() {
           value={regionaisSel} onChange={setRegionaisSel} />
         <MultiSelect label="Segmentos" options={filtros.segmentos || []}
           value={segmentosSel} onChange={setSegmentosSel} />
+        <MultiSelect label="Status" options={filtros.status || []}
+          value={statusSel} onChange={setStatusSel} />
 
         {/* Busca de cliente */}
         <div className="relative">

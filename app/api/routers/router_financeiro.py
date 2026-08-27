@@ -28,6 +28,7 @@ class PerguntaFinanceira(BaseModel):
     data_fim: date
     segmentos: Optional[str] = None
     regionais: Optional[str] = None
+    status: Optional[str] = None
     cgc: Optional[str] = None
     historico: Optional[list[dict]] = None
 
@@ -46,7 +47,8 @@ async def agente_chat(
         segmento = _split(payload.segmentos)
         regional = _split(payload.regionais)
         contexto = await asyncio.to_thread(
-            construir_contexto, payload.data_ini, payload.data_fim, segmento, regional, payload.cgc
+            construir_contexto, payload.data_ini, payload.data_fim, segmento, regional, payload.cgc,
+            _split(payload.status)
         )
         return {"resposta": await asyncio.to_thread(
             responder_pergunta, pergunta, contexto, payload.historico
@@ -274,13 +276,15 @@ async def get_pmr_global_filtrado(
     segmento:  str = Query(None, description="Um segmento (compat)"),
     regionais: str = Query(None, description="Multiplas regionais separadas por virgula"),
     segmentos: str = Query(None, description="Multiplos segmentos separados por virgula"),
+    status: str = Query(None, description="Status do cliente"),
     cgc:       str = Query(None, description="Filtro opcional por CNPJ do cliente"),
 ):
     try:
         reg = _split(regionais) or regional
         seg = _split(segmentos) or segmento
+        stat = _split(status) or status
         dados = await asyncio.to_thread(
-            _engine().calcular_pmr_global, data_ini, data_fim, seg, reg, cgc
+            _engine().calcular_pmr_global, data_ini, data_fim, seg, reg, cgc, stat
         )
         return dados
     except Exception as e:
@@ -300,12 +304,14 @@ async def get_pmr_regional_filtrado(
     segmentos: str = Query(None, description="Multiplos segmentos separados por virgula"),
     regional:   str = Query(None, description="Uma regional (compat)"),
     regionais:  str = Query(None, description="Multiplas regionais separadas por virgula"),
+    status:     str = Query(None, description="Status do cliente"),
 ):
     try:
         seg = _split(segmentos) or segmento
         reg = _split(regionais) or regional
+        stat = _split(status) or status
         dados = await asyncio.to_thread(
-            _engine().calcular_pmr_regional, data_ini, data_fim, seg, reg
+            _engine().calcular_pmr_regional, data_ini, data_fim, seg, reg, stat
         )
         return dados  # {"periodo": {...}, "regionais": [...]}
     except Exception as e:
@@ -321,14 +327,16 @@ async def get_pmr_clientes_filtrado(
     segmento:  str = Query(None),
     regionais: str = Query(None, description="Multiplas regionais separadas por virgula"),
     segmentos: str = Query(None, description="Multiplos segmentos separados por virgula"),
+    status: str = Query(None, description="Status do cliente"),
     limit: int = Query(50),
     offset: int = Query(0),
 ):
     try:
         reg = _split(regionais) or regional
         seg = _split(segmentos) or segmento
+        stat = _split(status) or status
         dados = await asyncio.to_thread(
-            _engine().calcular_pmr_clientes, data_ini, data_fim, seg, reg, limit, offset
+            _engine().calcular_pmr_clientes, data_ini, data_fim, seg, reg, limit, offset, stat
         )
         return dados  # {"periodo": {...}, "total": N, "clientes": [...]}
     except Exception as e:
@@ -346,13 +354,15 @@ async def get_pmr_evolucao(
     regionais: str = Query(None, description="Multiplas regionais separadas por virgula"),
     segmentos: str = Query(None, description="Multiplos segmentos separados por virgula"),
     cgc:       str = Query(None, description="Filtro opcional por CNPJ do cliente"),
+    status:    str = Query(None, description="Status do cliente"),
 ):
     """Evolucao mes a mes, agrupada pelo mes de recebimento (e5_data)."""
     try:
         reg = _split(regionais) or regional
         seg = _split(segmentos) or segmento
+        stat = _split(status) or status
         dados = await asyncio.to_thread(
-            _engine().calcular_pmr_mensal, data_ini, data_fim, seg, reg, cgc
+            _engine().calcular_pmr_mensal, data_ini, data_fim, seg, reg, cgc, stat
         )
         return dados  # {"periodo": {...}, "meses": [...]}
     except Exception as e:
@@ -389,6 +399,7 @@ async def pmr_exportar(
     regional: str = Query(None),
     segmentos: str = Query(None),
     regionais: str = Query(None),
+    status: str = Query(None, description="Status do cliente"),
     _: dict = Depends(get_current_user),
 ):
     """
@@ -411,12 +422,13 @@ async def pmr_exportar(
         engine = _engine()
         reg = _split(regionais) or regional
         seg = _split(segmentos) or segmento
+        stat = _split(status) or status
 
-        df_bruto    = engine.obter_dados_brutos(data_ini, data_fim, seg, reg)
-        d_regional  = engine.calcular_pmr_regional(data_ini, data_fim, seg, reg)
-        d_clientes  = engine.calcular_pmr_clientes(data_ini, data_fim, seg, reg, limit=5000)
-        d_global    = engine.calcular_pmr_global(data_ini, data_fim, seg, reg)
-        d_mensal    = engine.calcular_pmr_mensal(data_ini, data_fim, seg, reg)
+        df_bruto    = engine.obter_dados_brutos(data_ini, data_fim, seg, reg, status=stat)
+        d_regional  = engine.calcular_pmr_regional(data_ini, data_fim, seg, reg, stat)
+        d_clientes  = engine.calcular_pmr_clientes(data_ini, data_fim, seg, reg, 5000, 0, stat)
+        d_global    = engine.calcular_pmr_global(data_ini, data_fim, seg, reg, status=stat)
+        d_mensal    = engine.calcular_pmr_mensal(data_ini, data_fim, seg, reg, status=stat)
 
         wb = openpyxl.Workbook()
         hdr_fill = PatternFill("solid", fgColor="1E3A5F")
