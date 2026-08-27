@@ -206,12 +206,10 @@ export default function FinanceiroArena() {
     setLoading(true);
     try {
       const params = pmpParams;
-      const [gRes, fRes] = await Promise.all([
-        axios.get('/api/v1/financeiro/pmp/global-filtrado', { params }),
-        axios.get('/api/v1/financeiro/pmp/fornecedores-filtrado', { params: { ...params, limit: 100 } }),
-      ]);
-      setPmpGlobal(gRes.data);
-      setPmpFornecedores(fRes.data.fornecedores || []);
+      const r = await axios.get('/api/v1/financeiro/pmp/resumo', { params });
+      setPmpGlobal(r.data.global);
+      setPmpFornecedores(r.data.fornecedores?.fornecedores || []);
+      setPmpFiltros(r.data.filtros || { e5_motbx: [], d1_tp: [], fornecedor: [] });
     } catch {
       setPmpGlobal(null);
       setPmpFornecedores([]);
@@ -229,16 +227,9 @@ export default function FinanceiroArena() {
     } catch {}
   }, [dataIni, dataFim]);
 
-  useEffect(() => { buscarFiltros(); }, [buscarFiltros]);
-  const buscarPmpFiltros = useCallback(async () => {
-    try {
-      const r = await axios.get('/api/v1/financeiro/pmp/filtros', {
-        params: { data_ini: dataIni, data_fim: dataFim },
-      });
-      setPmpFiltros(r.data || { motivos: [], tipos: [], fornecedores: [], clifor: [] });
-    } catch {}
-  }, [dataIni, dataFim]);
-  useEffect(() => { buscarPmpFiltros(); }, [buscarPmpFiltros]);
+  useEffect(() => {
+    if (toggleAtivo === 'PMR') buscarFiltros();
+  }, [buscarFiltros, toggleAtivo]);
   useEffect(() => {
     if (toggleAtivo === 'PMR') buscarDados();
     if (toggleAtivo === 'PMP') buscarPmp();
@@ -310,7 +301,13 @@ export default function FinanceiroArena() {
   })).sort((a, b) => (b.pmr_pag ?? -Infinity) - (a.pmr_pag ?? -Infinity));
   const maxPMR = Math.max(...dadosGrafico.flatMap(d => [d.pmr_pag, d.pmr_vnc, d.pmr_cond]), 60);
   const selecionarRegionalNoGrafico = (state: any) => {
-    const regional = state?.activePayload?.[0]?.payload?.regionalOriginal;
+    const regional = state?.activePayload?.[0]?.payload?.regionalOriginal
+      || dadosGrafico.find(d => d.regional === state?.activeLabel)?.regionalOriginal;
+    if (!regional) return;
+    setRegionaisSel(atual => atual.length === 1 && atual[0] === regional ? [] : [regional]);
+  };
+  const selecionarRegionalNaBarra = (data: any) => {
+    const regional = data?.payload?.regionalOriginal || data?.regionalOriginal;
     if (!regional) return;
     setRegionaisSel(atual => atual.length === 1 && atual[0] === regional ? [] : [regional]);
   };
@@ -660,19 +657,21 @@ export default function FinanceiroArena() {
               ) : dadosGrafico.length === 0 ? (
                 <div className="flex items-center justify-center h-64 text-slate-300 text-xs font-bold">Sem dados</div>
               ) : (
-                <ResponsiveContainer width="100%" height={340}>
-                  <ComposedChart data={dadosGrafico} margin={{ top: 10, right: 20, left: 0, bottom: 65 }}
+                <ResponsiveContainer width="100%" height={360}>
+                <ComposedChart data={dadosGrafico} margin={{ top: 10, right: 20, left: 0, bottom: 75 }}
                     onClick={selecionarRegionalNoGrafico}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                     <XAxis dataKey="regional" tick={{ fontSize: 10, fontWeight: 700, fill: '#64748b' }}
-                      angle={-30} textAnchor="end" interval={0} />
+                      angle={-30} textAnchor="end" interval={0} height={75} />
                     <YAxis yAxisId="left" tickFormatter={fmtRs} tick={{ fontSize: 10, fill: '#64748b' }} width={68} />
                     <YAxis yAxisId="right" orientation="right" domain={[0, Math.ceil(maxPMR * 1.2)]}
                       tick={{ fontSize: 10, fill: '#64748b' }} unit=" d" width={42} />
                     <Tooltip content={<TooltipCustom />} />
-                    <Legend wrapperStyle={{ fontSize: 10, fontWeight: 700, paddingTop: 16 }} />
+                    <Legend verticalAlign="top" height={30}
+                      wrapperStyle={{ fontSize: 10, fontWeight: 700, paddingBottom: 4 }} />
                     <Bar yAxisId="left" dataKey="valor_recebido" name="Valor Recebido E5" fill="#c7d2fe"
-                      radius={[4, 4, 0, 0]} maxBarSize={48} cursor="pointer" />
+                      radius={[4, 4, 0, 0]} maxBarSize={48} cursor="pointer"
+                      onClick={selecionarRegionalNaBarra} />
                     <Line yAxisId="right" type="monotone" dataKey="pmr_pag" name="PMR Pagamento"
                       stroke="#7c3aed" strokeWidth={2.5} dot={{ r: 4, fill: '#7c3aed' }} />
                     <Line yAxisId="right" type="monotone" dataKey="pmr_vnc" name="PMR Vencimento"
@@ -829,10 +828,12 @@ export default function FinanceiroArena() {
       {toggleAtivo === 'PMP' && (
         <div className="space-y-4">
           {pmpGlobal && (
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
               {[
-                { label: 'PMP Global', value: pmpGlobal.pmp, color: '#7c3aed', icon: Clock },
-                { label: 'Pagamentos', value: pmpGlobal.pagamentos, color: '#2563eb', icon: DollarSign },
+                { label: 'PMP Pagamento', value: pmpGlobal.pmp_pagamento ?? pmpGlobal.pmp, color: '#7c3aed', icon: Clock },
+                { label: 'PMP Vencimento', value: pmpGlobal.pmp_vencimento, color: '#2563eb', icon: Clock },
+                { label: 'PMP Cond. Pag.', value: pmpGlobal.pmp_cond_pag, color: '#0891b2', icon: Clock },
+                { label: 'Pagamentos', value: pmpGlobal.pagamentos, color: '#475569', icon: DollarSign },
                 { label: 'Valor Pago', value: pmpGlobal.valor_total, color: '#059669', icon: TrendingDown },
               ].map(({ label, value, color, icon: Icon }) => (
                 <div key={label} className="bg-white rounded-2xl border border-slate-100 p-4">
@@ -842,7 +843,7 @@ export default function FinanceiroArena() {
                   </div>
                   <div className="text-3xl font-black mt-1" style={{ color }}>
                     {label === 'Valor Pago' ? fmtRsFull(value || 0) : Number(value || 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 })}
-                    {label === 'PMP Global' && <span className="text-sm font-bold text-slate-400 ml-1">dias</span>}
+                    {label.startsWith('PMP') && <span className="text-sm font-bold text-slate-400 ml-1">dias</span>}
                   </div>
                 </div>
               ))}
@@ -862,7 +863,7 @@ export default function FinanceiroArena() {
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
                   <thead>
                     <tr style={{ background: '#f8fafc' }}>
-                      {['CLIFOR', 'Fornecedor', 'Pagamentos', 'Valor Pago', 'PMP'].map((h, i) => (
+                      {['CLIFOR', 'Fornecedor', 'Pagamentos', 'Valor Pago', 'PMP Pag.', 'PMP Venc.', 'PMP Cond.'].map((h, i) => (
                         <th key={h} style={{ padding: '8px 12px', textAlign: i < 2 ? 'left' : 'right', fontSize: 9,
                           fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.04em', color: '#94a3b8',
                           borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>{h}</th>
@@ -876,7 +877,9 @@ export default function FinanceiroArena() {
                         <td style={{ padding: '7px 12px', fontWeight: 700, color: '#334155' }}>{f.nome || '—'}</td>
                         <td style={{ padding: '7px 12px', textAlign: 'right', color: '#475569' }}>{f.pagamentos?.toLocaleString('pt-BR')}</td>
                         <td style={{ padding: '7px 12px', textAlign: 'right', color: '#475569' }}>{fmtRs(f.valor_total || 0)}</td>
-                        <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 900, color: corDias(f.pmp) }}>{Number(f.pmp || 0).toFixed(2)} d</td>
+                        <td style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 900, color: corDias(f.pmp_pagamento ?? f.pmp) }}>{Number(f.pmp_pagamento ?? f.pmp ?? 0).toFixed(2)} d</td>
+                        <td style={{ padding: '7px 12px', textAlign: 'right', color: '#64748b' }}>{Number(f.pmp_vencimento || 0).toFixed(2)} d</td>
+                        <td style={{ padding: '7px 12px', textAlign: 'right', color: '#64748b' }}>{Number(f.pmp_cond_pag || 0).toFixed(2)} d</td>
                       </tr>
                     ))}
                   </tbody>

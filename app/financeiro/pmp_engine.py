@@ -4,10 +4,13 @@ O menor grão do cálculo é o movimento E5.  Assim pagamentos parciais não sã
 deduplicados e o peso é sempre o valor efetivamente pago.
 """
 from datetime import date
+import logging
 from typing import Any
 import pandas as pd
 
 from app.financeiro.s3_store import carregar_todos_mensal, carregar_mensal, carregar_fornecedores
+
+logger = logging.getLogger(__name__)
 
 
 def _num(df: pd.DataFrame, col: str) -> pd.Series:
@@ -58,13 +61,25 @@ def _base(data_ini: date, data_fim: date, motivos=None, tipos=None,
             tit[canonical] = _norm_key(tit[e2_key])
             mov[canonical] = _norm_key(mov[e5_key])
             join_keys.append(canonical)
+    if join_keys:
+        titulo_keys = ["clifor"] + join_keys
+        duplicados = int(tit.duplicated(titulo_keys, keep=False).sum())
+        if duplicados:
+            logger.warning(
+                "PMP: %d linhas SE2 repetidas por chave de título; mantendo a ocorrência mais recente.",
+                duplicados,
+            )
+            tit = tit.drop_duplicates(titulo_keys, keep="last")
     mov["e5_valor"] = _num(mov, "e5_valor")
     mov["e5_data"] = pd.to_datetime(_col(mov, "e5_data"), errors="coerce")
     mov = mov[(mov["e5_valor"] > 0) & mov["e5_data"].notna()]
     if mov.empty:
         return pd.DataFrame()
-    # Join SE2 aos movimentos pelo título quando possível; CLIFOR é a chave
-    # deliberada de fornecedor (loja nunca participa do agrupamento).
+    # E5 é uma base mista: contém recebimentos e pagamentos. O PMP considera
+    # somente movimentos que identificam um título a pagar na SE2 pelo CLIFOR
+    # e suas chaves; movimentos não casados permanecem fora do PMP, mas devem
+    # ser contabilizados separadamente nos diagnósticos de cobertura.
+    # CLIFOR é a chave deliberada de fornecedor (loja nunca participa do agrupamento).
     if join_keys:
         base = mov.merge(tit, on=["clifor"] + join_keys,
                          how="inner", suffixes=("", "_e2"),
@@ -99,10 +114,22 @@ def _base(data_ini: date, data_fim: date, motivos=None, tipos=None,
         base["f1_emissao"] = pd.to_datetime(_col(base, "e2_emissao"), errors="coerce")
     base["f1_emissao"] = pd.to_datetime(base["f1_emissao"], errors="coerce")
     emissao_titulo = pd.to_datetime(_col(base, "e2_emissao"), errors="coerce")
+    vencimento_real = pd.to_datetime(_col(base, "e2_vencrea"), errors="coerce")
+    vencimento_condicao = pd.to_datetime(_col(base, "e2_vencto"), errors="coerce")
     base["dias_pagamento"] = (base["e5_data"] - base["f1_emissao"]).dt.days.clip(lower=0)
     base["dias_pagamento"] = base["dias_pagamento"].fillna(
         (base["e5_data"] - emissao_titulo).dt.days.clip(lower=0)
     )
+    base["dias_vencimento"] = (vencimento_real - base["f1_emissao"]).dt.days
+    base["dias_cond_pag"] = (vencimento_condicao - base["f1_emissao"]).dt.days
+    base["dias_vencimento"] = base["dias_vencimento"].fillna(
+        (vencimento_real - emissao_titulo).dt.days
+    )
+    base["dias_cond_pag"] = base["dias_cond_pag"].fillna(
+        (vencimento_condicao - emissao_titulo).dt.days
+    )
+    base["dias_vencimento"] = base["dias_vencimento"].clip(lower=0)
+    base["dias_cond_pag"] = base["dias_cond_pag"].clip(lower=0)
     base = base[base["dias_pagamento"].notna()]
     motivo_values = _as_filter(motivos)
     tipo_values = _as_filter(tipos)
@@ -120,8 +147,34 @@ def _resumo(df: pd.DataFrame) -> dict[str, Any]:
     if df.empty:
         return {"pagamentos": 0, "valor_total": 0.0, "pmp": 0.0}
     valor = float(df["e5_valor"].sum())
-    return {"pagamentos": int(len(df)), "valor_total": round(valor, 2),
-            "pmp": round(float((df["dias_pagamento"] * df["e5_valor"]).sum() / valor), 2) if valor else 0.0}
+    media = lambda coluna: round(float((df[coluna].fillna(0) * df["e5_valor"]).sum() / valor), 2) if valor else 0.0
+    pagamento = media("dias_pagamento")
+    vencimento = media("dias_vencimento")
+    condicao = media("dias_cond_pag")
+    return {
+        "pagamentos": int(len(df)),
+        "valor_total": round(valor, 2),
+        "pmp": pagamento,
+        "pmp_pagamento": pagamento,
+        "pmp_vencimento": vencimento,
+        "pmp_cond_pag": condicao,
+        "delta_atraso": round(pagamento - condicao, 2),
+    }
+
+
+def _resumo_fornecedores(base: pd.DataFrame, limit: int = 100,
+                        offset: int = 0) -> dict[str, Any]:
+    if base.empty:
+        return {"total": 0, "fornecedores": []}
+    nomes = carregar_fornecedores()
+    nome_col = next((c for c in ("a2_nome", "a2_nom", "nome", "razao_social") if c in nomes), None)
+    lookup = nomes.set_index("clifor")[nome_col].to_dict() if nome_col and "clifor" in nomes else {}
+    rows = []
+    for clifor, grupo in base.groupby("clifor", dropna=False):
+        row = {"clifor": str(clifor), "nome": str(lookup.get(str(clifor), "")), **_resumo(grupo)}
+        rows.append(row)
+    rows.sort(key=lambda r: r["valor_total"], reverse=True)
+    return {"total": len(rows), "fornecedores": rows[offset:offset + limit]}
 
 
 def calcular_pmp_global(data_ini: date, data_fim: date, motivos=None, tipos=None,
@@ -142,19 +195,28 @@ def calcular_pmp_fornecedores(data_ini: date, data_fim: date,
     tipos = tipos if tipos is not None else d1_tp
     fornecedores = fornecedores if fornecedores is not None else fornecedor
     base = _base(data_ini, data_fim, motivos, tipos, fornecedores, clifor)
-    if base.empty:
-        return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
-                "total": 0, "fornecedores": []}
-    nomes = carregar_fornecedores()
-    nome_col = next((c for c in ("a2_nome", "a2_nom", "nome", "razao_social") if c in nomes), None)
-    lookup = nomes.set_index("clifor")[nome_col].to_dict() if nome_col and "clifor" in nomes else {}
-    rows = []
-    for clifor, grupo in base.groupby("clifor", dropna=False):
-        row = {"clifor": str(clifor), "nome": str(lookup.get(str(clifor), "")), **_resumo(grupo)}
-        rows.append(row)
-    rows.sort(key=lambda r: r["valor_total"], reverse=True)
+    resumo = _resumo_fornecedores(base, limit, offset)
     return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
-            "total": len(rows), "fornecedores": rows[offset:offset + limit]}
+            **resumo}
+
+
+def calcular_pmp_resumo(data_ini: date, data_fim: date, motivos=None, tipos=None,
+                        fornecedores=None, clifor=None) -> dict[str, Any]:
+    base = _base(data_ini, data_fim, motivos, tipos, fornecedores, clifor)
+    valores = lambda col: sorted(_norm_key(_col(base, col)).replace("", "SEM VALOR").unique().tolist())
+    motivos_disponiveis = valores("e5_motbx")
+    tipos_disponiveis = valores("d1_tp")
+    fornecedores_disponiveis = valores("clifor")
+    return {
+        "periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
+        "global": _resumo(base),
+        "fornecedores": _resumo_fornecedores(base),
+        "filtros": {
+            "e5_motbx": motivos_disponiveis,
+            "d1_tp": tipos_disponiveis,
+            "fornecedor": fornecedores_disponiveis,
+        },
+    }
 
 
 def calcular_pmp(data_ini: date, data_fim: date, **filters) -> dict[str, Any]:

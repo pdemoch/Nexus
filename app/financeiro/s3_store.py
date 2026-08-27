@@ -90,6 +90,42 @@ def carregar_fornecedores() -> pd.DataFrame:
     return df if df is not None else pd.DataFrame()
 
 
+def salvar_snapshot(df: pd.DataFrame, fonte: str) -> bool:
+    """Persiste um cadastro sem datas em ``{fonte}/latest.parquet``."""
+    if df is None or df.empty:
+        return False
+    buf = io.BytesIO()
+    df.to_parquet(buf, index=False, engine="pyarrow")
+    try:
+        _s3().put_object(Bucket=_BUCKET, Key=f"{_PREFIX}/{fonte}/latest.parquet",
+                         Body=buf.getvalue())
+        return True
+    except Exception as e:
+        logger.error("S3 snapshot %s/latest: %s", fonte, e)
+        return False
+
+
+def carregar_snapshot(fonte: str) -> pd.DataFrame:
+    df = _baixar_parquet(f"{_PREFIX}/{fonte}/latest.parquet")
+    return df if df is not None else pd.DataFrame()
+
+
+def salvar_sb1(df: pd.DataFrame) -> bool:
+    return salvar_snapshot(df, "sb1")
+
+
+def salvar_sg1(df: pd.DataFrame) -> bool:
+    return salvar_snapshot(df, "sg1")
+
+
+def carregar_sb1() -> pd.DataFrame:
+    return carregar_snapshot("sb1")
+
+
+def carregar_sg1() -> pd.DataFrame:
+    return carregar_snapshot("sg1")
+
+
 # ─── Escrita ──────────────────────────────────────────────────────────────────
 
 def salvar_mensal(df: pd.DataFrame, fonte: str, ano: int, mes: int) -> bool:

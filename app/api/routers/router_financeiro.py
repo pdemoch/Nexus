@@ -215,6 +215,18 @@ async def pmp_fornecedores_filtrado(data_ini: date = Query(...), data_fim: date 
     return await asyncio.to_thread(_pmp().calcular_pmp_fornecedores, data_ini, data_fim, limit, offset, *f)
 
 
+@router.get("/pmp/resumo")
+async def pmp_resumo(data_ini: date = Query(...), data_fim: date = Query(...),
+                     motivos: str = Query(None), tipos: str = Query(None),
+                     fornecedores: str = Query(None), clifor: str = Query(None),
+                     e5_motbx: str = Query(None), d1_tp: str = Query(None),
+                     fornecedor: str = Query(None),
+                     _: dict = Depends(get_current_user)):
+    _validar_datas(data_ini, data_fim)
+    f = _pmp_filters(motivos or e5_motbx, tipos or d1_tp, fornecedores or fornecedor, clifor)
+    return await asyncio.to_thread(_pmp().calcular_pmp_resumo, data_ini, data_fim, *f)
+
+
 @router.get("/pmp/exportar")
 async def pmp_exportar(data_ini: date = Query(...), data_fim: date = Query(...),
                        motivos: str = Query(None), tipos: str = Query(None),
@@ -246,6 +258,11 @@ async def pmp_exportar(data_ini: date = Query(...), data_fim: date = Query(...),
             pd.DataFrame({
                 "Metodologia": [
                     "PMP = SUM(dias_pagamento * e5_valor) / SUM(e5_valor).",
+                    "PMP Pagamento usa emissão da SF1 (com fallback para emissão SE2) até a baixa E5.",
+                    "PMP Vencimento usa vencimento real SE2 (E2_VENCREA); PMP Cond. Pag. usa vencimento contratual (E2_VENCTO).",
+                    "Delta atraso = PMP Pagamento - PMP Cond. Pagamento.",
+                    "E5 contém recebimentos e pagamentos; o PMP usa apenas movimentos E5 casados com títulos SE2 de fornecedores por CLIFOR e chave do título.",
+                    "Movimentos E5 sem correspondência SE2 não são deduplicados nem somados ao PMP; devem ser analisados como recebimentos ou exceções de conciliação.",
                     "E5 é o menor grão e seu valor é o peso; movimentos não são deduplicados.",
                     "SF1 f1_valbrut é valor no nível da NF; SD1 é apenas detalhe itemizado.",
                     "Produto PMP/SG1: metodologia de custo ainda não implementada (placeholder).",
