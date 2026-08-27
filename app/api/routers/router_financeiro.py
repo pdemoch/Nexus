@@ -13,11 +13,49 @@ import asyncio
 import logging
 from datetime import date
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from pydantic import BaseModel
+from typing import Optional
 from app.api.routers.router_auth import get_current_user
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/financeiro", tags=["Financeiro - PMR"])
+
+
+class PerguntaFinanceira(BaseModel):
+    pergunta: str
+    data_ini: date
+    data_fim: date
+    segmentos: Optional[str] = None
+    regionais: Optional[str] = None
+    cgc: Optional[str] = None
+    historico: Optional[list[dict]] = None
+
+
+@router.post("/agente/chat")
+async def agente_chat(
+    payload: PerguntaFinanceira,
+    _: dict = Depends(get_current_user),
+):
+    pergunta = payload.pergunta.strip()
+    if not pergunta:
+        raise HTTPException(422, "A pergunta financeira nao pode ser vazia.")
+    _validar_datas(payload.data_ini, payload.data_fim)
+    try:
+        from app.financeiro.agente_financeiro import construir_contexto, responder_pergunta
+        segmento = _split(payload.segmentos)
+        regional = _split(payload.regionais)
+        contexto = await asyncio.to_thread(
+            construir_contexto, payload.data_ini, payload.data_fim, segmento, regional, payload.cgc
+        )
+        return {"resposta": await asyncio.to_thread(
+            responder_pergunta, pergunta, contexto, payload.historico
+        )}
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    except Exception as e:
+        logger.exception("agente financeiro: %s", e)
+        raise HTTPException(500, "Erro ao consultar o agente financeiro.")
 
 
 # ------------------------------------------------------------
