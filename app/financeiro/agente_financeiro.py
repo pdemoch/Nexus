@@ -35,6 +35,8 @@ REGRAS:
   superar faturamento no contexto, sinalize como divergencia a investigar
   (possivel rateio, estorno, adiantamento ou duplicidade de vinculo); nao
   afirme que e impossivel nem invente uma correcao.
+- Para investigar divergencias, compare nesta ordem: faturamento bruto SF2,
+  titulo a receber E1 e recebimento liquido E5. Nao trate E1 como faturamento.
 - Em simulacoes, compare sempre faturamento, recebimento, PMR e caixa liberado.
   Nao diga que uma decisao e positiva sem explicitar o trade-off.
 - PMP, PME e CCC indisponiveis devem ser declarados como limitacao, nunca
@@ -139,7 +141,12 @@ def construir_contexto(
     faturamentos = notas.groupby(chaves_cliente, dropna=False).agg(
         faturamento_sf2=("f2_valbrut", "sum"),
     ).reset_index()
+    titulos = base_clientes.drop_duplicates("Chave_E5")
+    valores_e1 = titulos.groupby(chaves_cliente, dropna=False).agg(
+        titulo_e1=("e1_valor", "sum"),
+    ).reset_index()
     clientes_df = recebimentos.merge(faturamentos, on=chaves_cliente, how="left")
+    clientes_df = clientes_df.merge(valores_e1, on=chaves_cliente, how="left")
     nomes = base_clientes.groupby("_razao_key", as_index=False).agg(
         a1_nome=("a1_nome", "first"),
         cnpjs=("a1_cgc", lambda s: sorted({str(v).strip() for v in s.dropna() if str(v).strip()})),
@@ -166,6 +173,7 @@ def construir_contexto(
     )
     clientes_df = clientes_df.merge(status_resumo, on="_razao_key", how="left")
     clientes_df["faturamento_sf2"] = clientes_df["faturamento_sf2"].fillna(0)
+    clientes_df["titulo_e1"] = clientes_df["titulo_e1"].fillna(0)
     clientes_df["pmr_pagamento"] = (
         clientes_df["dias_x_valor"] / clientes_df["recebimento_e5"].where(
             clientes_df["recebimento_e5"].ne(0)
@@ -180,11 +188,15 @@ def construir_contexto(
             "segmento": str(row["segmento"]) if row["segmento"] else "SEM SEGMENTO",
             "movimentos_e5": int(row["movimentos_e5"]), "notas_sf2": int(row["notas_pagas"]),
             "faturamento_sf2": _round(row["faturamento_sf2"]),
+            "titulo_e1": _round(row["titulo_e1"]),
             "recebimento_e5": _round(row["recebimento_e5"]),
             "pmr_pagamento": _round(row["pmr_pagamento"]),
             "status_por_cnpj": row.get("status_por_cnpj") or {},
             "divergencia_recebimento_faturamento": _round(
                 row["recebimento_e5"] - row["faturamento_sf2"]
+            ),
+            "divergencia_recebimento_titulo_e1": _round(
+                row["recebimento_e5"] - row["titulo_e1"]
             ),
         })
     clientes.sort(key=lambda row: row["recebimento_e5"], reverse=True)

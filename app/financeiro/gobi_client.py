@@ -151,7 +151,9 @@ def extrair_contas_receber(data_ini: date, data_fim: date) -> pd.DataFrame:
 
     # Filtro: apenas notas fiscais
     df = df[df["e1_tipo"].str.strip() == "NF"]
-    df = df.drop_duplicates("Chave_F2")
+    # Uma nota pode possuir varias parcelas; a unidade da SE1 e Chave_E5.
+    # Deduplicar por Chave_F2 descartaria parcelas legitimas da mesma nota.
+    df = df.drop_duplicates("Chave_E5")
     return df.reset_index(drop=True)
 
 
