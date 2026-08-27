@@ -138,6 +138,7 @@ export default function FinanceiroArena() {
   // ── Dados ──
   const [global, setGlobal]       = useState<any>(null);
   const [pmpGlobal, setPmpGlobal] = useState<any>(null);
+  const [pmpEvolucao, setPmpEvolucao] = useState<any[]>([]);
   const [pmpFornecedores, setPmpFornecedores] = useState<any[]>([]);
   const [regionais, setRegionais] = useState<any[]>([]);
   const [clientes, setClientes]   = useState<any[]>([]);
@@ -206,13 +207,18 @@ export default function FinanceiroArena() {
     setLoading(true);
     try {
       const params = pmpParams;
-      const r = await axios.get('/api/v1/financeiro/pmp/resumo', { params });
+      const [r, eRes] = await Promise.all([
+        axios.get('/api/v1/financeiro/pmp/resumo', { params }),
+        axios.get('/api/v1/financeiro/pmp/evolucao', { params }),
+      ]);
       setPmpGlobal(r.data.global);
       setPmpFornecedores(r.data.fornecedores?.fornecedores || []);
       setPmpFiltros(r.data.filtros || { e5_motbx: [], d1_tp: [], fornecedor: [] });
+      setPmpEvolucao(eRes.data.meses || []);
     } catch {
       setPmpGlobal(null);
       setPmpFornecedores([]);
+      setPmpEvolucao([]);
     } finally {
       setLoading(false);
     }
@@ -300,18 +306,6 @@ export default function FinanceiroArena() {
     pmr_cond: r.pmr_cond_pag,
   })).sort((a, b) => (b.pmr_pag ?? -Infinity) - (a.pmr_pag ?? -Infinity));
   const maxPMR = Math.max(...dadosGrafico.flatMap(d => [d.pmr_pag, d.pmr_vnc, d.pmr_cond]), 60);
-  const selecionarRegionalNoGrafico = (state: any) => {
-    const regional = state?.activePayload?.[0]?.payload?.regionalOriginal
-      || dadosGrafico.find(d => d.regional === state?.activeLabel)?.regionalOriginal;
-    if (!regional) return;
-    setRegionaisSel(atual => atual.length === 1 && atual[0] === regional ? [] : [regional]);
-  };
-  const selecionarRegionalNaBarra = (data: any) => {
-    const regional = data?.payload?.regionalOriginal || data?.regionalOriginal;
-    if (!regional) return;
-    setRegionaisSel(atual => atual.length === 1 && atual[0] === regional ? [] : [regional]);
-  };
-
   const dadosEvolucao = evolucao.map(m => ({
     mes: m.mes,
     valor: Math.round(m.valor_recebido ?? m.valor_total),
@@ -649,8 +643,7 @@ export default function FinanceiroArena() {
                 Valor Recebido E5 e PMR por Regional
               </div>
               <div className="text-[10px] text-slate-400 mb-4">
-                Barras = Valor Recebido E5 (eixo esq.) · Linhas = PMR em dias (eixo dir.) ·
-                <span className="text-violet-500 font-bold"> clique em uma regional para filtrar</span>
+                Barras = Valor Recebido E5 (eixo esq.) · Linhas = PMR em dias (eixo dir.)
               </div>
               {loading ? (
                 <div className="flex items-center justify-center h-64 text-slate-300"><Loader2 className="w-6 h-6 animate-spin" /></div>
@@ -658,8 +651,7 @@ export default function FinanceiroArena() {
                 <div className="flex items-center justify-center h-64 text-slate-300 text-xs font-bold">Sem dados</div>
               ) : (
                 <ResponsiveContainer width="100%" height={360}>
-                <ComposedChart data={dadosGrafico} margin={{ top: 10, right: 20, left: 0, bottom: 75 }}
-                    onClick={selecionarRegionalNoGrafico}>
+                <ComposedChart data={dadosGrafico} margin={{ top: 10, right: 20, left: 0, bottom: 75 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                     <XAxis dataKey="regional" tick={{ fontSize: 10, fontWeight: 700, fill: '#64748b' }}
                       angle={-30} textAnchor="end" interval={0} height={75} />
@@ -670,8 +662,7 @@ export default function FinanceiroArena() {
                     <Legend verticalAlign="top" height={30}
                       wrapperStyle={{ fontSize: 10, fontWeight: 700, paddingBottom: 4 }} />
                     <Bar yAxisId="left" dataKey="valor_recebido" name="Valor Recebido E5" fill="#c7d2fe"
-                      radius={[4, 4, 0, 0]} maxBarSize={48} cursor="pointer"
-                      onClick={selecionarRegionalNaBarra} />
+                      radius={[4, 4, 0, 0]} maxBarSize={48} />
                     <Line yAxisId="right" type="monotone" dataKey="pmr_pag" name="PMR Pagamento"
                       stroke="#7c3aed" strokeWidth={2.5} dot={{ r: 4, fill: '#7c3aed' }} />
                     <Line yAxisId="right" type="monotone" dataKey="pmr_vnc" name="PMR Vencimento"
@@ -828,26 +819,106 @@ export default function FinanceiroArena() {
       {toggleAtivo === 'PMP' && (
         <div className="space-y-4">
           {pmpGlobal && (
-            <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
-              {[
-                { label: 'PMP Pagamento', value: pmpGlobal.pmp_pagamento ?? pmpGlobal.pmp, color: '#7c3aed', icon: Clock },
-                { label: 'PMP Vencimento', value: pmpGlobal.pmp_vencimento, color: '#2563eb', icon: Clock },
-                { label: 'PMP Cond. Pag.', value: pmpGlobal.pmp_cond_pag, color: '#0891b2', icon: Clock },
-                { label: 'Pagamentos', value: pmpGlobal.pagamentos, color: '#475569', icon: DollarSign },
-                { label: 'Valor Pago', value: pmpGlobal.valor_total, color: '#059669', icon: TrendingDown },
-              ].map(({ label, value, color, icon: Icon }) => (
-                <div key={label} className="bg-white rounded-2xl border border-slate-100 p-4">
-                  <div className="flex items-center gap-2 mb-1">
-                    <Icon className="w-3.5 h-3.5" style={{ color }} />
-                    <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</span>
+            <>
+              {/* CARDS KPI — mesmas 4 métricas do PMR */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                {[
+                  { label: 'PMP Pagamento',  val: pmpGlobal.pmp_pagamento ?? pmpGlobal.pmp, icon: Clock,
+                    desc: 'Emissão → pagamento real', cor: '#7c3aed' },
+                  { label: 'PMP Vencimento', val: pmpGlobal.pmp_vencimento, icon: Clock,
+                    desc: 'Emissão → vencimento real', cor: '#2563eb' },
+                  { label: 'PMP Cond. Pag.', val: pmpGlobal.pmp_cond_pag, icon: Clock,
+                    desc: 'Emissão → vencimento contratual', cor: '#0891b2' },
+                  { label: 'Delta Atraso', val: pmpGlobal.delta_atraso,
+                    icon: (pmpGlobal.delta_atraso ?? 0) >= 0 ? TrendingUp : TrendingDown,
+                    desc: 'PMP Pag. − PMP Cond. (+ = empresa paga após vencimento)', cor: '#64748b' },
+                ].map(({ label, val, icon: Icon, desc, cor }) => (
+                  <div key={label} className="bg-white rounded-2xl border border-slate-100 p-4">
+                    <div className="flex items-center gap-2 mb-1">
+                      <Icon className="w-3.5 h-3.5" style={{ color: cor }} />
+                      <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</span>
+                    </div>
+                    <div className="text-3xl font-black mt-1" style={{ color: cor }}>
+                      {val != null ? val.toFixed(2).replace('.', ',') : '—'}
+                      <span className="text-sm font-bold text-slate-400 ml-1">dias</span>
+                    </div>
+                    <div className="text-[10px] text-slate-400 mt-1">{desc}</div>
+                    {label === 'PMP Pagamento' && pmpGlobal.pagamentos > 0 && (
+                      <div className="text-[10px] text-slate-400 mt-1 font-bold">
+                        {pmpGlobal.pagamentos.toLocaleString('pt-BR')} pgtos · {fmtRsFull(pmpGlobal.valor_total)}
+                      </div>
+                    )}
                   </div>
-                  <div className="text-3xl font-black mt-1" style={{ color }}>
-                    {label === 'Valor Pago' ? fmtRsFull(value || 0) : Number(value || 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 })}
-                    {label.startsWith('PMP') && <span className="text-sm font-bold text-slate-400 ml-1">dias</span>}
+                ))}
+              </div>
+
+              {/* CARD IMPACTO — valor de 1 dia de PMP no capital de giro */}
+              {(pmpGlobal.valor_por_dia ?? 0) > 0 && (
+                <div className="bg-gradient-to-r from-blue-50 to-white rounded-2xl border border-blue-100 p-4 flex flex-wrap items-center gap-4">
+                  <div className="flex items-center gap-2">
+                    <DollarSign className="w-5 h-5 text-blue-600" />
+                    <span className="text-[10px] font-black uppercase tracking-widest text-blue-700">
+                      Impacto no Capital de Giro
+                    </span>
+                  </div>
+                  <div className="text-2xl font-black text-blue-700">
+                    {fmtRsFull(pmpGlobal.valor_por_dia)}
+                    <span className="text-xs font-bold text-blue-500 ml-1">por dia de PMP</span>
+                  </div>
+                  <div className="text-[11px] text-slate-500 max-w-md leading-snug">
+                    Cada dia adicional no PMP retém <b>{fmtRs(pmpGlobal.valor_por_dia)}</b> em caixa
+                    (dinheiro que ainda não saiu). Ampliar em 5 dias ≈ <b>{fmtRs((pmpGlobal.valor_por_dia ?? 0) * 5)}</b> retidos.
+                    <span className="block text-[10px] text-slate-400 mt-0.5">
+                      = valor pago ({fmtRs(pmpGlobal.valor_total)}) ÷ {pmpGlobal.periodo?.dias_periodo ?? '—'} dias do período · estimativa de ordem de grandeza.
+                    </span>
                   </div>
                 </div>
-              ))}
-            </div>
+              )}
+
+              {/* GRÁFICO EVOLUÇÃO MENSAL PMP */}
+              <div className="bg-white rounded-2xl border border-slate-100 p-5">
+                <div className="text-xs font-black uppercase tracking-widest text-slate-400 mb-1">
+                  Evolução Mensal do PMP
+                </div>
+                <div className="text-[10px] text-slate-400 mb-4">
+                  Agrupado por mês de pagamento · Barras = valor pago · Linhas = PMP em dias
+                </div>
+                {loading ? (
+                  <div className="flex items-center justify-center h-64 text-slate-300"><Loader2 className="w-6 h-6 animate-spin" /></div>
+                ) : pmpEvolucao.length === 0 ? (
+                  <div className="flex items-center justify-center h-64 text-slate-300 text-xs font-bold">Sem dados</div>
+                ) : (() => {
+                  const dadosPmpEvol = pmpEvolucao.map(m => ({
+                    mes: m.mes,
+                    valor: Math.round(m.valor_total),
+                    pmp_pag:  m.pmp_pagamento,
+                    pmp_vnc:  m.pmp_vencimento,
+                    pmp_cond: m.pmp_cond_pag,
+                  }));
+                  const maxPMRPmp = Math.max(...dadosPmpEvol.flatMap(d => [d.pmp_pag, d.pmp_vnc, d.pmp_cond].filter(Boolean)), 60);
+                  return (
+                    <ResponsiveContainer width="100%" height={300}>
+                      <ComposedChart data={dadosPmpEvol} margin={{ top: 10, right: 20, left: 0, bottom: 10 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                        <XAxis dataKey="mes" tick={{ fontSize: 10, fontWeight: 700, fill: '#64748b' }} />
+                        <YAxis yAxisId="left" tickFormatter={fmtRs} tick={{ fontSize: 10, fill: '#64748b' }} width={68} />
+                        <YAxis yAxisId="right" orientation="right" domain={[0, Math.ceil(maxPMRPmp * 1.2)]}
+                          tick={{ fontSize: 10, fill: '#64748b' }} unit=" d" width={42} />
+                        <Tooltip content={<TooltipCustom />} />
+                        <Legend wrapperStyle={{ fontSize: 10, fontWeight: 700 }} />
+                        <Bar yAxisId="left" dataKey="valor" name="Valor Pago" fill="#bfdbfe" radius={[4, 4, 0, 0]} maxBarSize={48} />
+                        <Line yAxisId="right" type="monotone" dataKey="pmp_pag" name="PMP Pagamento"
+                          stroke="#7c3aed" strokeWidth={2.5} dot={{ r: 4, fill: '#7c3aed' }} />
+                        <Line yAxisId="right" type="monotone" dataKey="pmp_vnc" name="PMP Vencimento"
+                          stroke="#2563eb" strokeWidth={2} dot={{ r: 3 }} strokeDasharray="4 2" />
+                        <Line yAxisId="right" type="monotone" dataKey="pmp_cond" name="PMP Cond.Pag."
+                          stroke="#f59e0b" strokeWidth={2} dot={{ r: 3 }} strokeDasharray="2 3" />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  );
+                })()}
+              </div>
+            </>
           )}
           <div className="bg-white rounded-2xl border border-slate-100 overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-100">

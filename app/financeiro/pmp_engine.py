@@ -183,8 +183,16 @@ def calcular_pmp_global(data_ini: date, data_fim: date, motivos=None, tipos=None
     motivos = motivos if motivos is not None else e5_motbx
     tipos = tipos if tipos is not None else d1_tp
     fornecedores = fornecedores if fornecedores is not None else fornecedor
-    return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
-            **_resumo(_base(data_ini, data_fim, motivos, tipos, fornecedores, clifor))}
+    base = _base(data_ini, data_fim, motivos, tipos, fornecedores, clifor)
+    dias_periodo = max((data_fim - data_ini).days, 1)
+    resultado = _resumo(base)
+    resultado["periodo"] = {
+        "data_ini": str(data_ini),
+        "data_fim": str(data_fim),
+        "dias_periodo": dias_periodo,
+    }
+    resultado["valor_por_dia"] = round(resultado["valor_total"] / dias_periodo, 2)
+    return resultado
 
 
 def calcular_pmp_fornecedores(data_ini: date, data_fim: date,
@@ -203,13 +211,21 @@ def calcular_pmp_fornecedores(data_ini: date, data_fim: date,
 def calcular_pmp_resumo(data_ini: date, data_fim: date, motivos=None, tipos=None,
                         fornecedores=None, clifor=None) -> dict[str, Any]:
     base = _base(data_ini, data_fim, motivos, tipos, fornecedores, clifor)
+    dias_periodo = max((data_fim - data_ini).days, 1)
     valores = lambda col: sorted(_norm_key(_col(base, col)).replace("", "SEM VALOR").unique().tolist())
     motivos_disponiveis = valores("e5_motbx")
     tipos_disponiveis = valores("d1_tp")
     fornecedores_disponiveis = valores("clifor")
+    global_data = _resumo(base)
+    global_data["periodo"] = {
+        "data_ini": str(data_ini),
+        "data_fim": str(data_fim),
+        "dias_periodo": dias_periodo,
+    }
+    global_data["valor_por_dia"] = round(global_data["valor_total"] / dias_periodo, 2)
     return {
         "periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
-        "global": _resumo(base),
+        "global": global_data,
         "fornecedores": _resumo_fornecedores(base),
         "filtros": {
             "e5_motbx": motivos_disponiveis,
@@ -217,6 +233,37 @@ def calcular_pmp_resumo(data_ini: date, data_fim: date, motivos=None, tipos=None
             "fornecedor": fornecedores_disponiveis,
         },
     }
+
+
+def calcular_pmp_mensal(data_ini: date, data_fim: date, motivos=None, tipos=None,
+                        fornecedores=None, clifor=None) -> dict[str, Any]:
+    """
+    Evolução mês a mês agrupada pelo mês de pagamento (e5_data).
+    Mesmo padrão do PMR mensal: cada mês acumula os pagamentos E5 casados
+    com títulos SE2, calculando os três PMPs e o valor pago no período.
+    """
+    base = _base(data_ini, data_fim, motivos, tipos, fornecedores, clifor)
+    if base.empty:
+        return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "meses": []}
+
+    base = base.copy()
+    base["mes_pag"] = base["e5_data"].dt.to_period("M")
+
+    meses = []
+    for mes, g in base.groupby("mes_pag", sort=True):
+        r = _resumo(g)
+        meses.append({
+            "mes":           mes.strftime("%Y-%m"),
+            "pagamentos":    r["pagamentos"],
+            "valor_total":   r["valor_total"],
+            "pmp_pagamento": r["pmp_pagamento"],
+            "pmp_vencimento":r["pmp_vencimento"],
+            "pmp_cond_pag":  r["pmp_cond_pag"],
+            "delta_atraso":  r["delta_atraso"],
+        })
+
+    meses.sort(key=lambda m: m["mes"])
+    return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "meses": meses}
 
 
 def calcular_pmp(data_ini: date, data_fim: date, **filters) -> dict[str, Any]:

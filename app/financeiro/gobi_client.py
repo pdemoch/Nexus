@@ -306,8 +306,8 @@ def extrair_sb1() -> pd.DataFrame:
 
 
 def extrair_sg1() -> pd.DataFrame:
-    """Snapshot da estrutura/composição de produtos (SG1, report Gobi 159)."""
-    return _extrair_snapshot(159)
+    """Snapshot da estrutura/composição de produtos / lista técnica (SG1, report Gobi 591)."""
+    return _extrair_snapshot(591)
 
 
 # Nomes descritivos mantidos como API pública para o pipeline.

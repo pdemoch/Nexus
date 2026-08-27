@@ -241,38 +241,180 @@ async def pmp_exportar(data_ini: date = Query(...), data_fim: date = Query(...),
 
     def gerar():
         import pandas as pd
-        base = _pmp()._base(data_ini, data_fim, *f)
-        fornecedores_data = _pmp().calcular_pmp_fornecedores(data_ini, data_fim, 100000, 0, *f)
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            # O bruto permanece no grão E5; abas separadas facilitam a
-            # reconciliação com SE2, SF1 e SD1 sem alterar o PMP.
-            base.to_excel(writer, index=False, sheet_name="Pagamentos E5")
-            for prefix, sheet in (("e2_", "Titulos SE2"), ("f1_", "Notas SF1"),
-                                  ("d1_", "Itens SD1")):
-                cols = [c for c in base.columns if c.startswith(prefix)]
-                if cols:
-                    base[cols].to_excel(writer, index=False, sheet_name=sheet)
-            pd.DataFrame(fornecedores_data["fornecedores"]).to_excel(
-                writer, index=False, sheet_name="Fornecedores")
-            pd.DataFrame({
-                "Metodologia": [
-                    "PMP = SUM(dias_pagamento * e5_valor) / SUM(e5_valor).",
-                    "PMP Pagamento usa emissão da SF1 (com fallback para emissão SE2) até a baixa E5.",
-                    "PMP Vencimento usa vencimento real SE2 (E2_VENCREA); PMP Cond. Pag. usa vencimento contratual (E2_VENCTO).",
-                    "Delta atraso = PMP Pagamento - PMP Cond. Pagamento.",
-                    "E5 contém recebimentos e pagamentos; o PMP usa apenas movimentos E5 casados com títulos SE2 de fornecedores por CLIFOR e chave do título.",
-                    "Movimentos E5 sem correspondência SE2 não são deduplicados nem somados ao PMP; devem ser analisados como recebimentos ou exceções de conciliação.",
-                    "E5 é o menor grão e seu valor é o peso; movimentos não são deduplicados.",
-                    "SF1 f1_valbrut é valor no nível da NF; SD1 é apenas detalhe itemizado.",
-                    "Produto PMP/SG1: metodologia de custo ainda não implementada (placeholder).",
-                ]
-            }).to_excel(writer, index=False, sheet_name="Metodologia")
-        output.seek(0)
-        return output
-    output = await asyncio.to_thread(gerar)
-    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                             headers={"Content-Disposition": f'attachment; filename="PMP_{data_ini}_{data_fim}.xlsx"'})
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+
+        pmp       = _pmp()
+        base      = pmp._base(data_ini, data_fim, *f)
+        d_forn    = pmp.calcular_pmp_fornecedores(data_ini, data_fim, 100000, 0, *f)
+        d_evol    = pmp.calcular_pmp_mensal(data_ini, data_fim, *f)
+        d_global  = pmp.calcular_pmp_global(data_ini, data_fim, *f)
+
+        HDR_FILL = PatternFill("solid", fgColor="1E3A5F")
+        HDR_FONT = Font(bold=True, color="FFFFFF", size=10, name="Arial")
+        BODY_FONT = Font(name="Arial", size=10)
+        ALT_FILL  = PatternFill("solid", fgColor="F2F7FC")
+        BORDER    = Border(bottom=Side(style="thin", color="D9E2EC"))
+        FMT_BRL  = "R$ #,##0.00"
+        FMT_DATE = "DD/MM/YYYY"
+        FMT_INT  = "#,##0"
+        FMT_DAYS = "#,##0.00"
+
+        def _hdr(ws, row, col, value, width=None):
+            c = ws.cell(row=row, column=col, value=value)
+            c.fill, c.font = HDR_FILL, HDR_FONT
+            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            if width:
+                ws.column_dimensions[get_column_letter(col)].width = width
+
+        def _write(ws, ri, vals, fmts, alt=False):
+            fill = ALT_FILL if alt else None
+            for ci, (val, fmt) in enumerate(zip(vals, fmts), 1):
+                c = ws.cell(row=ri, column=ci, value=val)
+                c.font = BODY_FONT; c.border = BORDER
+                if fill: c.fill = fill
+                if fmt:  c.number_format = fmt
+                if isinstance(val, (int, float)) and fmt != FMT_DATE:
+                    c.alignment = Alignment(horizontal="right")
+
+        def _dt(v):
+            try:
+                t = pd.Timestamp(v)
+                return t.date() if pd.notna(t) else None
+            except Exception:
+                return None
+
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+
+        # ── Dados Brutos ──────────────────────────────────────────────────────
+        ws1 = wb.create_sheet("Dados Brutos")
+        ws1.row_dimensions[1].height = 32
+        cols_b = [
+            ("e5_filial","Filial",None,6),("e5_numero","Num. Título",None,14),
+            ("e5_prefixo","Prefixo",None,8),("e5_parcela","Parcela",None,8),
+            ("e5_tipo","Tipo",None,8),("e5_clifor","CLIFOR",None,10),
+            ("e5_loja","Loja",None,6),("e5_valor","Valor Pago E5 (R$)",FMT_BRL,18),
+            ("e5_data","Data Pgto. (E5)",FMT_DATE,14),("e5_motbx","Motivo E5",None,10),
+            ("f1_emissao","Data Emissão NF",FMT_DATE,14),
+            ("f1_valbrut","Valor Bruto NF (R$)",FMT_BRL,18),
+            ("e2_vencto","Vencto. Cond.Pag.",FMT_DATE,14),
+            ("e2_vencrea","Vencto. Real",FMT_DATE,13),
+            ("d1_tp","Tipo Item",None,10),
+            ("dias_pagamento","Dias PMP Pgto.",FMT_DAYS,14),
+            ("dias_vencimento","Dias PMP Vencto.",FMT_DAYS,14),
+            ("dias_cond_pag","Dias PMP Cond.Pag.",FMT_DAYS,14),
+        ]
+        for ci,(col,lbl,fmt,w) in enumerate(cols_b, 1):
+            _hdr(ws1, 1, ci, lbl, width=w)
+        for ri, row in enumerate(base.itertuples(index=False), 2):
+            vals, fmts = [], []
+            for col,_,fmt,_ in cols_b:
+                v = getattr(row, col, None)
+                if fmt == FMT_DATE:
+                    v = _dt(v)
+                elif v is not None:
+                    try:
+                        if pd.isna(v): v = None
+                    except Exception:
+                        pass
+                vals.append(v); fmts.append(fmt)
+            _write(ws1, ri, vals, fmts, alt=(ri%2==0))
+        ws1.auto_filter.ref = f"A1:{get_column_letter(len(cols_b))}1"
+        ws1.freeze_panes = "A2"
+
+        # ── Por Fornecedor ────────────────────────────────────────────────────
+        ws2 = wb.create_sheet("Por Fornecedor")
+        ws2.row_dimensions[1].height = 32
+        h2 = [("CLIFOR",8),("Fornecedor",38),("Pagamentos",12),
+              ("Valor Pago E5 (R$)",20),("PMP Pagamento (dias)",18),
+              ("PMP Vencimento (dias)",19),("PMP Cond.Pag. (dias)",18),
+              ("Delta Atraso (dias)",16)]
+        for ci,(lbl,w) in enumerate(h2,1): _hdr(ws2,1,ci,lbl,width=w)
+        for ri, r in enumerate(d_forn.get("fornecedores",[]), 2):
+            _write(ws2, ri,
+                   [str(r.get("clifor","")), str(r.get("nome","")),
+                    int(r.get("pagamentos",0)), float(r.get("valor_total",0)),
+                    float(r.get("pmp_pagamento", r.get("pmp",0))),
+                    float(r.get("pmp_vencimento",0)),
+                    float(r.get("pmp_cond_pag",0)),
+                    float(r.get("delta_atraso",0))],
+                   [None,None,FMT_INT,FMT_BRL,FMT_DAYS,FMT_DAYS,FMT_DAYS,FMT_DAYS],
+                   alt=(ri%2==0))
+        ws2.auto_filter.ref = f"A1:{get_column_letter(len(h2))}1"
+        ws2.freeze_panes = "A2"
+
+        # ── Evolução Mensal ───────────────────────────────────────────────────
+        ws3 = wb.create_sheet("Evolucao Mensal")
+        ws3.row_dimensions[1].height = 32
+        h3 = [("Mês Pagamento E5",16),("Pagamentos",12),("Valor Pago E5 (R$)",20),
+              ("PMP Pagamento (dias)",18),("PMP Vencimento (dias)",19),
+              ("PMP Cond.Pag. (dias)",18),("Delta Atraso (dias)",16)]
+        for ci,(lbl,w) in enumerate(h3,1): _hdr(ws3,1,ci,lbl,width=w)
+        for ri, m in enumerate(d_evol.get("meses",[]), 2):
+            _write(ws3, ri,
+                   [m["mes"],int(m["pagamentos"]),float(m["valor_total"]),
+                    float(m["pmp_pagamento"]),float(m["pmp_vencimento"]),
+                    float(m["pmp_cond_pag"]),float(m["delta_atraso"])],
+                   [None,FMT_INT,FMT_BRL,FMT_DAYS,FMT_DAYS,FMT_DAYS,FMT_DAYS],
+                   alt=(ri%2==0))
+        ws3.freeze_panes = "A2"
+
+        # ── Metodologia ───────────────────────────────────────────────────────
+        ws4 = wb.create_sheet("Metodologia")
+        ws4.column_dimensions["A"].width = 100
+        tf = Font(bold=True, size=12, color="1E3A5F", name="Arial")
+        cf = Font(size=10, name="Arial")
+        hf = PatternFill("solid", fgColor="EBF3FB")
+        vt  = d_global.get("valor_total", 0) or 0
+        dp  = (d_global.get("periodo") or {}).get("dias_periodo", 1) or 1
+        pmp_pg = d_global.get("pmp_pagamento") or 0
+        linhas = [
+            ("CÁLCULO DO PMP (Prazo Médio de Pagamento)", True),
+            ("", False),
+            ("O PMP mede, em dias, o tempo médio entre a emissão da NF e o pagamento efetivo.", False),
+            ("É uma média PONDERADA pelo valor pago na E5 (e5_valor).", False),
+            ("", False),
+            ("FÓRMULA GERAL:", True),
+            ("PMP = SUM( dias_i × e5_valor_i ) / SUM( e5_valor_i )", False),
+            ("", False),
+            ("TRÊS MÉTRICAS (contadas a partir de f1_emissao, com fallback para e2_emissao):", True),
+            ("1. PMP Pagamento:  dias = e5_data - f1_emissao  (pagamento real no banco).", False),
+            ("2. PMP Vencimento: dias = e2_vencrea - f1_emissao  (vencimento real negociado).", False),
+            ("3. PMP Cond.Pag.:  dias = e2_vencto - f1_emissao  (vencimento contratual).", False),
+            ("", False),
+            ("DELTA ATRASO:", True),
+            ("Delta = PMP Pagamento - PMP Cond.Pag.  Positivo = empresa paga após o vencimento.", False),
+            ("", False),
+            ("EVOLUÇÃO MENSAL:", True),
+            ("Agrupada pelo mês de e5_data. Meses recentes podem ter PMP menor (survivor bias).", False),
+            ("", False),
+            ("FONTES DE DADOS:", True),
+            (f"Período: {data_ini.strftime('%d/%m/%Y')} a {data_fim.strftime('%d/%m/%Y')}", False),
+            ("SE2 (Contas a Pagar) · SF1 (Notas Entrada) · SE5 (Mov. Bancária) · SA2 (Fornecedores)", False),
+            ("", False),
+            ("NOTAS:", True),
+            ("- Apenas E5 casados com título SE2 via CLIFOR + chave entram no cálculo.", False),
+            ("- e5_valor é líquido de desconto, filtrado > 0.", False),
+            ("- Delta Atraso positivo = empresa paga depois do vencimento contratual.", False),
+        ]
+        for ri, (txt, bold) in enumerate(linhas, 1):
+            c = ws4.cell(row=ri, column=1, value=txt)
+            c.font = tf if bold else cf
+            if bold: c.fill = hf
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf
+
+    conteudo = await asyncio.to_thread(gerar)
+    return StreamingResponse(
+        conteudo,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="PMP_{data_ini}_{data_fim}.xlsx"'},
+    )
 
 
 # ------------------------------------------------------------
