@@ -7,12 +7,10 @@ import {
 import { ChevronDown, ChevronRight, Loader2, TrendingUp, TrendingDown, AlertTriangle,
          Sparkles, FileDown, Send, RefreshCw } from 'lucide-react';
 
-// ─── Paleta ───────────────────────────────────────────────────────────────────
+// ─── Paleta ───────────────────────────────────────────────
 const COR = { humano: '#2563eb', ia: '#10b981', over: '#e11d48', under: '#2563eb', neutro: '#94a3b8' };
 
-// ─── Renderizador de markdown do chat do agente ────────────────────────────────
-// O agente responde em markdown leve (## títulos, **negrito**, tabelas | pipe |,
-// linha final "Leitura: ..."). Sem isso, tudo virava texto cru com pipes visíveis.
+// ─── Renderizador de markdown do chat do agente ────────────────────────
 function renderInlineBold(texto: string, keyBase: string) {
   const partes = texto.split(/(\*\*[^*]+\*\*)/g);
   return partes.map((p, i) =>
@@ -124,7 +122,7 @@ function renderChatMarkdown(conteudo: string) {
   return blocos;
 }
 
-// ─── Formatadores ─────────────────────────────────────────────────────────────
+// ─── Formatadores ─────────────────────────────────────────────
 const NOMES_MES = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
 const lMes  = (m: string) => { const [a,mm] = m.split('-'); return `${NOMES_MES[+mm-1]}/${a.slice(2)}`; };
 const pct   = (v: any, d = 1) => v == null ? '—' : `${Number(v).toFixed(d).replace('.',',')}%`;
@@ -138,7 +136,7 @@ const corBias  = (v: number|null) => {
   return '#059669';
 };
 
-// ─── Tooltip customizado ──────────────────────────────────────────────────────
+// ─── Tooltip customizado ──────────────────────────────────────
 const TT = ({ active, payload, label }: any) => {
   if (!active || !payload?.length) return null;
   return (
@@ -154,7 +152,7 @@ const TT = ({ active, payload, label }: any) => {
   );
 };
 
-// ─── Rótulo de dado na linha ─────────────────────────────────────────────────
+// ─── Rótulo de dado na linha ───────────────────────────────────
 const RoituloLinha = (cor: string, total: number) => (props: any) => {
   const { x, y, value } = props;
   if (value == null || total > 20) return null; // omite se muitos pontos
@@ -167,9 +165,9 @@ const RoituloLinha = (cor: string, total: number) => (props: any) => {
   );
 };
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 // SELETOR DE DATAS EM ÁRVORE
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 function SeletorDatas({ calendario, mesesSel, setMesesSel }: any) {
   const [abertos, setAbertos] = useState<Set<string>>(new Set(['2026']));
   const [open, setOpen] = useState(false);
@@ -254,9 +252,9 @@ function SeletorDatas({ calendario, mesesSel, setMesesSel }: any) {
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 // GRÁFICO COM RÓTULOS E LINHAS SUAVIZADAS
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 function Grafico({ dados, chaveH, chaveIA, titulo, refZero=false, legendaRefs, yDomain }: any) {
   const temIA = dados.some((d: any) => d[chaveIA]!=null);
   const n     = dados.length;
@@ -315,9 +313,9 @@ function Grafico({ dados, chaveH, chaveIA, titulo, refZero=false, legendaRefs, y
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 // CARD KPI
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 function Card({ label, valor, cor, sub }: any) {
   return (
     <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', padding:'14px 18px', flex:1, minWidth:130 }}>
@@ -328,9 +326,9 @@ function Card({ label, valor, cor, sub }: any) {
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 // TABELAS DE BIAS
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 const styleTab = (ativo: boolean): React.CSSProperties => ({
   padding:'10px 18px', border:'none', background:'none', cursor:'pointer',
   fontSize:13, fontWeight:ativo?700:400,
@@ -459,9 +457,9 @@ function TabelaWmape({ itens }: { itens: any[] }) {
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 // TELA PRINCIPAL
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 export default function AuditoriaArena() {
   const [opts, setOpts]           = useState<any>({ categorias:[], skus:[], calendario:{} });
   const [mesesSel, setMesesSel]   = useState<string[]>([]);
@@ -535,7 +533,7 @@ export default function AuditoriaArena() {
   const ctx = sku?`SKU ${sku}`:categoria?`Categoria: ${categoria}`:'Portfólio completo';
 
 
-  // ─── Agente ────────────────────────────────────────────────────────────
+  // ─── Agente ──────────────────────────────────────────
   const gerarRelatorio = useCallback(async () => {
     if (!mesesSel.length) { setErroAgente('Selecione ao menos um mês.'); return; }
     setGerandoRel(true); setErroAgente(''); setRelatorio('');
@@ -769,28 +767,31 @@ export default function AuditoriaArena() {
         {/* ── ABA FILL RATE ── */}
         {abaKpi === 'fillrate' && (
           <div>
-            {/* Cards de resumo */}
+            {/* Cards de resumo — FIX: campos corretos do endpoint /fill-rate?nivel=evolucao
+                (resumo.pedido / .entregue / .corte / .atendimento). Antes lia
+                pedido_total / faturado_total / corte_total / fill_rate, que não existem
+                nessa rota, zerando todos os cards. */}
             {fillRate?.resumo && (
               <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:12, marginBottom:16 }}>
                 {[
                   { label:'Pedido',
                     val: unidade==='rs'
-                      ? 'R$ ' + (fillRate.resumo.pedido_total||0).toLocaleString('pt-BR')
-                      : (fillRate.resumo.pedido_total||0).toLocaleString('pt-BR') + ' cx',
+                      ? 'R$ ' + Math.round(fillRate.resumo.pedido||0).toLocaleString('pt-BR')
+                      : Math.round(fillRate.resumo.pedido||0).toLocaleString('pt-BR') + ' cx',
                     cor:'#0f172a' },
                   { label:'Faturado',
                     val: unidade==='rs'
-                      ? 'R$ ' + (fillRate.resumo.faturado_total||0).toLocaleString('pt-BR')
-                      : (fillRate.resumo.faturado_total||0).toLocaleString('pt-BR') + ' cx',
+                      ? 'R$ ' + Math.round(fillRate.resumo.entregue||0).toLocaleString('pt-BR')
+                      : Math.round(fillRate.resumo.entregue||0).toLocaleString('pt-BR') + ' cx',
                     cor:'#059669' },
                   { label:'Corte',
                     val: unidade==='rs'
-                      ? 'R$ ' + (fillRate.resumo.corte_total||0).toLocaleString('pt-BR')
-                      : (fillRate.resumo.corte_total||0).toLocaleString('pt-BR') + ' cx',
+                      ? 'R$ ' + Math.round(fillRate.resumo.corte||0).toLocaleString('pt-BR')
+                      : Math.round(fillRate.resumo.corte||0).toLocaleString('pt-BR') + ' cx',
                     cor:'#e11d48' },
                   { label:'Atendimento',
-                    val: fillRate.resumo.fill_rate != null ? `${Number(fillRate.resumo.fill_rate).toFixed(1).replace('.',',')}%` : '—',
-                    cor: (fillRate.resumo.fill_rate ?? 0) >= 95 ? '#059669' : (fillRate.resumo.fill_rate ?? 0) >= 85 ? '#d97706' : '#e11d48' },
+                    val: fillRate.resumo.atendimento != null ? `${Number(fillRate.resumo.atendimento).toFixed(1).replace('.',',')}%` : '—',
+                    cor: (fillRate.resumo.atendimento ?? 0) >= 95 ? '#059669' : (fillRate.resumo.atendimento ?? 0) >= 85 ? '#d97706' : '#e11d48' },
                 ].map(c => (
                   <div key={c.label} style={{ background:'#fff', borderRadius:12, border:'1px solid #f1f5f9', padding:'16px 20px' }}>
                     <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8', marginBottom:6 }}>{c.label}</div>
@@ -823,7 +824,9 @@ export default function AuditoriaArena() {
               </div>
             )}
 
-            {/* Tabela por categoria */}
+            {/* Tabela por categoria — FIX: usa sempre r.pedido / r.entregue / r.corte
+                (o backend troca cx<->R$ no SQL e mantém o mesmo alias). Antes lia
+                r.vl_pedido / r.vl_entregue / r.vl_corte, inexistentes, zerando em Reais. */}
             {fillDiag.cat.length > 0 && (
               <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden', marginBottom:16 }}>
                 <div style={{ padding:'14px 18px', fontWeight:800, fontSize:13, borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
@@ -845,9 +848,9 @@ export default function AuditoriaArena() {
                   <tbody>
                     {fillDiag.cat.map((r: any, i: number) => {
                       const cor = r.classe==='Restricao' ? '#e11d48' : r.classe==='Atencao' ? '#d97706' : '#059669';
-                      const pedVal  = unidade==='rs' ? 'R$ '+(r.vl_pedido||0).toLocaleString('pt-BR')   : (r.pedido||0).toLocaleString('pt-BR');
-                      const fatVal  = unidade==='rs' ? 'R$ '+(r.vl_entregue||0).toLocaleString('pt-BR') : (r.entregue||0).toLocaleString('pt-BR');
-                      const corVal  = unidade==='rs' ? 'R$ '+(r.vl_corte||0).toLocaleString('pt-BR')    : (r.corte||0).toLocaleString('pt-BR');
+                      const pedVal = (unidade==='rs' ? 'R$ ' : '') + Math.round(r.pedido||0).toLocaleString('pt-BR');
+                      const fatVal = (unidade==='rs' ? 'R$ ' : '') + Math.round(r.entregue||0).toLocaleString('pt-BR');
+                      const corVal = (unidade==='rs' ? 'R$ ' : '') + Math.round(r.corte||0).toLocaleString('pt-BR');
                       return (
                         <tr key={r.categoria} style={{ background: i%2 ? '#f9fafb' : '#fff', borderBottom:'1px solid #f1f5f9' }}>
                           <td style={{ padding:'8px 14px', fontWeight:700, color:'#334155' }}>{r.categoria}</td>
@@ -868,7 +871,7 @@ export default function AuditoriaArena() {
               </div>
             )}
 
-            {/* Tabela por SKU */}
+            {/* Tabela por SKU — FIX: mesmo ajuste de campos (r.pedido / r.entregue / r.corte) */}
             {fillDiag.sku.length > 0 && (
               <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
                 <div style={{ padding:'14px 18px', fontWeight:800, fontSize:13, borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
@@ -890,9 +893,9 @@ export default function AuditoriaArena() {
                   <tbody>
                     {fillDiag.sku.map((r: any, i: number) => {
                       const cor = r.classe==='Restricao' ? '#e11d48' : r.classe==='Atencao' ? '#d97706' : '#059669';
-                      const pedVal = unidade==='rs' ? 'R$ '+(r.vl_pedido||0).toLocaleString('pt-BR')   : (r.pedido||0).toLocaleString('pt-BR');
-                      const fatVal = unidade==='rs' ? 'R$ '+(r.vl_entregue||0).toLocaleString('pt-BR') : (r.entregue||0).toLocaleString('pt-BR');
-                      const corVal = unidade==='rs' ? 'R$ '+(r.vl_corte||0).toLocaleString('pt-BR')    : (r.corte||0).toLocaleString('pt-BR');
+                      const pedVal = (unidade==='rs' ? 'R$ ' : '') + Math.round(r.pedido||0).toLocaleString('pt-BR');
+                      const fatVal = (unidade==='rs' ? 'R$ ' : '') + Math.round(r.entregue||0).toLocaleString('pt-BR');
+                      const corVal = (unidade==='rs' ? 'R$ ' : '') + Math.round(r.corte||0).toLocaleString('pt-BR');
                       return (
                         <tr key={r.sku} style={{ background: i%2 ? '#f9fafb' : '#fff', borderBottom:'1px solid #f1f5f9' }}>
                           <td style={{ padding:'8px 14px', fontWeight:700, color:'#64748b', fontSize:10 }}>{r.sku}</td>
@@ -919,6 +922,7 @@ export default function AuditoriaArena() {
               <b>Atendimento</b> = volume entregue / volume pedido. &nbsp;
               <b>Corte</b> = volume pedido não entregue, medido diretamente no registro de corte do pedido. &nbsp;
               Mede execução de suprimento, não acurácia de previsão. &nbsp;
+              Escopo: todo SKU com pedido no período, inclusive descontinuados. &nbsp;
               Situação: <b style={{color:'#059669'}}>Adequado</b> ≥ 95% · <b style={{color:'#d97706'}}>Atenção</b> 85–95% · <b style={{color:'#e11d48'}}>Restrição</b> &lt; 85%.
             </div>
           </div>

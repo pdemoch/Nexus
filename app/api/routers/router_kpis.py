@@ -1,4 +1,4 @@
-# router_kpis.py — versão com _sdiv (fix ZeroDivisionError) aplicado
+# router_kpis.py — versão com _sdiv + correção fill-rate (ativo) + guarda ZeroDivision no /diagnostico
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -18,7 +18,7 @@ from app.api.routers import agente_kpis
 router = APIRouter(prefix="/api/v1/kpis", tags=["KPIs Acurácia S&OP"])
 
 
-# ─── divisão segura ───────────────────────────────────────────────────────────
+# ─── divisão segura ────────────────────────────────────────────
 def _sdiv(num, den, mult=1.0):
     """
     Divisão Python segura — retorna None se denominador for 0, NaN ou negativo.
@@ -37,7 +37,7 @@ def _sdiv(num, den, mult=1.0):
         return None
 
 
-# ─── helpers de data ──────────────────────────────────────────────────────────
+# ─── helpers de data ──────────────────────────────────────
 def _hoje_br() -> datetime.datetime:
     return datetime.datetime.utcnow() - datetime.timedelta(hours=3)
 
@@ -57,57 +57,33 @@ def _clamp(mes: Optional[str]) -> str:
     return mes
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
 # QUERY CENTRAL — LÊ DA CAMADA ANALÍTICA (mart_acuracia_sku_mes)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
 #
 # DEFINIÇÃO OFICIAL DO WMAPE (padrão S&OP)
 # ---------------------------------------------------------------------------
 # Acurácia de previsão mede contra DEMANDA (qt_pedido), nunca contra embarque.
-#
-# Medir contra o entregue cria demanda censurada: se o plano subestima, a
-# produção subestima e a entrega subestima junto — o erro se apaga sozinho e
-# quanto pior o suprimento, melhor a acurácia aparente. Nos dados: itens sem
-# plano tiveram 14.909 cx pedidas e 4.477 entregues. Contra entregue, o plano
-# zero "erra" 4.477; contra pedido, erra 14.909. O mercado quis 14.909.
-#
-# O que mede o quê:
-#   plano x qt_pedido        -> WMAPE de previsão   (cobra o Demand Planner)
-#   qt_entregue / qt_pedido  -> fill rate           (cobra a execução)
-#
-# WMAPE, BIAS e FVA são SÓ EM CAIXAS, vendido contra planejado. Valor
-# monetário não entra em nenhuma das três — fica nas contas de impacto
-# financeiro, que monetizam os gaps de volume.
-#
-# O parâmetro `base` continua sendo aceito para não quebrar o frontend, mas
-# NÃO altera o denominador do WMAPE. A resposta devolve base_efetiva='pedido'
-# para deixar isso explícito.
+# O parâmetro `base` continua aceito para não quebrar o frontend, mas NÃO
+# altera o denominador do WMAPE. A resposta devolve base_efetiva='pedido'.
 #
 # TRATAMENTO DE SKU SEM PLANO
 # ---------------------------------------------------------------------------
 # vol_humano vem COALESCE(qt_plano, 0): vender um item que não estava no plano
 # é erro de previsão do tamanho do volume vendido — o plano disse zero.
-# Excluí-lo seria escolher o denominador depois de ver o resultado.
 #
-# A coluna tem_plano preserva a distinção, e os endpoints devolvem também
-# wmape_h_planejado (só itens planejados) e cobertura_plano_pct. Medido:
-# a diferença chega a 2,30 pp em abril/2026 e fica abaixo de 0,1 pp em quatro
-# dos sete meses.
-# ═══════════════════════════════════════════════════════════════════════════════
+# FILTRO ativo=TRUE (ACURÁCIA): mantido aqui de propósito. WMAPE/BIAS cobram
+# previsão de portfolio ativo; item descontinuado não entra na acurácia. Os
+# endpoints de fill-rate/corte usam outro critério (qt_pedido>0), porque
+# atendimento histórico deve refletir tudo que teve pedido no período.
+# ═══════════════════════════════════════════════════════════════════
 def _carregar(db: Session, inicio: str, fim: str,
               categoria: Optional[str] = None,
               sku: Optional[str] = None,
               base: str = "pedido") -> pd.DataFrame:
     """
-    Lê de mart_acuracia_sku_mes. O mart já resolve, no grão (sku, mes):
-      - a união fato_previsao_humana + fato_ibp_granular (regra M-2);
-      - o PMV pela cascata mes -> 3m -> histórico;
-      - os três estados de venda.
-
-    Substitui uma CTE de ~80 linhas que rodava ao vivo em toda requisição.
-
-    `base` é aceito por compatibilidade e ignorado: o WMAPE é sempre contra
-    a demanda (qt_pedido).
+    Lê de mart_acuracia_sku_mes. `base` é aceito por compatibilidade e
+    ignorado: o WMAPE é sempre contra a demanda (qt_pedido).
     """
     filtros, params = ["a.ativo = TRUE"], {}
     if categoria:
@@ -147,7 +123,6 @@ def _carregar(db: Session, inicio: str, fim: str,
         return df
 
     df["vol_real"]    = pd.to_numeric(df["vol_real"],    errors="coerce").fillna(0)
-    # 0-fill deliberado: plano ausente = plano zero (ver bloco acima).
     df["vol_humano"]  = pd.to_numeric(df["vol_humano"],  errors="coerce").fillna(0)
     df["vol_ia"]      = pd.to_numeric(df["vol_ia"],      errors="coerce")
     df["qt_corte"]    = pd.to_numeric(df["qt_corte"],    errors="coerce").fillna(0)
@@ -156,9 +131,9 @@ def _carregar(db: Session, inicio: str, fim: str,
     return df
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
 # MÉTRICAS POR MÊS
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
 def _serie_metricas(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
@@ -167,11 +142,6 @@ def _serie_metricas(df: pd.DataFrame) -> pd.DataFrame:
     for mes, g in df.groupby("mes"):
         row = {"mes": mes}
 
-        # ── WMAPE OFICIAL: todo o volume vendido ──────────────────────────
-        # vol_humano já vem 0-preenchido em _carregar, então o item sem plano
-        # entra com erro igual ao volume vendido. Não há mais filtro por
-        # notna(): removê-lo do denominador premiaria o esquecimento, e são
-        # justamente os itens sem plano que têm fill rate de 30% contra 94,9%.
         if g.vol_real.sum() > 0:
             real_t = float(g.vol_real.sum())
             prev_t = float(g.vol_humano.sum())
@@ -185,9 +155,6 @@ def _serie_metricas(df: pd.DataFrame) -> pd.DataFrame:
                 row["mape_h"] = None
             row["n_skus_h"] = int(len(ok))
 
-            # ── Variante restrita ao que foi planejado ────────────────────
-            # Mesma conta, só sobre itens com plano. A diferença entre as duas
-            # é diagnóstico de cobertura, não discussão de metodologia.
             g_p = g[g.tem_plano]
             if not g_p.empty and g_p.vol_real.sum() > 0:
                 real_p = float(g_p.vol_real.sum())
@@ -217,20 +184,9 @@ def _serie_metricas(df: pd.DataFrame) -> pd.DataFrame:
                 row["mape_ia"] = None
             row["n_skus_ia"] = int(len(ok_ia))
 
-            # ── FVA = WMAPE_Humano − WMAPE_IA ─────────────────────────────
-            # As duas pernas TÊM que cobrir o mesmo conjunto de (SKU, mês).
-            # vol_ia só existe a partir de jun/2026; nos meses anteriores é
-            # NULL. Comparar o WMAPE humano do portfólio inteiro contra o da
-            # IA num subconjunto misturaria "quem previu melhor" com "quantos
-            # itens cada um cobriu", e o FVA deixaria de medir o que promete.
-            #
-            # Por isso o humano é recalculado AQUI, restrito às linhas onde a
-            # IA opinou. row["wmape_h"] segue sendo o oficial do portfólio.
             wmape_h_comp = _sdiv((g_ia.vol_humano - g_ia.vol_real).abs().sum(), real_ia_t, 100)
             if wmape_h_comp is not None and row["wmape_ia"] is not None:
                 row["wmape_h_comparavel"] = round(wmape_h_comp, 2)
-                # Positivo: humano piorou (IA era melhor)
-                # Negativo: humano agregou valor sobre a IA
                 row["fva"] = round(wmape_h_comp - row["wmape_ia"], 2)
             else:
                 row["wmape_h_comparavel"] = row["fva"] = None
@@ -252,9 +208,9 @@ def _serie_metricas(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("mes")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
 # ROTAS
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
 @router.get("/filtros")
 async def filtros(db: Session = Depends(get_db), _: dict = Depends(get_current_user)):
     try:
@@ -322,10 +278,6 @@ async def evolucao(
         real_t = float(df.vol_real.sum())
         resumo = {
             "vol_real_total": round(real_t, 0),
-            # Explícito: o WMAPE é sempre contra a demanda (qt_pedido).
-            # `base` continua aceito para não quebrar o frontend, mas não
-            # altera o denominador — medir contra o entregue criaria demanda
-            # censurada e faria a acurácia melhorar quando o supply piora.
             "base_efetiva": "pedido",
             "metrica": "WMAPE de previsao (plano x demanda)",
         }
@@ -342,7 +294,6 @@ async def evolucao(
                 resumo["mape_h"] = round(float(ok.ape.mean()), 2)
             resumo["vol_humano_total"] = round(prev_h_t, 0)
 
-            # Variante restrita ao planejado + cobertura de planejamento.
             df_p = df[df.tem_plano]
             real_p = float(df_p.vol_real.sum()) if not df_p.empty else 0.0
             if real_p > 0:
@@ -366,7 +317,6 @@ async def evolucao(
             if resumo["wmape_ia"] is not None: resumo["wmape_ia"] = round(resumo["wmape_ia"], 2)
             if resumo["bias_ia"]  is not None: resumo["bias_ia"]  = round(resumo["bias_ia"],  2)
 
-            # FVA sobre a MESMA população nos dois lados (ver _serie_metricas).
             wmape_h_comp = _sdiv((df_ia.vol_humano - df_ia.vol_real).abs().sum(), real_ia_t, 100)
             if wmape_h_comp is not None and resumo["wmape_ia"] is not None:
                 resumo["wmape_h_comparavel"] = round(wmape_h_comp, 2)
@@ -418,9 +368,6 @@ async def diagnostico(
             item = dict(zip(chave, vals))
             item["vol_real"] = round(real_t, 0)
 
-            # WMAPE oficial: sobre todo o volume vendido do grupo.
-            # vol_humano já vem 0-preenchido, então o item sem plano entra
-            # com erro igual ao volume vendido em vez de sair da conta.
             g_h = g.copy()
             if g_h.vol_real.sum() > 0:
                 real_h_t = float(g_h.vol_real.sum())
@@ -443,9 +390,6 @@ async def diagnostico(
                 else:
                     persist = 0.0
 
-                # Cobertura de planejamento do grupo: quanto do volume vendido
-                # tinha plano. Itens sem plano tiveram fill rate de 30% contra
-                # 94,9% dos planejados — a cobertura antecede a acurácia.
                 real_p = float(g_h[g_h.tem_plano].vol_real.sum())
                 cobertura = _sdiv(real_p, real_h_t, 100)
 
@@ -459,19 +403,24 @@ async def diagnostico(
                     "cobertura_plano_pct": round(cobertura, 1) if cobertura is not None else 0.0,
                 })
 
+                # FIX (ZeroDivisionError): o texto de ação divide por (100+bias).
+                # Quando o SKU tem plano mas sum(qt_plano)=0 no recorte, bias=-100
+                # exato e (100+bias)=0 -> float division by zero. O guarda
+                # `abs(100+bias) > 0.01` cobre esse caso; sem plano não há percentual
+                # de ajuste definido, então a ação textual é omitida.
                 if cobertura is not None and cobertura < 90:
-                    # Cobertura baixa domina o diagnóstico: não faz sentido
-                    # discutir acurácia de um item que ninguém planejou.
                     item["classe"] = "Sem cobertura de plano"
                     item["acao"]   = f"Incluir no plano ({100 - cobertura:.0f}% do volume sem previsão)"
                 elif wmape <= 20 and abs(bias) <= 10:
                     item["classe"] = "Sob controle"
                 elif bias > 10 and persist >= 0.70:
                     item["classe"] = "Superestimando"
-                    item["acao"]   = f"Reduzir ~{abs(round(-bias/(100+bias)*100,0)):.0f}%"
+                    if abs(100 + bias) > 0.01:
+                        item["acao"] = f"Reduzir ~{abs(round(-bias/(100+bias)*100,0)):.0f}%"
                 elif bias < -10 and persist >= 0.70:
                     item["classe"] = "Subestimando"
-                    item["acao"]   = f"Aumentar ~{abs(round(-bias/(100+bias)*100,0)):.0f}%"
+                    if abs(100 + bias) > 0.01:
+                        item["acao"] = f"Aumentar ~{abs(round(-bias/(100+bias)*100,0)):.0f}%"
                 elif wmape > 30:
                     item["classe"] = "Errático"
                 else:
@@ -487,9 +436,6 @@ async def diagnostico(
                 item["wmape_ia"] = round(_sdiv((g_ia.vol_ia - g_ia.vol_real).abs().sum(), ri, 100) or 0, 2)
                 item["bias_ia"]  = round(_sdiv(float(g_ia.vol_ia.sum()) - ri, ri, 100) or 0, 2)
                 if item.get("wmape_h") is not None:
-                    # FVA = WMAPE_Humano - WMAPE_IA
-                    # Positivo: humano piorou em relação à IA (IA era melhor)
-                    # Negativo: humano melhorou em relação à IA (humano agregou valor)
                     item["fva"] = round(item["wmape_h"] - item["wmape_ia"], 2)
 
             itens.append(item)
@@ -513,15 +459,16 @@ async def fill_rate(
     """
     Atendimento (fill rate) sobre o volume JA DECIDIDO.
 
-    A fato_vendas obedece a identidade de tres estados:
-        qt_pedido = qtfatura + qtcorte + carteira_em_aberto
+    Fill Rate = qt_entregue / qt_pedido. Corte = qtcorte do ERP, nunca por
+    subtração. unidade='cx' usa qt_*; 'rs' usa vl_*.
 
-    O denominador do fill rate e (qtfatura + qtcorte), NAO qt_pedido. Usar
-    qt_pedido joga a carteira em aberto contra o indicador e derruba o mes
-    corrente artificialmente (08/2026 exibia 58% quando o real era 97,9%).
-
-    Corte = qtcorte/vlcorte, valor do ERP. Nunca por subtracao.
-    unidade='cx' usa qt_pedido/qtfatura/qtcorte; 'rs' usa vl_pedido/vlfatura/vlcorte.
+    CRITÉRIO DE ESCOPO: inclui TODO SKU que teve pedido no período
+    (qt_pedido>0), independente de estar ativo hoje em dim_produtos. O
+    fill-rate e o corte históricos precisam refletir o que realmente foi
+    pedido — SKUs descontinuados depois de venderem carregam corte real
+    (ex.: jan/2026, ~19% do corte vinha de itens hoje inativos) e sair pelo
+    filtro ativo=TRUE escondia esse volume. A acurácia (WMAPE) mantém o
+    filtro ativo em _carregar; aqui não.
     """
     try:
         teto = _ultimo_mes_fechado()
@@ -532,8 +479,6 @@ async def fill_rate(
         ini = meses_validos[0]  + "-01"
         fim = meses_validos[-1] + "-01"
 
-        # Lê de mart_vendas_mes: os três estados já agregados por (sku, mes),
-        # com o corte por transferência de código separado.
         if unidade == "rs":
             c_ped, c_fat, c_cor, c_tra = "vl_pedido", "vl_entregue", "vl_corte", "vl_corte_transferencia"
         else:
@@ -551,10 +496,13 @@ async def fill_rate(
                   SUM(v.{c_cor}) AS corte,
                   SUM(COALESCE(v.{c_tra}, 0)) AS corte_transf"""
 
+        # FIX (fill-rate ativo): removido `WHERE v.ativo = TRUE`. O escopo agora
+        # é qt_pedido>0 (garantido no mart) para incluir SKUs descontinuados que
+        # tiveram pedido/corte no período. Ver docstring.
         base_from = f"""
             FROM mart_vendas_mes v
             LEFT JOIN dim_produtos p ON p.sku = v.sku
-            WHERE v.ativo = TRUE
+            WHERE v.qt_pedido > 0
               AND v.mes >= CAST(:ini AS date)
               AND v.mes <= CAST(:fim AS date)
               AND TO_CHAR(v.mes,'YYYY-MM') = ANY(:meses)
@@ -563,32 +511,13 @@ async def fill_rate(
 
         def _mont(pedido, entregue, corte, transf=0.0):
             """
-            Fill Rate = qt_entregue / qt_pedido.
-
-            O denominador é o PEDIDO, não o volume decidido. Pedido pendente
-            (nem faturado nem cortado) é demanda não atendida e conta contra o
-            indicador — julho/2026 tinha 1.241 cx nessa situação.
-
-            O que NÃO se faz é calcular corte por subtração (pedido - entregue):
-            isso trata a carteira como ruptura confirmada. Corte é qtcorte, o
-            valor do ERP. Os três estados obedecem a:
-                qt_pedido = qt_entregue + qt_corte + carteira
-
-            Mês aberto fica distorcido por natureza (agosto/2026 exibia 58% no
-            dia 20, com 28.087 cx em carteira). A proteção é não exibir mês não
-            fechado — _ultimo_mes_fechado() já corta a série.
-
-            atendimento_ajustado desconta do denominador o corte por
-            transferência de código: quando a promoção COPA encerra, o pedido no
-            código promocional é cortado e o cliente é atendido no regular. Ele
-            recebeu o produto. Medido: 0,57% do corte do ano, pico de 0,7 pp em
-            maio/2026.
+            Fill Rate = qt_entregue / qt_pedido. Denominador é o PEDIDO.
+            atendimento_ajustado desconta o corte por transferência de código.
             """
             pedido, entregue = float(pedido or 0), float(entregue or 0)
             corte, transf    = float(corte or 0), float(transf or 0)
             carteira = max(pedido - entregue - corte, 0.0)
             at  = round(entregue / pedido * 100, 1) if pedido > 0 else None
-            # cobertura: quanto do pedido já teve desfecho (faturado ou cortado)
             cob = round((entregue + corte) / pedido * 100, 1) if pedido > 0 else None
             ped_aj = pedido - transf
             at_aj  = round(entregue / ped_aj * 100, 1) if ped_aj > 0 else None
@@ -619,7 +548,6 @@ async def fill_rate(
             tt = sum(float(r.corte_transf or 0) for r in rows)
             resumo = {"pedido": round(tp), "entregue": round(te), "corte": round(tc),
                       "carteira": round(max(tp - td, 0.0)),
-                      # Fill Rate = entregue / pedido (ver _mont)
                       "atendimento": round(te / tp * 100, 1) if tp > 0 else None,
                       "cobertura": round(td / tp * 100, 1) if tp > 0 else None,
                       "corte_transferencia": round(tt),
@@ -685,37 +613,6 @@ async def alertas(limite: int = Query(20), db: Session = Depends(get_db), _: dic
         raise HTTPException(500, f"Erro nos alertas: {e}")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# FILL RATE — MODELO DE TRÊS ESTADOS
-#
-# A fato_vendas nasce do relatório de pendência e obedece à identidade:
-#
-#       qt_pedido = qtfatura + qtcorte + carteira_em_aberto
-#
-# Um pedido tem TRÊS destinos, não dois: foi faturado, foi cortado, ou ainda
-# aguarda decisão. Validado no banco (jan/2025 a ago/2026): a carteira é ruído
-# (±800 cx) em todo mês fechado e 28.087 cx em 08/2026 no dia 20 — exatamente
-# o volume ainda em aberto no mês corrente.
-#
-# NUNCA usar (qt_pedido - qtfatura) como corte: isso conta carteira em aberto
-# como ruptura. Com a fórmula antiga, agosto/2026 exibia 58% de fill rate e
-# 28.961 cx de corte, quando o real era 97,9% e 874 cx.
-#
-#       Fill Rate = qt_entregue / qt_pedido             -> entregue do pedido
-#       Corte     = qt_corte                            -> valor do ERP, canônico
-#       Carteira  = qt_pedido - qt_entregue - qt_corte  -> ainda indefinido
-#       Cobertura = (qt_entregue + qt_corte) / qt_pedido -> % do pedido resolvido
-#
-# O denominador do Fill Rate é o PEDIDO. Pedido pendente (nem faturado nem
-# cortado) é demanda não atendida e conta contra o indicador — julho/2026
-# tinha 1.241 cx nessa situação. Mês aberto fica distorcido por natureza;
-# a proteção é _ultimo_mes_fechado(), não trocar a fórmula.
-#
-# As três rotas de fill rate (/fill-rate, /fill-rate/evolucao,
-# /fill-rate/diagnostico) usam esta mesma definição. Qualquer divergência entre
-# elas é bug.
-# ═══════════════════════════════════════════════════════════════════════════════
-
 @router.get("/fill-rate/evolucao")
 async def fill_rate_evolucao(
     meses:     List[str] = Query(...),
@@ -779,7 +676,6 @@ async def fill_rate_evolucao(
                 "corte_transferencia": round(float(r.corte_transf or 0)),
             })
 
-        # Resumo acumulado — fill rate sobre o PEDIDO (definição de negócio)
         tot_ped = sum(s["pedido"]   for s in serie)
         tot_fat = sum(s["faturado"] for s in serie)
         tot_cor = sum(s["corte"]    for s in serie)
@@ -830,7 +726,6 @@ async def fill_rate_diagnostico(
 
         w = "AND " + " AND ".join(filtros)
 
-        # Agrupamento dinâmico: por categoria ou por SKU
         if nivel == "categoria":
             group_sel = "v.categoria AS chave, v.categoria AS descricao, v.categoria AS categoria"
             group_by  = "v.categoria"
@@ -839,6 +734,8 @@ async def fill_rate_diagnostico(
                          "COALESCE(MAX(v.categoria),'') AS categoria")
             group_by  = "v.sku"
 
+        # FIX (fill-rate ativo): removido `AND v.ativo = TRUE`. Mesmo critério do
+        # /fill-rate: qt_pedido>0 inclui SKUs descontinuados que tiveram pedido.
         rows = db.execute(text(f"""
             SELECT
                 {group_sel},
@@ -852,7 +749,6 @@ async def fill_rate_diagnostico(
             WHERE v.mes >= CAST(:inicio AS date)
               AND v.mes <= CAST(:fim AS date)
               AND v.qt_pedido > 0
-              AND v.ativo = TRUE
               {w}
             GROUP BY {group_by}
             ORDER BY SUM(v.qt_corte) DESC
@@ -879,7 +775,6 @@ async def fill_rate_diagnostico(
                 "fill_rate": fr,
                 "corte_pct": round(corte / pedido * 100, 1),
                 "cobertura": round(_sdiv(decidido, pedido, 100), 1) if pedido > 0 else None,
-                # Classificação por nível de fill rate
                 "classe": (
                     "Crítico"   if fr < 85 else
                     "Atenção"   if fr < 93 else
@@ -892,9 +787,9 @@ async def fill_rate_diagnostico(
     except Exception as e:
         raise HTTPException(500, f"Erro no fill rate diagnóstico: {e}")
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════
 # AGENTE DE IA — relatório analítico, chat e PDF
-# ═══════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════
 def _require_lideranca(u: dict = Depends(get_current_user)):
     """Relatório executivo: restrito a Administrador, C-Level e Gerente."""
     if u.get("funcao") not in {"Administrador", "C-Level", "Gerente"}:
@@ -908,12 +803,7 @@ async def agente_dataset(
     db: Session = Depends(get_db),
     _: dict = Depends(get_current_user),
 ):
-    """
-    Dataset que fundamenta o relatorio — sem chamar a IA.
-
-    Nao recebe meses, base nem unidade: a janela sai do ciclo ativo.
-    O parametro `ciclo` existe so para consultar um ciclo anterior.
-    """
+    """Dataset que fundamenta o relatorio — sem chamar a IA."""
     try:
         return agente_kpis.montar_dataset(db, ciclo or agente_kpis._ciclo_atual(db))
     except Exception as e:
@@ -927,15 +817,7 @@ async def agente_relatorio(
     db: Session = Depends(get_db),
     u: dict = Depends(get_current_user),
 ):
-    """
-    Relatorio do ciclo. UM por ciclo_sop, sem filtro nenhum.
-
-    Normalmente ja foi gerado pelo pipeline ao criar o ciclo. Esta rota
-    apenas o entrega; a geracao sob demanda e fallback para o caso de a
-    API da Anthropic ter falhado durante o pipeline.
-
-    Todos os perfis leem. So Administrador gera ou regera.
-    """
+    """Relatorio do ciclo. UM por ciclo_sop, sem filtro nenhum."""
     eh_admin = u.get("funcao") == "Administrador"
     try:
         ciclo_ativo = ciclo or agente_kpis._ciclo_atual(db)
@@ -1008,8 +890,6 @@ async def agente_chat(
             db, payload.pergunta, payload.meses,
             payload.base, payload.unidade, payload.historico
         )
-        # responder_pergunta devolve dict com resposta + flag de cache.
-        # Tolera str para nao quebrar se a versao antiga estiver no ar.
         if isinstance(r, dict):
             return {"resposta": r.get("resposta", ""), "do_cache": r.get("do_cache", False)}
         return {"resposta": r}
