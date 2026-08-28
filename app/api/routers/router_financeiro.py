@@ -227,6 +227,44 @@ async def pmp_resumo(data_ini: date = Query(...), data_fim: date = Query(...),
     return await asyncio.to_thread(_pmp().calcular_pmp_resumo, data_ini, data_fim, *f)
 
 
+@router.get("/pmp/evolucao")
+async def pmp_evolucao(
+    data_ini: date = Query(...), data_fim: date = Query(...),
+    motivos: str = Query(None), tipos: str = Query(None),
+    fornecedores: str = Query(None), clifor: str = Query(None),
+    e5_motbx: str = Query(None), d1_tp: str = Query(None),
+    fornecedor: str = Query(None),
+    _: dict = Depends(get_current_user),
+):
+    """Evolução mês a mês do PMP, agrupada pelo mês de pagamento (e5_data)."""
+    _validar_datas(data_ini, data_fim)
+    f = _pmp_filters(motivos or e5_motbx, tipos or d1_tp, fornecedores or fornecedor, clifor)
+    try:
+        return await asyncio.to_thread(_pmp().calcular_pmp_mensal, data_ini, data_fim, *f)
+    except Exception as e:
+        logger.exception("pmp/evolucao: %s", e)
+        return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "meses": []}
+
+
+@router.get("/pmp/por-tipo")
+async def pmp_por_tipo(
+    data_ini: date = Query(...), data_fim: date = Query(...),
+    motivos: str = Query(None), tipos: str = Query(None),
+    fornecedores: str = Query(None), clifor: str = Query(None),
+    e5_motbx: str = Query(None), d1_tp: str = Query(None),
+    fornecedor: str = Query(None),
+    _: dict = Depends(get_current_user),
+):
+    """PMP agregado por tipo de compra D1 (MP, EM, SV, GG…)."""
+    _validar_datas(data_ini, data_fim)
+    f = _pmp_filters(motivos or e5_motbx, tipos or d1_tp, fornecedores or fornecedor, clifor)
+    try:
+        return await asyncio.to_thread(_pmp().calcular_pmp_por_tipo, data_ini, data_fim, *f)
+    except Exception as e:
+        logger.exception("pmp/por-tipo: %s", e)
+        return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "tipos": []}
+
+
 @router.get("/pmp/exportar")
 async def pmp_exportar(data_ini: date = Query(...), data_fim: date = Query(...),
                        motivos: str = Query(None), tipos: str = Query(None),
@@ -245,16 +283,17 @@ async def pmp_exportar(data_ini: date = Query(...), data_fim: date = Query(...),
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
         from openpyxl.utils import get_column_letter
 
-        pmp       = _pmp()
-        base      = pmp._base(data_ini, data_fim, *f)
-        d_forn    = pmp.calcular_pmp_fornecedores(data_ini, data_fim, 100000, 0, *f)
-        d_evol    = pmp.calcular_pmp_mensal(data_ini, data_fim, *f)
-        d_global  = pmp.calcular_pmp_global(data_ini, data_fim, *f)
+        pmp      = _pmp()
+        base     = pmp._base(data_ini, data_fim, *f)
+        d_forn   = pmp.calcular_pmp_fornecedores(data_ini, data_fim, 100000, 0, *f)
+        d_evol   = pmp.calcular_pmp_mensal(data_ini, data_fim, *f)
+        d_global = pmp.calcular_pmp_global(data_ini, data_fim, *f)
 
         HDR_FILL = PatternFill("solid", fgColor="1E3A5F")
         HDR_FONT = Font(bold=True, color="FFFFFF", size=10, name="Arial")
         BODY_FONT = Font(name="Arial", size=10)
         ALT_FILL  = PatternFill("solid", fgColor="F2F7FC")
+        WARN_FILL = PatternFill("solid", fgColor="FFF8E7")   # amarelo suave = fallback SE2
         BORDER    = Border(bottom=Side(style="thin", color="D9E2EC"))
         FMT_BRL  = "R$ #,##0.00"
         FMT_DATE = "DD/MM/YYYY"
@@ -268,8 +307,8 @@ async def pmp_exportar(data_ini: date = Query(...), data_fim: date = Query(...),
             if width:
                 ws.column_dimensions[get_column_letter(col)].width = width
 
-        def _write(ws, ri, vals, fmts, alt=False):
-            fill = ALT_FILL if alt else None
+        def _write(ws, ri, vals, fmts, alt=False, warn=False):
+            fill = WARN_FILL if warn else (ALT_FILL if alt else None)
             for ci, (val, fmt) in enumerate(zip(vals, fmts), 1):
                 c = ws.cell(row=ri, column=ci, value=val)
                 c.font = BODY_FONT; c.border = BORDER
@@ -288,29 +327,37 @@ async def pmp_exportar(data_ini: date = Query(...), data_fim: date = Query(...),
         wb = openpyxl.Workbook()
         wb.remove(wb.active)
 
-        # ── Dados Brutos ──────────────────────────────────────────────────────
+        # ── DADOS BRUTOS — inclui coluna Fonte Emissão ────────────────────────
         ws1 = wb.create_sheet("Dados Brutos")
         ws1.row_dimensions[1].height = 32
         cols_b = [
-            ("e5_filial","Filial",None,6),("e5_numero","Num. Título",None,14),
-            ("e5_prefixo","Prefixo",None,8),("e5_parcela","Parcela",None,8),
-            ("e5_tipo","Tipo",None,8),("e5_clifor","CLIFOR",None,10),
-            ("e5_loja","Loja",None,6),("e5_valor","Valor Pago E5 (R$)",FMT_BRL,18),
-            ("e5_data","Data Pgto. (E5)",FMT_DATE,14),("e5_motbx","Motivo E5",None,10),
-            ("f1_emissao","Data Emissão NF",FMT_DATE,14),
-            ("f1_valbrut","Valor Bruto NF (R$)",FMT_BRL,18),
-            ("e2_vencto","Vencto. Cond.Pag.",FMT_DATE,14),
-            ("e2_vencrea","Vencto. Real",FMT_DATE,13),
-            ("d1_tp","Tipo Item",None,10),
-            ("dias_pagamento","Dias PMP Pgto.",FMT_DAYS,14),
-            ("dias_vencimento","Dias PMP Vencto.",FMT_DAYS,14),
-            ("dias_cond_pag","Dias PMP Cond.Pag.",FMT_DAYS,14),
+            ("e5_filial",       "Filial",               None,     6),
+            ("e5_clifor",       "CLIFOR",                None,    10),
+            ("e5_numero",       "Nº Título",             None,    14),
+            ("e5_prefixo",      "Prefixo",               None,     8),
+            ("e5_parcela",      "Parcela",               None,     8),
+            ("e5_tipo",         "Tipo",                  None,     6),
+            ("e5_loja",         "Loja",                  None,     6),
+            ("e5_valor",        "Valor Pago E5 (R$)",   FMT_BRL, 18),
+            ("e5_data",         "Data Pgto. E5",        FMT_DATE,14),
+            ("e5_motbx",        "Motivo E5",             None,    10),
+            ("fonte_emissao",   "Fonte Emissão",         None,    16),
+            ("f1_emissao",      "Emissão NF (SF1)",     FMT_DATE,15),
+            ("f1_valbrut",      "Valor Bruto NF (R$)",  FMT_BRL, 18),
+            ("e2_vencto",       "Vencto. Contratual",   FMT_DATE,15),
+            ("e2_vencrea",      "Vencto. Real",         FMT_DATE,13),
+            ("d1_tp",           "Tipo Compra D1",        None,    13),
+            ("dias_pagamento",  "Dias PMP Pgto.",       FMT_DAYS,14),
+            ("dias_vencimento", "Dias PMP Vencto.",     FMT_DAYS,14),
+            ("dias_cond_pag",   "Dias PMP Cond.Pag.",   FMT_DAYS,14),
         ]
-        for ci,(col,lbl,fmt,w) in enumerate(cols_b, 1):
+        for ci, (_, lbl, _, w) in enumerate(cols_b, 1):
             _hdr(ws1, 1, ci, lbl, width=w)
         for ri, row in enumerate(base.itertuples(index=False), 2):
+            fonte = getattr(row, "fonte_emissao", "SF1")
+            warn  = (fonte != "SF1")  # destaca fallback em amarelo
             vals, fmts = [], []
-            for col,_,fmt,_ in cols_b:
+            for col, _, fmt, _ in cols_b:
                 v = getattr(row, col, None)
                 if fmt == FMT_DATE:
                     v = _dt(v)
@@ -320,19 +367,19 @@ async def pmp_exportar(data_ini: date = Query(...), data_fim: date = Query(...),
                     except Exception:
                         pass
                 vals.append(v); fmts.append(fmt)
-            _write(ws1, ri, vals, fmts, alt=(ri%2==0))
+            _write(ws1, ri, vals, fmts, alt=(ri % 2 == 0), warn=warn)
         ws1.auto_filter.ref = f"A1:{get_column_letter(len(cols_b))}1"
         ws1.freeze_panes = "A2"
 
-        # ── Por Fornecedor ────────────────────────────────────────────────────
+        # ── POR FORNECEDOR ───────────────────────────────────────────────────
         ws2 = wb.create_sheet("Por Fornecedor")
         ws2.row_dimensions[1].height = 32
         h2 = [("CLIFOR",8),("Fornecedor",38),("Pagamentos",12),
               ("Valor Pago E5 (R$)",20),("PMP Pagamento (dias)",18),
               ("PMP Vencimento (dias)",19),("PMP Cond.Pag. (dias)",18),
               ("Delta Atraso (dias)",16)]
-        for ci,(lbl,w) in enumerate(h2,1): _hdr(ws2,1,ci,lbl,width=w)
-        for ri, r in enumerate(d_forn.get("fornecedores",[]), 2):
+        for ci, (lbl, w) in enumerate(h2, 1): _hdr(ws2, 1, ci, lbl, width=w)
+        for ri, r in enumerate(d_forn.get("fornecedores", []), 2):
             _write(ws2, ri,
                    [str(r.get("clifor","")), str(r.get("nome","")),
                     int(r.get("pagamentos",0)), float(r.get("valor_total",0)),
@@ -345,14 +392,14 @@ async def pmp_exportar(data_ini: date = Query(...), data_fim: date = Query(...),
         ws2.auto_filter.ref = f"A1:{get_column_letter(len(h2))}1"
         ws2.freeze_panes = "A2"
 
-        # ── Evolução Mensal ───────────────────────────────────────────────────
+        # ── EVOLUÇÃO MENSAL ─────────────────────────────────────────────────
         ws3 = wb.create_sheet("Evolucao Mensal")
         ws3.row_dimensions[1].height = 32
-        h3 = [("Mês Pagamento E5",16),("Pagamentos",12),("Valor Pago E5 (R$)",20),
+        h3 = [("Mês Pagamento",14),("Pagamentos",12),("Valor Pago E5 (R$)",20),
               ("PMP Pagamento (dias)",18),("PMP Vencimento (dias)",19),
               ("PMP Cond.Pag. (dias)",18),("Delta Atraso (dias)",16)]
-        for ci,(lbl,w) in enumerate(h3,1): _hdr(ws3,1,ci,lbl,width=w)
-        for ri, m in enumerate(d_evol.get("meses",[]), 2):
+        for ci, (lbl, w) in enumerate(h3, 1): _hdr(ws3, 1, ci, lbl, width=w)
+        for ri, m in enumerate(d_evol.get("meses", []), 2):
             _write(ws3, ri,
                    [m["mes"],int(m["pagamentos"]),float(m["valor_total"]),
                     float(m["pmp_pagamento"]),float(m["pmp_vencimento"]),
@@ -361,48 +408,118 @@ async def pmp_exportar(data_ini: date = Query(...), data_fim: date = Query(...),
                    alt=(ri%2==0))
         ws3.freeze_panes = "A2"
 
-        # ── Metodologia ───────────────────────────────────────────────────────
+        # ── METODOLOGIA ──────────────────────────────────────────────────────
         ws4 = wb.create_sheet("Metodologia")
         ws4.column_dimensions["A"].width = 100
-        tf = Font(bold=True, size=12, color="1E3A5F", name="Arial")
-        cf = Font(size=10, name="Arial")
-        hf = PatternFill("solid", fgColor="EBF3FB")
-        vt  = d_global.get("valor_total", 0) or 0
-        dp  = (d_global.get("periodo") or {}).get("dias_periodo", 1) or 1
+        TF = Font(bold=True, size=12, color="1E3A5F", name="Arial")
+        CF = Font(size=10, name="Arial")
+        HF = PatternFill("solid", fgColor="EBF3FB")
+        WF = PatternFill("solid", fgColor="FFF3CD")   # alerta amarelo
+
+        cob   = d_global.get("cobertura_sf1", {})
+        vt    = d_global.get("valor_total", 0) or 0
+        dp    = (d_global.get("periodo") or {}).get("dias_periodo", 1) or 1
+        vpd   = round(vt / dp, 2)
         pmp_pg = d_global.get("pmp_pagamento") or 0
+        pmp_cd = d_global.get("pmp_cond_pag") or 0
+        delta  = round(pmp_pg - pmp_cd, 2)
+        sf1_val_pct = cob.get("valor_pct", 0)
+        pmp_sf1 = cob.get("pmp_sf1_only") or 0
+        pmp_se2 = cob.get("pmp_se2_fallback") or 0
+
         linhas = [
-            ("CÁLCULO DO PMP (Prazo Médio de Pagamento)", True),
-            ("", False),
-            ("O PMP mede, em dias, o tempo médio entre a emissão da NF e o pagamento efetivo.", False),
-            ("É uma média PONDERADA pelo valor pago na E5 (e5_valor).", False),
-            ("", False),
-            ("FÓRMULA GERAL:", True),
-            ("PMP = SUM( dias_i × e5_valor_i ) / SUM( e5_valor_i )", False),
-            ("", False),
-            ("TRÊS MÉTRICAS (contadas a partir de f1_emissao, com fallback para e2_emissao):", True),
-            ("1. PMP Pagamento:  dias = e5_data - f1_emissao  (pagamento real no banco).", False),
-            ("2. PMP Vencimento: dias = e2_vencrea - f1_emissao  (vencimento real negociado).", False),
-            ("3. PMP Cond.Pag.:  dias = e2_vencto - f1_emissao  (vencimento contratual).", False),
-            ("", False),
-            ("DELTA ATRASO:", True),
-            ("Delta = PMP Pagamento - PMP Cond.Pag.  Positivo = empresa paga após o vencimento.", False),
-            ("", False),
-            ("EVOLUÇÃO MENSAL:", True),
-            ("Agrupada pelo mês de e5_data. Meses recentes podem ter PMP menor (survivor bias).", False),
-            ("", False),
-            ("FONTES DE DADOS:", True),
-            (f"Período: {data_ini.strftime('%d/%m/%Y')} a {data_fim.strftime('%d/%m/%Y')}", False),
-            ("SE2 (Contas a Pagar) · SF1 (Notas Entrada) · SE5 (Mov. Bancária) · SA2 (Fornecedores)", False),
-            ("", False),
-            ("NOTAS:", True),
-            ("- Apenas E5 casados com título SE2 via CLIFOR + chave entram no cálculo.", False),
-            ("- e5_valor é líquido de desconto, filtrado > 0.", False),
-            ("- Delta Atraso positivo = empresa paga depois do vencimento contratual.", False),
+            ("ANÁLISE DE PMP — PRAZO MÉDIO DE PAGAMENTO", True, False),
+            (f"Período: {data_ini.strftime('%d/%m/%Y')} a {data_fim.strftime('%d/%m/%Y')}  ·  "
+             f"PMP global: {pmp_pg:.1f} dias  ·  R$ {vt:,.0f}", False, False),
+            ("", False, False),
+            ("SEÇÃO 1 — FONTES DE DADOS", True, False),
+            ("", False, False),
+            ("Cinco tabelas do Protheus compõem esta análise:", False, False),
+            ("  SE5 (Mov. Bancária / report 592) — grain: cada pagamento realizado", False, False),
+            ("  SE2 (Contas a Pagar / report 590) — grain: cada título a pagar", False, False),
+            ("  SF1 (Notas de Entrada / report 589) — grain: cada NF de fornecedor  ← DATA BASE DO CÁLCULO", False, False),
+            ("  SD1 (Itens das NFs / report 589) — grain: cada item da NF (tipo de compra d1_tp)", False, False),
+            ("  SA2 (Fornecedores / report 614) — dimensão: cadastro de fornecedores (nome via CLIFOR)", False, False),
+            ("", False, False),
+            ("SEÇÃO 2 — MODELO DE CRUZAMENTO", True, False),
+            ("", False, False),
+            ("  SE5 ──[CLIFOR + chave do título]──► SE2     liga o pagamento bancário ao título", False, False),
+            ("  SE2 ──[nº NF de origem]───────────► SF1     obtém a data de emissão da nota fiscal", False, False),
+            ("  SF1 ──[número da NF]──────────────► SD1     obtém o tipo de compra (d1_tp)", False, False),
+            ("  SE5/SE2 ──[CLIFOR]────────────────► SA2     obtém o nome do fornecedor", False, False),
+            ("", False, False),
+            ("  Regra: somente E5 casados com SE2 entram no cálculo.", False, False),
+            ("  Títulos não pagos e pagamentos sem título vinculado ficam FORA do PMP.", False, False),
+            ("", False, False),
+            ("SEÇÃO 3 — DATA BASE DO CÁLCULO E FALLBACK", True, False),
+            ("", False, False),
+            ("  O PMP é calculado a partir da data de emissão da NF de entrada (f1_emissao da SF1).", False, False),
+            ("  Quando o join SF1 falha (NF não encontrada), usa-se e2_emissao (emissão do título SE2).", False, False),
+            ("", False, False),
+            ("  ⚠  ATENÇÃO — COBERTURA DO JOIN SF1 NESTE PERÍODO:", False, True),
+            (f"     {sf1_val_pct:.1f}% do valor pago usou f1_emissao real (SF1).", False, True),
+            (f"     {100-sf1_val_pct:.1f}% do valor pago usou e2_emissao como fallback (SE2).", False, True),
+            (f"     PMP Pagamento com emissão NF real:     {pmp_sf1:.1f} dias", False, True),
+            (f"     PMP Pagamento com fallback SE2:         {pmp_se2:.1f} dias", False, True),
+            (f"     Diferença:                              {pmp_se2 - pmp_sf1:+.1f} dias", False, True),
+            ("", False, False),
+            ("  Por que o fallback gera PMP maior?", False, False),
+            ("  Hipótese 1 — join falhou: a NF existe no SF1 mas as chaves (filial/doc/série) não casam.", False, False),
+            ("  Hipótese 2 — NF fora do histórico: NF de período anterior ao carregamento (antes de jan/2023).", False, False),
+            ("  Hipótese 3 — pagamentos sem NF: adiantamentos, fretes, taxas sem nota de entrada.", False, False),
+            ("  Ação recomendada: auditar os CLIFOR com maior valor no fallback (filtrar Fonte Emissão = SE2).", False, False),
+            ("", False, False),
+            ("  Na aba Dados Brutos, a coluna 'Fonte Emissão' identifica cada linha:", False, False),
+            ("  SF1          → emissão NF real — data confiável para base do PMP", False, False),
+            ("  SE2 (fallback) → emissão do título — pode introduzir viés (linhas em amarelo)", False, False),
+            ("", False, False),
+            ("SEÇÃO 4 — CÁLCULO DO PMP", True, False),
+            ("", False, False),
+            ("  Fórmula (média ponderada por valor pago):", False, False),
+            ("  PMP = Σ( dias_i × e5_valor_i ) / Σ( e5_valor_i )", False, False),
+            ("", False, False),
+            ("  Três métricas — base: f1_emissao (ou e2_emissao no fallback):", False, False),
+            ("  PMP Pagamento  = e5_data    − f1_emissao  (quando a empresa pagou)", False, False),
+            ("  PMP Vencimento = e2_vencrea − f1_emissao  (vencimento real negociado)", False, False),
+            ("  PMP Cond.Pag.  = e2_vencto  − f1_emissao  (vencimento contratual)", False, False),
+            ("", False, False),
+            ("  Delta Atraso = PMP Pagamento − PMP Cond.Pag.", False, False),
+            ("  Delta > 0 → empresa paga depois do vencto → retém caixa (bom)", False, False),
+            ("  Delta < 0 → empresa paga antes do vencto → libera caixa antecipado (pressão)", False, False),
+            ("", False, False),
+            ("SEÇÃO 5 — EXEMPLO NUMÉRICO", True, False),
+            ("", False, False),
+            ("  3 pagamentos com emissão NF real (Fonte = SF1):", False, False),
+            ("  Pgto A: emissão NF 01/03, pago 10/04 →  40 dias, R$ 100.000 →  4.000.000", False, False),
+            ("  Pgto B: emissão NF 01/03, pago 20/04 →  50 dias, R$  50.000 →  2.500.000", False, False),
+            ("  Pgto C: emissão NF 01/03, pago 05/05 →  65 dias, R$  10.000 →    650.000", False, False),
+            ("  PMP = (4.000.000 + 2.500.000 + 650.000) / (100.000 + 50.000 + 10.000) = 44,69 dias", False, False),
+            ("", False, False),
+            ("  3 pagamentos com fallback SE2 (Fonte = SE2 — sem NF):", False, False),
+            ("  Pgto D: emissão SE2 01/01, pago 10/04 → 99 dias, R$ 80.000 →  7.920.000", False, False),
+            ("  Pgto E: emissão SE2 15/01, pago 20/04 → 95 dias, R$ 20.000 →  1.900.000", False, False),
+            ("  PMP SE2 = (7.920.000 + 1.900.000) / (80.000 + 20.000) = 98,2 dias", False, False),
+            ("  → Títulos emitidos em janeiro com pagamento em abril geram PMP naturalmente alto.", False, False),
+            ("", False, False),
+            ("SEÇÃO 6 — IMPACTO DE 1 DIA A MAIS DE PMP NO CAIXA", True, False),
+            ("", False, False),
+            (f"  valor_pago / dias_período = R$ {vt:,.0f} / {dp} = R$ {vpd:,.2f} por dia", False, False),
+            (f"  Cada dia a MAIS no PMP retém R$ {vpd:,.2f} adicionais em caixa.", False, False),
+            (f"  Aumentar PMP em  5 dias ≈ R$ {vpd*5:,.0f} de folga adicional.", False, False),
+            (f"  Aumentar PMP em 10 dias ≈ R$ {vpd*10:,.0f} de folga adicional.", False, False),
+            ("  (Estimativa — assume fluxo de pagamento uniforme no período.)", False, False),
+            ("", False, False),
+            ("SEÇÃO 7 — RESUMO DO PERÍODO", True, False),
+            (f"  PMP Pagamento global:  {pmp_pg:.2f} dias", False, False),
+            (f"  PMP Cond.Pag. global:  {pmp_cd:.2f} dias", False, False),
+            (f"  Delta Atraso global:   {delta:+.2f} dias", False, False),
         ]
-        for ri, (txt, bold) in enumerate(linhas, 1):
+        for ri, item in enumerate(linhas, 1):
+            txt, bold, warn = item
             c = ws4.cell(row=ri, column=1, value=txt)
-            c.font = tf if bold else cf
-            if bold: c.fill = hf
+            c.font = TF if bold else CF
+            if bold:   c.fill = HF
+            if warn:   c.fill = WF
 
         buf = io.BytesIO()
         wb.save(buf)

@@ -131,6 +131,12 @@ def _base(data_ini: date, data_fim: date, motivos=None, tipos=None,
     base["dias_vencimento"] = base["dias_vencimento"].clip(lower=0)
     base["dias_cond_pag"] = base["dias_cond_pag"].clip(lower=0)
     base = base[base["dias_pagamento"].notna()]
+    # ── Coluna de rastreabilidade: fonte da data base usada ──────────────────
+    # "SF1" = usou f1_emissao da nota fiscal de entrada
+    # "SE2" = f1_emissao nula → usou e2_emissao do título a pagar como fallback
+    base["fonte_emissao"] = "SF1"
+    sem_nf_mask = pd.to_datetime(base.get("f1_emissao"), errors="coerce").isna()
+    base.loc[sem_nf_mask, "fonte_emissao"] = "SE2 (fallback)"
     motivo_values = _as_filter(motivos)
     tipo_values = _as_filter(tipos)
     fornecedor_values = _as_filter(fornecedores) or _as_filter(clifor)
@@ -145,20 +151,37 @@ def _base(data_ini: date, data_fim: date, motivos=None, tipos=None,
 
 def _resumo(df: pd.DataFrame) -> dict[str, Any]:
     if df.empty:
-        return {"pagamentos": 0, "valor_total": 0.0, "pmp": 0.0}
+        return {"pagamentos": 0, "valor_total": 0.0, "pmp": 0.0,
+                "cobertura_sf1": {"linhas_pct": 0.0, "valor_pct": 0.0}}
     valor = float(df["e5_valor"].sum())
     media = lambda coluna: round(float((df[coluna].fillna(0) * df["e5_valor"]).sum() / valor), 2) if valor else 0.0
-    pagamento = media("dias_pagamento")
+    pagamento  = media("dias_pagamento")
     vencimento = media("dias_vencimento")
-    condicao = media("dias_cond_pag")
+    condicao   = media("dias_cond_pag")
+    # Cobertura SF1: proporção de linhas e valor com f1_emissao real (não fallback)
+    sf1_mask = (df.get("fonte_emissao", pd.Series("SF1", index=df.index)) == "SF1")
+    val_sf1  = float(df.loc[sf1_mask, "e5_valor"].sum()) if "e5_valor" in df else 0.0
+    cobertura = {
+        "linhas_pct": round(sf1_mask.sum() / len(df) * 100, 1),
+        "valor_pct":  round(val_sf1 / valor * 100, 1) if valor else 0.0,
+        "pmp_sf1_only": round(
+            float((df.loc[sf1_mask, "dias_pagamento"].fillna(0) * df.loc[sf1_mask, "e5_valor"]).sum()
+                  / val_sf1), 2
+        ) if val_sf1 else None,
+        "pmp_se2_fallback": round(
+            float((df.loc[~sf1_mask, "dias_pagamento"].fillna(0) * df.loc[~sf1_mask, "e5_valor"]).sum()
+                  / float(df.loc[~sf1_mask, "e5_valor"].sum())), 2
+        ) if float(df.loc[~sf1_mask, "e5_valor"].sum()) > 0 else None,
+    }
     return {
-        "pagamentos": int(len(df)),
-        "valor_total": round(valor, 2),
-        "pmp": pagamento,
-        "pmp_pagamento": pagamento,
+        "pagamentos":   int(len(df)),
+        "valor_total":  round(valor, 2),
+        "pmp":          pagamento,
+        "pmp_pagamento":  pagamento,
         "pmp_vencimento": vencimento,
-        "pmp_cond_pag": condicao,
-        "delta_atraso": round(pagamento - condicao, 2),
+        "pmp_cond_pag":   condicao,
+        "delta_atraso":   round(pagamento - condicao, 2),
+        "cobertura_sf1":  cobertura,
     }
 
 
@@ -264,6 +287,34 @@ def calcular_pmp_mensal(data_ini: date, data_fim: date, motivos=None, tipos=None
 
     meses.sort(key=lambda m: m["mes"])
     return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "meses": meses}
+
+
+_TIPO_DESC: dict[str, str] = {
+    "GG": "Gerais / Outros",    "EM": "Embalagens",
+    "MP": "Matéria-Prima",      "MC": "Material de Consumo",
+    "SV": "Serviços",           "SI": "Serv. Infraestrutura",
+    "EP": "Equipamentos",       "AI": "Ativo Imobilizado",
+    "LI": "Locação / Imóveis",  "IN": "Insumos",
+    "BN": "Benefícios",         "AL": "Aluguel",
+    "OI": "Outros Insumos",     "OL": "Outros Locação",
+    "PA": "Prest. de Contas",   "CC": "Custo Comercializ.",
+    "ME": "Mat. de Escritório",
+}
+
+
+def calcular_pmp_por_tipo(data_ini: date, data_fim: date, motivos=None, tipos=None,
+                          fornecedores=None, clifor=None) -> dict[str, Any]:
+    """PMP agregado pelo tipo de compra D1 (MP, EM, SV, GG…)."""
+    base = _base(data_ini, data_fim, motivos, tipos, fornecedores, clifor)
+    if base.empty:
+        return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "tipos": []}
+    rows = []
+    for tp, g in base.groupby("d1_tp", dropna=False):
+        tp_str = str(tp).strip().upper() if pd.notna(tp) and str(tp).strip() else "SEM TIPO"
+        r = _resumo(g)
+        rows.append({"tipo": tp_str, "descricao": _TIPO_DESC.get(tp_str, tp_str), **r})
+    rows.sort(key=lambda r: r["valor_total"], reverse=True)
+    return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "tipos": rows}
 
 
 def calcular_pmp(data_ini: date, data_fim: date, **filters) -> dict[str, Any]:

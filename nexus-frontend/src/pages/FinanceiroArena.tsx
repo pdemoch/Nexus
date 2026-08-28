@@ -150,7 +150,9 @@ export default function FinanceiroArena() {
   // ── Dados ──
   const [global, setGlobal]       = useState<any>(null);
   const [pmpGlobal, setPmpGlobal] = useState<any>(null);
-  const [pmpEvolucao, setPmpEvolucao] = useState<any[]>([]);
+  const [pmpEvolucao, setPmpEvolucao]         = useState<any[]>([]);
+  const [pmpTiposData, setPmpTiposData]       = useState<any[]>([]);
+  const [pmpCobertura, setPmpCobertura]       = useState<any>(null);
   const [pmpFornecedores, setPmpFornecedores] = useState<any[]>([]);
   const [regionais, setRegionais] = useState<any[]>([]);
   const [clientes, setClientes]   = useState<any[]>([]);
@@ -219,18 +221,23 @@ export default function FinanceiroArena() {
     setLoading(true);
     try {
       const params = pmpParams;
-      const [r, eRes] = await Promise.all([
+      const [r, eRes, tRes] = await Promise.all([
         axios.get('/api/v1/financeiro/pmp/resumo', { params }),
         axios.get('/api/v1/financeiro/pmp/evolucao', { params }).catch(() => ({ data: { meses: [] } })),
+        axios.get('/api/v1/financeiro/pmp/por-tipo', { params }).catch(() => ({ data: { tipos: [] } })),
       ]);
       setPmpGlobal(r.data.global);
+      setPmpCobertura(r.data.global?.cobertura_sf1 ?? null);
       setPmpFornecedores(r.data.fornecedores?.fornecedores || []);
       setPmpFiltros(r.data.filtros || { e5_motbx: [], d1_tp: [], fornecedor: [] });
       setPmpEvolucao(eRes.data.meses || []);
+      setPmpTiposData(tRes.data.tipos || []);
     } catch {
       setPmpGlobal(null);
+      setPmpCobertura(null);
       setPmpFornecedores([]);
       setPmpEvolucao([]);
+      setPmpTiposData([]);
     } finally {
       setLoading(false);
     }
@@ -335,18 +342,6 @@ export default function FinanceiroArena() {
     pmr_cond: r.pmr_cond_pag,
   })).sort((a, b) => (b.pmr_pag ?? -Infinity) - (a.pmr_pag ?? -Infinity));
   const maxPMR = Math.max(...dadosGrafico.flatMap(d => [d.pmr_pag, d.pmr_vnc, d.pmr_cond]), 60);
-  const selecionarRegionalNoGrafico = (state: any) => {
-    const regional = state?.activePayload?.[0]?.payload?.regionalOriginal
-      || dadosGrafico.find(d => d.regional === state?.activeLabel)?.regionalOriginal;
-    if (!regional) return;
-    setRegionaisSel(atual => atual.length === 1 && atual[0] === regional ? [] : [regional]);
-  };
-  const selecionarRegionalNaBarra = (data: any) => {
-    const regional = data?.payload?.regionalOriginal || data?.regionalOriginal;
-    if (!regional) return;
-    setRegionaisSel(atual => atual.length === 1 && atual[0] === regional ? [] : [regional]);
-  };
-
   const dadosEvolucao = evolucao.map(m => ({
     mes: m.mes,
     valor: Math.round(m.valor_recebido ?? m.valor_total),
@@ -684,8 +679,7 @@ export default function FinanceiroArena() {
                 Valor Recebido E5 e PMR por Regional
               </div>
               <div className="text-[10px] text-slate-400 mb-4">
-                Barras = Valor Recebido E5 (eixo esq.) · Linhas = PMR em dias (eixo dir.) ·
-                <span className="text-violet-500 font-bold"> clique em uma regional para filtrar</span>
+                Barras = Valor Recebido E5 (eixo esq.) · Linhas = PMR em dias (eixo dir.)
               </div>
               {loading ? (
                 <div className="flex items-center justify-center h-64 text-slate-300"><Loader2 className="w-6 h-6 animate-spin" /></div>
@@ -693,8 +687,7 @@ export default function FinanceiroArena() {
                 <div className="flex items-center justify-center h-64 text-slate-300 text-xs font-bold">Sem dados</div>
               ) : (
                 <ResponsiveContainer width="100%" height={360}>
-                <ComposedChart data={dadosGrafico} margin={{ top: 10, right: 20, left: 0, bottom: 75 }}
-                    onClick={selecionarRegionalNoGrafico}>
+                <ComposedChart data={dadosGrafico} margin={{ top: 10, right: 20, left: 0, bottom: 75 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                     <XAxis dataKey="regional" tick={{ fontSize: 10, fontWeight: 700, fill: '#64748b' }}
                       angle={-30} textAnchor="end" interval={0} height={75} />
@@ -705,8 +698,7 @@ export default function FinanceiroArena() {
                     <Legend verticalAlign="top" height={30}
                       wrapperStyle={{ fontSize: 10, fontWeight: 700, paddingBottom: 4 }} />
                     <Bar yAxisId="left" dataKey="valor_recebido" name="Valor Recebido E5" fill="#c7d2fe"
-                      radius={[4, 4, 0, 0]} maxBarSize={48} cursor="pointer"
-                      onClick={selecionarRegionalNaBarra} />
+                      radius={[4, 4, 0, 0]} maxBarSize={48} />
                     <Line yAxisId="right" type="monotone" dataKey="pmr_pag" name="PMR Pagamento"
                       stroke="#7c3aed" strokeWidth={2.5} dot={{ r: 4, fill: '#7c3aed' }} />
                     <Line yAxisId="right" type="monotone" dataKey="pmr_vnc" name="PMR Vencimento"
@@ -936,7 +928,24 @@ export default function FinanceiroArena() {
                   </div>
                 )}
 
-                {/* GRAFICO EVOLUÇÃO MENSAL PMP */}
+                {/* ALERTA DE COBERTURA SF1 */}
+                {pmpCobertura && pmpCobertura.valor_pct < 80 && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-2xl px-5 py-3 flex flex-wrap items-start gap-3">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
+                    <div className="text-[11px] text-amber-800 leading-snug">
+                      <b>Cobertura da emissão NF (SF1): {pmpCobertura.valor_pct?.toFixed(1)}% do valor</b> tem data real de NF.
+                      Os demais {(100 - (pmpCobertura.valor_pct ?? 0)).toFixed(1)}% usam fallback (emissão do título SE2), o que pode distorcer o PMP Vencimento e Cond.Pag.
+                      {pmpCobertura.pmp_sf1_only != null && pmpCobertura.pmp_se2_fallback != null && (
+                        <span className="ml-1">
+                          PMP com NF real: <b>{pmpCobertura.pmp_sf1_only?.toFixed(1)} d</b> · PMP fallback SE2: <b>{pmpCobertura.pmp_se2_fallback?.toFixed(1)} d</b>.
+                          Filtre <i>Fonte Emissão = SF1</i> no Excel para ver os dados sem viés.
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* GRÁFICO EVOLUÇÃO MENSAL PMP */}
                 {pmpEvolucao.length > 0 && (() => {
                   const dadosPmpEvol = pmpEvolucao.map(m => ({
                     mes: m.mes,
@@ -978,55 +987,105 @@ export default function FinanceiroArena() {
             );
           })()}
 
-          {/* TABELA FORNECEDORES */}
-          <div className="bg-white rounded-2xl border border-slate-100 overflow-hidden">
-            <div className="px-4 py-3 border-b border-slate-100">
-              <div className="text-xs font-black uppercase tracking-widest text-slate-400">Pagamentos por Fornecedor</div>
-              <div className="text-[10px] text-slate-400">
-                Agrupado por CLIFOR · {pmpFornecedores.length} fornecedores · Delta positivo = empresa paga depois do vencto. (bom para caixa)
-              </div>
-            </div>
-            {loading ? (
-              <div className="flex items-center justify-center h-40 text-slate-300"><Loader2 className="w-5 h-5 animate-spin" /></div>
-            ) : !pmpFornecedores.length ? (
-              <div className="flex items-center justify-center h-24 text-slate-300 text-xs font-bold">Sem dados</div>
-            ) : (
-              <div className="overflow-auto">
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
-                  <thead>
-                    <tr style={{ background: '#f8fafc' }}>
-                      {['CLIFOR','Fornecedor','Pagamentos','Valor Pago','PMP Pag.','PMP Venc.','PMP Cond.','Delta'].map((h,i) => (
-                        <th key={h} style={{ padding: '8px 12px', textAlign: i < 2 ? 'left' : 'right', fontSize: 9,
-                          fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.04em', color: '#94a3b8',
-                          borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pmpFornecedores.map((f: any, i: number) => {
-                      const d = f.delta_atraso ?? 0;
-                      const dCor = d >= 5 ? '#059669' : d >= 0 ? '#d97706' : '#e11d48';
-                      return (
-                        <tr key={`${f.clifor}-${i}`} style={{ background: i%2 ? '#f9fafb' : '#fff', borderBottom: '1px solid #f1f5f9' }}>
-                          <td style={{ padding:'7px 12px', color:'#64748b', whiteSpace:'nowrap' }}>{f.clifor}</td>
-                          <td style={{ padding:'7px 12px', fontWeight:700, color:'#334155' }}>{f.nome || '—'}</td>
-                          <td style={{ padding:'7px 12px', textAlign:'right', color:'#475569' }}>{f.pagamentos?.toLocaleString('pt-BR')}</td>
-                          <td style={{ padding:'7px 12px', textAlign:'right', color:'#475569' }}>{fmtRs(f.valor_total||0)}</td>
-                          <td style={{ padding:'7px 12px', textAlign:'right', fontWeight:900, color:'#7c3aed' }}>{Number(f.pmp_pagamento??f.pmp??0).toFixed(1)} d</td>
-                          <td style={{ padding:'7px 12px', textAlign:'right', color:'#64748b' }}>{Number(f.pmp_vencimento||0).toFixed(1)} d</td>
-                          <td style={{ padding:'7px 12px', textAlign:'right', color:'#64748b' }}>{Number(f.pmp_cond_pag||0).toFixed(1)} d</td>
-                          <td style={{ padding:'7px 12px', textAlign:'right', fontWeight:900, color: dCor }}>
-                            {d > 0 ? '+' : ''}{d.toFixed(1)}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
+          {/* GRID: Por Tipo D1 (esq) + Tabela Fornecedores (dir) */}
+          <div className="grid grid-cols-1 xl:grid-cols-5 gap-4">
 
+            {/* GRÁFICO POR TIPO D1 */}
+            <div className="xl:col-span-3 bg-white rounded-2xl border border-slate-100 p-5">
+              <div className="text-xs font-black uppercase tracking-widest text-slate-400 mb-1">
+                Valor Pago e PMP por Tipo de Compra (D1)
+              </div>
+              <div className="text-[10px] text-slate-400 mb-4">
+                Barras = Valor Pago · Linhas = PMP em dias · ordenado por valor pago
+              </div>
+              {loading ? (
+                <div className="flex items-center justify-center h-64 text-slate-300"><Loader2 className="w-6 h-6 animate-spin" /></div>
+              ) : pmpTiposData.length === 0 ? (
+                <div className="flex items-center justify-center h-64 text-slate-300 text-xs font-bold">Sem dados</div>
+              ) : (() => {
+                const dadosTipo = pmpTiposData.map((t: any) => ({
+                  tipo: t.descricao || t.tipo,
+                  valor: Math.round(t.valor_total ?? 0),
+                  pmp_pag:  t.pmp_pagamento  ?? 0,
+                  pmp_vnc:  t.pmp_vencimento ?? 0,
+                  pmp_cond: t.pmp_cond_pag   ?? 0,
+                }));
+                const maxT = Math.max(...dadosTipo.flatMap((d: any) => [d.pmp_pag, d.pmp_vnc, d.pmp_cond]), 30);
+                return (
+                  <ResponsiveContainer width="100%" height={360}>
+                    <ComposedChart data={dadosTipo} margin={{ top: 10, right: 20, left: 0, bottom: 80 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                      <XAxis dataKey="tipo" tick={{ fontSize: 10, fontWeight: 700, fill: '#64748b' }}
+                        angle={-30} textAnchor="end" interval={0} height={80} />
+                      <YAxis yAxisId="left" tickFormatter={fmtRs} tick={{ fontSize: 10, fill: '#64748b' }} width={72} />
+                      <YAxis yAxisId="right" orientation="right" domain={[0, Math.ceil(maxT * 1.2)]}
+                        tick={{ fontSize: 10, fill: '#64748b' }} unit=" d" width={42} />
+                      <Tooltip content={<TooltipCustom />} />
+                      <Legend verticalAlign="top" height={30} wrapperStyle={{ fontSize: 10, fontWeight: 700, paddingBottom: 4 }} />
+                      <Bar yAxisId="left" dataKey="valor" name="Valor Pago" fill="#bfdbfe" radius={[4,4,0,0]} maxBarSize={48} />
+                      <Line yAxisId="right" type="monotone" dataKey="pmp_pag" name="PMP Pagamento"
+                        stroke="#7c3aed" strokeWidth={2.5} dot={{ r: 4, fill: '#7c3aed' }} />
+                      <Line yAxisId="right" type="monotone" dataKey="pmp_vnc" name="PMP Vencimento"
+                        stroke="#2563eb" strokeWidth={2} dot={{ r: 3 }} strokeDasharray="4 2" />
+                      <Line yAxisId="right" type="monotone" dataKey="pmp_cond" name="PMP Cond.Pag."
+                        stroke="#f59e0b" strokeWidth={2} dot={{ r: 3 }} strokeDasharray="2 3" />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                );
+              })()}
+            </div>
+
+            {/* TABELA FORNECEDORES */}
+            <div className="xl:col-span-2 bg-white rounded-2xl border border-slate-100 flex flex-col overflow-hidden">
+              <div className="px-4 py-3 border-b border-slate-100 flex-shrink-0">
+                <div className="text-xs font-black uppercase tracking-widest text-slate-400">Maiores Fornecedores</div>
+                <div className="text-[10px] text-slate-400">por Valor Pago · Delta positivo = bom para caixa</div>
+              </div>
+              <div className="overflow-auto flex-1" style={{ maxHeight: 380 }}>
+                {loading ? (
+                  <div className="flex items-center justify-center h-40 text-slate-300"><Loader2 className="w-5 h-5 animate-spin" /></div>
+                ) : !pmpFornecedores.length ? (
+                  <div className="flex items-center justify-center h-24 text-slate-300 text-xs font-bold">Sem dados</div>
+                ) : (
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                    <thead>
+                      <tr style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
+                        {[['Fornecedor','left'],['Valor Pago','right'],['PMP Pag.','right'],['PMP Cond.','right'],['Delta','right']].map(([h, al]) => (
+                          <th key={h} style={{ padding:'7px 10px', textAlign:al as any, fontSize:9,
+                            fontWeight:800, textTransform:'uppercase', letterSpacing:'.04em',
+                            color:'#94a3b8', borderBottom:'1px solid #f1f5f9', whiteSpace:'nowrap' }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pmpFornecedores.slice(0, 50).map((f: any, i: number) => {
+                        const d = f.delta_atraso ?? 0;
+                        const dCor = d >= 5 ? '#059669' : d >= 0 ? '#d97706' : '#e11d48';
+                        return (
+                          <tr key={`${f.clifor}-${i}`} style={{ background:i%2?'#f9fafb':'#fff', borderBottom:'1px solid #f1f5f9' }}>
+                            <td style={{ padding:'6px 10px', maxWidth:160, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', fontWeight:700, color:'#334155' }} title={f.nome||f.clifor}>
+                              {f.nome || f.clifor || '—'}
+                            </td>
+                            <td style={{ padding:'6px 10px', textAlign:'right', color:'#475569', whiteSpace:'nowrap' }}>{fmtRs(f.valor_total||0)}</td>
+                            <td style={{ padding:'6px 10px', textAlign:'right', fontWeight:900, color:'#7c3aed', whiteSpace:'nowrap' }}>{Number(f.pmp_pagamento??f.pmp??0).toFixed(0)} d</td>
+                            <td style={{ padding:'6px 10px', textAlign:'right', color:'#64748b', whiteSpace:'nowrap' }}>{Number(f.pmp_cond_pag||0).toFixed(0)} d</td>
+                            <td style={{ padding:'6px 10px', textAlign:'right', fontWeight:900, color:dCor, whiteSpace:'nowrap' }}>
+                              {d > 0 ? '+' : ''}{d.toFixed(1)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+              {pmpFornecedores.length > 50 && (
+                <div className="px-4 py-2 border-t border-slate-100 text-[10px] text-slate-400 font-bold flex-shrink-0">
+                  50 de {pmpFornecedores.length} fornecedores · Excel para ver todos
+                </div>
+              )}
+            </div>
+          </div>
           {/* LEGENDA PMP */}
           <div className="flex gap-4 flex-wrap">
             {[
