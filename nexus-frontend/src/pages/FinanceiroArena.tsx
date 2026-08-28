@@ -928,23 +928,6 @@ export default function FinanceiroArena() {
                   </div>
                 )}
 
-                {/* ALERTA DE COBERTURA SF1 */}
-                {pmpCobertura && pmpCobertura.valor_pct < 80 && (
-                  <div className="bg-amber-50 border border-amber-200 rounded-2xl px-5 py-3 flex flex-wrap items-start gap-3">
-                    <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
-                    <div className="text-[11px] text-amber-800 leading-snug">
-                      <b>Cobertura da emissão NF (SF1): {pmpCobertura.valor_pct?.toFixed(1)}% do valor</b> tem data real de NF.
-                      Os demais {(100 - (pmpCobertura.valor_pct ?? 0)).toFixed(1)}% usam fallback (emissão do título SE2), o que pode distorcer o PMP Vencimento e Cond.Pag.
-                      {pmpCobertura.pmp_sf1_only != null && pmpCobertura.pmp_se2_fallback != null && (
-                        <span className="ml-1">
-                          PMP com NF real: <b>{pmpCobertura.pmp_sf1_only?.toFixed(1)} d</b> · PMP fallback SE2: <b>{pmpCobertura.pmp_se2_fallback?.toFixed(1)} d</b>.
-                          Filtre <i>Fonte Emissão = SF1</i> no Excel para ver os dados sem viés.
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                )}
-
                 {/* GRÁFICO EVOLUÇÃO MENSAL PMP */}
                 {pmpEvolucao.length > 0 && (() => {
                   const dadosPmpEvol = pmpEvolucao.map(m => ({
@@ -1003,13 +986,15 @@ export default function FinanceiroArena() {
               ) : pmpTiposData.length === 0 ? (
                 <div className="flex items-center justify-center h-64 text-slate-300 text-xs font-bold">Sem dados</div>
               ) : (() => {
-                const dadosTipo = pmpTiposData.map((t: any) => ({
-                  tipo: t.descricao || t.tipo,
-                  valor: Math.round(t.valor_total ?? 0),
-                  pmp_pag:  t.pmp_pagamento  ?? 0,
-                  pmp_vnc:  t.pmp_vencimento ?? 0,
-                  pmp_cond: t.pmp_cond_pag   ?? 0,
-                }));
+                const dadosTipo = pmpTiposData
+                  .map((t: any) => ({
+                    tipo: t.tipo,            // código original: MP, EM, SV, GG…
+                    valor: Math.round(t.valor_total ?? 0),
+                    pmp_pag:  t.pmp_pagamento  ?? 0,
+                    pmp_vnc:  t.pmp_vencimento ?? 0,
+                    pmp_cond: t.pmp_cond_pag   ?? 0,
+                  }))
+                  .sort((a: any, b: any) => a.pmp_pag - b.pmp_pag); // menor PMP → maior
                 const maxT = Math.max(...dadosTipo.flatMap((d: any) => [d.pmp_pag, d.pmp_vnc, d.pmp_cond]), 30);
                 return (
                   <ResponsiveContainer width="100%" height={360}>
