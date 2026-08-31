@@ -154,6 +154,9 @@ export default function FinanceiroArena() {
   const [pmpTiposData, setPmpTiposData]       = useState<any[]>([]);
   const [pmpCobertura, setPmpCobertura]       = useState<any>(null);
   const [pmpFornecedores, setPmpFornecedores] = useState<any[]>([]);
+  const [pmpFornSel, setPmpFornSel]           = useState<{ clifor: string; nome: string } | null>(null);
+  const [pmpPagamentos, setPmpPagamentos]     = useState<any>(null);
+  const [loadingPmpPag, setLoadingPmpPag]     = useState(false);
   const [regionais, setRegionais] = useState<any[]>([]);
   const [clientes, setClientes]   = useState<any[]>([]);
   const [evolucao, setEvolucao]   = useState<any[]>([]);
@@ -243,6 +246,28 @@ export default function FinanceiroArena() {
     }
   }, [dataIni, dataFim, pmpMotivosSel, pmpTiposSel, pmpFornecedoresSel]);
 
+  // ─── Detalhe de pagamentos do fornecedor PMP ──────────────────────────────
+  const abrirFornecedor = async (clifor: string, nome: string) => {
+    setPmpFornSel({ clifor, nome });
+    setLoadingPmpPag(true);
+    setPmpPagamentos(null);
+    try {
+      const r = await axios.get('/api/v1/financeiro/pmp/pagamentos', {
+        params: {
+          data_ini: dataIni, data_fim: dataFim,
+          clifor,
+          motivos: pmpMotivosSel.length ? pmpMotivosSel.join(',') : undefined,
+          tipos:   pmpTiposSel.length   ? pmpTiposSel.join(',')   : undefined,
+        },
+      });
+      setPmpPagamentos(r.data);
+    } catch {
+      setPmpPagamentos({ pagamentos: [] });
+    } finally {
+      setLoadingPmpPag(false);
+    }
+  };
+
   const buscarFiltros = useCallback(async () => {
     try {
       const r = await axios.get('/api/v1/financeiro/pmr/filtros', {
@@ -260,21 +285,18 @@ export default function FinanceiroArena() {
     if (toggleAtivo === 'PMP') buscarPmp();
   }, [buscarDados, buscarPmp, toggleAtivo]);
 
-  // ─── Aplicar filtros (copia staged → applied e chama API) ────────────────────
+  // ─── Aplicar filtros: copia staged → applied. O useEffect([buscarDados, buscarPmp])
+  //     dispara automaticamente quando os applied states mudam — sem setTimeout.
   const aplicarFiltros = () => {
-    // Datas
     setMesIni(stgMesIni); setAnoIni(stgAnoIni);
     setMesFim(stgMesFim); setAnoFim(stgAnoFim);
-    // PMR filters
     setSegmentosSel(stgSegmentos); setRegionaisSel(stgRegionais);
     setStatusSel(stgStatus);       setMotivosSel(stgMotivos);
-    // PMP filters
     setPmpMotivosSel(stgPmpMotivos);
     setPmpTiposSel(stgPmpTipos);
     setPmpFornecedoresSel(stgPmpFornecedores);
-    // Dispara a busca (a mudança de estado acima re-cria os callbacks via useCallback deps)
-    if (toggleAtivo === 'PMP') setTimeout(() => buscarPmp(), 0);
-    else setTimeout(() => buscarDados(), 0);
+    // NÃO chamar buscarPmp/buscarDados aqui — o useEffect abaixo
+    // detecta que os callbacks foram recriados (novos deps) e dispara.
   };
 
   // ─── Autocomplete de cliente (debounced) ─────────────────────────────────────
@@ -1047,7 +1069,11 @@ export default function FinanceiroArena() {
                         const d = f.delta_atraso ?? 0;
                         const dCor = d >= 5 ? '#059669' : d >= 0 ? '#d97706' : '#e11d48';
                         return (
-                          <tr key={`${f.clifor}-${i}`} style={{ background:i%2?'#f9fafb':'#fff', borderBottom:'1px solid #f1f5f9' }}>
+                          <tr key={`${f.clifor}-${i}`} style={{ background:i%2?'#f9fafb':'#fff', borderBottom:'1px solid #f1f5f9',
+                              cursor:'pointer', transition:'background .1s' }}
+                            onClick={() => abrirFornecedor(f.clifor, f.nome || f.clifor)}
+                            onMouseEnter={e => (e.currentTarget.style.background='#f5f3ff')}
+                            onMouseLeave={e => (e.currentTarget.style.background=i%2?'#f9fafb':'#fff')}>
                             <td style={{ padding:'6px 10px', maxWidth:160, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', fontWeight:700, color:'#334155' }} title={f.nome||f.clifor}>
                               {f.nome || f.clifor || '—'}
                             </td>
@@ -1071,6 +1097,96 @@ export default function FinanceiroArena() {
               )}
             </div>
           </div>
+
+          {/* PAINEL DE DETALHE DO FORNECEDOR */}
+          {pmpFornSel && (
+            <div className="bg-white rounded-2xl border border-violet-100 overflow-hidden">
+              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs font-black uppercase tracking-widest text-violet-600">
+                    Pagamentos — {pmpFornSel.nome || pmpFornSel.clifor}
+                  </div>
+                  <div className="text-[10px] text-slate-400">
+                    CLIFOR {pmpFornSel.clifor} · grão SE5 · prova: Dias = Data Pgto. − Data Base SE2 · Contrib = Dias × Valor
+                    {pmpPagamentos?.resumo && (() => {
+                      const r = pmpPagamentos.resumo;
+                      return (
+                        <> · <b>{pmpPagamentos.total}</b> pgtos ·{' '}
+                          {fmtRs(r.valor_total || 0)} · PMP <b>{(r.pmp_pagamento ?? r.pmp ?? 0).toFixed(1)} d</b>
+                          {' '}· Delta <b style={{ color: (r.delta_atraso ?? 0) >= 0 ? '#059669' : '#e11d48' }}>
+                            {(r.delta_atraso ?? 0) >= 0 ? '+' : ''}{(r.delta_atraso ?? 0).toFixed(1)} d
+                          </b>
+                        </>
+                      );
+                    })()}
+                  </div>
+                </div>
+                <button onClick={() => { setPmpFornSel(null); setPmpPagamentos(null); }}
+                  className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="overflow-auto" style={{ maxHeight: 400 }}>
+                {loadingPmpPag ? (
+                  <div className="flex items-center justify-center h-32 text-slate-300"><Loader2 className="w-5 h-5 animate-spin" /></div>
+                ) : !pmpPagamentos?.pagamentos?.length ? (
+                  <div className="flex items-center justify-center h-24 text-slate-300 text-xs font-bold">Sem pagamentos no período</div>
+                ) : (
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                    <thead>
+                      <tr style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
+                        {[
+                          ['Nº Título', 'left'],  ['Pref.', 'left'], ['Parc.', 'left'], ['Tipo', 'left'],
+                          ['★ Data Base SE2', 'left'], ['Vencto Contr.', 'left'], ['Vencto Real', 'left'],
+                          ['★ Data Pgto.', 'left'], ['★ Valor Pago', 'right'],
+                          ['Motivo', 'left'], ['D1', 'left'],
+                          ['★ Dias Pgto.', 'right'], ['★ Contrib.', 'right'],
+                          ['Dias Vencto.', 'right'], ['Dias Cond.', 'right'], ['Delta', 'right'],
+                        ].map(([h, al]) => (
+                          <th key={h as string} style={{ padding:'7px 9px', textAlign:al as any, fontSize:9,
+                            fontWeight:800, textTransform:'uppercase', letterSpacing:'.04em',
+                            color: (h as string).startsWith('★') ? '#92400e' : '#94a3b8',
+                            background: (h as string).startsWith('★') ? '#fffbeb' : '#f8fafc',
+                            borderBottom:'1px solid #f1f5f9', whiteSpace:'nowrap' }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pmpPagamentos.pagamentos.map((p: any, i: number) => {
+                        const dCor = p.delta_atraso >= 5 ? '#059669' : p.delta_atraso >= 0 ? '#d97706' : '#e11d48';
+                        return (
+                          <tr key={i} style={{ background: i%2?'#f9fafb':'#fff', borderBottom:'1px solid #f1f5f9' }}>
+                            <td style={{ padding:'6px 9px', color:'#334155', fontWeight:600, whiteSpace:'nowrap' }}>{p.nf_titulo}</td>
+                            <td style={{ padding:'6px 9px', color:'#64748b', whiteSpace:'nowrap' }}>{p.prefixo}</td>
+                            <td style={{ padding:'6px 9px', color:'#64748b', whiteSpace:'nowrap' }}>{p.parcela || '—'}</td>
+                            <td style={{ padding:'6px 9px', color:'#64748b', whiteSpace:'nowrap' }}>{p.tipo}</td>
+                            <td style={{ padding:'6px 9px', color:'#065f46', fontWeight:700, whiteSpace:'nowrap', background:'#f0fdf4' }}>{p.data_base_se2}</td>
+                            <td style={{ padding:'6px 9px', color:'#64748b', whiteSpace:'nowrap' }}>{p.vencto_contratual}</td>
+                            <td style={{ padding:'6px 9px', color:'#64748b', whiteSpace:'nowrap' }}>{p.vencto_real}</td>
+                            <td style={{ padding:'6px 9px', color:'#1e40af', fontWeight:700, whiteSpace:'nowrap', background:'#eff6ff' }}>{p.data_pagamento}</td>
+                            <td style={{ padding:'6px 9px', textAlign:'right', fontWeight:700, color:'#334155', whiteSpace:'nowrap', background:'#eff6ff' }}>{fmtRs(p.valor_pago)}</td>
+                            <td style={{ padding:'6px 9px', color:'#64748b', whiteSpace:'nowrap' }}>{p.motivo}</td>
+                            <td style={{ padding:'6px 9px', color:'#64748b', whiteSpace:'nowrap' }}>{p.d1_tp}</td>
+                            <td style={{ padding:'6px 9px', textAlign:'right', fontWeight:900, color:'#7c3aed', background:'#fef9c3' }}>{p.dias_pagamento} d</td>
+                            <td style={{ padding:'6px 9px', textAlign:'right', color:'#92400e', background:'#fef9c3', whiteSpace:'nowrap' }}>{Number(p.contrib_pgto).toLocaleString('pt-BR',{maximumFractionDigits:0})}</td>
+                            <td style={{ padding:'6px 9px', textAlign:'right', color:'#64748b' }}>{p.dias_vencimento} d</td>
+                            <td style={{ padding:'6px 9px', textAlign:'right', color:'#64748b' }}>{p.dias_cond_pag} d</td>
+                            <td style={{ padding:'6px 9px', textAlign:'right', fontWeight:900, color:dCor }}>
+                              {p.delta_atraso >= 0 ? '+' : ''}{p.delta_atraso}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+              {/* Nota de prova */}
+              <div className="px-4 py-2 border-t border-amber-100 bg-amber-50 text-[10px] text-amber-800 font-bold">
+                Prova: <span className="font-normal">★ Dias Pgto. = Data Pgto. − Data Base SE2 · ★ Contrib. = Dias × Valor · PMP fornecedor = SUM(Contrib.) / SUM(Valor Pago)</span>
+              </div>
+            </div>
+          )}
           {/* LEGENDA PMP */}
           <div className="flex gap-4 flex-wrap">
             {[
