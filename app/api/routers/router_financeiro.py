@@ -263,6 +263,29 @@ async def pmp_por_tipo(
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "tipos": []}
 
 
+
+@router.get("/pmp/pagamentos")
+async def pmp_pagamentos(
+    data_ini: date = Query(...), data_fim: date = Query(...),
+    clifor: str = Query(...),
+    motivos: str = Query(None), tipos: str = Query(None),
+    e5_motbx: str = Query(None), d1_tp: str = Query(None),
+    _: dict = Depends(get_current_user),
+):
+    """Detalhe de todos os pagamentos SE5 de um CLIFOR — prova do PMP."""
+    _validar_datas(data_ini, data_fim)
+    motivos_v = motivos or e5_motbx
+    tipos_v   = tipos or d1_tp
+    try:
+        return await asyncio.to_thread(
+            _pmp().calcular_pmp_fornecedor_detalhe,
+            data_ini, data_fim, clifor, motivos_v, tipos_v,
+        )
+    except Exception as e:
+        logger.exception("pmp/pagamentos: %s", e)
+        return {"clifor": clifor, "nome": "", "total": 0, "resumo": {}, "pagamentos": []}
+
+
 @router.get("/pmp/exportar")
 async def pmp_exportar(data_ini: date = Query(...), data_fim: date = Query(...),
                        motivos: str = Query(None), tipos: str = Query(None),

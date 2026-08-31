@@ -286,6 +286,79 @@ def calcular_pmp_por_tipo(data_ini: date, data_fim: date, motivos=None, tipos=No
     rows.sort(key=lambda r: r["pmp_pagamento"])
     return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "tipos": rows}
 
+def calcular_pmp_fornecedor_detalhe(
+    data_ini: date, data_fim: date,
+    clifor: str,
+    motivos=None, tipos=None,
+) -> dict[str, Any]:
+    """
+    Retorna o detalhe de todos os pagamentos SE5 de um CLIFOR específico,
+    incluindo as colunas de prova do cálculo (dias, contrib, datas).
+    """
+    base = _base(data_ini, data_fim, motivos, tipos, fornecedores=clifor)
+    if base.empty:
+        return {
+            "clifor": clifor, "nome": "",
+            "total": 0, "resumo": _resumo(base), "pagamentos": [],
+        }
+
+    # nome do fornecedor
+    try:
+        from app.financeiro.s3_store import carregar_fornecedores
+        sa2 = carregar_fornecedores()
+        nc = next((c for c in ("a2_nome","a2_nom","nome","razao_social") if c in sa2), None)
+        nome = ""
+        if nc and "clifor" in sa2.columns:
+            nm = sa2.set_index(sa2["clifor"].astype(str).str.strip().str.upper())[nc].to_dict()
+            nome = nm.get(str(clifor).strip().upper(), "")
+    except Exception:
+        nome = ""
+
+    base = base.copy()
+    base["contrib_pgto"] = base["dias_pagamento"].fillna(0) * base["e5_valor"].fillna(0)
+
+    def _fmtd(v):
+        try:
+            t = pd.Timestamp(v)
+            return t.strftime("%d/%m/%Y") if pd.notna(t) else None
+        except Exception:
+            return None
+
+    pagamentos = []
+    for row in base.sort_values("e5_data", ascending=False).itertuples(index=False):
+        pagamentos.append({
+            "nf_titulo":        str(getattr(row, "e2_num",      "") or ""),
+            "prefixo":          str(getattr(row, "e2_prefixo",  "") or ""),
+            "parcela":          str(getattr(row, "e2_parcela",  "") or "").strip(),
+            "tipo":             str(getattr(row, "e2_tipo",     "") or "").strip(),
+            "data_base_se2":    _fmtd(getattr(row, "e2_emissao",  None)),
+            "vencto_contratual":_fmtd(getattr(row, "e2_vencto",   None)),
+            "vencto_real":      _fmtd(getattr(row, "e2_vencrea",  None)),
+            "data_pagamento":   _fmtd(getattr(row, "e5_data",     None)),
+            "valor_pago":       round(float(getattr(row, "e5_valor",   0) or 0), 2),
+            "motivo":           str(getattr(row, "e5_motbx",   "") or "").strip(),
+            "d1_tp":            str(getattr(row, "d1_tp",      "") or "").strip() or "SEM TIPO",
+            "emissao_nf_sf1":   _fmtd(getattr(row, "f1_emissao",  None)),
+            "dias_pagamento":   int(round(float(getattr(row, "dias_pagamento",  0) or 0))),
+            "dias_vencimento":  int(round(float(getattr(row, "dias_vencimento", 0) or 0))),
+            "dias_cond_pag":    int(round(float(getattr(row, "dias_cond_pag",   0) or 0))),
+            "delta_atraso":     round(
+                float(getattr(row, "dias_pagamento", 0) or 0) -
+                float(getattr(row, "dias_cond_pag",  0) or 0), 1
+            ),
+            "contrib_pgto":     round(float(getattr(row, "contrib_pgto", 0) or 0), 0),
+        })
+
+    resumo = _resumo(base)
+    return {
+        "clifor": clifor,
+        "nome":   nome,
+        "total":  len(pagamentos),
+        "resumo": resumo,
+        "pagamentos": pagamentos,
+    }
+
+
 def calcular_pmp(data_ini: date, data_fim: date, **filters) -> dict[str, Any]:
     """Alias estável para consumidores que não precisam escolher a granularidade."""
     return {"global": calcular_pmp_global(data_ini, data_fim, **filters),
