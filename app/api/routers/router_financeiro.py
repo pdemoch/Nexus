@@ -283,322 +283,314 @@ async def pmp_exportar(data_ini: date = Query(...), data_fim: date = Query(...),
 
         pmp      = _pmp()
         base     = pmp._base(data_ini, data_fim, *f)
-        d_forn   = pmp.calcular_pmp_fornecedores(data_ini, data_fim, 100000, 0, *f)
-        d_evol   = pmp.calcular_pmp_mensal(data_ini, data_fim, *f)
         d_global = pmp.calcular_pmp_global(data_ini, data_fim, *f)
 
         if base.empty:
             buf = io.BytesIO(); openpyxl.Workbook().save(buf); buf.seek(0); return buf
 
-        # ── Enriquecer base com nome do fornecedor (SA2) ─────────────────────
+        # Enriquecer base com nome do fornecedor (SA2)
         try:
             from app.financeiro.s3_store import carregar_fornecedores
             sa2 = carregar_fornecedores()
             nc = next((c for c in ("a2_nome","a2_nom","nome","razao_social") if c in sa2), None)
             if nc and "clifor" in sa2.columns:
-                sa2["_clf"] = sa2["clifor"].astype(str).str.strip().str.upper()
-                nome_map = sa2.set_index("_clf")[nc].to_dict()
-                base["nome_fornecedor"] = base["clifor"].map(nome_map).fillna("— sem cadastro —")
+                nm = sa2.set_index(sa2["clifor"].astype(str).str.strip().str.upper())[nc].to_dict()
+                base["nome_forn"] = base["clifor"].map(nm).fillna("—")
             else:
-                base["nome_fornecedor"] = "— sem cadastro —"
+                base["nome_forn"] = "—"
         except Exception:
-            base["nome_fornecedor"] = "— sem cadastro —"
+            base["nome_forn"] = "—"
 
-        # ── Garantir colunas derivadas ────────────────────────────────────────
-        base["contribuicao_pmp"] = (
-            base["dias_pagamento"].fillna(0) * base["e5_valor"].fillna(0)
-        )
-        base["e2_emissao"]  = pd.to_datetime(base.get("e2_emissao"),  errors="coerce")
-        base["e2_vencto"]   = pd.to_datetime(base.get("e2_vencto"),   errors="coerce")
-        base["e2_vencrea"]  = pd.to_datetime(base.get("e2_vencrea"),  errors="coerce")
-        base["e5_data"]     = pd.to_datetime(base.get("e5_data"),     errors="coerce")
-        base["f1_emissao"]  = pd.to_datetime(base.get("f1_emissao"),  errors="coerce")
+        # Colunas de contribuicao (numerador da media ponderada)
+        base["contrib_pgto"] = base["dias_pagamento"].fillna(0) * base["e5_valor"].fillna(0)
+        base["contrib_vnc"]  = base["dias_vencimento"].fillna(0) * base["e5_valor"].fillna(0)
+        base["contrib_cond"] = base["dias_cond_pag"].fillna(0)  * base["e5_valor"].fillna(0)
+        base["e2_emissao"]   = pd.to_datetime(base.get("e2_emissao"),  errors="coerce")
+        base["e2_vencto"]    = pd.to_datetime(base.get("e2_vencto"),   errors="coerce")
+        base["e2_vencrea"]   = pd.to_datetime(base.get("e2_vencrea"),  errors="coerce")
+        base["e5_data"]      = pd.to_datetime(base.get("e5_data"),     errors="coerce")
+        base["f1_emissao"]   = pd.to_datetime(base.get("f1_emissao"),  errors="coerce")
+        base["d1_label"]     = base["d1_tp"].astype(str).str.strip().str.upper().replace("", "SEM TIPO").fillna("SEM TIPO")
+
+        def _fill(h): return PatternFill("solid", fgColor=h)
+        def _fnt(bold=False, color="000000", sz=10):
+            return Font(bold=bold, color=color, size=sz, name="Arial")
+        def _bdr():
+            return Border(bottom=Side(style="thin", color="D9E2EC"))
+        def _aln(h="left"):
+            return Alignment(horizontal=h, vertical="center", wrap_text=False)
+
+        FMT_BRL = "R$ #,##0.00"; FMT_DATE = "DD/MM/YYYY"
+        FMT_INT = "#,##0"; FMT_DAYS = "#,##0.00"; FMT_CONTRIB = "#,##0"
+        ALT_BG   = _fill("F2F7FC"); PROVA_BG = _fill("FFF8E7")
+        BODY_FNT = _fnt(sz=10); BORDER   = _bdr()
+
+        C_ID = "0F3460"; C_SE2 = "065F46"; C_SE5 = "3B1F6D"
+        C_SF1 = "4A4A4A"; C_PROVA = "7C3400"; C_AGG = "1E3A5F"
 
         def _dt(v):
-            try:
-                t = pd.Timestamp(v)
-                return t.date() if pd.notna(t) else None
-            except Exception:
-                return None
-
-        def _v(v):
+            try: t = pd.Timestamp(v); return t.date() if pd.notna(t) else None
+            except: return None
+        def _sv(v):
             try: return None if pd.isna(v) else v
             except: return v
 
-        # ── Estilos ───────────────────────────────────────────────────────────
-        def fill(hex_): return PatternFill("solid", fgColor=hex_)
-        def font(bold=False, color="000000", sz=10, name="Arial"):
-            return Font(bold=bold, color=color, size=sz, name=name)
-        def bdr(bot="D9E2EC"):
-            return Border(bottom=Side(style="thin", color=bot))
-        def align(h="left", wrap=False):
-            return Alignment(horizontal=h, vertical="center", wrap_text=wrap)
+        def write_hdr(ws, row, cols_info):
+            ws.row_dimensions[row].height = 32
+            for ci, (lbl, w, cor) in enumerate(cols_info, 1):
+                c = ws.cell(row=row, column=ci, value=lbl)
+                c.fill = _fill(cor)
+                c.font = Font(bold=True, color="FFFFFF", size=9, name="Arial")
+                c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                ws.column_dimensions[get_column_letter(ci)].width = w
 
-        # cabeçalho de grupo → cor de fundo
-        GRP_COLORS = {
-            "ID":    "0F3460",   # azul escuro
-            "SE2":  "065F46",   # verde-escuro (título SE2)
-            "SE5":  "3B1F6D",   # roxo escuro  (pagamento)
-            "SF1":  "4A4A4A",   # cinza        (referência NF)
-            "PROVA":"7C3400",   # âmbar        (prova do cálculo)
-        }
-        PROVA_ROW_FILL  = fill("FFF8E7")   # linhas com fundo suave para cols prova
-        ALT_FILL        = fill("F2F7FC")   # linhas alternadas normais
-        BODY_FONT       = font(sz=10)
-        BORDER          = bdr()
-
-        FMT_BRL   = "R$ #,##0.00"
-        FMT_DATE  = "DD/MM/YYYY"
-        FMT_INT   = "#,##0"
-        FMT_DAYS  = "#,##0.00"
-        FMT_CONTRIB = "#,##0"
-
-        # ─────────────────────────────────────────────────────────────────────
-        # Definição das colunas: (campo_df, grupo, label_col, fmt, width)
-        #  grupo define a cor do cabeçalho de grupo (linha 1)
-        # ─────────────────────────────────────────────────────────────────────
-        COLS = [
-            # IDENTIFICAÇÃO
-            ("clifor",           "ID",    "CLIFOR",                   None,       10),
-            ("nome_fornecedor",  "ID",    "Razão Social (SA2)",       None,       36),
-            ("e5_filial",        "ID",    "Filial",                   None,        6),
-            # SE2 — Título a Pagar
-            ("e2_num",           "SE2",   "Nº Título (SE2)",          None,       16),
-            ("e2_prefixo",       "SE2",   "Prefixo",                  None,        8),
-            ("e2_parcela",       "SE2",   "Parcela",                  None,        8),
-            ("e2_tipo",          "SE2",   "Tipo",                     None,        6),
-            ("e2_emissao",       "SE2",   "★ Data Base Cálculo (SE2)",FMT_DATE,  20),
-            ("e2_vencto",        "SE2",   "Vencto. Contratual (SE2)", FMT_DATE,  20),
-            ("e2_vencrea",       "SE2",   "Vencto. Real (SE2)",       FMT_DATE,  18),
-            # SE5 — Pagamento
-            ("e5_numero",        "SE5",   "Nº Mov. (SE5)",            None,       16),
-            ("e5_loja",          "SE5",   "Loja",                     None,        6),
-            ("e5_data",          "SE5",   "★ Data Pagamento (E5)",    FMT_DATE,  20),
-            ("e5_valor",         "SE5",   "★ Valor Pago E5 (R$)",    FMT_BRL,   18),
-            ("e5_motbx",         "SE5",   "Motivo Baixa",             None,       12),
-            # SF1 — NF referência (não usada no cálculo)
-            ("f1_emissao",       "SF1",   "Emissão NF SF1 (ref.)",   FMT_DATE,  17),
-            ("d1_tp",            "SF1",   "Tipo Compra D1",           None,       12),
-            # PROVA DO CÁLCULO
-            ("dias_pagamento",   "PROVA", "Dias PMP Pgto." + chr(10) + "= Pgto - Base SE2",   FMT_DAYS,    18),
-            ("dias_vencimento",  "PROVA", "Dias PMP Vencto." + chr(10) + "= Vencrea - Base",  FMT_DAYS,    18),
-            ("dias_cond_pag",    "PROVA", "Dias PMP Cond." + chr(10) + "= Vencto - Base",     FMT_DAYS,    18),
-            ("contribuicao_pmp", "PROVA", "Contrib. Pgto." + chr(10) + "= Dias x R$",         FMT_CONTRIB, 18),
-        ]
-        N = len(COLS)
-
-        wb = openpyxl.Workbook()
-        wb.remove(wb.active)
-
-        # ════════════════════════════════════════════════════════════════════
-        # ABA 1 — DADOS BRUTOS (prova do cálculo)
-        # ════════════════════════════════════════════════════════════════════
-        ws1 = wb.create_sheet("Dados Brutos")
-
-        # Linha 1 — cabeçalhos de grupo (merged por grupo contíguo)
-        grp_ranges = {}
-        cur_grp = None; cur_start = 1
-        for ci, (_, grp, *_rest) in enumerate(COLS, 1):
-            if grp != cur_grp:
-                if cur_grp:
-                    grp_ranges[cur_grp] = (cur_start, ci - 1)
-                cur_grp = grp; cur_start = ci
-        grp_ranges[cur_grp] = (cur_start, N)
-
-        GRP_LABELS = {
-            "ID":    "IDENTIFICAÇÃO",
-            "SE2":  "SE2 — TÍTULO A PAGAR  (data base do cálculo)",
-            "SE5":  "SE5 — PAGAMENTO BANCÁRIO",
-            "SF1":  "SF1 — NF REFERÊNCIA (não usada no cálculo SE2)",
-            "PROVA":"★  PROVA DO CÁLCULO  —  PMP = SUM(Contrib.) ÷ SUM(Valor Pago)",
-        }
-        ws1.row_dimensions[1].height = 22
-        for grp, (c1, c2) in grp_ranges.items():
-            if c1 < c2:
-                ws1.merge_cells(start_row=1, start_column=c1, end_row=1, end_column=c2)
-            c = ws1.cell(row=1, column=c1, value=GRP_LABELS[grp])
-            c.fill = fill(GRP_COLORS[grp])
-            c.font = font(bold=True, color="FFFFFF", sz=10)
-            c.alignment = align("center")
-
-        # Linha 2 — nomes das colunas
-        ws1.row_dimensions[2].height = 36
-        for ci, (_, grp, label, fmt, w) in enumerate(COLS, 1):
-            c = ws1.cell(row=2, column=ci, value=label)
-            c.fill = fill(GRP_COLORS[grp])
-            c.font = font(bold=True, color="FFFFFF", sz=9)
-            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            ws1.column_dimensions[get_column_letter(ci)].width = w
-
-        # Dados — a partir da linha 3
-        for ri, row in enumerate(base.itertuples(index=False), 3):
-            alt = (ri % 2 == 0)
-            for ci, (col, grp, label, fmt, _) in enumerate(COLS, 1):
-                v = getattr(row, col, None)
-                if fmt == FMT_DATE:
-                    v = _dt(v)
-                else:
-                    v = _v(v)
-
-                c = ws1.cell(row=ri, column=ci, value=v)
-                c.font  = BODY_FONT
-                c.border = BORDER
-
-                if grp == "PROVA":
-                    c.fill = PROVA_ROW_FILL
-                elif alt:
-                    c.fill = ALT_FILL
-
-                if fmt:
-                    c.number_format = fmt
-                if isinstance(v, (int, float)) and fmt not in (FMT_DATE, None):
-                    c.alignment = align("right")
-
-        ws1.auto_filter.ref = f"A2:{get_column_letter(N)}2"
-        ws1.freeze_panes    = "A3"
-
-        # ── Nota de rodapé: fórmula de verificação ────────────────────────────
-        nota_row = len(base) + 4
-        pmp_pg   = d_global.get("pmp_pagamento") or 0
-        vt       = d_global.get("valor_total", 0) or 0
-        c = ws1.cell(row=nota_row, column=1,
-                     value=f"VERIFICAÇÃO GLOBAL: SUM(Contrib. Pgto.) / SUM(Valor Pago) "
-                           f"= PMP Pagamento global = {pmp_pg:.2f} dias  "
-                           f"(valor total: R$ {vt:,.0f})")
-        c.font = font(bold=True, sz=10, color="7C3400")
-        c.fill = fill("FFF3CD")
-        ws1.merge_cells(start_row=nota_row, start_column=1,
-                        end_row=nota_row, end_column=min(N, 12))
-
-        # ════════════════════════════════════════════════════════════════════
-        # ABA 2 — POR FORNECEDOR
-        # ════════════════════════════════════════════════════════════════════
-        ws2 = wb.create_sheet("Por Fornecedor")
-        ws2.row_dimensions[1].height = 30
-        HDR_FILL = fill("1E3A5F"); HDR_FONT = font(bold=True, color="FFFFFF", sz=10)
-        BODY2    = font(sz=10);   BDR2 = bdr()
-
-        def _hdr2(ws, row, col, label, width=None):
-            c = ws.cell(row=row, column=col, value=label)
-            c.fill, c.font = HDR_FILL, HDR_FONT
-            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            if width: ws.column_dimensions[get_column_letter(col)].width = width
-
-        def _write2(ws, ri, vals_fmts, alt=False):
-            f2 = ALT_FILL if alt else None
+        def write_data(ws, ri, vals_fmts, alt=False, proof=False):
+            bg = PROVA_BG if proof else (ALT_BG if alt else None)
             for ci, (val, fmt) in enumerate(vals_fmts, 1):
                 c = ws.cell(row=ri, column=ci, value=val)
-                c.font = BODY2; c.border = BDR2
-                if f2: c.fill = f2
+                c.font = BODY_FNT; c.border = BORDER
+                if bg: c.fill = bg
                 if fmt: c.number_format = fmt
                 if isinstance(val, (int, float)) and fmt not in (FMT_DATE, None):
-                    c.alignment = align("right")
+                    c.alignment = _aln("right")
 
-        h2 = [("CLIFOR",8),("Razão Social",38),("Pagamentos",12),
-              ("Valor Pago E5 (R$)",20),("PMP Pagamento (dias)",18),
-              ("PMP Vencimento (dias)",19),("PMP Cond.Pag. (dias)",18),
-              ("Delta Atraso (dias)",16)]
-        for ci,(lbl,w) in enumerate(h2,1): _hdr2(ws2,1,ci,lbl,width=w)
-        for ri, r in enumerate(d_forn.get("fornecedores",[]), 2):
-            _write2(ws2, ri, [
-                (str(r.get("clifor","")),  None),
-                (str(r.get("nome","")),    None),
-                (int(r.get("pagamentos",0)), FMT_INT),
-                (float(r.get("valor_total",0)), FMT_BRL),
-                (float(r.get("pmp_pagamento", r.get("pmp",0))), FMT_DAYS),
-                (float(r.get("pmp_vencimento",0)), FMT_DAYS),
-                (float(r.get("pmp_cond_pag",0)),   FMT_DAYS),
-                (float(r.get("delta_atraso",0)),    FMT_DAYS),
+        def agg_pmp(grp):
+            vt = grp["e5_valor"].sum()
+            if not vt: return dict.fromkeys(["pagamentos","valor","contrib_pgto","pmp_pgto","pmp_vnc","pmp_cond","delta"], 0)
+            return {
+                "pagamentos":   int(len(grp)),
+                "valor":        round(float(vt), 2),
+                "contrib_pgto": round(float(grp["contrib_pgto"].sum()), 0),
+                "pmp_pgto":     round(float(grp["contrib_pgto"].sum()) / float(vt), 2),
+                "pmp_vnc":      round(float(grp["contrib_vnc"].sum())  / float(vt), 2),
+                "pmp_cond":     round(float(grp["contrib_cond"].sum()) / float(vt), 2),
+                "delta":        round((float(grp["contrib_pgto"].sum()) - float(grp["contrib_cond"].sum())) / float(vt), 2),
+            }
+
+        wb = openpyxl.Workbook(); wb.remove(wb.active)
+
+        # === ABA 1: DADOS BRUTOS ===
+        ws1 = wb.create_sheet("Dados Brutos")
+        # Linha 1: grupos mergeados
+        GRP_SPANS = [
+            ("IDENTIFICACAO", 3, C_ID),
+            ("SE2 - TITULO A PAGAR (data base do calculo)", 7, C_SE2),
+            ("SE5 - PAGAMENTO BANCARIO", 5, C_SE5),
+            ("SF1 - NF REFERENCIA", 2, C_SF1),
+            ("PROVA DO CALCULO", 4, C_PROVA),
+        ]
+        ws1.row_dimensions[1].height = 18
+        ci = 1
+        for lbl, span, cor in GRP_SPANS:
+            if span > 1:
+                ws1.merge_cells(start_row=1, start_column=ci, end_row=1, end_column=ci+span-1)
+            cell = ws1.cell(row=1, column=ci, value=lbl)
+            cell.fill = _fill(cor)
+            cell.font = Font(bold=True, color="FFFFFF", size=9, name="Arial")
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            ci += span
+        COLS_B = [
+            ("clifor",         "CLIFOR",                 None,      10, C_ID),
+            ("nome_forn",      "Razao Social (SA2)",      None,      32, C_ID),
+            ("e5_filial",      "Filial",                  None,       6, C_ID),
+            ("e2_num",         "No. Titulo (SE2)",        None,      15, C_SE2),
+            ("e2_prefixo",     "Prefixo",                 None,       8, C_SE2),
+            ("e2_parcela",     "Parcela",                 None,       8, C_SE2),
+            ("e2_tipo",        "Tipo",                    None,       6, C_SE2),
+            ("e2_emissao",     "* Data Base (SE2)",      FMT_DATE,  18, C_SE2),
+            ("e2_vencto",      "Vencto. Contratual",     FMT_DATE,  18, C_SE2),
+            ("e2_vencrea",     "Vencto. Real",           FMT_DATE,  15, C_SE2),
+            ("e5_numero",      "No. Mov. E5",             None,      15, C_SE5),
+            ("e5_loja",        "Loja",                    None,       6, C_SE5),
+            ("e5_data",        "* Data Pagamento (E5)",  FMT_DATE,  18, C_SE5),
+            ("e5_valor",       "* Valor Pago (R$)",      FMT_BRL,   18, C_SE5),
+            ("e5_motbx",       "Motivo Baixa",            None,      12, C_SE5),
+            ("f1_emissao",     "Emissao NF SF1 (ref.)",  FMT_DATE,  16, C_SF1),
+            ("d1_label",       "Tipo Compra D1",          None,      12, C_SF1),
+            ("dias_pagamento",  "* Dias PMP Pgto.",       FMT_DAYS,  16, C_PROVA),
+            ("contrib_pgto",   "* Contrib=Dias x R$",    FMT_CONTRIB,18,C_PROVA),
+            ("dias_vencimento", "Dias PMP Vencto.",       FMT_DAYS,  16, C_PROVA),
+            ("dias_cond_pag",  "Dias PMP Cond.",          FMT_DAYS,  15, C_PROVA),
+        ]
+        ws1.row_dimensions[2].height = 34
+        for ci, (_, lbl, _, w, cor) in enumerate(COLS_B, 1):
+            cell = ws1.cell(row=2, column=ci, value=lbl)
+            cell.fill = _fill(cor)
+            cell.font = Font(bold=True, color="FFFFFF", size=9, name="Arial")
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            ws1.column_dimensions[get_column_letter(ci)].width = w
+        for ri, row in enumerate(base.itertuples(index=False), 3):
+            for ci, (col, _, fmt, _, cor) in enumerate(COLS_B, 1):
+                v = getattr(row, col, None)
+                if fmt == FMT_DATE: v = _dt(v)
+                else: v = _sv(v)
+                cell = ws1.cell(row=ri, column=ci, value=v)
+                cell.font = BODY_FNT; cell.border = BORDER
+                if cor == C_PROVA: cell.fill = PROVA_BG
+                elif ri % 2 == 0: cell.fill = ALT_BG
+                if fmt: cell.number_format = fmt
+                if isinstance(v, (int, float)) and fmt not in (FMT_DATE, None):
+                    cell.alignment = _aln("right")
+        ws1.auto_filter.ref = "A2:" + get_column_letter(len(COLS_B)) + "2"
+        ws1.freeze_panes = "A3"
+        nr = len(base) + 4
+        vt_tot = base["e5_valor"].sum(); ct_tot = base["contrib_pgto"].sum()
+        pmp_pv = ct_tot / vt_tot if vt_tot else 0
+        nc_cell = ws1.cell(row=nr, column=1,
+            value=f"PROVA GLOBAL: SUM(Contrib.) / SUM(Valor) = {ct_tot:,.0f} / {vt_tot:,.0f} = {pmp_pv:.2f} dias")
+        nc_cell.font = Font(bold=True, size=10, color="7C3400", name="Arial"); nc_cell.fill = _fill("FFF3CD")
+        ws1.merge_cells(start_row=nr, start_column=1, end_row=nr, end_column=min(len(COLS_B), 12))
+
+        # === ABA 2: POR FORNECEDOR ===
+        ws2 = wb.create_sheet("Por Fornecedor")
+        HFORN = [("CLIFOR",10,C_AGG),("Razao Social (SA2)",36,C_AGG),("Pagamentos",12,C_AGG),
+                 ("Valor Pago (R$)",18,C_AGG),("* SIGMA Contrib.Pgto.",18,C_PROVA),
+                 ("* PMP Pgto.=Sigma/Valor",18,C_PROVA),("PMP Vencto.(d)",15,C_AGG),
+                 ("PMP Cond.Pag.(d)",15,C_AGG),("Delta Atraso(d)",14,C_AGG)]
+        write_hdr(ws2, 1, HFORN)
+        rows_f = sorted([{"clifor":k,"nome":g["nome_forn"].iloc[0],**agg_pmp(g)}
+                         for k,g in base.groupby("clifor", dropna=False)],
+                        key=lambda r: r["valor"], reverse=True)
+        for ri, r in enumerate(rows_f, 2):
+            write_data(ws2, ri, [
+                (str(r["clifor"]),None),(str(r["nome"]),None),(r["pagamentos"],FMT_INT),
+                (r["valor"],FMT_BRL),(r["contrib_pgto"],FMT_CONTRIB),(r["pmp_pgto"],FMT_DAYS),
+                (r["pmp_vnc"],FMT_DAYS),(r["pmp_cond"],FMT_DAYS),(r["delta"],FMT_DAYS),
             ], alt=(ri%2==0))
-        ws2.auto_filter.ref = f"A1:{get_column_letter(len(h2))}1"
+        ws2.auto_filter.ref = "A1:" + get_column_letter(len(HFORN)) + "1"
         ws2.freeze_panes = "A2"
+        nr2 = len(rows_f) + 3
+        nc2 = ws2.cell(row=nr2, column=1,
+            value="PROVA: coluna * PMP = coluna * SIGMA Contrib. / Valor Pago. SUM(Valor) = total Dados Brutos.")
+        nc2.font = Font(bold=True, size=9, color="7C3400", name="Arial"); nc2.fill = _fill("FFF3CD")
+        ws2.merge_cells(start_row=nr2, start_column=1, end_row=nr2, end_column=8)
 
-        # ════════════════════════════════════════════════════════════════════
-        # ABA 3 — EVOLUÇÃO MENSAL
-        # ════════════════════════════════════════════════════════════════════
-        ws3 = wb.create_sheet("Evolucao Mensal")
-        ws3.row_dimensions[1].height = 30
-        h3 = [("Mês Pagamento",14),("Pagamentos",12),("Valor Pago E5 (R$)",20),
-              ("PMP Pagamento (dias)",18),("PMP Vencimento (dias)",19),
-              ("PMP Cond.Pag. (dias)",18),("Delta Atraso (dias)",16)]
-        for ci,(lbl,w) in enumerate(h3,1): _hdr2(ws3,1,ci,lbl,width=w)
-        for ri, m in enumerate(d_evol.get("meses",[]), 2):
-            _write2(ws3, ri, [
-                (m["mes"],               None),
-                (int(m["pagamentos"]),   FMT_INT),
-                (float(m["valor_total"]),FMT_BRL),
-                (float(m["pmp_pagamento"]),  FMT_DAYS),
-                (float(m["pmp_vencimento"]), FMT_DAYS),
-                (float(m["pmp_cond_pag"]),   FMT_DAYS),
-                (float(m["delta_atraso"]),   FMT_DAYS),
-            ], alt=(ri%2==0))
+        # === ABA 3: POR TIPO D1 ===
+        ws3 = wb.create_sheet("Por Tipo D1")
+        HTIPO = [("Cod. D1",10,C_AGG),("Pagamentos",12,C_AGG),("Valor Pago (R$)",18,C_AGG),
+                 ("* SIGMA Contrib.Pgto.",18,C_PROVA),("* PMP Pgto.=Sigma/V.",18,C_PROVA),
+                 ("PMP Vencto.(d)",15,C_AGG),("PMP Cond.Pag.(d)",15,C_AGG),("Delta(d)",12,C_AGG)]
+        write_hdr(ws3, 1, HTIPO)
+        rows_t = sorted([{"tipo":k,**agg_pmp(g)} for k,g in base.groupby("d1_label",dropna=False)],
+                        key=lambda r: r["pmp_pgto"])
+        for ri, r in enumerate(rows_t, 2):
+            is_sem = (r["tipo"] == "SEM TIPO")
+            write_data(ws3, ri, [
+                (r["tipo"],None),(r["pagamentos"],FMT_INT),(r["valor"],FMT_BRL),
+                (r["contrib_pgto"],FMT_CONTRIB),(r["pmp_pgto"],FMT_DAYS),
+                (r["pmp_vnc"],FMT_DAYS),(r["pmp_cond"],FMT_DAYS),(r["delta"],FMT_DAYS),
+            ], alt=(ri%2==0), proof=is_sem)
+            ri_final = ri
+        ws3.auto_filter.ref = "A1:" + get_column_letter(len(HTIPO)) + "1"
         ws3.freeze_panes = "A2"
+        sem_base = base[base["d1_label"] == "SEM TIPO"]
+        if not sem_base.empty:
+            sep_r = ri_final + 2
+            sc = ws3.cell(row=sep_r, column=1,
+                value="SEM TIPO — Top Fornecedores (SF1/SD1 nao encontrou tipo de compra para esses pagamentos)")
+            sc.font = Font(bold=True, size=10, color="7C3400", name="Arial"); sc.fill = _fill("FFF3CD")
+            ws3.merge_cells(start_row=sep_r, start_column=1, end_row=sep_r, end_column=8)
+            sub_h = [("CLIFOR",10,C_SF1),("Razao Social",36,C_SF1),("Pagamentos",12,C_SF1),
+                     ("Valor Pago (R$)",18,C_SF1),("PMP Pgto.(d)",15,C_SF1)]
+            write_hdr(ws3, sep_r+1, sub_h)
+            rows_sem = sorted([{"clifor":k,"nome":g["nome_forn"].iloc[0],**agg_pmp(g)}
+                                for k,g in sem_base.groupby("clifor",dropna=False)],
+                               key=lambda r: r["valor"], reverse=True)
+            for sri, r in enumerate(rows_sem[:25], sep_r+2):
+                write_data(ws3, sri, [
+                    (str(r["clifor"]),None),(str(r["nome"]),None),
+                    (r["pagamentos"],FMT_INT),(r["valor"],FMT_BRL),(r["pmp_pgto"],FMT_DAYS),
+                ], alt=(sri%2==0))
+            nc3 = ws3.cell(row=sri+2, column=1,
+                value="Causas: (1) impostos/governo sem NF de fornecedor  "
+                      "(2) chave join SE2->SF1 diverge  (3) NF sem itens SD1")
+            nc3.font = Font(size=9, color="475569", name="Arial")
+            ws3.merge_cells(start_row=sri+2, start_column=1, end_row=sri+2, end_column=8)
 
-        # ════════════════════════════════════════════════════════════════════
-        # ABA 4 — METODOLOGIA
-        # ════════════════════════════════════════════════════════════════════
-        ws4 = wb.create_sheet("Metodologia")
-        ws4.column_dimensions["A"].width = 110
-        TF = font(bold=True, sz=12, color="1E3A5F")
-        CF = font(sz=10)
-        HF = fill("EBF3FB")
-        PF = fill("FFF8E7")
+        # === ABA 4: EVOLUCAO MENSAL ===
+        ws4 = wb.create_sheet("Evolucao Mensal")
+        HEVOL = [("Mes Pagamento E5",14,C_AGG),("Pagamentos",12,C_AGG),("Valor Pago (R$)",18,C_AGG),
+                 ("* SIGMA Contrib.Pgto.",18,C_PROVA),("* PMP Pgto.=Sigma/V.",18,C_PROVA),
+                 ("PMP Vencto.(d)",15,C_AGG),("PMP Cond.Pag.(d)",15,C_AGG),("Delta(d)",12,C_AGG)]
+        write_hdr(ws4, 1, HEVOL)
+        base["_mes"] = base["e5_data"].dt.to_period("M").astype(str)
+        ri = 2
+        for mes, g in sorted(base.groupby("_mes", dropna=False), key=lambda x: x[0]):
+            r = agg_pmp(g)
+            write_data(ws4, ri, [
+                (str(mes),None),(r["pagamentos"],FMT_INT),(r["valor"],FMT_BRL),
+                (r["contrib_pgto"],FMT_CONTRIB),(r["pmp_pgto"],FMT_DAYS),
+                (r["pmp_vnc"],FMT_DAYS),(r["pmp_cond"],FMT_DAYS),(r["delta"],FMT_DAYS),
+            ], alt=(ri%2==0))
+            ri += 1
+        ws4.freeze_panes = "A2"
+        nc4 = ws4.cell(row=ri+1, column=1,
+            value="PROVA: PMP do mes = SIGMA(Contrib.Pgto.) / Valor Pago daquele mes. SUM(Valor todos meses) = total Dados Brutos.")
+        nc4.font = Font(bold=True, size=9, color="7C3400", name="Arial"); nc4.fill = _fill("FFF3CD")
+        ws4.merge_cells(start_row=ri+1, start_column=1, end_row=ri+1, end_column=8)
 
-        dp  = (d_global.get("periodo") or {}).get("dias_periodo", 1) or 1
-        vpd = round((d_global.get("valor_total") or 0) / dp, 2)
-        pmp_pg = d_global.get("pmp_pagamento") or 0
-        pmp_cd = d_global.get("pmp_cond_pag")  or 0
-
-        linhas = [
-            ("METODOLOGIA DO CÁLCULO DE PMP", True, False),
+        # === ABA 5: METODOLOGIA ===
+        ws5 = wb.create_sheet("Metodologia")
+        ws5.column_dimensions["A"].width = 110
+        TF = Font(bold=True, size=12, color="1E3A5F", name="Arial")
+        CF = Font(size=10, name="Arial"); HF = _fill("EBF3FB"); PF = _fill("FFF8E7")
+        dp = (d_global.get("periodo") or {}).get("dias_periodo", 1) or 1
+        pmpg = d_global.get("pmp_pagamento") or 0; pmpc = d_global.get("pmp_cond_pag") or 0
+        metodo = [
+            ("COMO O PMP E CALCULADO - GUIA COMPLETO", True, False),
             ("", False, False),
-            ("Data Base: e2_emissao (SE2 — Contas a Pagar). Cobertura: 100% dos movimentos.", False, False),
-            ("NÃO usa f1_emissao (SF1). SF1 é carregada somente para d1_tp (tipo de compra).", False, False),
+            ("CADEIA DE DADOS:", True, False),
+            ("  SE5 + SE2 + SF1/SD1  ==>  Dados Brutos  (uma linha por pagamento SE5)", False, False),
+            ("  Dados Brutos agrupado por CLIFOR         ==>  Por Fornecedor", False, False),
+            ("  Dados Brutos agrupado por d1_tp           ==>  Por Tipo D1", False, False),
+            ("  Dados Brutos agrupado pelo mes e5_data    ==>  Evolucao Mensal", False, False),
+            ("  TODAS as abas usam a MESMA formula: PMP = SUM(contrib) / SUM(valor)", False, False),
             ("", False, False),
-            ("FÓRMULA:", True, False),
-            ("PMP = SUM( dias_i × e5_valor_i ) / SUM( e5_valor_i )", False, False),
+            ("FORMULA (media ponderada por valor pago):", True, False),
+            ("  Para cada linha nos Dados Brutos:", False, True),
+            ("    dias_pgto = e5_data - e2_emissao     [pagamento - data base SE2]", False, True),
+            ("    contrib   = dias_pgto x e5_valor     [contribuicao ao numerador]", False, True),
+            ("  PMP do grupo = SUM(contrib) / SUM(e5_valor)", False, True),
             ("", False, False),
-            ("TRÊS MÉTRICAS — todas a partir de e2_emissao:", True, False),
-            ("Dias PMP Pgto.  = e5_data    − e2_emissao  → quando a empresa pagou de fato", False, False),
-            ("Dias PMP Vencto.= e2_vencrea − e2_emissao  → vencimento real negociado",       False, False),
-            ("Dias PMP Cond.  = e2_vencto  − e2_emissao  → vencimento contratual",            False, False),
+            ("DATA BASE: sempre e2_emissao (SE2 Contas a Pagar) - 100% de cobertura", True, False),
+            ("  SF1 e carregada so para obter d1_tp (tipo de compra para Por Tipo D1)", False, False),
             ("", False, False),
-            ("COMO VERIFICAR O PMP DE UMA LINHA NA ABA 'DADOS BRUTOS':", True, False),
-            ("1. Localize a coluna '★ Data Base Cálculo (SE2)' = e2_emissao.", False, True),
-            ("2. Localize a coluna '★ Data Pagamento (E5)'    = e5_data.",    False, True),
-            ("3. Dias PMP Pgto. = e5_data − e2_emissao  (conferir com a coluna Dias PMP Pgto.)", False, True),
-            ("4. Localize '★ Valor Pago E5 (R$)'              = e5_valor (peso).", False, True),
-            ("5. Contrib. Pgto. = Dias PMP Pgto. × Valor Pago (coluna Contrib. Pgto.).", False, True),
-            ("6. PMP global = SUM(Contrib. Pgto.) / SUM(Valor Pago)  → confere com o painel.", False, True),
+            ("3 METRICAS DE DIAS:", True, False),
+            ("  PMP Pagamento  = e5_data    - e2_emissao", False, False),
+            ("  PMP Vencimento = e2_vencrea - e2_emissao", False, False),
+            ("  PMP Cond.Pag.  = e2_vencto  - e2_emissao", False, False),
+            ("  Delta Atraso   = PMP Pag. - PMP Cond.  [+ = paga depois do vencimento = bom para caixa]", False, False),
             ("", False, False),
-            ("COMO VERIFICAR O PMP GLOBAL NO EXCEL:", True, False),
-            ("Selecione toda a coluna Contrib. Pgto. → SOMA  /  Selecione Valor Pago → SOMA", False, False),
-            ("PMP = SOMARPRODUTO(Contrib.) / SOMA(Valor) = deve bater com o KPI do painel.", False, False),
+            ("COMO VERIFICAR:", True, False),
+            ("  1. Na aba Dados Brutos: Dias PMP Pgto. = Data Pagamento (E5) - Data Base (SE2)", False, True),
+            ("  2. Contrib. = Dias x Valor Pago", False, True),
+            ("  3. PMP Fornecedor X = SUM(Contrib. onde CLIFOR=X) / SUM(Valor onde CLIFOR=X)", False, True),
+            ("  4. PMP Mes M = SUM(Contrib. onde mes=M) / SUM(Valor onde mes=M)", False, True),
+            ("  5. SUM(Valor Pago) em TODAS as abas deve ser igual ao total dos Dados Brutos", False, True),
+            ("", False, False),
+            ("SEM TIPO: pagamentos sem d1_tp porque:", True, False),
+            ("  (1) Impostos/governo - nao geram NF de fornecedor (sem SF1/SD1)", False, False),
+            ("  (2) Chave do join SE2->SF1 falhou (e2_num/f1_doc ou e2_prefixo/f1_serie divergem)", False, False),
+            ("  (3) NF existe na SF1 mas sem itens SD1 cadastrados", False, False),
             ("", False, False),
             ("CHAVES DE JOIN:", True, False),
-            ("SE5 ↔ SE2: CLIFOR + e5_numero/e2_num + e5_prefixo/e2_prefixo", False, False),
-            ("           + e5_parcela/e2_parcela + e5_filial/e2_filial + e5_tipo/e2_tipo", False, False),
-            ("SE2 ↔ SF1: CLIFOR + e2_num/f1_doc + e2_prefixo/f1_serie + e2_filial/f1_filial", False, False),
-            ("(SF1 usada só para d1_tp — não participa do cálculo de dias)", False, False),
+            ("  SE5 <-> SE2: CLIFOR + numero + prefixo + parcela + filial + tipo", False, False),
+            ("  SE2 <-> SF1: CLIFOR + e2_num/f1_doc + e2_prefixo/f1_serie + e2_filial/f1_filial", False, False),
+            ("  SA2 <-> base: CLIFOR (para razao social)", False, False),
             ("", False, False),
-            ("FONTES:", True, False),
-            (f"Período: {data_ini.strftime('%d/%m/%Y')} a {data_fim.strftime('%d/%m/%Y')}", False, False),
-            ("SE5 — Movimentação Bancária (Gobi report 592)", False, False),
-            ("SE2 — Contas a Pagar       (Gobi report 590)  ← DATA BASE", False, False),
-            ("SF1 — Notas de Entrada     (Gobi report 589)  ← tipo compra", False, False),
-            ("SA2 — Fornecedores         (Gobi report 614)  ← razão social", False, False),
+            (f"Periodo: {data_ini.strftime('%d/%m/%Y')} a {data_fim.strftime('%d/%m/%Y')}", False, False),
+            (f"PMP Pagamento global: {pmpg:.2f} d  |  Delta Atraso: {pmpg-pmpc:+.2f} d", False, False),
         ]
-        for ri, (txt, bold, proof) in enumerate(linhas, 1):
-            c = ws4.cell(row=ri, column=1, value=txt)
+        for ri, (txt, bold, proof) in enumerate(metodo, 1):
+            c = ws5.cell(row=ri, column=1, value=txt)
             c.font = TF if bold else CF
-            if bold:  c.fill = HF
+            if bold: c.fill = HF
             if proof: c.fill = PF
 
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
         return buf
-
 
     conteudo = await asyncio.to_thread(gerar)
     return StreamingResponse(

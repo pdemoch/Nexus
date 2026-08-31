@@ -110,14 +110,12 @@ def _base(data_ini: date, data_fim: date, motivos=None, tipos=None,
                 cols.append("d1_tp")
             n = nf[cols].drop_duplicates(keys + ["clifor"])
             base = base.merge(n, on=["clifor"] + keys, how="left")
-    # Garante coluna f1_emissao para o Excel (pode ser nula — não é mais usada no cálculo)
+    # Garante f1_emissao para Excel (referência — não usada no cálculo)
     if "f1_emissao" not in base:
         base["f1_emissao"] = pd.NaT
     base["f1_emissao"] = pd.to_datetime(base["f1_emissao"], errors="coerce")
 
-    # ── Data base do cálculo: sempre e2_emissao (SE2) ───────────────────────────
-    # e2_emissao = lançamento do título no Protheus — 100% de cobertura,
-    # sem fallback. SF1 é carregada apenas para d1_tp (tipo de compra).
+    # Data base: sempre e2_emissao (100% de cobertura, sem fallback)
     emissao             = pd.to_datetime(_col(base, "e2_emissao"), errors="coerce")
     vencimento_real     = pd.to_datetime(_col(base, "e2_vencrea"), errors="coerce")
     vencimento_condicao = pd.to_datetime(_col(base, "e2_vencto"),  errors="coerce")
@@ -125,8 +123,6 @@ def _base(data_ini: date, data_fim: date, motivos=None, tipos=None,
     base["dias_pagamento"]  = (base["e5_data"] - emissao).dt.days.clip(lower=0)
     base["dias_vencimento"] = (vencimento_real     - emissao).dt.days.clip(lower=0)
     base["dias_cond_pag"]   = (vencimento_condicao - emissao).dt.days.clip(lower=0)
-
-    # Sempre SE2; coluna mantida para rastreabilidade no Excel
     base["fonte_emissao"] = "SE2"
     base = base[base["dias_pagamento"].notna()]
     motivo_values = _as_filter(motivos)
@@ -135,7 +131,8 @@ def _base(data_ini: date, data_fim: date, motivos=None, tipos=None,
     if motivo_values:
         base = base[_norm_key(_col(base, "e5_motbx")).isin(motivo_values)]
     if tipo_values:
-        base = base[_norm_key(_col(base, "d1_tp")).isin(tipo_values)]
+        _d1 = _norm_key(_col(base, "d1_tp")).replace("", "SEM TIPO")
+        base = base[_d1.isin(tipo_values)]
     if fornecedor_values:
         base = base[_norm_key(_col(base, "clifor")).isin(fornecedor_values)]
     return base
@@ -210,10 +207,11 @@ def calcular_pmp_resumo(data_ini: date, data_fim: date, motivos=None, tipos=None
                         fornecedores=None, clifor=None) -> dict[str, Any]:
     base = _base(data_ini, data_fim, motivos, tipos, fornecedores, clifor)
     dias_periodo = max((data_fim - data_ini).days, 1)
-    valores = lambda col: sorted(_norm_key(_col(base, col)).replace("", "SEM VALOR").unique().tolist())
-    motivos_disponiveis = valores("e5_motbx")
-    tipos_disponiveis = valores("d1_tp")
-    fornecedores_disponiveis = valores("clifor")
+    def _valores(col, empty_label="SEM VALOR"):
+        return sorted(_norm_key(_col(base, col)).replace("", empty_label).unique().tolist())
+    motivos_disponiveis = _valores("e5_motbx", "SEM VALOR")
+    tipos_disponiveis   = _valores("d1_tp",    "SEM TIPO")
+    fornecedores_disponiveis = _valores("clifor")
     global_data = _resumo(base)
     global_data["periodo"] = {
         "data_ini": str(data_ini),
@@ -266,21 +264,17 @@ def calcular_pmp_mensal(data_ini: date, data_fim: date, motivos=None, tipos=None
 
 
 _TIPO_DESC: dict[str, str] = {
-    "GG": "Gerais / Outros",    "EM": "Embalagens",
-    "MP": "Matéria-Prima",      "MC": "Material de Consumo",
-    "SV": "Serviços",           "SI": "Serv. Infraestrutura",
-    "EP": "Equipamentos",       "AI": "Ativo Imobilizado",
-    "LI": "Locação / Imóveis",  "IN": "Insumos",
-    "BN": "Benefícios",         "AL": "Aluguel",
-    "OI": "Outros Insumos",     "OL": "Outros Locação",
-    "PA": "Prest. de Contas",   "CC": "Custo Comercializ.",
-    "ME": "Mat. de Escritório",
+    "GG":"Gerais/Outros","EM":"Embalagens","MP":"Materia-Prima","MC":"Mat. Consumo",
+    "SV":"Servicos","SI":"Serv. Infraestrutura","EP":"Equipamentos","AI":"Ativo Imob.",
+    "LI":"Locacao/Imoveis","IN":"Insumos","BN":"Beneficios","AL":"Aluguel",
+    "OI":"Outros Insumos","OL":"Outros Locacao","PA":"Prest. Contas",
+    "CC":"Custo Comercializ.","ME":"Mat. Escritorio",
 }
 
 
 def calcular_pmp_por_tipo(data_ini: date, data_fim: date, motivos=None, tipos=None,
                           fornecedores=None, clifor=None) -> dict[str, Any]:
-    """PMP agregado pelo tipo de compra D1, ordenado por PMP Pagamento crescente."""
+    """PMP por tipo compra D1, ordenado por PMP Pagamento crescente."""
     base = _base(data_ini, data_fim, motivos, tipos, fornecedores, clifor)
     if base.empty:
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "tipos": []}
@@ -289,13 +283,8 @@ def calcular_pmp_por_tipo(data_ini: date, data_fim: date, motivos=None, tipos=No
         tp_str = str(tp).strip().upper() if pd.notna(tp) and str(tp).strip() else "SEM TIPO"
         r = _resumo(g)
         rows.append({"tipo": tp_str, "descricao": _TIPO_DESC.get(tp_str, tp_str), **r})
-    # Ordena pelo PMP Pagamento crescente (menor prazo primeiro)
     rows.sort(key=lambda r: r["pmp_pagamento"])
-    return {
-        "periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
-        "tipos": rows,
-    }
-
+    return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "tipos": rows}
 
 def calcular_pmp(data_ini: date, data_fim: date, **filters) -> dict[str, Any]:
     """Alias estável para consumidores que não precisam escolher a granularidade."""
