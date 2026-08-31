@@ -337,7 +337,9 @@ def calcular_pmp_fornecedor_detalhe(
             "data_pagamento":   _fmtd(getattr(row, "e5_data",     None)),
             "valor_pago":       round(float(getattr(row, "e5_valor",   0) or 0), 2),
             "motivo":           str(getattr(row, "e5_motbx",   "") or "").strip(),
-            "d1_tp":            str(getattr(row, "d1_tp",      "") or "").strip() or "SEM TIPO",
+            "d1_tp":            (lambda v: v if v not in ("", "nan", "NaN", "None", "none") else "SEM TIPO")(
+                                    str(getattr(row, "d1_tp", "") or "").strip()
+                                ),
             "emissao_nf_sf1":   _fmtd(getattr(row, "f1_emissao",  None)),
             "dias_pagamento":   int(round(float(getattr(row, "dias_pagamento",  0) or 0))),
             "dias_vencimento":  int(round(float(getattr(row, "dias_vencimento", 0) or 0))),

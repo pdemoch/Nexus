@@ -1166,7 +1166,7 @@ export default function FinanceiroArena() {
                             <td style={{ padding:'6px 9px', color:'#1e40af', fontWeight:700, whiteSpace:'nowrap', background:'#eff6ff' }}>{p.data_pagamento}</td>
                             <td style={{ padding:'6px 9px', textAlign:'right', fontWeight:700, color:'#334155', whiteSpace:'nowrap', background:'#eff6ff' }}>{fmtRs(p.valor_pago)}</td>
                             <td style={{ padding:'6px 9px', color:'#64748b', whiteSpace:'nowrap' }}>{p.motivo}</td>
-                            <td style={{ padding:'6px 9px', color:'#64748b', whiteSpace:'nowrap' }}>{p.d1_tp}</td>
+                            <td style={{ padding:'6px 9px', color:'#64748b', whiteSpace:'nowrap' }}>{['nan','NaN','none','None',''].includes(p.d1_tp) ? 'SEM TIPO' : p.d1_tp}</td>
                             <td style={{ padding:'6px 9px', textAlign:'right', fontWeight:900, color:'#7c3aed', background:'#fef9c3' }}>{p.dias_pagamento} d</td>
                             <td style={{ padding:'6px 9px', textAlign:'right', color:'#92400e', background:'#fef9c3', whiteSpace:'nowrap' }}>{Number(p.contrib_pgto).toLocaleString('pt-BR',{maximumFractionDigits:0})}</td>
                             <td style={{ padding:'6px 9px', textAlign:'right', color:'#64748b' }}>{p.dias_vencimento} d</td>
