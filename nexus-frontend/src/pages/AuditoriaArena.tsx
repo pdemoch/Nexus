@@ -898,7 +898,7 @@ export default function AuditoriaArena() {
             {fillDiag.sku.length > 0 && (
               <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
                 <div style={{ padding:'14px 18px', fontWeight:800, fontSize:13, borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
-                  SKUs com corte, ordenados pelo maior volume cortado
+                  Todos os SKUs, ordenados pelo maior volume cortado
                 </div>
                 <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
                   <thead>

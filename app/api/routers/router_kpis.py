@@ -915,9 +915,9 @@ async def fill_rate_diagnostico(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# EXPORTAÇÃO EXCEL — mesmo padrão do PMR/PMP: uma aba por indicador,
-# uma aba com a base completa (nível sku x mês) para validação, e uma
-# aba de metodologia com fórmulas e exemplo numérico provado.
+# EXPORTAÇÃO EXCEL — uma aba por indicador x nível (WMAPE, BIAS, Fill Rate ×
+# Categoria/SKU), abas de SKU com detalhamento mês a mês + linha de total,
+# e uma aba de metodologia explicando o cálculo por SKU e por categoria.
 # ═══════════════════════════════════════════════════════════════════════════
 @router.get("/exportar")
 async def kpis_exportar(
@@ -927,12 +927,14 @@ async def kpis_exportar(
     _: dict = Depends(get_current_user),
 ):
     """
-    Gera um Excel com 5 abas:
-      1. Base Completa      - nivel sku x mes (real, plano, IA, corte, entregue)
-      2. Ranking WMAPE/BIAS - por SKU (mesma conta da tela)
-      3. Fill Rate Categoria- atendimento agregado por categoria
-      4. Fill Rate SKU      - atendimento agregado por SKU
-      5. Metodologia        - formulas + exemplo numerico provado
+    Gera um Excel com 7 abas:
+      1. WMAPE Categoria    - agregado por categoria (mesma conta da tela)
+      2. WMAPE SKU          - detalhamento mês a mês por SKU + linha TOTAL
+      3. BIAS Categoria     - agregado por categoria
+      4. BIAS SKU           - detalhamento mês a mês por SKU + linha TOTAL
+      5. Fill Rate Categoria- atendimento agregado por categoria
+      6. Fill Rate SKU      - detalhamento mês a mês por SKU + linha TOTAL
+      7. Metodologia        - fórmulas + exemplo numérico, por SKU e por categoria
     """
     import asyncio
     import openpyxl
@@ -944,99 +946,178 @@ async def kpis_exportar(
         if not meses_validos:
             raise HTTPException(400, "Nenhum mês válido informado.")
 
-        def _gerar():
-            ini_sql = meses_validos[0] + "-01"
-            fim_sql = meses_validos[-1] + "-01"
+        ini_sql = meses_validos[0] + "-01"
+        fim_sql = meses_validos[-1] + "-01"
 
+        def _carregar_base():
             df_base = _carregar(db, ini_sql, fim_sql, categoria, None, base="pedido")
             if not df_base.empty:
                 df_base = df_base[df_base.mes.isin(meses_validos)]
+            return df_base
 
-            wb = openpyxl.Workbook()
-            hdr_fill = PatternFill("solid", fgColor="1E3A5F")
-            hdr_font = Font(bold=True, color="FFFFFF", size=10)
+        def _fr_sku_mensal():
+            """Fill Rate por (sku, mês) — não existe endpoint pronto para
+            esse grão; a tela só expõe evolução agregada ou total por SKU."""
+            filtros, params = ["1=1"], {"ini": ini_sql, "fim": fim_sql, "meses": meses_validos}
+            if categoria:
+                if categoria == "SEM CATEGORIA":
+                    filtros.append("(v.categoria IS NULL OR v.categoria = 'SEM CATEGORIA')")
+                else:
+                    filtros.append("v.categoria = :cat"); params["cat"] = categoria
+            w = " AND ".join(filtros)
+            rows = db.execute(text(f"""
+                SELECT v.sku, COALESCE(MAX(p.descricao), v.sku) AS descricao,
+                       COALESCE(MAX(v.categoria),'SEM CATEGORIA') AS categoria,
+                       TO_CHAR(v.mes,'YYYY-MM') AS mes,
+                       SUM(v.qt_pedido)   AS pedido,
+                       SUM(v.qt_entregue) AS entregue,
+                       SUM(v.qt_corte)    AS corte
+                FROM mart_vendas_mes v
+                LEFT JOIN dim_produtos p ON p.sku = v.sku
+                WHERE v.mes >= CAST(:ini AS date) AND v.mes <= CAST(:fim AS date)
+                  AND TO_CHAR(v.mes,'YYYY-MM') = ANY(:meses)
+                  AND {w}
+                GROUP BY v.sku, mes
+                ORDER BY v.sku, mes
+            """), params).fetchall()
+            return rows
 
-            # ABA 1: Base Completa (nível sku x mês)
-            ws1 = wb.active
-            ws1.title = "Base Completa"
-            if not df_base.empty:
-                cols = ["sku", "descricao", "categoria", "mes", "vol_real",
-                        "vol_humano", "vol_ia", "tem_plano", "qt_corte", "qt_entregue"]
-                cols = [c for c in cols if c in df_base.columns]
-                for j, col in enumerate(cols, 1):
-                    c = ws1.cell(row=1, column=j, value=col)
-                    c.fill, c.font = hdr_fill, hdr_font
-                    c.alignment = Alignment(horizontal="center")
-                for i, row in enumerate(df_base[cols].itertuples(index=False), 2):
-                    for j, v in enumerate(row, 1):
-                        ws1.cell(row=i, column=j, value=v)
+        # Mesma Session do SQLAlchemy não suporta duas queries concorrentes
+        # (asyncio.gather com to_thread dispara ambas ao mesmo tempo e
+        # estoura "concurrent operations are not permitted"); roda em série.
+        df_base = await asyncio.to_thread(_carregar_base)
+        fr_sku_mensal_rows = await asyncio.to_thread(_fr_sku_mensal)
 
-            return wb, ini_sql, fim_sql
-
-        wb, ini_sql, fim_sql = await asyncio.to_thread(_gerar)
-
-        # ABA 2: Ranking WMAPE/BIAS por SKU (reaproveita a mesma rota da tela)
-        diag = await diagnostico(meses=meses_validos, nivel="sku", categoria=categoria, base="pedido", db=db, _=_)
-        ws2 = wb.create_sheet("Ranking WMAPE-BIAS")
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
         hdr_fill = PatternFill("solid", fgColor="1E3A5F")
         hdr_font = Font(bold=True, color="FFFFFF", size=10)
-        hdrs2 = ["SKU", "Descrição", "Categoria", "Real (cx)", "Previsto (cx)",
-                 "Delta (cx)", "WMAPE (%)", "BIAS (%)", "Meses", "Cobertura Plano (%)", "Classe"]
-        for j, h in enumerate(hdrs2, 1):
-            c = ws2.cell(row=1, column=j, value=h); c.fill, c.font = hdr_fill, hdr_font
-        for i, it in enumerate(diag.get("itens", []), 2):
+        tot_fill = PatternFill("solid", fgColor="D9E2F3")
+        tot_font = Font(bold=True)
+
+        def _cabecalho(ws, hdrs):
+            for j, h in enumerate(hdrs, 1):
+                c = ws.cell(row=1, column=j, value=h); c.fill, c.font = hdr_fill, hdr_font
+
+        # ── ABAS 1-2: WMAPE Categoria / WMAPE SKU ─────────────────────────
+        diag_cat = await diagnostico(meses=meses_validos, nivel="categoria", categoria=categoria, base="pedido", db=db, _=_)
+        ws1 = wb.create_sheet("WMAPE Categoria")
+        _cabecalho(ws1, ["Categoria", "Real (cx)", "Previsto (cx)", "Delta (cx)",
+                         "WMAPE (%)", "Meses", "Cobertura Plano (%)"])
+        for i, it in enumerate(diag_cat.get("itens", []), 2):
             delta = round((it.get("vol_previsto") or 0) - (it.get("vol_real") or 0))
-            ws2.cell(row=i, column=1, value=it.get("sku"))
-            ws2.cell(row=i, column=2, value=it.get("descricao"))
-            ws2.cell(row=i, column=3, value=it.get("categoria"))
-            ws2.cell(row=i, column=4, value=it.get("vol_real"))
-            ws2.cell(row=i, column=5, value=it.get("vol_previsto"))
-            ws2.cell(row=i, column=6, value=delta)
-            ws2.cell(row=i, column=7, value=it.get("wmape_h"))
-            ws2.cell(row=i, column=8, value=it.get("bias_h"))
-            ws2.cell(row=i, column=9, value=it.get("meses"))
-            ws2.cell(row=i, column=10, value=it.get("cobertura_plano_pct"))
-            ws2.cell(row=i, column=11, value=it.get("classe"))
+            vals = [it.get("categoria"), it.get("vol_real"), it.get("vol_previsto"), delta,
+                    it.get("wmape_h"), it.get("meses"), it.get("cobertura_plano_pct")]
+            for j, v in enumerate(vals, 1):
+                ws1.cell(row=i, column=j, value=v)
 
-        # ABA 3: Fill Rate por Categoria (mesma rota/cálculo da tela: /fill-rate)
+        ws2 = wb.create_sheet("WMAPE SKU")
+        _cabecalho(ws2, ["SKU", "Descrição", "Categoria", "Mês", "Real (cx)",
+                         "Previsto (cx)", "Erro Absoluto (cx)", "Delta (cx)"])
+        row_i = 2
+        if not df_base.empty:
+            for sku, g in df_base.groupby("sku", sort=False):
+                g = g.sort_values("mes")
+                desc, cat_sku = g.descricao.iloc[0], g.categoria.iloc[0]
+                for _, r in g.iterrows():
+                    erro_abs = abs(r.vol_humano - r.vol_real)
+                    delta = r.vol_humano - r.vol_real
+                    for j, v in enumerate([sku, desc, cat_sku, r.mes, round(r.vol_real),
+                                            round(r.vol_humano), round(erro_abs), round(delta)], 1):
+                        ws2.cell(row=row_i, column=j, value=v)
+                    row_i += 1
+                # linha TOTAL do SKU: mesma conta oficial (soma erro/soma real)
+                real_t, prev_t = float(g.vol_real.sum()), float(g.vol_humano.sum())
+                wmape_sku = _sdiv((g.vol_humano - g.vol_real).abs().sum(), real_t, 100)
+                tot_vals = [sku, desc, cat_sku, "TOTAL", round(real_t), round(prev_t),
+                            round((g.vol_humano - g.vol_real).abs().sum()), round(prev_t - real_t)]
+                for j, v in enumerate(tot_vals, 1):
+                    c = ws2.cell(row=row_i, column=j, value=v); c.fill, c.font = tot_fill, tot_font
+                ws2.cell(row=row_i, column=9, value=round(wmape_sku, 2) if wmape_sku is not None else None).font = tot_font
+                row_i += 1
+        ws2.cell(row=1, column=9, value="WMAPE SKU (%)").fill = hdr_fill
+        ws2.cell(row=1, column=9).font = hdr_font
+
+        # ── ABAS 3-4: BIAS Categoria / BIAS SKU ───────────────────────────
+        ws3 = wb.create_sheet("BIAS Categoria")
+        _cabecalho(ws3, ["Categoria", "Real (cx)", "Previsto (cx)", "Delta (cx)",
+                         "BIAS (%)", "Meses", "Cobertura Plano (%)"])
+        for i, it in enumerate(diag_cat.get("itens", []), 2):
+            delta = round((it.get("vol_previsto") or 0) - (it.get("vol_real") or 0))
+            vals = [it.get("categoria"), it.get("vol_real"), it.get("vol_previsto"), delta,
+                    it.get("bias_h"), it.get("meses"), it.get("cobertura_plano_pct")]
+            for j, v in enumerate(vals, 1):
+                ws3.cell(row=i, column=j, value=v)
+
+        ws4 = wb.create_sheet("BIAS SKU")
+        _cabecalho(ws4, ["SKU", "Descrição", "Categoria", "Mês", "Real (cx)",
+                         "Previsto (cx)", "Delta (cx)"])
+        row_i = 2
+        if not df_base.empty:
+            for sku, g in df_base.groupby("sku", sort=False):
+                g = g.sort_values("mes")
+                desc, cat_sku = g.descricao.iloc[0], g.categoria.iloc[0]
+                for _, r in g.iterrows():
+                    delta = r.vol_humano - r.vol_real
+                    for j, v in enumerate([sku, desc, cat_sku, r.mes, round(r.vol_real),
+                                            round(r.vol_humano), round(delta)], 1):
+                        ws4.cell(row=row_i, column=j, value=v)
+                    row_i += 1
+                real_t, prev_t = float(g.vol_real.sum()), float(g.vol_humano.sum())
+                bias_sku = _sdiv(prev_t - real_t, real_t, 100)
+                tot_vals = [sku, desc, cat_sku, "TOTAL", round(real_t), round(prev_t), round(prev_t - real_t)]
+                for j, v in enumerate(tot_vals, 1):
+                    c = ws4.cell(row=row_i, column=j, value=v); c.fill, c.font = tot_fill, tot_font
+                ws4.cell(row=row_i, column=8, value=round(bias_sku, 2) if bias_sku is not None else None).font = tot_font
+                row_i += 1
+        ws4.cell(row=1, column=8, value="BIAS SKU (%)").fill = hdr_fill
+        ws4.cell(row=1, column=8).font = hdr_font
+
+        # ── ABAS 5-6: Fill Rate Categoria / Fill Rate SKU ─────────────────
         fr_cat = await fill_rate(meses=meses_validos, categoria=categoria, unidade="cx", nivel="categoria", db=db, _=_)
-        ws3 = wb.create_sheet("Fill Rate Categoria")
-        hdrs3 = ["Categoria", "Pedido (cx)", "Faturado (cx)", "Corte (cx)",
-                 "Carteira (cx)", "Fill Rate (%)", "Cobertura (%)", "Classe"]
-        for j, h in enumerate(hdrs3, 1):
-            c = ws3.cell(row=1, column=j, value=h); c.fill, c.font = hdr_fill, hdr_font
+        ws5 = wb.create_sheet("Fill Rate Categoria")
+        _cabecalho(ws5, ["Categoria", "Pedido (cx)", "Entregue (cx)", "Corte (cx)",
+                         "Carteira (cx)", "Fill Rate (%)", "Cobertura (%)", "Classe"])
         for i, it in enumerate(fr_cat.get("itens", []), 2):
-            ws3.cell(row=i, column=1, value=it.get("categoria"))
-            ws3.cell(row=i, column=2, value=it.get("pedido"))
-            ws3.cell(row=i, column=3, value=it.get("entregue"))
-            ws3.cell(row=i, column=4, value=it.get("corte"))
-            ws3.cell(row=i, column=5, value=it.get("carteira"))
-            ws3.cell(row=i, column=6, value=it.get("atendimento"))
-            ws3.cell(row=i, column=7, value=it.get("cobertura"))
-            ws3.cell(row=i, column=8, value=it.get("classe"))
+            vals = [it.get("categoria"), it.get("pedido"), it.get("entregue"), it.get("corte"),
+                    it.get("carteira"), it.get("atendimento"), it.get("cobertura"), it.get("classe")]
+            for j, v in enumerate(vals, 1):
+                ws5.cell(row=i, column=j, value=v)
 
-        # ABA 4: Fill Rate por SKU (mesma rota/cálculo da tela: /fill-rate)
-        fr_sku = await fill_rate(meses=meses_validos, categoria=categoria, unidade="cx", nivel="sku", db=db, _=_)
-        ws4 = wb.create_sheet("Fill Rate SKU")
-        hdrs4 = ["SKU", "Descrição", "Categoria", "Pedido (cx)", "Faturado (cx)", "Corte (cx)",
-                 "Carteira (cx)", "Fill Rate (%)", "Cobertura (%)", "Classe"]
-        for j, h in enumerate(hdrs4, 1):
-            c = ws4.cell(row=1, column=j, value=h); c.fill, c.font = hdr_fill, hdr_font
-        for i, it in enumerate(fr_sku.get("itens", []), 2):
-            ws4.cell(row=i, column=1, value=it.get("sku"))
-            ws4.cell(row=i, column=2, value=it.get("descricao"))
-            ws4.cell(row=i, column=3, value=it.get("categoria"))
-            ws4.cell(row=i, column=4, value=it.get("pedido"))
-            ws4.cell(row=i, column=5, value=it.get("entregue"))
-            ws4.cell(row=i, column=6, value=it.get("corte"))
-            ws4.cell(row=i, column=7, value=it.get("carteira"))
-            ws4.cell(row=i, column=8, value=it.get("atendimento"))
-            ws4.cell(row=i, column=9, value=it.get("cobertura"))
-            ws4.cell(row=i, column=10, value=it.get("classe"))
+        ws6 = wb.create_sheet("Fill Rate SKU")
+        _cabecalho(ws6, ["SKU", "Descrição", "Categoria", "Mês", "Pedido (cx)",
+                         "Entregue (cx)", "Corte (cx)", "Carteira (cx)", "Fill Rate (%)"])
+        row_i = 2
+        from itertools import groupby as _groupby
+        for sku, grp in _groupby(fr_sku_mensal_rows, key=lambda r: r.sku):
+            grp = list(grp)
+            desc, cat_sku = grp[0].descricao, grp[0].categoria
+            tp = te = tc = 0.0
+            for r in grp:
+                pe, en, co = float(r.pedido or 0), float(r.entregue or 0), float(r.corte or 0)
+                tp += pe; te += en; tc += co
+                fr_mes = round(en / pe * 100, 1) if pe > 0 else None
+                carteira_mes = max(pe - en - co, 0.0)
+                for j, v in enumerate([sku, desc, cat_sku, r.mes, round(pe), round(en),
+                                        round(co), round(carteira_mes), fr_mes], 1):
+                    ws6.cell(row=row_i, column=j, value=v)
+                row_i += 1
+            fr_tot = round(te / tp * 100, 1) if tp > 0 else None
+            carteira_tot = max(tp - te - tc, 0.0)
+            tot_vals = [sku, desc, cat_sku, "TOTAL", round(tp), round(te), round(tc),
+                        round(carteira_tot), fr_tot]
+            for j, v in enumerate(tot_vals, 1):
+                c = ws6.cell(row=row_i, column=j, value=v); c.fill, c.font = tot_fill, tot_font
+            row_i += 1
 
-        # ABA 5: Metodologia (exemplo numérico provado com o próprio caso
+        for ws in (ws1, ws2, ws3, ws4, ws5, ws6):
+            for col_cells in ws.columns:
+                largura = max((len(str(c.value)) for c in col_cells if c.value is not None), default=10)
+                ws.column_dimensions[col_cells[0].column_letter].width = min(max(largura + 2, 10), 40)
+
+        # ABA 7: Metodologia (exemplo numérico provado com o próprio caso
         # que gerou a dúvida: erro líquido pequeno, WMAPE alto)
-        ws5 = wb.create_sheet("Metodologia")
+        ws7 = wb.create_sheet("Metodologia")
         titulo_font = Font(bold=True, size=12, color="1E3A5F")
         texto = [
             ("CALCULO DO WMAPE, BIAS E FILL RATE", True),
@@ -1080,6 +1161,34 @@ async def kpis_exportar(
             ("SKUs sem categoria cadastrada em dim_produtos aparecem como 'SEM CATEGORIA'", False),
             ("(nunca ficam ocultos): tanto no filtro quanto nos graficos e tabelas.", False),
             ("", False),
+            ("CALCULO POR SKU x POR CATEGORIA — QUAL A DIFERENCA:", True),
+            ("Por SKU: cada linha das abas 'WMAPE SKU'/'BIAS SKU'/'Fill Rate SKU' e' um mes", False),
+            ("daquele SKU. A linha 'TOTAL' (destacada) soma real e previsto de TODOS os meses", False),
+            ("do SKU no periodo filtrado e SO' ENTAO calcula o indicador — nunca e' a media", False),
+            ("simples dos indicadores mensais (isso distorceria o resultado).", False),
+            ("", False),
+            ("Por Categoria: as abas 'WMAPE Categoria'/'BIAS Categoria'/'Fill Rate Categoria'", False),
+            ("somam real e previsto de TODOS os SKUs da categoria, em TODOS os meses do", False),
+            ("periodo, numa unica conta. E' a MESMA formula, so' que o grupo somado e' maior.", False),
+            ("", False),
+            ("POR QUE O WMAPE DA CATEGORIA PODE SER BEM MENOR QUE O DE UM SKU DENTRO DELA:", True),
+            ("O WMAPE soma erro em MODULO por linha (sku x mes) ou por SKU, mas ao agregar", False),
+            ("por categoria, SKUs que erram para lados opostos (um superestima, outro", False),
+            ("subestima) tem os erros somados em modulo dentro de cada SKU, mas o volume", False),
+            ("real de TODOS os SKUs vira o mesmo denominador. Um SKU pequeno com WMAPE de", False),
+            ("80% pesa pouco no WMAPE da categoria se o volume dele for uma fracao do total;", False),
+            ("um SKU grande com WMAPE de 10% domina a media ponderada da categoria.", False),
+            ("Por isso: WMAPE de categoria baixo NAO garante que todos os SKUs estejam bem", False),
+            ("previstos — sempre confira a aba por SKU antes de concluir que uma categoria", False),
+            ("esta 'sob controle'.", False),
+            ("", False),
+            ("EXEMPLO: categoria com 2 SKUs, 1 mes.", True),
+            ("SKU A: Real 1.000 cx, Previsto 1.100 cx -> erro = 100 cx -> WMAPE do SKU = 10%", False),
+            ("SKU B: Real 50 cx,    Previsto 90 cx    -> erro =  40 cx -> WMAPE do SKU = 80%", False),
+            ("WMAPE da CATEGORIA = (100 + 40) / (1.000 + 50) = 140/1.050 = 13,3%", False),
+            ("O SKU B individualmente esta pessimo (80%), mas quase nao move o WMAPE da", False),
+            ("categoria (13,3%) porque o volume dele e' pequeno frente ao SKU A.", False),
+            ("", False),
             ("FONTES DE DADOS:", True),
             (f"Periodo analisado: {meses_validos[0]} a {meses_validos[-1]}", False),
             ("mart_acuracia_sku_mes - plano (humano/IA) x realizado, grao sku x mes", False),
@@ -1088,15 +1197,19 @@ async def kpis_exportar(
             ("NOTAS IMPORTANTES:", True),
             ("- SKU sem plano entra no WMAPE com erro igual ao volume vendido (plano = 0), nao e' excluido.", False),
             ("- WMAPE/BIAS sao calculados SOMENTE em caixas (cx); valor monetario nao entra nessa conta.", False),
-            ("- 'Meses' na aba Ranking indica quantos meses do periodo tiveram volume real > 0.", False),
+            ("- 'Meses' nas abas de Categoria indica quantos meses do periodo tiveram volume real > 0.", False),
+            ("- Nas abas de SKU, a linha 'TOTAL' de cada SKU e' destacada em azul claro — e' o numero", False),
+            ("  oficial do periodo; as linhas acima dela sao o detalhamento mes a mes para auditoria.", False),
             ("- 'Cobertura Plano' e' o % do volume vendido que tinha plano; abaixo de 90% dispensa", False),
             ("  discussao de acuracia (ninguem planejou aquele volume).", False),
+            ("- Fill Rate considera TODOS os itens (ativos ou inativos em dim_produtos); WMAPE/BIAS", False),
+            ("  continuam restritos ao portfolio ativo.", False),
         ]
         for i, (txt, bold) in enumerate(texto, 1):
-            c = ws5.cell(row=i, column=1, value=txt)
+            c = ws7.cell(row=i, column=1, value=txt)
             if bold:
                 c.font = titulo_font
-        ws5.column_dimensions["A"].width = 95
+        ws7.column_dimensions["A"].width = 95
 
         buf = io.BytesIO()
         wb.save(buf)
