@@ -471,10 +471,24 @@ class NexusLoader:
                 # preço velho em vez do fallback regional/SKU. O reset garante que
                 # a cascata recalcula do zero, cada nível cobrindo o que o anterior
                 # não alcançou. Só toca o ciclo ativo; passados são imutáveis.
+                #
+                # EXCEÇÃO — SKU de NPD sem NENHUMA venda em fato_vendas: o preço
+                # foi definido manualmente pelo Marketing na tela de Inovações
+                # (router_npd.py) e NENHUM nível da cascata abaixo consegue
+                # recalculá-lo (todos os 4 níveis leem fato_vendas). Resetar esse
+                # PMV para 0 aqui apaga o preço da injeção e ele nunca mais volta,
+                # ficando zerado até alguém notar (caso real: SKU 410252958,
+                # lançamento sem venda alguma, ficou com pmv_aplicado=0 em dois
+                # ciclos seguidos até a correção manual em 01/09/2026). Por isso o
+                # reset agora PULA os SKUs sem histórico de venda.
                 r0 = db.execute(text("""
-                    UPDATE fato_ibp_granular
+                    UPDATE fato_ibp_granular f
                     SET pmv_aplicado = 0
-                    WHERE ciclo_sop = :ciclo
+                    WHERE f.ciclo_sop = :ciclo
+                      AND EXISTS (
+                          SELECT 1 FROM fato_vendas v
+                          WHERE v.sku = f.sku AND v.qt_pedido > 0 AND v.vl_pedido > 0
+                      )
                 """), {"ciclo": ciclo_alvo})
                 log_callback(f"   [PMV] Reset: {r0.rowcount} linhas do ciclo zeradas para recálculo.")
 

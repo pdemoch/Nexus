@@ -35,6 +35,12 @@ embarque. Medir contra o faturado cria demanda censurada: se o plano
 subestima, a producao subestima e a entrega subestima junto — o erro se
 apaga e quanto pior o suprimento, melhor a acuracia aparente.
 
+Todas as consultas somam TODOS os SKUs (ativos e inativos/historicos),
+sem filtro `ativo`. E a mesma regra do endpoint /kpis/fill-rate: um SKU
+descontinuado ainda tinha pedido/entrega reais no mes em que vendeu, e
+excluir esse volume derruba o denominador e infla o indicador — foi essa
+divergencia que fazia o relatorio do agente nao bater com o dashboard.
+
 Valor monetario NAO entra em WMAPE, BIAS nem FVA. Fica na secao de
 impacto financeiro, que monetiza os gaps de volume.
 
@@ -278,7 +284,7 @@ SELECT EXTRACT(YEAR FROM a.mes)::int              AS ano,
        SUM(a.vl_perda_subplano)                   AS vl_subplano,
        COUNT(DISTINCT a.sku)                      AS n_skus
 FROM mart_acuracia_sku_mes a
-WHERE a.ativo AND a.qt_pedido > 0
+WHERE a.qt_pedido > 0
   AND EXTRACT(MONTH FROM a.mes) <= :mes_fim
   AND EXTRACT(YEAR  FROM a.mes) = ANY(:anos)
 GROUP BY 1 ORDER BY 1
@@ -305,7 +311,7 @@ SELECT TO_CHAR(a.mes, 'YYYY-MM')                  AS mes,
            FILTER (WHERE a.qt_ia IS NOT NULL)     AS erro_ia,
        SUM(a.qt_pedido)    FILTER (WHERE a.qt_ia IS NOT NULL) AS qt_base_ia
 FROM mart_acuracia_sku_mes a
-WHERE a.ativo AND a.qt_pedido > 0
+WHERE a.qt_pedido > 0
   AND a.mes >= CAST(:ini AS date) AND a.mes <= CAST(:fim AS date)
 GROUP BY 1 ORDER BY 1
 """
@@ -325,7 +331,7 @@ SELECT a.categoria,
        SUM(a.vl_perda_subplano) AS vl_subplano,
        SUM(a.qt_pedido) FILTER (WHERE a.tem_plano) AS qt_com_plano
 FROM mart_acuracia_sku_mes a
-WHERE a.ativo AND a.qt_pedido > 0
+WHERE a.qt_pedido > 0
   AND a.mes >= CAST(:ini AS date) AND a.mes <= CAST(:fim AS date)
 GROUP BY 1 ORDER BY SUM(a.erro_abs_cx) DESC
 """
@@ -349,7 +355,7 @@ SELECT a.sku,
        BOOL_AND(a.tem_plano) AS sempre_com_plano
 FROM mart_acuracia_sku_mes a
 LEFT JOIN dim_produtos p ON p.sku = a.sku
-WHERE a.ativo AND a.qt_pedido > 0
+WHERE a.qt_pedido > 0
   AND a.mes >= CAST(:ini AS date) AND a.mes <= CAST(:fim AS date)
 GROUP BY a.sku
 """
@@ -580,7 +586,7 @@ def montar_dataset(db: Session, meses: List[str] = None,
                    SUM(a.vl_excesso_plano)  AS vl_excesso,
                    SUM(a.vl_perda_subplano) AS vl_subplano
             FROM mart_acuracia_sku_mes a
-            WHERE a.ativo AND a.qt_pedido > 0 AND a.mes = CAST(:mes AS date)
+            WHERE a.qt_pedido > 0 AND a.mes = CAST(:mes AS date)
             GROUP BY 1 ORDER BY SUM(a.erro_abs_cx) DESC
         """), {"mes": mes_d.isoformat()}).fetchall()
 
@@ -781,23 +787,30 @@ REGRAS DE REDACAO - obrigatorias:
   responsavel especifico (nada de "Planejamento de Demanda deve...",
   "a area de Suprimentos precisa..."). Descreva a acao e o resultado
   esperado; quem executa nao e parte do relatorio.
+- Escreva como uma HISTORIA para a diretoria, nao como documentacao tecnica.
+  PROIBIDO explicar a propria metodologia do relatorio na prosa (nada de
+  "isso nao e um recorte isolado apenas daquele mes", "o periodo e o teto
+  do calculo", "os dados vem do JSON/sistema/base"). O leitor nao precisa
+  saber COMO o numero foi calculado, so o que ele significa para o negocio.
+  Va direto ao fato e à consequencia: o que aconteceu, quanto, e o que fazer.
 
 {METODOLOGIA}
 
 ESTRUTURA (700 a 900 palavras, prosa densa):
 
-1. ESCOPO E METODO
-   Periodo medido (o ano vigente, do inicio do ano ate o ultimo mes
-   fechado — e o UNICO periodo do relatorio, use sempre o mesmo recorte
-   ao longo de todo o texto), quantidade de SKUs, origem do plano e
-   limitacoes. Cite os DOIS numeros de SKU do contexto: quantos venderam
+1. VISAO GERAL DO PERIODO
+   Abra dizendo, em uma frase natural, qual periodo do ano foi analisado
+   (ex.: "de janeiro a agosto de 2026") sem explicar o metodo de corte do
+   periodo. Cite quantidade de SKUs, origem do plano e limitacoes de forma
+   narrativa. Cite os DOIS numeros de SKU do contexto: quantos venderam
    no periodo e quantos existem no portfolio ativo total. Se forem
    diferentes, diga "X de Y SKUs ativos venderam no periodo" — PROIBIDO
    escrever que os SKUs vendidos "representam a totalidade do portfolio"
    quando os dois numeros nao forem iguais.
 
-2. LEITURA DO PERIODO
-   WMAPE e BIAS do portfolio, classificacao pelo cruzamento e persistencia.
+2. COMO O NEGOCIO SE COMPORTOU
+   WMAPE e BIAS do portfolio, contados como historia (o que aconteceu e o
+   que isso significa), classificacao pelo cruzamento e persistencia.
 
 3. EVOLUCAO ANO A ANO
    Compare cada ano usando os mesmos meses do calendario. Diga se o erro
@@ -1229,16 +1242,14 @@ def gerar_pdf(relatorio: str, ds: Dict[str, Any] = None) -> bytes:
     st_txt = ParagraphStyle("p", parent=ss["BodyText"], fontSize=9,
                             leading=13.5, alignment=TA_JUSTIFY, spaceAfter=6)
 
-    fluxo = [Paragraph("Relatorio S&OP — Nexus", ss["Heading1"]), Spacer(1, 4)]
+    fluxo = [Paragraph("Relatorio de Acuracia de Demanda — Linea Alimentos", ss["Heading1"]), Spacer(1, 4)]
 
     if ds and ds.get("totais"):
         t, jan = ds["totais"], ds.get("janela", {})
         rotulo = (jan["meses_detalhe"][0] + " a " + jan["meses_detalhe"][-1]
                   if len(jan.get("meses_detalhe", [])) > 1 else jan.get("mes_referencia", "-"))
         fluxo.append(Paragraph(
-            f"Ciclo {jan.get('ciclo','-')} · periodo acumulado {rotulo} "
-            f"(ate o ultimo mes fechado, {jan.get('mes_referencia','-')} — nao e um "
-            f"recorte isolado apenas daquele mes)",
+            f"Ciclo {jan.get('ciclo','-')} · acumulado do ano de {rotulo}",
             st_txt))
         dados = [
             ["Vendido (cx)",  f"{t['qt_pedido']:,.0f}".replace(",", ".")],
