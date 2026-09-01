@@ -871,9 +871,9 @@ export default function AuditoriaArena() {
                   <tbody>
                     {fillDiag.cat.map((r: any, i: number) => {
                       const cor = r.classe==='Restricao' ? '#e11d48' : r.classe==='Atencao' ? '#d97706' : '#059669';
-                      const pedVal  = unidade==='rs' ? 'R$ '+(r.vl_pedido||0).toLocaleString('pt-BR')   : (r.pedido||0).toLocaleString('pt-BR');
-                      const fatVal  = unidade==='rs' ? 'R$ '+(r.vl_entregue||0).toLocaleString('pt-BR') : (r.entregue||0).toLocaleString('pt-BR');
-                      const corVal  = unidade==='rs' ? 'R$ '+(r.vl_corte||0).toLocaleString('pt-BR')    : (r.corte||0).toLocaleString('pt-BR');
+                      const pedVal  = unidade==='rs' ? 'R$ '+(r.pedido||0).toLocaleString('pt-BR')   : (r.pedido||0).toLocaleString('pt-BR');
+                      const fatVal  = unidade==='rs' ? 'R$ '+(r.entregue||0).toLocaleString('pt-BR') : (r.entregue||0).toLocaleString('pt-BR');
+                      const corVal  = unidade==='rs' ? 'R$ '+(r.corte||0).toLocaleString('pt-BR')    : (r.corte||0).toLocaleString('pt-BR');
                       return (
                         <tr key={r.categoria} style={{ background: i%2 ? '#f9fafb' : '#fff', borderBottom:'1px solid #f1f5f9' }}>
                           <td style={{ padding:'8px 14px', fontWeight:700, color:'#334155' }}>{r.categoria}</td>
@@ -916,9 +916,9 @@ export default function AuditoriaArena() {
                   <tbody>
                     {fillDiag.sku.map((r: any, i: number) => {
                       const cor = r.classe==='Restricao' ? '#e11d48' : r.classe==='Atencao' ? '#d97706' : '#059669';
-                      const pedVal = unidade==='rs' ? 'R$ '+(r.vl_pedido||0).toLocaleString('pt-BR')   : (r.pedido||0).toLocaleString('pt-BR');
-                      const fatVal = unidade==='rs' ? 'R$ '+(r.vl_entregue||0).toLocaleString('pt-BR') : (r.entregue||0).toLocaleString('pt-BR');
-                      const corVal = unidade==='rs' ? 'R$ '+(r.vl_corte||0).toLocaleString('pt-BR')    : (r.corte||0).toLocaleString('pt-BR');
+                      const pedVal = unidade==='rs' ? 'R$ '+(r.pedido||0).toLocaleString('pt-BR')   : (r.pedido||0).toLocaleString('pt-BR');
+                      const fatVal = unidade==='rs' ? 'R$ '+(r.entregue||0).toLocaleString('pt-BR') : (r.entregue||0).toLocaleString('pt-BR');
+                      const corVal = unidade==='rs' ? 'R$ '+(r.corte||0).toLocaleString('pt-BR')    : (r.corte||0).toLocaleString('pt-BR');
                       return (
                         <tr key={r.sku} style={{ background: i%2 ? '#f9fafb' : '#fff', borderBottom:'1px solid #f1f5f9' }}>
                           <td style={{ padding:'8px 14px', fontWeight:700, color:'#64748b', fontSize:10 }}>{r.sku}</td>
