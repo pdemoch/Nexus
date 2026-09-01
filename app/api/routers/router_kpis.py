@@ -267,11 +267,13 @@ async def filtros(db: Session = Depends(get_db), _: dict = Depends(get_current_u
         # lista de opções (dropna), mas continuam aparecendo agrupados como
         # "SEM CATEGORIA" no gráfico/tabela — o filtro nunca conseguia
         # selecionar esse grupo, mesmo ele existindo nos dados.
+        # Sem filtro de "ativo": Fill Rate mede execução do que foi pedido/
+        # entregue/cortado no histórico, então itens descontinuados também
+        # entram (ex.: categoria HUMMM, com SKUs todos inativos).
         df = pd.read_sql(text("""
             SELECT DISTINCT COALESCE(categoria, 'SEM CATEGORIA') AS categoria,
                    sku, descricao
             FROM dim_produtos
-            WHERE COALESCE(ativo, FALSE) = TRUE
             ORDER BY categoria, sku
         """), db.bind)
 
@@ -567,8 +569,7 @@ async def fill_rate(
         base_from = f"""
             FROM mart_vendas_mes v
             LEFT JOIN dim_produtos p ON p.sku = v.sku
-            WHERE v.ativo = TRUE
-              AND v.mes >= CAST(:ini AS date)
+            WHERE v.mes >= CAST(:ini AS date)
               AND v.mes <= CAST(:fim AS date)
               AND TO_CHAR(v.mes,'YYYY-MM') = ANY(:meses)
               {w}
@@ -873,7 +874,6 @@ async def fill_rate_diagnostico(
             WHERE v.mes >= CAST(:inicio AS date)
               AND v.mes <= CAST(:fim AS date)
               AND v.qt_pedido > 0
-              AND v.ativo = TRUE
               {w}
             GROUP BY {group_by}
             ORDER BY SUM(v.qt_corte) DESC
