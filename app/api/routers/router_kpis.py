@@ -656,7 +656,6 @@ async def fill_rate(
                        COALESCE(MAX(v.categoria),'SEM CATEGORIA') AS categoria, {sel}
                 {base_from}
                 GROUP BY 1
-                HAVING SUM(v.{c_cor}) > 0
                 ORDER BY 6 DESC
             """), params).fetchall()
 
