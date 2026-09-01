@@ -533,10 +533,14 @@ def avaliar_categoria(db: Session, categoria: str, ciclo: str = None,
         return None
 
     payload = json.dumps(ctx, ensure_ascii=False, separators=(",", ":"))
+    # ~250 tokens por SKU (avaliacao de categoria + N avaliacoes de SKU no
+    # mesmo JSON) mais um piso de 4000: categorias com 16+ SKUs estouravam
+    # o limite fixo de 4000 e a resposta vinha cortada no meio do JSON.
+    tokens_estimados = max(4000, 1200 + len(ctx["skus"]) * 250)
     texto = _chamar_claude(
         _SYSTEM_PLANEJADOR_BATCH,
         [{"role": "user", "content": payload}],
-        max_tokens=4000,
+        max_tokens=tokens_estimados,
     )
     parsed = _parse_json_seguro(texto)
     if not parsed or "categoria" not in parsed:

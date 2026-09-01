@@ -236,6 +236,13 @@ def janela_do_ciclo(ciclo: str) -> Dict[str, Any]:
         meses_detalhe.append(d.strftime("%Y-%m"))
         d += relativedelta(months=1)
 
+    # Janelas trailing curtas (6m / 3m), terminando no mesmo ultimo mes
+    # fechado do YTD. Servem para responder "o que estamos melhorando
+    # AGORA" — YTD e YoY diluem uma mudanca recente de 2-3 meses num
+    # denominador de 8+ meses, escondendo tendencia de curto prazo.
+    ini_6m = ref - relativedelta(months=5)   # 6 meses incluindo ref
+    ini_3m = ref - relativedelta(months=2)   # 3 meses incluindo ref
+
     anos = list(range(ref.year - (ANOS_YOY - 1), ref.year + 1))
     return {
         "ciclo":          ciclo,
@@ -245,6 +252,8 @@ def janela_do_ciclo(ciclo: str) -> Dict[str, Any]:
         "meses_detalhe":  meses_detalhe,
         "ini_detalhe":    ini_det.isoformat(),
         "fim_detalhe":    ref.isoformat(),
+        "ini_6m":         ini_6m.isoformat(),
+        "ini_3m":         ini_3m.isoformat(),
         "rotulo_yoy":     f"Jan a {ref.strftime('%b')}/{{ano}}",
     }
 
@@ -346,6 +355,28 @@ GROUP BY a.sku
 """
 
 
+def _categorias_por_janela(db: Session, ini: str, fim: str) -> Dict[str, Dict[str, Any]]:
+    """
+    WMAPE/BIAS/Fill Rate por categoria numa janela arbitraria (YTD, 6m, 3m).
+
+    Usa a mesma _SQL_CATEGORIA da janela YTD, so' que parametrizada — o
+    dataset chama isto tres vezes (YTD, 6m, 3m) para montar a tabela
+    consolidada de evolucao por categoria que fecha os tres indicadores
+    lado a lado com a mesma metodologia (SUM erro/SUM real, nunca media
+    dos WMAPEs individuais).
+    """
+    out = {}
+    for r in db.execute(text(_SQL_CATEGORIA), {"ini": ini, "fim": fim}).fetchall():
+        qp = float(r.qt_pedido or 0)
+        out[r.categoria or "SEM CATEGORIA"] = {
+            "qt_pedido":  round(qp),
+            "wmape":      _r(_sdiv(r.erro_abs, qp, 100)),
+            "bias":       _r(_sdiv(float(r.qt_plano or 0) - qp, qp, 100)),
+            "fill_rate":  _r(_sdiv(r.qt_entregue, qp, 100), 1),
+        }
+    return out
+
+
 def montar_dataset(db: Session, meses: List[str] = None,
                    base: str = "pedido", unidade: str = "cx",
                    ciclo: str = None) -> Dict[str, Any]:
@@ -443,6 +474,39 @@ def montar_dataset(db: Session, meses: List[str] = None,
             "vl_excesso": round(float(r.vl_excesso or 0)),
             "vl_subplano": round(float(r.vl_subplano or 0)),
         })
+
+    # ---- Categoria: evolucao consolidada YTD / 6m / 3m ----
+    # Uma tabela que cruza WMAPE, BIAS e Fill Rate por categoria em tres
+    # janelas terminando no mesmo ultimo mes fechado: o YTD (jan a mes_fim,
+    # 8 meses no ciclo atual) dilui uma piora ou melhora recente; 6m e 3m
+    # (trailing, terminando no mesmo mes) mostram se a categoria esta
+    # melhorando ou piorando AGORA, nao so' na media do ano.
+    cat_ytd = {c["categoria"]: {"qt_pedido": c["qt_pedido"], "wmape": c["wmape"],
+                                 "bias": c["bias"], "fill_rate": c["fill_rate"]}
+               for c in categorias}
+    cat_6m = _categorias_por_janela(db, jan["ini_6m"], jan["fim_detalhe"])
+    cat_3m = _categorias_por_janela(db, jan["ini_3m"], jan["fim_detalhe"])
+
+    todas_categorias = sorted(set(cat_ytd) | set(cat_6m) | set(cat_3m))
+    categoria_evolucao = []
+    for cat in todas_categorias:
+        ytd, m6, m3 = cat_ytd.get(cat, {}), cat_6m.get(cat, {}), cat_3m.get(cat, {})
+        categoria_evolucao.append({
+            "categoria":        cat,
+            "qt_pedido_ytd":    ytd.get("qt_pedido", 0),
+            "wmape_ytd":        ytd.get("wmape"), "bias_ytd": ytd.get("bias"),
+            "fill_rate_ytd":    ytd.get("fill_rate"),
+            "wmape_6m":         m6.get("wmape"), "bias_6m": m6.get("bias"),
+            "fill_rate_6m":     m6.get("fill_rate"),
+            "wmape_3m":         m3.get("wmape"), "bias_3m": m3.get("bias"),
+            "fill_rate_3m":     m3.get("fill_rate"),
+            # Tendencia: 3m contra 6m no WMAPE (queda = melhorando, subida = piorando).
+            "tendencia_wmape":  _r(m3.get("wmape") - m6.get("wmape"), 1)
+                                if m3.get("wmape") is not None and m6.get("wmape") is not None else None,
+            "tendencia_fill_rate": _r(m3.get("fill_rate") - m6.get("fill_rate"), 1)
+                                if m3.get("fill_rate") is not None and m6.get("fill_rate") is not None else None,
+        })
+    categoria_evolucao.sort(key=lambda x: -(x["qt_pedido_ytd"] or 0))
 
     # ---- SKU: rankings ----
     skus = []
@@ -542,6 +606,7 @@ def montar_dataset(db: Session, meses: List[str] = None,
         "yoy":           yoy,
         "mensal":        mensal,
         "categorias":    categorias,
+        "categoria_evolucao": categoria_evolucao,
         "totais":        tot,
         "top_erro":      top_erro,
         "top_corte":     top_corte,
@@ -738,6 +803,22 @@ ESTRUTURA (700 a 900 palavras, prosa densa):
    Compare cada ano usando os mesmos meses do calendario. Diga se o erro
    aumentou, diminuiu ou permaneceu estavel, e quanto.
 
+3B. EVOLUCAO POR CATEGORIA — CURTO PRAZO (o que esta melhorando/piorando)
+   Use "categoria_evolucao" do JSON. Para CADA categoria com volume
+   relevante (qt_pedido_ytd alto), descreva em prosa — NUNCA em tabela —
+   o WMAPE, BIAS e Fill Rate do YTD comparados aos ultimos 6 meses e aos
+   ultimos 3 meses. Aponte explicitamente:
+     - Categorias com tendencia_wmape negativa (WMAPE caindo nos ultimos
+       3m vs 6m) e tendencia_fill_rate positiva: estao MELHORANDO agora,
+       mesmo que o YTD acumulado ainda pareca ruim.
+     - Categorias com tendencia_wmape positiva e/ou tendencia_fill_rate
+       negativa: estao PIORANDO nos meses mais recentes, mesmo que o YTD
+       acumulado ainda pareca bom — sinal de alerta que o YTD sozinho
+       esconde.
+   Se algum campo vier nulo (categoria sem volume suficiente na janela
+   curta), nao force uma leitura — apenas omita aquela categoria da
+   comparacao de tendencia.
+
 4. CONCENTRACAO DO ERRO
    Onde o erro absoluto se concentra. Distinga erro percentual de erro em
    volume. Separe maduros de lancamentos.
@@ -777,8 +858,9 @@ ESTRUTURA (700 a 900 palavras, prosa densa):
    onde esta o maior ganho no proximo ciclo, e qual o principal risco.
    Sem repetir numeros ja citados.
 
-IMPORTANTE: complete todas as 10 secoes. Se precisar economizar espaco,
-encurte as secoes 4 e 5, mas sempre entregue a secao 10 completa.
+IMPORTANTE: complete todas as 10 secoes (a secao 3B faz parte da 3, nao
+conta como secao extra). Se precisar economizar espaco, encurte as
+secoes 4 e 5, mas sempre entregue a secao 10 completa.
 
 Escreva em portugues do Brasil, paragrafos curtos.
 
@@ -803,8 +885,22 @@ def _contexto_modelo(ds: Dict[str, Any]) -> str:
         f"  comparacao YoY usam EXATAMENTE os mesmos meses — nao ha uma",
         f"  janela 'de detalhe' diferente da janela 'do periodo'. Nunca",
         f"  escreva dois recortes de meses diferentes no mesmo relatorio.",
+        f"  IMPORTANTE: 'ultimo mes fechado' e apenas o TETO do periodo YTD,",
+        f"  NAO significa que os dados sao so' daquele mes isolado. Deixe",
+        f"  isso explicito na abertura do relatorio (ex.: 'os numeros abaixo",
+        f"  cobrem {rotulo_periodo}, acumulado do ano, e nao apenas",
+        f"  {jan['mes_referencia']} isoladamente').",
         f"COMPARACAO YoY: mesmos meses (01 a {jan['mes_num_fim']:02d}) em cada um",
         f"  destes anos: {jan['anos_yoy']}.",
+        f"JANELAS CURTAS (trailing, terminando em {jan['mes_referencia']}):",
+        f"  ultimos 6 meses = {jan['ini_6m']} a {jan['fim_detalhe']};",
+        f"  ultimos 3 meses = {jan['ini_3m']} a {jan['fim_detalhe']}.",
+        f"  Use 'categoria_evolucao' no JSON para comparar WMAPE/BIAS/Fill",
+        f"  Rate de cada categoria em YTD x 6m x 3m e apontar quem esta",
+        f"  melhorando ou piorando de fato nos meses mais recentes (campo",
+        f"  tendencia_wmape: negativo = WMAPE caindo/melhorando nos ultimos",
+        f"  3m vs 6m; positivo = piorando. Mesma leitura inversa para",
+        f"  tendencia_fill_rate: positivo = melhorando, negativo = piorando).",
         f"SKUs ATIVOS NO PORTFOLIO (dim_produtos, ativo=true): {total_ativos}",
         f"SKUs ATIVOS QUE TIVERAM PEDIDO NO PERIODO ANALISADO: {ds['n_skus']}",
         "  -> Estes dois numeros SAO DIFERENTES por definicao: o primeiro e o",
@@ -818,6 +914,7 @@ def _contexto_modelo(ds: Dict[str, Any]) -> str:
             "yoy":          ds["yoy"],
             "mensal":       ds["mensal"],
             "categorias":   ds["categorias"],
+            "categoria_evolucao": ds["categoria_evolucao"],
             "totais":       ds["totais"],
             "top_erro":     ds["top_erro"],
             "top_corte":    ds["top_corte"],
@@ -834,6 +931,13 @@ def _chamar_claude(system: str, mensagens: List[Dict[str, str]],
     """
     Chama a API Anthropic. Haiku por padrao: o relatorio e prosa sobre um
     JSON ja preparado — o modelo descreve e cita, nao calcula.
+
+    Se a resposta for cortada por estourar max_tokens (stop_reason
+    "max_tokens"), refaz a chamada UMA vez com o dobro do limite antes de
+    desistir — categorias com mais SKUs geram texto proporcionalmente maior
+    e um max_tokens fixo cortava a resposta no meio do JSON (visto em
+    categorias com 16+ SKUs: a resposta parava a meio de um valor de
+    string, gerando "JSON invalido" quando o problema real era truncamento).
     """
     chave = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
     if not chave:
@@ -856,21 +960,31 @@ def _chamar_claude(system: str, mensagens: List[Dict[str, str]],
 
     ultimo_erro = None
     for modelo in modelos:
-        try:
-            resp = cliente.messages.create(
-                model=modelo,
-                max_tokens=max_tokens,
-                temperature=0,          # relatorio e reproduzivel, nao criativo
-                system=system,
-                messages=mensagens,
-            )
-            return "".join(
-                b.text for b in resp.content if getattr(b, "type", "") == "text"
-            ).strip()
-        except Exception as e:
-            ultimo_erro = e
-            logger.warning("Modelo %s falhou: %s", modelo, e)
-            continue
+        tentativa_tokens = max_tokens
+        for tentativa in range(2):   # 1a tentativa + 1 retry com o dobro se truncar
+            try:
+                resp = cliente.messages.create(
+                    model=modelo,
+                    max_tokens=tentativa_tokens,
+                    temperature=0,      # relatorio e reproduzivel, nao criativo
+                    system=system,
+                    messages=mensagens,
+                )
+                texto = "".join(
+                    b.text for b in resp.content if getattr(b, "type", "") == "text"
+                ).strip()
+                if resp.stop_reason == "max_tokens" and tentativa == 0:
+                    logger.warning(
+                        "Resposta truncada por max_tokens=%s no modelo %s — "
+                        "repetindo com %s.", tentativa_tokens, modelo, tentativa_tokens * 2
+                    )
+                    tentativa_tokens *= 2
+                    continue
+                return texto
+            except Exception as e:
+                ultimo_erro = e
+                logger.warning("Modelo %s falhou: %s", modelo, e)
+                break   # erro de API (nao truncamento): tenta o proximo modelo
 
     raise RuntimeError(f"Nenhum modelo respondeu. Ultimo erro: {ultimo_erro}")
 
@@ -945,6 +1059,8 @@ def _dataset_salvo(db: Session, ciclo: str) -> Optional[Dict[str, Any]]:
 # =====================================================================
 # GERACAO
 # =====================================================================
+
+
 def gerar_relatorio(db: Session, meses: List[str] = None,
                     base: str = "pedido", unidade: str = "cx",
                     usuario: str = "-", forcar: bool = False,
@@ -1117,8 +1233,12 @@ def gerar_pdf(relatorio: str, ds: Dict[str, Any] = None) -> bytes:
 
     if ds and ds.get("totais"):
         t, jan = ds["totais"], ds.get("janela", {})
+        rotulo = (jan["meses_detalhe"][0] + " a " + jan["meses_detalhe"][-1]
+                  if len(jan.get("meses_detalhe", [])) > 1 else jan.get("mes_referencia", "-"))
         fluxo.append(Paragraph(
-            f"Ciclo {jan.get('ciclo','-')} · ultimo mes fechado {jan.get('mes_referencia','-')}",
+            f"Ciclo {jan.get('ciclo','-')} · periodo acumulado {rotulo} "
+            f"(ate o ultimo mes fechado, {jan.get('mes_referencia','-')} — nao e um "
+            f"recorte isolado apenas daquele mes)",
             st_txt))
         dados = [
             ["Vendido (cx)",  f"{t['qt_pedido']:,.0f}".replace(",", ".")],
