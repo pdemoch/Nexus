@@ -935,6 +935,8 @@ async def kpis_exportar(
       5. Metodologia        - formulas + exemplo numerico provado
     """
     import asyncio
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
 
     try:
         teto = _ultimo_mes_fechado()
@@ -943,9 +945,6 @@ async def kpis_exportar(
             raise HTTPException(400, "Nenhum mês válido informado.")
 
         def _gerar():
-            import openpyxl
-            from openpyxl.styles import Font, PatternFill, Alignment
-
             ini_sql = meses_validos[0] + "-01"
             fim_sql = meses_validos[-1] + "-01"
 

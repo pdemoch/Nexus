@@ -801,22 +801,22 @@ export default function AuditoriaArena() {
                 {[
                   { label:'Pedido',
                     val: unidade==='rs'
-                      ? 'R$ ' + (fillRate.resumo.pedido_total||0).toLocaleString('pt-BR')
-                      : (fillRate.resumo.pedido_total||0).toLocaleString('pt-BR') + ' cx',
+                      ? 'R$ ' + (fillRate.resumo.pedido||0).toLocaleString('pt-BR')
+                      : (fillRate.resumo.pedido||0).toLocaleString('pt-BR') + ' cx',
                     cor:'#0f172a' },
                   { label:'Faturado',
                     val: unidade==='rs'
-                      ? 'R$ ' + (fillRate.resumo.faturado_total||0).toLocaleString('pt-BR')
-                      : (fillRate.resumo.faturado_total||0).toLocaleString('pt-BR') + ' cx',
+                      ? 'R$ ' + (fillRate.resumo.entregue||0).toLocaleString('pt-BR')
+                      : (fillRate.resumo.entregue||0).toLocaleString('pt-BR') + ' cx',
                     cor:'#059669' },
                   { label:'Corte',
                     val: unidade==='rs'
-                      ? 'R$ ' + (fillRate.resumo.corte_total||0).toLocaleString('pt-BR')
-                      : (fillRate.resumo.corte_total||0).toLocaleString('pt-BR') + ' cx',
+                      ? 'R$ ' + (fillRate.resumo.corte||0).toLocaleString('pt-BR')
+                      : (fillRate.resumo.corte||0).toLocaleString('pt-BR') + ' cx',
                     cor:'#e11d48' },
                   { label:'Atendimento',
-                    val: fillRate.resumo.fill_rate != null ? `${Number(fillRate.resumo.fill_rate).toFixed(1).replace('.',',')}%` : '—',
-                    cor: (fillRate.resumo.fill_rate ?? 0) >= 95 ? '#059669' : (fillRate.resumo.fill_rate ?? 0) >= 85 ? '#d97706' : '#e11d48' },
+                    val: fillRate.resumo.atendimento != null ? `${Number(fillRate.resumo.atendimento).toFixed(1).replace('.',',')}%` : '—',
+                    cor: (fillRate.resumo.atendimento ?? 0) >= 95 ? '#059669' : (fillRate.resumo.atendimento ?? 0) >= 85 ? '#d97706' : '#e11d48' },
                 ].map(c => (
                   <div key={c.label} style={{ background:'#fff', borderRadius:12, border:'1px solid #f1f5f9', padding:'16px 20px' }}>
                     <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8', marginBottom:6 }}>{c.label}</div>
