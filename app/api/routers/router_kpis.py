@@ -111,10 +111,12 @@ def _carregar(db: Session, inicio: str, fim: str,
     """
     filtros, params = ["a.ativo = TRUE"], {}
     if categoria:
-        # "SEM CATEGORIA" é rótulo de exibição (COALESCE), não existe como
-        # valor gravado — precisa virar filtro por categoria NULL.
+        # "SEM CATEGORIA" é rótulo de exibição via COALESCE, mas também
+        # existe gravado como valor literal em dim_produtos.categoria para
+        # alguns SKUs — precisa cobrir os dois casos, senão o filtro nunca
+        # bate com nenhuma linha.
         if categoria == "SEM CATEGORIA":
-            filtros.append("a.categoria IS NULL")
+            filtros.append("(a.categoria IS NULL OR a.categoria = 'SEM CATEGORIA')")
         else:
             filtros.append("a.categoria = :cat"); params["cat"] = categoria
     if sku:
@@ -554,7 +556,7 @@ async def fill_rate(
         filtros, params = [], {"ini": ini, "fim": fim, "meses": meses_validos}
         if categoria:
             if categoria == "SEM CATEGORIA":
-                filtros.append("AND v.categoria IS NULL")
+                filtros.append("AND (v.categoria IS NULL OR v.categoria = 'SEM CATEGORIA')")
             else:
                 filtros.append("AND v.categoria = :cat"); params["cat"] = categoria
         if sku:
@@ -656,7 +658,6 @@ async def fill_rate(
                 GROUP BY 1
                 HAVING SUM(v.{c_cor}) > 0
                 ORDER BY 6 DESC
-                LIMIT 150
             """), params).fetchall()
 
         itens = []
@@ -748,7 +749,7 @@ async def fill_rate_evolucao(
         filtros, params = ["1=1"], {}
         if categoria:
             if categoria == "SEM CATEGORIA":
-                filtros.append("v.categoria IS NULL")
+                filtros.append("(v.categoria IS NULL OR v.categoria = 'SEM CATEGORIA')")
             else:
                 filtros.append("v.categoria = :cat"); params["cat"] = categoria
         if sku:
@@ -841,7 +842,7 @@ async def fill_rate_diagnostico(
         filtros, params = ["1=1"], {}
         if categoria:
             if categoria == "SEM CATEGORIA":
-                filtros.append("v.categoria IS NULL")
+                filtros.append("(v.categoria IS NULL OR v.categoria = 'SEM CATEGORIA')")
             else:
                 filtros.append("v.categoria = :cat"); params["cat"] = categoria
 
@@ -998,43 +999,41 @@ async def kpis_exportar(
             ws2.cell(row=i, column=10, value=it.get("cobertura_plano_pct"))
             ws2.cell(row=i, column=11, value=it.get("classe"))
 
-        # ABA 3: Fill Rate por Categoria
-        fr_cat = await fill_rate_diagnostico(meses=meses_validos, categoria=categoria, nivel="categoria", db=db, _=_)
+        # ABA 3: Fill Rate por Categoria (mesma rota/cálculo da tela: /fill-rate)
+        fr_cat = await fill_rate(meses=meses_validos, categoria=categoria, unidade="cx", nivel="categoria", db=db, _=_)
         ws3 = wb.create_sheet("Fill Rate Categoria")
         hdrs3 = ["Categoria", "Pedido (cx)", "Faturado (cx)", "Corte (cx)",
-                 "Carteira (cx)", "Fill Rate (%)", "Corte (%)", "Cobertura (%)", "Classe"]
+                 "Carteira (cx)", "Fill Rate (%)", "Cobertura (%)", "Classe"]
         for j, h in enumerate(hdrs3, 1):
             c = ws3.cell(row=1, column=j, value=h); c.fill, c.font = hdr_fill, hdr_font
         for i, it in enumerate(fr_cat.get("itens", []), 2):
             ws3.cell(row=i, column=1, value=it.get("categoria"))
             ws3.cell(row=i, column=2, value=it.get("pedido"))
-            ws3.cell(row=i, column=3, value=it.get("faturado"))
+            ws3.cell(row=i, column=3, value=it.get("entregue"))
             ws3.cell(row=i, column=4, value=it.get("corte"))
             ws3.cell(row=i, column=5, value=it.get("carteira"))
-            ws3.cell(row=i, column=6, value=it.get("fill_rate"))
-            ws3.cell(row=i, column=7, value=it.get("corte_pct"))
-            ws3.cell(row=i, column=8, value=it.get("cobertura"))
-            ws3.cell(row=i, column=9, value=it.get("classe"))
+            ws3.cell(row=i, column=6, value=it.get("atendimento"))
+            ws3.cell(row=i, column=7, value=it.get("cobertura"))
+            ws3.cell(row=i, column=8, value=it.get("classe"))
 
-        # ABA 4: Fill Rate por SKU
-        fr_sku = await fill_rate_diagnostico(meses=meses_validos, categoria=categoria, nivel="sku", db=db, _=_)
+        # ABA 4: Fill Rate por SKU (mesma rota/cálculo da tela: /fill-rate)
+        fr_sku = await fill_rate(meses=meses_validos, categoria=categoria, unidade="cx", nivel="sku", db=db, _=_)
         ws4 = wb.create_sheet("Fill Rate SKU")
         hdrs4 = ["SKU", "Descrição", "Categoria", "Pedido (cx)", "Faturado (cx)", "Corte (cx)",
-                 "Carteira (cx)", "Fill Rate (%)", "Corte (%)", "Cobertura (%)", "Classe"]
+                 "Carteira (cx)", "Fill Rate (%)", "Cobertura (%)", "Classe"]
         for j, h in enumerate(hdrs4, 1):
             c = ws4.cell(row=1, column=j, value=h); c.fill, c.font = hdr_fill, hdr_font
         for i, it in enumerate(fr_sku.get("itens", []), 2):
-            ws4.cell(row=i, column=1, value=it.get("chave"))
+            ws4.cell(row=i, column=1, value=it.get("sku"))
             ws4.cell(row=i, column=2, value=it.get("descricao"))
             ws4.cell(row=i, column=3, value=it.get("categoria"))
             ws4.cell(row=i, column=4, value=it.get("pedido"))
-            ws4.cell(row=i, column=5, value=it.get("faturado"))
+            ws4.cell(row=i, column=5, value=it.get("entregue"))
             ws4.cell(row=i, column=6, value=it.get("corte"))
             ws4.cell(row=i, column=7, value=it.get("carteira"))
-            ws4.cell(row=i, column=8, value=it.get("fill_rate"))
-            ws4.cell(row=i, column=9, value=it.get("corte_pct"))
-            ws4.cell(row=i, column=10, value=it.get("cobertura"))
-            ws4.cell(row=i, column=11, value=it.get("classe"))
+            ws4.cell(row=i, column=8, value=it.get("atendimento"))
+            ws4.cell(row=i, column=9, value=it.get("cobertura"))
+            ws4.cell(row=i, column=10, value=it.get("classe"))
 
         # ABA 5: Metodologia (exemplo numérico provado com o próprio caso
         # que gerou a dúvida: erro líquido pequeno, WMAPE alto)
