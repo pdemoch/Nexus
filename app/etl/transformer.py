@@ -75,9 +75,6 @@ class NexusTransformer:
         # isso inflou o valor de vl_pedido em ~R$2,2 milhoes no periodo jan-ago
         # 2026 (R$163.426.642 apurado vs R$161.216.226 do ERP), distorcendo Fill
         # Rate, WMAPE, BIAS e PMR/PMP, que dependem de vl_pedido/qt_pedido.
-        # Filtros de regional (FIFEIRO/EIC) continuam removidos: nao ha evidencia
-        # de que causem divergencia financeira: analises de canal seguem sendo
-        # feitas por filtro no front, nao na camada de carga.
         colunas_150 = lf_150.columns
         if "operacao" in colunas_150:
             lf_150 = lf_150.filter(
@@ -85,6 +82,22 @@ class NexusTransformer:
             )
         else:
             print("⚠️ [SILVER] Coluna 'operacao' ausente na 150 — filtro de bonificação/transferência não aplicado.")
+
+        # FILTRO DE REGIONAL (EIC / FIFEIRO) — reintroduzido em 2026-09 a pedido
+        # explicito do negocio: esses canais NAO podem entrar em NENHUMA metrica,
+        # KPI, rateio (distributor.py usa fato_vendas p/ share/PMV) ou base de
+        # planejamento (ConsensoArena, dashboards, WMAPE/BIAS/FVA, PMR/PMP).
+        # A regional usada aqui e' a propria da 150 (coluna 'regional' de vendas,
+        # nao a de dim_clientes/188 — ver comentario mais abaixo sobre o join).
+        # Excecao unica: o Painel Financeiro, que NAO le fato_vendas (le de
+        # dim_clientes + fontes proprias em app/financeiro/pmr_engine.py) e por
+        # isso nao e afetado por este filtro, propositalmente.
+        if "regional" in lf_150.columns:
+            lf_150 = lf_150.filter(
+                ~pl.col("regional").cast(pl.Utf8).str.strip_chars().str.to_uppercase().is_in(["EIC", "FIFEIRO"])
+            )
+        else:
+            print("⚠️ [SILVER] Coluna 'regional' ausente na 150 — filtro de EIC/FIFEIRO não aplicado.")
 
         lf_vendas = lf_150.filter(
             (pl.col("dtapedido") >= data_inicio_str)   # <-- BLINDAGEM TEMPORAL
