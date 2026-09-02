@@ -131,15 +131,19 @@ function PreenchimentoMetas() {
   const [busca,          setBusca]          = useState('');
   const [fase,           setFase]           = useState<any>(null);
   const [avancando,      setAvancando]      = useState(false);
+  const [adminAlvo,      setAdminAlvo]      = useState<{ nome: string; nivel: string } | null>(null);
 
   const carregar = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await axios.get('/api/v1/carteira/tabela');
+      const params = adminAlvo
+        ? { responsavel: adminAlvo.nome, nivel_responsavel: adminAlvo.nivel }
+        : {};
+      const r = await axios.get('/api/v1/carteira/tabela', { params });
       setDados(r.data); setEdits({});
       setFase(r.data?.minha_fase || null);
     } finally { setLoading(false); }
-  }, []);
+  }, [adminAlvo]);
   useEffect(() => { carregar(); }, [carregar]);
 
   const meses: string[]    = dados?.meses || [];
@@ -147,16 +151,24 @@ function PreenchimentoMetas() {
   const minhaCongelada     = Boolean(dados?.minha_carteira_congelada);
   const aguardandoUpstream = Boolean(dados?.aguardando_upstream);
   const souAdmin           = dados?.sou_admin === true;
+  const adminOperando      = souAdmin && adminAlvo !== null;
   // funcao vem como campo extra — precisamos dela para controle de cadeado
   const funcao: string     = dados?.funcao || '';
-  const bloqueado          = congeladaEtapa || minhaCongelada || aguardandoUpstream;
+  // O Administrador pode operar como supervisor mesmo antes do congelamento
+  // upstream; os demais perfis continuam respeitando o bastão da etapa.
+  const bloqueado          = congeladaEtapa || minhaCongelada ||
+    (aguardandoUpstream && !souAdmin);
 
   // Fase da cascata (Gerente: só SKU; Coordenador: SKU -> EXECUTIVO -> RAZAO_SOCIAL).
   // Admin não tem fase própria (fase === null): trabalha em modo livre (compatibilidade).
   const faseAtual: string | null = fase?.fase_atual ?? null;
-  const naFaseRazaoSocial = souAdmin || faseAtual === 'RAZAO_SOCIAL' || faseAtual === null;
-  const naFaseSku         = !souAdmin && faseAtual === 'SKU';
-  const naFaseExecutivo   = !souAdmin && faseAtual === 'EXECUTIVO';
+  const naFaseRazaoSocial = (souAdmin && !adminOperando) ||
+    ((!souAdmin || adminOperando) &&
+      (faseAtual === 'RAZAO_SOCIAL' || faseAtual === null));
+  const naFaseSku         = (!souAdmin || adminOperando) && faseAtual === 'SKU';
+  const naFaseExecutivo   = (!souAdmin || adminOperando) && faseAtual === 'EXECUTIVO';
+  const faseFuncao = adminAlvo?.nivel || funcao;
+  const responsaveis = (dados?.responsaveis || []) as Array<{ nome: string; nivel: string }>;
 
   /* Chave de edição: sempre no nível razão social */
   const keyOf       = (razao: string, sku: string, mes: string) => `${razao}||${sku}||${mes}`;
@@ -256,7 +268,7 @@ function PreenchimentoMetas() {
   /* Avança a fase corrente (SKU ou EXECUTIVO): grava o rateio em cascata via
      /ratear-fase e move a máquina de estado para a próxima etapa. */
   const avancarFase = async () => {
-    if (!faseAtual || souAdmin) return;
+    if (!faseAtual || (!adminOperando && souAdmin)) return;
     const mensagem = naFaseSku
       ? 'Concluir a fase de SKU? Os totais serão rateados para os Executivos e você passará a editar por Executivo.'
       : 'Concluir a fase de Executivo? Os totais serão rateados para as Razões Sociais e você passará à edição final por cliente.';
@@ -276,7 +288,13 @@ function PreenchimentoMetas() {
           const [sku, mes] = k.split('||');
           return { sku, mes_projetado: mes, novo_volume: Math.round(somaSkuCarteira(sku, mes)) };
         });
-        const r = await axios.post('/api/v1/carteira/ratear-fase', { ajustes });
+        const r = await axios.post('/api/v1/carteira/ratear-fase', {
+          ajustes,
+          ...(adminAlvo ? {
+            responsavel_nome: adminAlvo.nome,
+            responsavel_nivel: adminAlvo.nivel,
+          } : {}),
+        });
         setFase(r.data?.fase || null);
       } else if (naFaseExecutivo) {
         // Na fase Executivo, cada executivo ajusta seus próprios SKUs — percorremos
@@ -308,7 +326,13 @@ function PreenchimentoMetas() {
         for (const [executivo, itens] of Object.entries(porExecutivo)) {
           const ajustes = itens.map(i => ({ sku: i.sku, mes_projetado: i.mes, novo_volume: Math.round(i.total) }));
           if (!ajustes.length) continue;
-          const r = await axios.post('/api/v1/carteira/ratear-fase', { ajustes, executivo_nome: executivo });
+          const r = await axios.post('/api/v1/carteira/ratear-fase', {
+            ajustes, executivo_nome: executivo,
+            ...(adminAlvo ? {
+              responsavel_nome: adminAlvo.nome,
+              responsavel_nivel: adminAlvo.nivel,
+            } : {}),
+          });
           ultimaFase = r.data?.fase || ultimaFase;
         }
         setFase(ultimaFase);
@@ -385,6 +409,18 @@ function PreenchimentoMetas() {
     } catch (e: any) { alert(e?.response?.data?.detail || 'Falha ao reabrir.'); }
   };
 
+  const reabrirFaseAdmin = async () => {
+    if (!adminAlvo || !confirm(`Reabrir a fase de ${adminAlvo.nome}?`)) return;
+    try {
+      await axios.post('/api/v1/carteira/reabrir-fase', {
+        nome_alvo: adminAlvo.nome, nivel_alvo: adminAlvo.nivel,
+      });
+      await carregar();
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || 'Falha ao reabrir a fase.');
+    }
+  };
+
   const toggle = (id: string) =>
     setAbertas(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
@@ -438,11 +474,30 @@ function PreenchimentoMetas() {
               {!aguardandoUpstream && minhaCongelada && <span className="ml-2 text-emerald-600 font-bold">· sua carteira bloqueada</span>}
               {!aguardandoUpstream && congeladaEtapa && <span className="ml-2 text-amber-600 font-bold">· etapa congelada</span>}
             </p>
-            {!souAdmin && faseAtual && !bloqueado && (
-              <div className="mt-2"><StepperFase funcao={funcao} faseAtual={faseAtual} /></div>
+            {faseAtual && (!souAdmin || adminOperando) && (
+              <div className="mt-2">
+                <StepperFase funcao={faseFuncao} faseAtual={faseAtual} />
+              </div>
             )}
           </div>
           <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+            {souAdmin && (
+              <select
+                value={adminAlvo ? `${adminAlvo.nivel}||${adminAlvo.nome}` : ''}
+                onChange={e => {
+                  const [nivel, ...nome] = e.target.value.split('||');
+                  setAdminAlvo(e.target.value ? { nivel, nome: nome.join('||') } : null);
+                }}
+                className="max-w-xs px-3 py-2 rounded-xl border border-violet-200 bg-violet-50 text-xs font-bold text-violet-700 focus:outline-none"
+              >
+                <option value="">Visão administrativa: toda a carteira</option>
+                {responsaveis.map(r => (
+                  <option key={`${r.nivel}||${r.nome}`} value={`${r.nivel}||${r.nome}`}>
+                    {r.nivel}: {r.nome}
+                  </option>
+                ))}
+              </select>
+            )}
             {/* Busca */}
             <div className="relative">
               <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
@@ -473,11 +528,17 @@ function PreenchimentoMetas() {
               </button>
             )}
             {/* Trancar/Avançar fase — SKU e Executivo (Gerente e Coordenador) */}
-            {!souAdmin && (naFaseSku || naFaseExecutivo) && !bloqueado && (
+            {(naFaseSku || naFaseExecutivo) && (!bloqueado || (souAdmin && adminOperando)) && (
               <button onClick={avancarFase} disabled={avancando}
                 className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-60">
                 {avancando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />}
                 {naFaseSku ? 'Trancar SKU e ratear p/ Executivos' : 'Trancar Executivo e ratear p/ Razão Social'}
+              </button>
+            )}
+            {souAdmin && adminOperando && (
+              <button onClick={reabrirFaseAdmin}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-black bg-amber-500 text-white hover:bg-amber-600">
+                <Unlock className="w-4 h-4" /> Reabrir fase
               </button>
             )}
             {/* Congelar/Reabrir etapa — só Gerente e Admin */}
@@ -536,19 +597,12 @@ function PreenchimentoMetas() {
         </div>
       </div>
 
-      {/* ÁRVORE — na fase SKU, mostra lista agregada por SKU (editável, sem
-          nível executivo/cliente ainda, pois eles só existem após o rateio).
-          Nas fases EXECUTIVO e RAZAO_SOCIAL, mostra a árvore completa
-          (só a razão social é editável na última fase). */}
+      {/* A árvore permanece visível em todas as fases. Na fase SKU os SKUs
+          aparecem dentro de cada executivo para permitir navegar e abrir o
+          dossiê antes do rateio; na fase EXECUTIVO o SKU fica editável e, na
+          fase Razão Social, o ajuste final ocorre no cliente. */}
       <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-8">
-        {naFaseSku ? (
-          <ListaSkuCarteira
-            skus={skusAgregadosCarteira} meses={meses}
-            somaSkuCarteira={somaSkuCarteira} setSkuCarteira={setSkuCarteira}
-            bloqueado={bloqueado} edits={edits}
-            setDossieAlvo={setDossieAlvo} dossieAlvo={dossieAlvo}
-          />
-        ) : arvoreVisivelOuCompleta.length === 0 && busca.trim() ? (
+        {arvoreVisivelOuCompleta.length === 0 && busca.trim() ? (
           <div className="flex flex-col items-center justify-center py-16 text-slate-400">
             <Search className="w-8 h-8 mb-2 opacity-30" />
             <div className="text-sm font-bold">Nenhum resultado para "{busca}"</div>
@@ -560,7 +614,7 @@ function PreenchimentoMetas() {
               meses={meses} abertas={abertas} toggle={toggle}
               valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setCliente={setCliente}
               somaSkuExecutivo={somaSkuExecutivo}
-              bloqueado={bloqueado || naFaseExecutivo} edits={edits}
+              bloqueado={bloqueado || faseAtual === 'RAZAO_SOCIAL'} edits={edits}
               setDossieAlvo={setDossieAlvo}
               dossieAlvo={dossieAlvo}
               idPath={g.nome}
