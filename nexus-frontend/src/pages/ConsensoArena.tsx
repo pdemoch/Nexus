@@ -132,6 +132,7 @@ function PreenchimentoMetas() {
   const [fase,           setFase]           = useState<any>(null);
   const [avancando,      setAvancando]      = useState(false);
   const [adminAlvo,      setAdminAlvo]      = useState<{ nome: string; nivel: string } | null>(null);
+  const [modoEdicao,     setModoEdicao]     = useState<'caixas' | 'valor'>('caixas');
 
   const carregar = useCallback(async () => {
     setLoading(true);
@@ -196,6 +197,11 @@ function PreenchimentoMetas() {
   /* Edição direta no nível cliente (override manual) */
   const setCliente = (razao: string, sku: string, mes: string, v: number) =>
     setEdits(prev => ({ ...prev, [keyOf(razao, sku, mes)]: Math.max(0, Math.round(v || 0)) }));
+
+  const setClienteValor = (razao: string, sku: string, mes: string, valor: number, pmv: number) => {
+    if (pmv <= 0) return;
+    setCliente(razao, sku, mes, Math.round(Math.max(0, valor || 0) / pmv));
+  };
 
   /* Soma de um SKU de um executivo num mês (para exibir no input do SKU) */
   const somaSkuExecutivo = (clientes: any[], sku: string, mes: string): number => {
@@ -511,6 +517,18 @@ function PreenchimentoMetas() {
                 </button>
               )}
             </div>
+            <div className="flex items-center rounded-xl border border-slate-200 bg-white p-0.5">
+              <button onClick={() => setModoEdicao('caixas')}
+                className={`px-2.5 py-1.5 rounded-lg text-[10px] font-black transition-colors
+                  ${modoEdicao === 'caixas' ? 'bg-indigo-100 text-indigo-700' : 'text-slate-400 hover:text-slate-600'}`}>
+                Caixas
+              </button>
+              <button onClick={() => setModoEdicao('valor')}
+                className={`px-2.5 py-1.5 rounded-lg text-[10px] font-black transition-colors
+                  ${modoEdicao === 'valor' ? 'bg-indigo-100 text-indigo-700' : 'text-slate-400 hover:text-slate-600'}`}>
+                R$
+              </button>
+            </div>
             {/* Cadeados — só Gerente e Admin */}
             {(souAdmin || funcao === 'Gerente') && (
               <button onClick={() => setPainelCadeados(true)}
@@ -615,6 +633,7 @@ function PreenchimentoMetas() {
               valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setCliente={setCliente}
               somaSkuExecutivo={somaSkuExecutivo}
               bloqueado={bloqueado || faseAtual === 'RAZAO_SOCIAL'} edits={edits}
+              modoEdicao={modoEdicao} setClienteValor={setClienteValor}
               setDossieAlvo={setDossieAlvo}
               dossieAlvo={dossieAlvo}
               idPath={g.nome}
@@ -703,7 +722,8 @@ function ListaSkuCarteira({ skus, meses, somaSkuCarteira, setSkuCarteira,
 /* ── NÓ RECURSIVO DA ÁRVORE ──────────────────────────────────────── */
 function NoArvore({ node, nivel, meses, abertas, toggle,
   valorCliente, setSkuExecutivo, setCliente, somaSkuExecutivo,
-  bloqueado, edits, setDossieAlvo, dossieAlvo, idPath, buscaAtiva }: any) {
+  bloqueado, edits, setDossieAlvo, dossieAlvo, idPath, buscaAtiva,
+  modoEdicao, setClienteValor }: any) {
 
   const buscaAtv = buscaAtiva;
   const aberta   = buscaAtv || abertas.has(idPath);
@@ -737,7 +757,20 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
           {meses.map((m: string) => {
             const totalSku  = somaSkuExecutivo(clientes, sku, m);
             const cel0      = clientes[0]?.subRows?.find((p: any) => p.sku === sku)?.meses[m];
-            const pmv       = cel0?.pmv || 0;
+            const pmvSoma = clientes.reduce((s: number, cli: any) => {
+              const p = (cli.subRows || []).find((pr: any) => pr.sku === sku);
+              const cel = p?.meses?.[m];
+              const volume = cel ? valorCliente(cli.nome, sku, m, cel.meta) : 0;
+              return s + volume * (cel?.pmv || 0);
+            }, 0);
+            const pmvComVolume = clientes.reduce((s: number, cli: any) => {
+              const p = (cli.subRows || []).find((pr: any) => pr.sku === sku);
+              return s + (p?.meses?.[m]?.pmv || 0);
+            }, 0);
+            const pmv       = totalSku > 0
+              ? pmvSoma / totalSku
+              : (clientes.length ? pmvComVolume / clientes.length : 0);
+            const valorAtual = totalSku * pmv;
             const ia        = clientes.reduce((s: number, cli: any) => {
               const p = (cli.subRows || []).find((pr: any) => pr.sku === sku);
               return s + (p?.meses[m]?.ia || 0);
@@ -761,12 +794,20 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
                 </div>
                 <input
                   type="number"
-                  value={totalSku}
+                  value={modoEdicao === 'valor' ? Math.round(valorAtual) : totalSku}
                   disabled={bloqueado}
-                  onChange={e => setSkuExecutivo(clientesInfo, sku, m, parseInt(e.target.value) || 0)}
+                  onChange={e => {
+                    const valor = parseFloat(e.target.value) || 0;
+                    const volume = modoEdicao === 'valor'
+                      ? (pmv > 0 ? Math.round(valor / pmv) : totalSku)
+                      : Math.round(valor);
+                    setSkuExecutivo(clientesInfo, sku, m, volume);
+                  }}
+                  title={modoEdicao === 'valor' && pmv <= 0 ? 'Sem PMV: edição monetária bloqueada' : undefined}
+                  inputMode={modoEdicao === 'valor' ? 'decimal' : 'numeric'}
                   className={`w-full text-right text-sm font-bold rounded-md px-2 py-1 border transition-colors
                     ${temEdit ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-transparent bg-transparent text-slate-700'}
-                    ${bloqueado ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
+                    ${bloqueado || (modoEdicao === 'valor' && pmv <= 0) ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
                 />
                 <div className="text-[9px] font-bold text-slate-300 pr-2">IA {fmtCx(ia)} cx</div>
               </div>
@@ -805,12 +846,21 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
                   <div key={m} className="text-right">
                     <input
                       type="number"
-                      value={val}
-                      disabled={bloqueado}
-                      onChange={e => setCliente(cli.nome, sku, m, parseInt(e.target.value) || 0)}
+                      value={modoEdicao === 'valor' ? Math.round(val * (cel.pmv || 0)) : val}
+                      disabled={bloqueado || (modoEdicao === 'valor' && (cel.pmv || 0) <= 0)}
+                      onChange={e => {
+                        const valor = parseFloat(e.target.value) || 0;
+                        if (modoEdicao === 'valor') {
+                          setClienteValor(cli.nome, sku, m, valor, cel.pmv || 0);
+                        } else {
+                          setCliente(cli.nome, sku, m, Math.round(valor));
+                        }
+                      }}
+                      title={modoEdicao === 'valor' && (cel.pmv || 0) <= 0 ? 'Sem PMV: edição monetária bloqueada' : undefined}
+                      inputMode={modoEdicao === 'valor' ? 'decimal' : 'numeric'}
                       className={`w-full text-right text-xs font-bold rounded-md px-2 py-1 border transition-colors
                         ${editado ? 'border-violet-300 bg-violet-50 text-violet-700' : 'border-transparent bg-transparent text-slate-500'}
-                        ${bloqueado ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-100 focus:border-violet-400 focus:bg-white focus:outline-none'}`}
+                        ${bloqueado || (modoEdicao === 'valor' && (cel.pmv || 0) <= 0) ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-100 focus:border-violet-400 focus:bg-white focus:outline-none'}`}
                     />
                   </div>
                 );
@@ -922,6 +972,7 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
             valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setCliente={setCliente}
             somaSkuExecutivo={somaSkuExecutivo}
             bloqueado={bloqueado} edits={edits}
+            modoEdicao={modoEdicao} setClienteValor={setClienteValor}
             setDossieAlvo={setDossieAlvo}
             dossieAlvo={dossieAlvo}
             idPath={`${idPath}>${skuNode.sku}`}
@@ -992,7 +1043,8 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
           setDossieAlvo={setDossieAlvo}
           dossieAlvo={dossieAlvo}
           idPath={`${idPath}>${f.nome || f.sku}`}
-          buscaAtiva={buscaAtv} />
+          buscaAtiva={buscaAtv}
+          modoEdicao={modoEdicao} setClienteValor={setClienteValor} />
       ))}
     </div>
   );
