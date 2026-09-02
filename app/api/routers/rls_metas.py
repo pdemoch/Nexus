@@ -346,3 +346,157 @@ def etapa_metas_bloqueada(db: Session, ciclo: str) -> bool:
         WHERE ciclo_sop = :c AND origem = 'Metas'
     """), {"c": ciclo}).scalar()
     return st == "CONGELADO"
+
+
+# =====================================================================
+# 6. FASES DA CARTEIRA — cascata SKU -> Executivo -> Razão Social
+# =====================================================================
+# Fluxo (ver design-consenso-arena-fases.md para o desenho completo):
+#   Gerente:      só a fase SKU (agregado de toda a carteira). Ao travar,
+#                 rateia o SKU entre os Coordenadores (peso histórico 4m).
+#   Coordenador:  SKU -> EXECUTIVO -> RAZAO_SOCIAL, sempre dentro da própria
+#                 tela. Ao travar cada fase, rateia para a próxima e avança.
+#                 Ao travar RAZAO_SOCIAL (última), grava o cadeado FINAL em
+#                 controle_metas_responsavel (já existente) — sem isso o
+#                 congelamento geral da etapa (Admin) continua exatamente
+#                 como já funciona hoje.
+#
+# NÃO substitui controle_metas_responsavel: essa tabela nova é uma submáquina
+# de estados ANTES do cadeado final. O valor persistido continua sendo só
+# vol_meta por CNPJ em fato_ibp_granular — SKU/Executivo agregados nunca
+# viram linha própria, são sempre projeção calculada na hora (Opção A do
+# desenho técnico).
+FASE_SKU = "SKU"
+FASE_EXECUTIVO = "EXECUTIVO"
+FASE_RAZAO_SOCIAL = "RAZAO_SOCIAL"
+
+ORDEM_FASES_COORDENADOR = [FASE_SKU, FASE_EXECUTIVO, FASE_RAZAO_SOCIAL]
+
+DDL_FASE_CARTEIRA = """
+CREATE TABLE IF NOT EXISTS controle_fase_carteira (
+    id                SERIAL PRIMARY KEY,
+    ciclo_sop         VARCHAR(7)   NOT NULL,
+    nome_responsavel  VARCHAR(120) NOT NULL,
+    nivel             VARCHAR(20)  NOT NULL,   -- 'Gerente' | 'Coordenador'
+    fase_atual        VARCHAR(20)  NOT NULL DEFAULT 'SKU',
+    sku_travado       BOOLEAN      NOT NULL DEFAULT FALSE,
+    executivo_travado BOOLEAN      NOT NULL DEFAULT FALSE,
+    atualizado_por    VARCHAR(120),
+    atualizado_em     TIMESTAMP    DEFAULT NOW(),
+    UNIQUE (ciclo_sop, nome_responsavel)
+);
+CREATE INDEX IF NOT EXISTS ix_fase_carteira_ciclo ON controle_fase_carteira (ciclo_sop);
+"""
+
+
+def garantir_tabela_fase_carteira(db: Session) -> None:
+    """Cria a tabela de fases por responsável se ainda não existir."""
+    for stmt in DDL_FASE_CARTEIRA.strip().split(";"):
+        s = stmt.strip()
+        if s:
+            db.execute(text(s))
+    db.commit()
+
+
+def fase_atual_do_responsavel(db: Session, ciclo: str, nome_responsavel: str) -> Dict[str, Any]:
+    """
+    Retorna o estado de fase de um responsável. Se não houver linha ainda
+    (primeira vez no ciclo), devolve o estado inicial (fase SKU, nada travado)
+    sem gravar nada — só grava quando a fase é efetivamente travada.
+    """
+    row = db.execute(text("""
+        SELECT fase_atual, sku_travado, executivo_travado
+        FROM controle_fase_carteira
+        WHERE ciclo_sop = :c AND TRIM(nome_responsavel) = :n
+    """), {"c": ciclo, "n": nome_responsavel.strip()}).fetchone()
+    if not row:
+        return {"fase_atual": FASE_SKU, "sku_travado": False, "executivo_travado": False}
+    return {"fase_atual": row.fase_atual, "sku_travado": row.sku_travado,
+            "executivo_travado": row.executivo_travado}
+
+
+def avancar_fase(db: Session, escopo: Dict[str, Any], ciclo: str) -> Dict[str, Any]:
+    """
+    Trava a fase corrente do PRÓPRIO responsável logado e avança para a
+    próxima. O rateio em si (cálculo de peso histórico + Maior Resto,
+    gravação em vol_meta) é feito ANTES desta chamada, pelo router
+    (rateio_cascata.py) — esta função só governa a máquina de estado.
+
+    Gerente: só tem a fase SKU. Travar aqui é o fim do papel dele nesta
+    submáquina (o rateio dele distribui direto para os Coordenadores, cada
+    um com sua PRÓPRIA linha nesta tabela, começando também em SKU).
+
+    Coordenador: SKU -> EXECUTIVO -> RAZAO_SOCIAL. Ao travar RAZAO_SOCIAL,
+    o router deve também chamar travar_cadeado() (cadeado final existente).
+    """
+    if escopo["ve_tudo"]:
+        raise HTTPException(status_code=400, detail="Admin não avança fase própria — use reabertura administrativa.")
+
+    nome = (escopo["nome_responsavel"] or "").strip()
+    funcao = escopo["funcao"]
+    if not nome:
+        raise HTTPException(status_code=403, detail="Escopo inválido para avançar fase.")
+
+    garantir_tabela_fase_carteira(db)
+    estado = fase_atual_do_responsavel(db, ciclo, nome)
+    fase = estado["fase_atual"]
+
+    if funcao == NIVEL_GERENTE:
+        if fase != FASE_SKU:
+            raise HTTPException(status_code=400, detail="Gerente só possui a fase SKU.")
+        novo_estado = {"fase_atual": FASE_SKU, "sku_travado": True, "executivo_travado": False}
+    else:  # Coordenador
+        idx = ORDEM_FASES_COORDENADOR.index(fase) if fase in ORDEM_FASES_COORDENADOR else 0
+        if idx >= len(ORDEM_FASES_COORDENADOR) - 1:
+            raise HTTPException(status_code=400, detail="Carteira já está na última fase (Razão Social).")
+        proxima = ORDEM_FASES_COORDENADOR[idx + 1]
+        novo_estado = {
+            "fase_atual": proxima,
+            "sku_travado": True if proxima in (FASE_EXECUTIVO, FASE_RAZAO_SOCIAL) else estado["sku_travado"],
+            "executivo_travado": True if proxima == FASE_RAZAO_SOCIAL else estado["executivo_travado"],
+        }
+
+    db.execute(text("""
+        INSERT INTO controle_fase_carteira
+            (ciclo_sop, nome_responsavel, nivel, fase_atual, sku_travado, executivo_travado, atualizado_por)
+        VALUES (:c, :n, :nv, :fa, :st, :et, :por)
+        ON CONFLICT (ciclo_sop, nome_responsavel)
+        DO UPDATE SET fase_atual=:fa, sku_travado=:st, executivo_travado=:et,
+                      atualizado_por=:por, atualizado_em=NOW()
+    """), {
+        "c": ciclo, "n": nome, "nv": funcao,
+        "fa": novo_estado["fase_atual"], "st": novo_estado["sku_travado"],
+        "et": novo_estado["executivo_travado"], "por": nome,
+    })
+    db.commit()
+    return novo_estado
+
+
+def reabrir_fase(db: Session, escopo: Dict[str, Any], ciclo: str, nome_alvo: str,
+                  pertence_ao_escopo: bool, nivel_alvo: Optional[str] = None) -> None:
+    """
+    Reabre a carteira de um responsável de volta para a fase SKU (recomeça
+    a cascata do zero). Mesma precedência hierárquica de reabrir_cadeado:
+    o próprio dono pode reabrir a si mesmo (se ainda não travou o cadeado
+    FINAL em controle_metas_responsavel — isso é validado pelo router);
+    Gerente pode reabrir qualquer Coordenador da sua gerência; Admin, todos.
+    """
+    alvo = nome_alvo.strip()
+    eh_o_proprio = (alvo == (escopo["nome_responsavel"] or "").strip())
+    nivel = nivel_alvo or (escopo["funcao"] if eh_o_proprio else NIVEL_COORDENADOR)
+
+    if not escopo["ve_tudo"] and not eh_o_proprio and not pertence_ao_escopo:
+        raise HTTPException(
+            status_code=403,
+            detail="Você só pode reabrir a sua própria carteira ou a de um responsável abaixo de você."
+        )
+
+    garantir_tabela_fase_carteira(db)
+    db.execute(text("""
+        INSERT INTO controle_fase_carteira (ciclo_sop, nome_responsavel, nivel, fase_atual, sku_travado, executivo_travado, atualizado_por)
+        VALUES (:c, :n, :nv, 'SKU', FALSE, FALSE, :por)
+        ON CONFLICT (ciclo_sop, nome_responsavel)
+        DO UPDATE SET fase_atual='SKU', sku_travado=FALSE, executivo_travado=FALSE,
+                      atualizado_por=:por, atualizado_em=NOW()
+    """), {"c": ciclo, "n": alvo, "nv": nivel, "por": (escopo["nome_responsavel"] or escopo["funcao"])})
+    db.commit()
