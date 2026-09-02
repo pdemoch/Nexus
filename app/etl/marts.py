@@ -6,10 +6,12 @@ Destino: app/etl/marts.py
 
 Recalcula, nesta ordem obrigatória (cada um depende do anterior):
 
-    1. mart_pmv_sku_mes        fonte única de preço
-    2. mart_vendas_mes         realizado, três estados
-    3. mart_plano_sku_mes      plano normalizado (dissolve o UNION ALL)
-    4. mart_acuracia_sku_mes   plano x realizado + preço do erro
+    1. mart_pmv_sku_mes            fonte única de preço
+    2. mart_vendas_mes             realizado, três estados
+    3. mart_plano_sku_mes          plano normalizado (dissolve o UNION ALL)
+    4. mart_acuracia_sku_mes       plano x realizado + preço do erro
+    5. mart_acuracia_coordenador_mes  idem, no grão (sku, mes, coordenador),
+       para o agente de demanda filtrar por alçada de Coordenador/Gerente
 
 Chamado no fim do pipeline (ciclo novo E ciclo existente) ou à mão:
 
@@ -337,6 +339,113 @@ LEFT JOIN dim_produtos        p2 ON p2.sku = e.sku
 
 
 # =====================================================================
+# 5. ACURÁCIA POR COORDENADOR/GERENTE — GRÃO (SKU, MÊS, COORDENADOR)
+# =====================================================================
+# Mart separada de mart_acuracia_sku_mes (não altera a existente, que
+# fica no grão (sku, mes) e continua servindo todos os consumidores já
+# existentes sem impacto). Esta mart adiciona a dimensão Coordenador/
+# Gerente para permitir ao agente de demanda (agente_kpis.py) filtrar
+# acurácia por alçada — necessidade do drilldown do ConsensoArena, onde
+# cada Coordenador/Gerente só deve analisar os CNPJs sob sua hierarquia.
+#
+# Mesmas regras travadas do mart_acuracia_sku_mes: PMV é razão de totais
+# (nunca média por CNPJ), corte vem do ERP (nunca subtração), WMAPE é
+# calculado no grão mais fino (aqui: sku, mes, coordenador) e só depois
+# agregado — nunca a média de um WMAPE por CNPJ.
+#
+# vendas_cli / plano_cli agregam por CNPJ primeiro (dentro do CTE) para
+# então juntar com dim_clientes e agrupar por coordenador — preservando
+# a regra "some primeiro, divida depois" também na nova dimensão.
+_SQL_ACURACIA_COORDENADOR = """
+INSERT INTO mart_acuracia_coordenador_mes
+    (sku, mes, gerente_nome, coordenador_nome, categoria, segmento, curva, ativo,
+     qt_pedido, vl_pedido, qt_entregue, vl_entregue, qt_corte, vl_corte,
+     qt_plano, vl_plano, tem_plano, pmv,
+     gap_previsao_cx, erro_abs_cx, gap_previsao_rs, erro_abs_rs, atualizado_em)
+WITH
+-- Vendas por CNPJ, depois enriquecidas com Coordenador/Gerente e
+-- agregadas em (sku, mes, coordenador). fato_vendas.cgc é o CNPJ.
+vendas_cli AS (
+    SELECT TRIM(v.sku::text)                          AS sku,
+           DATE_TRUNC('month', v.data_pedido)::date   AS mes,
+           dc.gerente_nome,
+           dc.supervisor_nome                         AS coordenador_nome,
+           MAX(p.categoria)                           AS categoria,
+           MAX(p.segmento)                            AS segmento,
+           MAX(p.curva)                               AS curva,
+           BOOL_OR(COALESCE(p.ativo, FALSE))          AS ativo,
+           SUM(v.qt_pedido)                           AS qt_pedido,
+           SUM(v.vl_pedido)                           AS vl_pedido,
+           SUM(v.qtfatura)                            AS qt_entregue,
+           SUM(v.vlfatura)                            AS vl_entregue,
+           SUM(v.qtcorte)                              AS qt_corte,
+           SUM(v.vlcorte)                              AS vl_corte
+    FROM fato_vendas v
+    JOIN dim_clientes dc ON dc.cgc = v.cgc
+    LEFT JOIN dim_produtos p ON p.sku = v.sku
+    WHERE v.data_pedido >= :piso
+      AND dc.supervisor_nome IS NOT NULL
+    GROUP BY 1, 2, 3, 4
+),
+-- Plano Nexus (fato_ibp_granular já é no grão sku x mes x cgc), mesma
+-- regra M-2 usada em mart_plano_sku_mes, agora agregada por coordenador.
+plano_cli AS (
+    SELECT TRIM(g.sku::text)          AS sku,
+           g.mes_projetado::date      AS mes,
+           dc.gerente_nome,
+           dc.supervisor_nome         AS coordenador_nome,
+           SUM(g.vol_final)           AS qt_plano,
+           SUM(g.vol_final * g.pmv_aplicado) AS vl_plano
+    FROM fato_ibp_granular g
+    JOIN dim_clientes dc ON dc.cgc = g.cgc
+    WHERE (EXTRACT(YEAR FROM g.mes_projetado) * 12
+           + EXTRACT(MONTH FROM g.mes_projetado))
+        - (SPLIT_PART(g.ciclo_sop, '/', 2)::int * 12
+           + SPLIT_PART(g.ciclo_sop, '/', 1)::int) = :defasagem
+      AND g.mes_projetado >= :piso_nexus
+      AND dc.supervisor_nome IS NOT NULL
+    GROUP BY 1, 2, 3, 4
+),
+espinha AS (
+    SELECT sku, mes, gerente_nome, coordenador_nome FROM vendas_cli
+    UNION
+    SELECT sku, mes, gerente_nome, coordenador_nome FROM plano_cli
+)
+SELECT e.sku,
+       e.mes,
+       e.gerente_nome,
+       e.coordenador_nome,
+       v.categoria,
+       v.segmento,
+       v.curva,
+       COALESCE(v.ativo, FALSE),
+       COALESCE(v.qt_pedido, 0),
+       COALESCE(v.vl_pedido, 0),
+       COALESCE(v.qt_entregue, 0),
+       COALESCE(v.vl_entregue, 0),
+       COALESCE(v.qt_corte, 0),
+       COALESCE(v.vl_corte, 0),
+       pl.qt_plano,
+       pl.vl_plano,
+       (pl.qt_plano IS NOT NULL)                            AS tem_plano,
+       COALESCE(pm.pmv_mes, pm.pmv_3m, pm.pmv_historico, 0) AS pmv,
+       COALESCE(pl.qt_plano, 0) - COALESCE(v.qt_pedido, 0)   AS gap_previsao_cx,
+       ABS(COALESCE(pl.qt_plano, 0) - COALESCE(v.qt_pedido, 0)) AS erro_abs_cx,
+       (COALESCE(pl.qt_plano, 0) - COALESCE(v.qt_pedido, 0))
+           * COALESCE(pm.pmv_mes, pm.pmv_3m, pm.pmv_historico, 0) AS gap_previsao_rs,
+       ABS(COALESCE(pl.qt_plano, 0) - COALESCE(v.qt_pedido, 0))
+           * COALESCE(pm.pmv_mes, pm.pmv_3m, pm.pmv_historico, 0) AS erro_abs_rs,
+       now()
+FROM espinha e
+LEFT JOIN vendas_cli v ON v.sku = e.sku AND v.mes = e.mes
+                       AND v.coordenador_nome = e.coordenador_nome
+LEFT JOIN plano_cli  pl ON pl.sku = e.sku AND pl.mes = e.mes
+                       AND pl.coordenador_nome = e.coordenador_nome
+LEFT JOIN mart_pmv_sku_mes pm ON pm.sku = e.sku AND pm.mes = e.mes
+"""
+
+
+# =====================================================================
 # ORQUESTRAÇÃO
 # =====================================================================
 def _rodar(db, nome: str, sql: str, params: dict, log) -> int:
@@ -417,6 +526,11 @@ def compute_marts(ciclo_sop: str = None, log_callback=print) -> dict:
             db, "mart_acuracia_sku_mes", _SQL_ACURACIA,
             {"m_lanc": params["m_lanc"], "m_rec": params["m_rec"],
              "_ciclo": ciclo_sop}, log_callback)
+
+        resultado["mart_acuracia_coordenador_mes"] = _rodar(
+            db, "mart_acuracia_coordenador_mes", _SQL_ACURACIA_COORDENADOR,
+            {"piso": params["piso"], "piso_nexus": params["piso_nexus"],
+             "defasagem": params["defasagem"], "_ciclo": ciclo_sop}, log_callback)
 
         # ANALYZE: o planner precisa de estatísticas frescas depois do
         # TRUNCATE + INSERT, senão escolhe plano ruim nas primeiras queries.

@@ -69,15 +69,25 @@ class NexusTransformer:
         print(f"   -> Janela: pedidos a partir de {data_inicio_str}")
 
         # 1. Tratamento da Tabela de Vendas (150)
-        # FILTROS REMOVIDOS PERMANENTEMENTE em 2026-08:
-        #   - operacao != "51"  (bonificações/transferências internas)
-        #   - regional FIFEIRO  (canal informal)
-        #   - regional EIC      (exportações/intercompany)
-        # Decisão: base unificada sem exclusões de canal — todo o volume do ERP
-        # entra na fato_vendas. Análises de canal são feitas por filtro no front,
-        # não na camada de carga.
+        # FILTRO DE OPERACAO — reintroduzido em 2026-09 apos confirmacao contra
+        # o ERP: operacao "51" e' bonificacao/transferencia interna, nao venda
+        # real. Removido em 2026-08 (base unificada sem exclusao de canal), mas
+        # isso inflou o valor de vl_pedido em ~R$2,2 milhoes no periodo jan-ago
+        # 2026 (R$163.426.642 apurado vs R$161.216.226 do ERP), distorcendo Fill
+        # Rate, WMAPE, BIAS e PMR/PMP, que dependem de vl_pedido/qt_pedido.
+        # Filtros de regional (FIFEIRO/EIC) continuam removidos: nao ha evidencia
+        # de que causem divergencia financeira: analises de canal seguem sendo
+        # feitas por filtro no front, nao na camada de carga.
+        colunas_150 = lf_150.columns
+        if "operacao" in colunas_150:
+            lf_150 = lf_150.filter(
+                pl.col("operacao").cast(pl.Utf8).str.strip_chars() != "51"
+            )
+        else:
+            print("⚠️ [SILVER] Coluna 'operacao' ausente na 150 — filtro de bonificação/transferência não aplicado.")
+
         lf_vendas = lf_150.filter(
-            (pl.col("dtapedido") >= data_inicio_str)   # <-- BLINDAGEM TEMPORAL (única barreira)
+            (pl.col("dtapedido") >= data_inicio_str)   # <-- BLINDAGEM TEMPORAL
         ).with_columns([
             pl.col("produto").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars(),
             pl.col("cliente").cast(pl.Utf8).str.replace(r"\.0$", "").str.strip_chars(),

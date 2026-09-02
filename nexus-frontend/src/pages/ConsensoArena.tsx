@@ -51,6 +51,38 @@ const INDENT: Record<string, string> = {
   cliente: 'pl-12', produto: 'pl-16',
 };
 
+/* ── STEPPER DE FASE (cascata SKU → Executivo → Razão Social) ──────
+   Gerente só tem a fase SKU (rateia direto para Coordenadores).
+   Coordenador percorre as 3 fases dentro da própria tela. */
+function StepperFase({ funcao, faseAtual }: { funcao: string; faseAtual: string }) {
+  const passos = funcao === 'Gerente'
+    ? [{ id: 'SKU', label: 'SKU' }]
+    : [
+        { id: 'SKU', label: 'SKU' },
+        { id: 'EXECUTIVO', label: 'Executivo' },
+        { id: 'RAZAO_SOCIAL', label: 'Razão Social' },
+      ];
+  const idxAtual = passos.findIndex(p => p.id === faseAtual);
+  return (
+    <div className="flex items-center gap-1.5">
+      {passos.map((p, i) => {
+        const concluido = i < idxAtual;
+        const atual     = i === idxAtual;
+        return (
+          <React.Fragment key={p.id}>
+            <div className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wide
+              ${concluido ? 'bg-emerald-100 text-emerald-700' : atual ? 'bg-violet-100 text-violet-700' : 'bg-slate-100 text-slate-400'}`}>
+              {concluido && <Lock className="w-2.5 h-2.5" />}
+              {p.label}
+            </div>
+            {i < passos.length - 1 && <div className="w-3 h-px bg-slate-200" />}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
 /* ── COMPONENTE RAIZ ─────────────────────────────────────────────── */
 export default function MetasComercial() {
   const [aba, setAba] = useState<'geral' | 'preenchimento' | 'consolidado'>('geral');
@@ -97,12 +129,15 @@ function PreenchimentoMetas() {
   } | null>(null);
   const [painelCadeados, setPainelCadeados] = useState(false);
   const [busca,          setBusca]          = useState('');
+  const [fase,           setFase]           = useState<any>(null);
+  const [avancando,      setAvancando]      = useState(false);
 
   const carregar = useCallback(async () => {
     setLoading(true);
     try {
       const r = await axios.get('/api/v1/carteira/tabela');
       setDados(r.data); setEdits({});
+      setFase(r.data?.minha_fase || null);
     } finally { setLoading(false); }
   }, []);
   useEffect(() => { carregar(); }, [carregar]);
@@ -115,6 +150,13 @@ function PreenchimentoMetas() {
   // funcao vem como campo extra — precisamos dela para controle de cadeado
   const funcao: string     = dados?.funcao || '';
   const bloqueado          = congeladaEtapa || minhaCongelada || aguardandoUpstream;
+
+  // Fase da cascata (Gerente: só SKU; Coordenador: SKU -> EXECUTIVO -> RAZAO_SOCIAL).
+  // Admin não tem fase própria (fase === null): trabalha em modo livre (compatibilidade).
+  const faseAtual: string | null = fase?.fase_atual ?? null;
+  const naFaseRazaoSocial = souAdmin || faseAtual === 'RAZAO_SOCIAL' || faseAtual === null;
+  const naFaseSku         = !souAdmin && faseAtual === 'SKU';
+  const naFaseExecutivo   = !souAdmin && faseAtual === 'EXECUTIVO';
 
   /* Chave de edição: sempre no nível razão social */
   const keyOf       = (razao: string, sku: string, mes: string) => `${razao}||${sku}||${mes}`;
@@ -153,6 +195,23 @@ function PreenchimentoMetas() {
     }, 0);
   };
 
+  /* Soma de um SKU na carteira INTEIRA do responsável logado (todos executivos),
+     usada na fase SKU, onde o coordenador ajusta o total do SKU antes de ratear
+     para executivos (que só existem como agregação — não há input próprio aqui). */
+  const somaSkuCarteira = (sku: string, mes: string): number => {
+    let total = 0;
+    const walk = (n: any, rz: string | null) => {
+      if (n.tipo === 'produto') {
+        if (n.sku === sku) total += valorCliente(rz || '', sku, mes, n.meses[mes]?.meta || 0);
+        return;
+      }
+      const c = n.tipo === 'cliente' ? n.nome : rz;
+      (n.subRows || []).forEach((f: any) => walk(f, c));
+    };
+    (dados?.arvore || []).forEach((g: any) => walk(g, null));
+    return total;
+  };
+
   /* Totalizadores globais */
   const totaisVivos = useMemo(() => {
     const vol: Record<string, number> = {};
@@ -177,7 +236,8 @@ function PreenchimentoMetas() {
 
   const temEdicoes = Object.keys(edits).length > 0;
 
-  /* Salvar: envia por razão social (contrato do backend) — só a carteira do coordenador */
+  /* Salvar: envia por razão social (contrato do backend) — só a carteira do coordenador.
+     Só é usado na fase RAZAO_SOCIAL (última fase) ou pelo Admin (modo livre). */
   const salvar = async () => {
     if (!temEdicoes) return;
     setSalvando(true);
@@ -193,6 +253,73 @@ function PreenchimentoMetas() {
     } finally { setSalvando(false); }
   };
 
+  /* Avança a fase corrente (SKU ou EXECUTIVO): grava o rateio em cascata via
+     /ratear-fase e move a máquina de estado para a próxima etapa. */
+  const avancarFase = async () => {
+    if (!faseAtual || souAdmin) return;
+    const mensagem = naFaseSku
+      ? 'Concluir a fase de SKU? Os totais serão rateados para os Executivos e você passará a editar por Executivo.'
+      : 'Concluir a fase de Executivo? Os totais serão rateados para as Razões Sociais e você passará à edição final por cliente.';
+    if (!confirm(mensagem)) return;
+    setAvancando(true);
+    try {
+      // Reúne todos os (sku, mes) tocados na árvore para montar os ajustes da fase.
+      const chaves = new Set<string>();
+      const walk = (n: any) => {
+        if (n.tipo === 'produto') { meses.forEach(m => chaves.add(`${n.sku}||${m}`)); return; }
+        (n.subRows || []).forEach(walk);
+      };
+      (dados?.arvore || []).forEach(walk);
+
+      if (naFaseSku) {
+        const ajustes = Array.from(chaves).map(k => {
+          const [sku, mes] = k.split('||');
+          return { sku, mes_projetado: mes, novo_volume: Math.round(somaSkuCarteira(sku, mes)) };
+        });
+        const r = await axios.post('/api/v1/carteira/ratear-fase', { ajustes });
+        setFase(r.data?.fase || null);
+      } else if (naFaseExecutivo) {
+        // Na fase Executivo, cada executivo ajusta seus próprios SKUs — percorremos
+        // por executivo (nó 'vendedor') e enviamos um POST por executivo.
+        const porExecutivo: Record<string, { sku: string; mes: string; total: number }[]> = {};
+        const walkExec = (n: any) => {
+          if (n.tipo === 'vendedor') {
+            const skuMap: Record<string, number> = {};
+            (n.subRows || []).forEach((cli: any) => {
+              (cli.subRows || []).forEach((prod: any) => {
+                meses.forEach(m => {
+                  const cel = prod.meses[m]; if (!cel) return;
+                  const key = `${prod.sku}||${m}`;
+                  skuMap[key] = (skuMap[key] || 0) + valorCliente(cli.nome, prod.sku, m, cel.meta);
+                });
+              });
+            });
+            porExecutivo[n.nome] = Object.entries(skuMap).map(([k, total]) => {
+              const [sku, mes] = k.split('||');
+              return { sku, mes, total };
+            });
+            return;
+          }
+          (n.subRows || []).forEach(walkExec);
+        };
+        (dados?.arvore || []).forEach(walkExec);
+
+        let ultimaFase: any = fase;
+        for (const [executivo, itens] of Object.entries(porExecutivo)) {
+          const ajustes = itens.map(i => ({ sku: i.sku, mes_projetado: i.mes, novo_volume: Math.round(i.total) }));
+          if (!ajustes.length) continue;
+          const r = await axios.post('/api/v1/carteira/ratear-fase', { ajustes, executivo_nome: executivo });
+          ultimaFase = r.data?.fase || ultimaFase;
+        }
+        setFase(ultimaFase);
+      }
+      setEdits({});
+      await carregar();
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || 'Falha ao avançar a fase.');
+    } finally { setAvancando(false); }
+  };
+
   const congelarEtapa = async () => {
     if (!confirm('Congelar Metas Comercial? A etapa Supply será liberada.')) return;
     try {
@@ -201,6 +328,54 @@ function PreenchimentoMetas() {
       await carregar();
     } catch (e: any) { alert(e?.response?.data?.detail || 'Falha ao congelar.'); }
   };
+
+  /* Lista agregada de SKUs da carteira INTEIRA — usada só na fase SKU
+     (Gerente e Coordenador ajustam o total do SKU antes de qualquer rateio
+     por executivo existir). */
+  const skusAgregadosCarteira = useMemo(() => {
+    if (!naFaseSku) return [];
+    const map: Record<string, { sku: string; descricao: string; pmvPorMes: Record<string, number>; iaPorMes: Record<string, number> }> = {};
+    const walk = (n: any, rz: string | null) => {
+      if (n.tipo === 'produto') {
+        if (!map[n.sku]) map[n.sku] = { sku: n.sku, descricao: n.descricao, pmvPorMes: {}, iaPorMes: {} };
+        meses.forEach(m => {
+          const cel = n.meses[m]; if (!cel) return;
+          map[n.sku].pmvPorMes[m] = cel.pmv || 0;
+          map[n.sku].iaPorMes[m] = (map[n.sku].iaPorMes[m] || 0) + (cel.ia || 0);
+        });
+        return;
+      }
+      const c = n.tipo === 'cliente' ? n.nome : rz;
+      (n.subRows || []).forEach((f: any) => walk(f, c));
+    };
+    (dados?.arvore || []).forEach((g: any) => walk(g, null));
+    return Object.values(map).sort((a, b) => a.descricao.localeCompare(b.descricao));
+  }, [dados, naFaseSku, meses]);
+
+  /* Edição do SKU no nível carteira inteira: rateia entre TODOS os clientes
+     da carteira que compram esse SKU, proporcionalmente ao histórico. */
+  const setSkuCarteira = (sku: string, mes: string, novoTotal: number) => {
+    const clientesDoSku: Array<{ razao: string; pesoHist: number }> = [];
+    const walk = (n: any, rz: string | null) => {
+      if (n.tipo === 'produto') {
+        if (n.sku === sku && n.meses[mes]) {
+          clientesDoSku.push({ razao: rz || '', pesoHist: n.meses[mes].peso_historico ?? 0 });
+        }
+        return;
+      }
+      const c = n.tipo === 'cliente' ? n.nome : rz;
+      (n.subRows || []).forEach((f: any) => walk(f, c));
+    };
+    (dados?.arvore || []).forEach((g: any) => walk(g, null));
+    const pesos  = clientesDoSku.map(c => c.pesoHist);
+    const partes = ratearMaiorResto(Math.max(0, Math.round(novoTotal)), pesos);
+    setEdits(prev => {
+      const next = { ...prev };
+      clientesDoSku.forEach((c, i) => { next[keyOf(c.razao, sku, mes)] = partes[i]; });
+      return next;
+    });
+  };
+
 
   const reabrirEtapa = async () => {
     if (!confirm('Reabrir Metas Comercial?')) return;
@@ -263,6 +438,9 @@ function PreenchimentoMetas() {
               {!aguardandoUpstream && minhaCongelada && <span className="ml-2 text-emerald-600 font-bold">· sua carteira bloqueada</span>}
               {!aguardandoUpstream && congeladaEtapa && <span className="ml-2 text-amber-600 font-bold">· etapa congelada</span>}
             </p>
+            {!souAdmin && faseAtual && !bloqueado && (
+              <div className="mt-2"><StepperFase funcao={funcao} faseAtual={faseAtual} /></div>
+            )}
           </div>
           <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
             {/* Busca */}
@@ -285,13 +463,23 @@ function PreenchimentoMetas() {
                 <ShieldCheck className="w-4 h-4" /> Cadeados
               </button>
             )}
-            {/* Salvar */}
-            <button onClick={salvar} disabled={!temEdicoes || salvando || bloqueado}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all
-                ${temEdicoes && !bloqueado ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}>
-              {salvando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-              Salvar{temEdicoes ? ` (${Object.keys(edits).length})` : ''}
-            </button>
+            {/* Salvar — só existe como ação livre na fase Razão Social (última) ou para Admin */}
+            {naFaseRazaoSocial && (
+              <button onClick={salvar} disabled={!temEdicoes || salvando || bloqueado}
+                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all
+                  ${temEdicoes && !bloqueado ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}>
+                {salvando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                Salvar{temEdicoes ? ` (${Object.keys(edits).length})` : ''}
+              </button>
+            )}
+            {/* Trancar/Avançar fase — SKU e Executivo (Gerente e Coordenador) */}
+            {!souAdmin && (naFaseSku || naFaseExecutivo) && !bloqueado && (
+              <button onClick={avancarFase} disabled={avancando}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-60">
+                {avancando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />}
+                {naFaseSku ? 'Trancar SKU e ratear p/ Executivos' : 'Trancar Executivo e ratear p/ Razão Social'}
+              </button>
+            )}
             {/* Congelar/Reabrir etapa — só Gerente e Admin */}
             {(souAdmin || funcao === 'Gerente') && (
               congeladaEtapa ? (
@@ -348,9 +536,19 @@ function PreenchimentoMetas() {
         </div>
       </div>
 
-      {/* ÁRVORE */}
+      {/* ÁRVORE — na fase SKU, mostra lista agregada por SKU (editável, sem
+          nível executivo/cliente ainda, pois eles só existem após o rateio).
+          Nas fases EXECUTIVO e RAZAO_SOCIAL, mostra a árvore completa
+          (só a razão social é editável na última fase). */}
       <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-8">
-        {arvoreVisivelOuCompleta.length === 0 && busca.trim() ? (
+        {naFaseSku ? (
+          <ListaSkuCarteira
+            skus={skusAgregadosCarteira} meses={meses}
+            somaSkuCarteira={somaSkuCarteira} setSkuCarteira={setSkuCarteira}
+            bloqueado={bloqueado} edits={edits}
+            setDossieAlvo={setDossieAlvo} dossieAlvo={dossieAlvo}
+          />
+        ) : arvoreVisivelOuCompleta.length === 0 && busca.trim() ? (
           <div className="flex flex-col items-center justify-center py-16 text-slate-400">
             <Search className="w-8 h-8 mb-2 opacity-30" />
             <div className="text-sm font-bold">Nenhum resultado para "{busca}"</div>
@@ -362,7 +560,7 @@ function PreenchimentoMetas() {
               meses={meses} abertas={abertas} toggle={toggle}
               valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setCliente={setCliente}
               somaSkuExecutivo={somaSkuExecutivo}
-              bloqueado={bloqueado} edits={edits}
+              bloqueado={bloqueado || naFaseExecutivo} edits={edits}
               setDossieAlvo={setDossieAlvo}
               dossieAlvo={dossieAlvo}
               idPath={g.nome}
@@ -378,6 +576,72 @@ function PreenchimentoMetas() {
       {painelCadeados && (
         <PainelCadeados fechar={() => setPainelCadeados(false)} recarregar={carregar} />
       )}
+    </div>
+  );
+}
+
+/* ── LISTA AGREGADA DE SKUs DA CARTEIRA (fase SKU) ──────────────────
+   Edição no nível SKU × Mês, um único total por SKU para toda a
+   carteira (não há executivo/cliente ainda — só existem após o rateio
+   desta fase). Dossiê disponível aqui é o dossiê agregado da carteira. */
+function ListaSkuCarteira({ skus, meses, somaSkuCarteira, setSkuCarteira,
+  bloqueado, edits, setDossieAlvo, dossieAlvo }: any) {
+  if (!skus.length) {
+    return <div className="py-16 text-center text-slate-400 text-sm font-bold">Nenhum SKU na carteira.</div>;
+  }
+  return (
+    <div>
+      {skus.map((s: any) => (
+        <div key={s.sku} className="mb-0.5 grid gap-2 px-3 py-2 items-center rounded-lg bg-white border border-slate-100 hover:border-slate-200"
+          style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(130px, 1fr)) 40px` }}>
+          <div className="min-w-0">
+            <div className="text-xs font-bold text-slate-700 truncate">{s.descricao}</div>
+            <div className="text-[10px] font-bold text-slate-300">{s.sku}</div>
+          </div>
+          {meses.map((m: string) => {
+            const total   = somaSkuCarteira(s.sku, m);
+            const pmv     = s.pmvPorMes[m] || 0;
+            const ia      = s.iaPorMes[m] || 0;
+            return (
+              <div key={m} className="text-right">
+                <div className="text-[9px] font-bold text-indigo-400 pr-2 mb-0.5">
+                  {pmv ? fmtRs(total * pmv) : '—'}
+                </div>
+                <input
+                  type="number"
+                  value={total}
+                  disabled={bloqueado}
+                  onChange={e => setSkuCarteira(s.sku, m, parseInt(e.target.value) || 0)}
+                  className={`w-full text-right text-sm font-bold rounded-md px-2 py-1 border transition-colors
+                    border-transparent bg-transparent text-slate-700
+                    ${bloqueado ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
+                />
+                <div className="text-[9px] font-bold text-slate-300 pr-2">IA {fmtCx(ia)} cx</div>
+              </div>
+            );
+          })}
+          <button
+            onClick={() => setDossieAlvo((prev: any) => prev?.sku === s.sku ? null : { sku: s.sku, descricao: s.descricao })}
+            className={`justify-self-center p-1.5 rounded-lg transition-colors
+              ${dossieAlvo?.sku === s.sku ? 'bg-indigo-100 text-indigo-600' : 'text-slate-300 hover:bg-indigo-50 hover:text-indigo-600'}`}
+            title="Ver dossiê do SKU (agregado da sua carteira)">
+            <LineIcon className="w-4 h-4" />
+          </button>
+          {dossieAlvo?.sku === s.sku && (
+            <div className="col-span-full ml-4 mr-2 mb-1">
+              <DossieInferior
+                prefixoApi="/api/v1/carteira"
+                tipo="sku"
+                id={s.sku}
+                titulo={s.descricao}
+                subtitulo={`${s.sku} · sua carteira`}
+                paramsExtra={{}}
+                onFechar={() => setDossieAlvo(null)}
+              />
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   );
 }

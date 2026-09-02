@@ -280,6 +280,24 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
             from app.api.routers.rls_metas import esta_congelado_para_usuario
             minha_congelada = esta_congelado_para_usuario(db, escopo, ciclo)
 
+        # Fase corrente da carteira (SKU/EXECUTIVO/RAZAO_SOCIAL) — usada pelo
+        # frontend para montar o stepper da cascata. Admin não tem fase própria.
+        minha_fase = None
+        if nome_resp:
+            from app.api.routers.rls_metas import fase_atual_do_responsavel
+            minha_fase = fase_atual_do_responsavel(db, ciclo, nome_resp)
+
+        # Fase de cada Coordenador visivel na arvore — permite ao Gerente ver o
+        # badge de progresso (SKU/EXECUTIVO/RAZAO_SOCIAL) de cada Coordenador
+        # sem precisar de uma chamada por linha.
+        fases_coordenadores = {}
+        if u.get("funcao") in ("Administrador", "Gerente"):
+            from app.api.routers.rls_metas import fase_atual_do_responsavel
+            nomes_coord = {co for g in tree.values() for co in g["subRows"].keys()
+                           if co and co != "SEM COORDENADOR"}
+            for co in nomes_coord:
+                fases_coordenadores[co] = fase_atual_do_responsavel(db, ciclo, co)
+
         return {
             "ciclo": ciclo,
             "meses": meses_iso,
@@ -289,6 +307,8 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
             "motivo_bloqueio": ("Demanda Comercial ainda nao congelou o plano." if aguardando
                                  else "Etapa congelada pelo Administrador." if propria_congelada else None),
             "minha_carteira_congelada": minha_congelada,
+            "minha_fase": minha_fase,
+            "fases_coordenadores": fases_coordenadores,
             "sou_admin": u.get("funcao") == "Administrador",
             "funcao": u.get("funcao", ""),
             "arvore": arvore,
@@ -420,15 +440,20 @@ def exportar(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
 # ---------------------------------------------------------------------------
 @router.get("/dossie")
 def dossie(sku: str, razao_social: str = None, vendedor_nome: str = None,
-           db: Session = Depends(get_db), _: dict = Depends(require_metas)):
+           db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     """
     Dossie do SKU para Metas Comercial.
     - razao_social: filtra por aquela razao social (nivel cliente).
     - vendedor_nome: nivel executivo — agrega todos os CGCs dos clientes daquele executivo.
-    Se nenhum for passado, retorna o total geral do SKU.
+    - Se nenhum for passado (nivel SKU, fase agregada de Gerente/Coordenador):
+      restringe automaticamente ao escopo RLS de quem pediu — NUNCA mostra a
+      empresa inteira para um Coordenador ou Gerente. Dossie por SKU só existe
+      até o nivel Coordenador (Executivo/Razao Social nao tem botao de dossie
+      na tela — ver design-consenso-arena-fases.md, secao 6).
     """
     try:
         from app.api.routers.perfil_sku import montar_dossie
+        from app.api.routers.rls_metas import escopo_usuario, clausula_rls
         ciclo = get_current_cycle(db)
         meses = get_working_window_months(db)
         desc  = db.execute(text("SELECT descricao FROM dim_produtos WHERE sku=:s"), {"s": sku}).scalar()
@@ -467,6 +492,21 @@ def dossie(sku: str, razao_social: str = None, vendedor_nome: str = None,
                   AND COALESCE(NULLIF(TRIM(f.vendedor_nome),''), 'SEM VENDEDOR') = :vend
             """), {"ciclo": ciclo, "sku": sku, "vend": vendedor_nome}).fetchall()
             cgcs_override = [r[0] for r in cgcs_rows] or ["__SEM_CLIENTE__"]
+
+        else:
+            # Nivel SKU agregado (fase SKU de Gerente ou Coordenador): SEM esse
+            # filtro, o dossie mostraria a empresa inteira para qualquer um com
+            # acesso a Metas — bug corrigido aqui. Restringe pelo mesmo campo/
+            # valor de RLS (gerente_nome ou supervisor_nome) usado no /tabela.
+            escopo = escopo_usuario(u)
+            if not escopo["ve_tudo"]:
+                rls = clausula_rls(escopo, alias_cli="c")
+                cgcs_rows = db.execute(text(f"""
+                    SELECT DISTINCT cgc FROM dim_clientes c
+                    WHERE {rls['where']}
+                      AND UPPER(TRIM(COALESCE(bloqueado,'ATIVO'))) != 'INATIVO'
+                """), rls["params"]).fetchall()
+                cgcs_override = [r[0] for r in cgcs_rows] or ["__SEM_CLIENTE__"]
 
         return montar_dossie(db, sku, ciclo, meses, descricao=desc,
                              coluna_meta="vol_meta",
@@ -672,6 +712,149 @@ def reabrir_cadeado_ep(payload: PayloadBloquear, db: Session = Depends(get_db),
     except HTTPException: raise
     except Exception as e:
         db.rollback(); raise HTTPException(500, repr(e))
+
+
+# ---------------------------------------------------------------------------
+# FASES DA CARTEIRA (cascata SKU -> Executivo -> Razão Social)
+# Ver design-consenso-arena-fases.md para o desenho completo.
+# ---------------------------------------------------------------------------
+@router.get("/fase")
+def obter_fase(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
+    """Estado de fase da carteira do usuário logado (para montar o stepper)."""
+    try:
+        from app.api.routers.rls_metas import escopo_usuario, fase_atual_do_responsavel
+        ciclo  = get_current_cycle(db)
+        escopo = escopo_usuario(u)
+        if escopo["ve_tudo"]:
+            return {"fase_atual": None, "sku_travado": False, "executivo_travado": False}
+        nome = escopo["nome_responsavel"]
+        estado = fase_atual_do_responsavel(db, ciclo, nome)
+        estado["funcao"] = escopo["funcao"]
+        estado["nome_responsavel"] = nome
+        return estado
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(500, repr(e))
+
+
+class AjusteFase(BaseModel):
+    sku: str
+    mes_projetado: str
+    novo_volume: Optional[int] = None
+    novo_valor_financeiro: Optional[float] = None
+
+
+class PayloadRatearFase(BaseModel):
+    ajustes: List[AjusteFase]
+    executivo_nome: Optional[str] = None  # obrigatório quando a fase corrente é EXECUTIVO
+
+
+@router.post("/ratear-fase")
+def ratear_fase(payload: PayloadRatearFase, db: Session = Depends(get_db),
+                 u: dict = Depends(require_metas)):
+    """
+    Grava os ajustes da fase CORRENTE do responsável logado (SKU ou
+    EXECUTIVO), rateando em cascata até o CNPJ (vol_meta), e avança a
+    máquina de fase para o próximo passo. Razão Social continua usando
+    POST /salvar (já existente, não muda).
+    """
+    try:
+        from app.api.routers.rls_metas import (
+            escopo_usuario, fase_atual_do_responsavel, avancar_fase,
+            garantir_tabela_fase_carteira, FASE_SKU, FASE_EXECUTIVO,
+            NIVEL_GERENTE, NIVEL_COORDENADOR,
+        )
+        from app.api.routers.rateio_cascata import (
+            ratear_gerente_para_coordenadores,
+            ratear_coordenador_sku_para_executivos,
+            ratear_executivo_para_razao_social,
+        )
+
+        ciclo = get_current_cycle(db)
+        if not etapa_congelada(db, ciclo, ETAPA_BOTTOMUP):
+            raise HTTPException(423, "Demanda Comercial ainda nao congelou. Aguarde o bastao.")
+        if etapa_congelada(db, ciclo, ETAPA_METAS):
+            raise HTTPException(423, "Etapa congelada — não é possível ratear.")
+
+        escopo = escopo_usuario(u)
+        if escopo["ve_tudo"]:
+            raise HTTPException(400, "Admin não opera fases diretamente — use reabertura administrativa.")
+
+        nome = escopo["nome_responsavel"]
+        funcao = escopo["funcao"]
+        garantir_tabela_fase_carteira(db)
+        estado = fase_atual_do_responsavel(db, ciclo, nome)
+        fase = estado["fase_atual"]
+
+        if funcao == NIVEL_GERENTE and fase != FASE_SKU:
+            raise HTTPException(400, "Gerente só possui a fase SKU.")
+        if funcao == NIVEL_COORDENADOR and fase == "RAZAO_SOCIAL":
+            raise HTTPException(400, "Fase Razão Social usa POST /salvar, não /ratear-fase.")
+        if funcao == NIVEL_COORDENADOR and fase == FASE_EXECUTIVO and not payload.executivo_nome:
+            raise HTTPException(422, "executivo_nome é obrigatório na fase Executivo.")
+
+        for aj in payload.ajustes:
+            check_imutabilidade_mes(aj.mes_projetado, aj.sku, contexto="Meta")
+
+            # R$ e caixas são sempre sincronizados via PMV vigente do SKU no ciclo.
+            if aj.novo_volume is not None:
+                novo_total = aj.novo_volume
+            elif aj.novo_valor_financeiro is not None:
+                pmv = db.execute(text("""
+                    SELECT COALESCE(SUM(pmv_aplicado * vol_bottomup) / NULLIF(SUM(vol_bottomup), 0), 0)
+                    FROM fato_ibp_granular
+                    WHERE ciclo_sop = :c AND sku = :s AND TO_CHAR(mes_projetado,'YYYY-MM') = :m
+                """), {"c": ciclo, "s": aj.sku, "m": aj.mes_projetado}).scalar() or 0
+                novo_total = int(round(aj.novo_valor_financeiro / pmv)) if pmv > 0 else 0
+            else:
+                raise HTTPException(422, "Informe novo_volume ou novo_valor_financeiro.")
+
+            if funcao == NIVEL_GERENTE:
+                ratear_gerente_para_coordenadores(db, ciclo, aj.sku, aj.mes_projetado, novo_total, nome)
+            elif fase == FASE_SKU:
+                ratear_coordenador_sku_para_executivos(db, ciclo, aj.sku, aj.mes_projetado, novo_total, nome)
+            else:  # fase == FASE_EXECUTIVO
+                ratear_executivo_para_razao_social(
+                    db, ciclo, aj.sku, aj.mes_projetado, novo_total, nome, payload.executivo_nome
+                )
+
+        db.commit()
+        novo_estado = avancar_fase(db, escopo, ciclo)
+        return {"status": "ok", "fase": novo_estado}
+    except HTTPException:
+        db.rollback(); raise
+    except Exception as e:
+        db.rollback(); raise HTTPException(500, repr(e))
+
+
+class PayloadReabrirFase(BaseModel):
+    nome_alvo: str
+    nivel_alvo: Optional[str] = None
+
+
+@router.post("/reabrir-fase")
+def reabrir_fase_ep(payload: PayloadReabrirFase, db: Session = Depends(get_db),
+                     u: dict = Depends(require_metas)):
+    """
+    Reabre a carteira de um responsável de volta para a fase SKU. Mesma
+    precedência hierárquica de /reabrir-cadeado (dono, ou superior).
+    """
+    try:
+        from app.api.routers.rls_metas import escopo_usuario, reabrir_fase
+        ciclo  = get_current_cycle(db)
+        escopo = escopo_usuario(u)
+        pertence = False
+        if not escopo["ve_tudo"] and escopo["funcao"] == "Gerente":
+            pertence = bool(db.execute(text("""
+                SELECT 1 FROM dim_clientes
+                WHERE TRIM(gerente_nome) = :g AND TRIM(supervisor_nome) = :a LIMIT 1
+            """), {"g": escopo["valor_rls"], "a": payload.nome_alvo.strip()}).scalar())
+        reabrir_fase(db, escopo, ciclo, payload.nome_alvo, pertence, payload.nivel_alvo)
+        return {"status": "reaberto", "responsavel": payload.nome_alvo}
+    except HTTPException: raise
+    except Exception as e:
+        db.rollback(); raise HTTPException(500, repr(e))
+
 
 # ---------------------------------------------------------------------------
 # GET /consolidado  — visão somente leitura: vol_meta vs vol_bu por categoria/SKU

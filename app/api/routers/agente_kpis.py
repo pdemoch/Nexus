@@ -383,6 +383,102 @@ def _categorias_por_janela(db: Session, ini: str, fim: str) -> Dict[str, Dict[st
     return out
 
 
+_SQL_ESCOPO_CATEGORIA = """
+SELECT a.categoria,
+       SUM(a.qt_pedido)   AS qt_pedido,
+       SUM(a.qt_plano)    AS qt_plano,
+       SUM(a.qt_entregue) AS qt_entregue,
+       SUM(a.erro_abs_cx) AS erro_abs,
+       SUM(a.qt_pedido) FILTER (WHERE a.tem_plano) AS qt_com_plano
+FROM mart_acuracia_coordenador_mes a
+WHERE a.qt_pedido > 0
+  AND a.mes >= CAST(:ini AS date) AND a.mes <= CAST(:fim AS date)
+  AND (:campo_rls IS NULL OR
+       (:campo_rls = 'gerente_nome'     AND a.gerente_nome = :valor_rls) OR
+       (:campo_rls = 'supervisor_nome'  AND a.coordenador_nome = :valor_rls))
+GROUP BY a.categoria
+ORDER BY SUM(a.erro_abs_cx) DESC
+"""
+
+_SQL_ESCOPO_MENSAL = """
+SELECT TO_CHAR(a.mes, 'YYYY-MM') AS mes,
+       SUM(a.qt_pedido)   AS qt_pedido,
+       SUM(a.vl_pedido)   AS vl_pedido,
+       SUM(a.qt_entregue) AS qt_entregue,
+       SUM(a.qt_corte)    AS qt_corte,
+       SUM(a.qt_plano)    AS qt_plano,
+       SUM(a.erro_abs_cx) AS erro_abs,
+       SUM(a.qt_pedido) FILTER (WHERE a.tem_plano) AS qt_com_plano
+FROM mart_acuracia_coordenador_mes a
+WHERE a.qt_pedido > 0
+  AND a.mes >= CAST(:ini AS date) AND a.mes <= CAST(:fim AS date)
+  AND (:campo_rls IS NULL OR
+       (:campo_rls = 'gerente_nome'     AND a.gerente_nome = :valor_rls) OR
+       (:campo_rls = 'supervisor_nome'  AND a.coordenador_nome = :valor_rls))
+GROUP BY 1 ORDER BY 1
+"""
+
+
+def montar_dataset_escopo(db: Session, escopo: Dict[str, Any],
+                           ciclo: str = None) -> Dict[str, Any]:
+    """
+    Mesmo relatorio (WMAPE/BIAS/Fill Rate por categoria + mensal), mas
+    restrito a alcada de Coordenador/Gerente — le de
+    mart_acuracia_coordenador_mes (grao sku, mes, coordenador) em vez de
+    mart_acuracia_sku_mes (grao sku, mes, empresa toda).
+
+    `escopo` e o dict devolvido por rls_metas.escopo_usuario:
+        {"campo_rls": "gerente_nome" | "supervisor_nome" | None,
+         "valor_rls": <nome> | None, "ve_tudo": bool}
+    Admin (ve_tudo=True ou campo_rls None) cai no dataset da empresa
+    inteira — mesma regra aplicada em todo o resto do sistema.
+    """
+    if escopo.get("ve_tudo") or not escopo.get("campo_rls"):
+        return montar_dataset(db, ciclo=ciclo)
+
+    ciclo = ciclo or _ciclo_atual(db)
+    jan = janela_do_ciclo(ciclo)
+    p_det = {"ini": jan["ini_detalhe"], "fim": jan["fim_detalhe"],
+              "campo_rls": escopo["campo_rls"], "valor_rls": escopo["valor_rls"]}
+
+    mensal = []
+    for r in db.execute(text(_SQL_ESCOPO_MENSAL), p_det).fetchall():
+        qp = float(r.qt_pedido or 0)
+        mensal.append({
+            "mes":        r.mes,
+            "qt_pedido":  round(qp),
+            "vl_pedido":  round(float(r.vl_pedido or 0)),
+            "qt_entregue": round(float(r.qt_entregue or 0)),
+            "qt_corte":   round(float(r.qt_corte or 0)),
+            "qt_plano":   round(float(r.qt_plano or 0)),
+            "wmape":      _r(_sdiv(r.erro_abs, qp, 100)),
+            "bias":       _r(_sdiv(float(r.qt_plano or 0) - qp, qp, 100)),
+            "fill_rate":  _r(_sdiv(r.qt_entregue, qp, 100), 1),
+            "cobertura_plano": _r(_sdiv(r.qt_com_plano, qp, 100), 1),
+        })
+
+    categorias = []
+    for r in db.execute(text(_SQL_ESCOPO_CATEGORIA), p_det).fetchall():
+        qp = float(r.qt_pedido or 0)
+        categorias.append({
+            "categoria":  r.categoria or "SEM CATEGORIA",
+            "qt_pedido":  round(qp),
+            "qt_entregue": round(float(r.qt_entregue or 0)),
+            "wmape":      _r(_sdiv(r.erro_abs, qp, 100)),
+            "bias":       _r(_sdiv(float(r.qt_plano or 0) - qp, qp, 100)),
+            "fill_rate":  _r(_sdiv(r.qt_entregue, qp, 100), 1),
+            "cobertura_plano": _r(_sdiv(r.qt_com_plano, qp, 100), 1),
+        })
+
+    return {
+        "ciclo": ciclo,
+        "janela": jan,
+        "escopo": {"campo": escopo["campo_rls"], "valor": escopo["valor_rls"]},
+        "mensal": mensal,
+        "categorias": categorias,
+    }
+
+
 def montar_dataset(db: Session, meses: List[str] = None,
                    base: str = "pedido", unidade: str = "cx",
                    ciclo: str = None) -> Dict[str, Any]:

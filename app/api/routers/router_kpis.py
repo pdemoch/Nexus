@@ -14,6 +14,7 @@ import io
 from app.core.database import get_db
 from app.api.routers.router_auth import get_current_user
 from app.api.routers import agente_kpis
+from app.api.routers.rls_metas import escopo_usuario
 
 router = APIRouter(prefix="/api/v1/kpis", tags=["KPIs Acurácia S&OP"])
 
@@ -1283,6 +1284,35 @@ async def agente_dataset(
         return agente_kpis.montar_dataset(db, ciclo or agente_kpis._ciclo_atual(db))
     except Exception as e:
         raise HTTPException(500, f"Erro ao montar dataset: {e}")
+
+
+@router.get("/agente/dataset-escopo")
+async def agente_dataset_escopo(
+    ciclo: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    u: dict = Depends(get_current_user),
+):
+    """
+    Dataset de acuracia (WMAPE/BIAS/Fill Rate por categoria + mensal)
+    restrito a alcada do usuario logado — Coordenador ve so' seus CNPJs,
+    Gerente ve sua equipe, Administrador ve a empresa toda.
+
+    Usado pelo agente de demanda no drilldown do ConsensoArena, onde o
+    Coordenador/Gerente abre o dossie de um SKU e precisa de acuracia
+    calculada apenas sobre a carteira sob sua responsabilidade — nao a
+    empresa inteira.
+    """
+    try:
+        escopo = escopo_usuario(u)
+        if not escopo.get("nivel_ok") and not escopo.get("ve_tudo"):
+            raise HTTPException(403, "Usuario sem escopo de acesso definido.")
+        return agente_kpis.montar_dataset_escopo(
+            db, escopo, ciclo or agente_kpis._ciclo_atual(db)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao montar dataset por escopo: {e}")
 
 
 @router.get("/agente/relatorio")
