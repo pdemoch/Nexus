@@ -49,8 +49,9 @@ async def agente_chat(
         segmento = _split(payload.segmentos)
         regional = _split(payload.regionais)
         contexto = await asyncio.to_thread(
-            construir_contexto, payload.data_ini, payload.data_fim, segmento, regional, payload.cgc,
-            _split(payload.status), _split(payload.motivos)
+            construir_contexto, payload.data_ini, payload.data_fim,
+            pergunta=pergunta, segmento=segmento, regional=regional, cgc=payload.cgc,
+            status=_split(payload.status), motivo=_split(payload.motivos)
         )
         return {"resposta": await asyncio.to_thread(
             responder_pergunta, pergunta, contexto, payload.historico

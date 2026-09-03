@@ -202,9 +202,13 @@ def calcular_pmp_resumo(data_ini: date, data_fim: date, motivos=None, tipos=None
     motivos_disponiveis = valores("e5_motbx")
     tipos_disponiveis = valores("d1_tp")
     fornecedores_disponiveis = valores("clifor")
+    global_resumo = _resumo(base)
+    dias_periodo = max((data_fim - data_ini).days, 1)
+    global_resumo["valor_por_dia"] = round(global_resumo["valor_total"] / dias_periodo, 2)
     return {
-        "periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
-        "global": _resumo(base),
+        "periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim),
+                    "dias_periodo": dias_periodo},
+        "global": global_resumo,
         "fornecedores": _resumo_fornecedores(base),
         "filtros": {
             "e5_motbx": motivos_disponiveis,

@@ -167,19 +167,31 @@ export default function FinanceiroArena() {
   const dataIni = mesAno2Date(mesIni, anoIni);
   const dataFim = mesAno2Date(mesFim, anoFim, true);
 
-  const paramsBase: any = {
-    data_ini: dataIni,
-    data_fim: dataFim,
-    ...(segmentosSel.length ? { segmentos: segmentosSel.join(',') } : {}),
-    ...(regionaisSel.length ? { regionais: regionaisSel.join(',') } : {}),
-    ...(statusSel.length ? { status: statusSel.join(',') } : {}),
-    ...(motivosSel.length ? { motivos: motivosSel.join(',') } : {}),
-  };
-  const pmpParams: any = {
-    data_ini: dataIni, data_fim: dataFim,
-    ...(pmpMotivosSel.length ? { e5_motbx: pmpMotivosSel.join(',') } : {}),
-    ...(pmpTiposSel.length ? { d1_tp: pmpTiposSel.join(',') } : {}),
-    ...(pmpFornecedoresSel.length ? { fornecedor: pmpFornecedoresSel.join(',') } : {}),
+  const [appliedParams, setAppliedParams] = useState<{ pmr: any; pmp: any }>({
+    pmr: { data_ini: dataIni, data_fim: dataFim },
+    pmp: { data_ini: dataIni, data_fim: dataFim },
+  });
+  const paramsBase = appliedParams.pmr;
+  const pmpParams = appliedParams.pmp;
+
+  const aplicarFiltros = () => {
+    setAppliedParams({
+      pmr: {
+        data_ini: dataIni,
+        data_fim: dataFim,
+        ...(segmentosSel.length ? { segmentos: segmentosSel.join(',') } : {}),
+        ...(regionaisSel.length ? { regionais: regionaisSel.join(',') } : {}),
+        ...(statusSel.length ? { status: statusSel.join(',') } : {}),
+        ...(motivosSel.length ? { motivos: motivosSel.join(',') } : {}),
+      },
+      pmp: {
+        data_ini: dataIni,
+        data_fim: dataFim,
+        ...(pmpMotivosSel.length ? { e5_motbx: pmpMotivosSel.join(',') } : {}),
+        ...(pmpTiposSel.length ? { d1_tp: pmpTiposSel.join(',') } : {}),
+        ...(pmpFornecedoresSel.length ? { fornecedor: pmpFornecedoresSel.join(',') } : {}),
+      },
+    });
   };
 
   // ─── Fetch principal ───────────────────────────────────────────────────────
@@ -204,7 +216,7 @@ export default function FinanceiroArena() {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dataIni, dataFim, segmentosSel, regionaisSel, statusSel, motivosSel]);
+  }, [appliedParams.pmr]);
 
   const buscarPmp = useCallback(async () => {
     setLoading(true);
@@ -226,7 +238,7 @@ export default function FinanceiroArena() {
     } finally {
       setLoading(false);
     }
-  }, [dataIni, dataFim, pmpMotivosSel, pmpTiposSel, pmpFornecedoresSel]);
+  }, [appliedParams.pmp]);
 
   const abrirFornecedorPmp = async (fornecedor: any) => {
     setPmpFornecedorSel(fornecedor);
@@ -240,11 +252,11 @@ export default function FinanceiroArena() {
   const buscarFiltros = useCallback(async () => {
     try {
       const r = await axios.get('/api/v1/financeiro/pmr/filtros', {
-        params: { data_ini: dataIni, data_fim: dataFim },
+        params: { data_ini: paramsBase.data_ini, data_fim: paramsBase.data_fim },
       });
       setFiltros(r.data || { regionais: [], segmentos: [] });
     } catch {}
-  }, [dataIni, dataFim]);
+  }, [paramsBase]);
 
   useEffect(() => {
     if (toggleAtivo === 'PMR') buscarFiltros();
@@ -260,14 +272,14 @@ export default function FinanceiroArena() {
     const t = setTimeout(async () => {
       try {
         const r = await axios.get('/api/v1/financeiro/pmr/clientes-busca', {
-          params: { data_ini: dataIni, data_fim: dataFim, q: buscaCli, limit: 15 },
+          params: { data_ini: paramsBase.data_ini, data_fim: paramsBase.data_fim, q: buscaCli, limit: 15 },
         });
         setSugestoes(r.data.clientes || []);
         setShowSug(true);
       } catch {}
     }, 300);
     return () => clearTimeout(t);
-  }, [buscaCli, dataIni, dataFim]);
+  }, [buscaCli, paramsBase.data_ini, paramsBase.data_fim]);
 
   // ─── Detalhe de notas do cliente ─────────────────────────────────────────────
   const abrirCliente = useCallback(async (cgc: string, nome: string) => {
@@ -277,11 +289,8 @@ export default function FinanceiroArena() {
     try {
       const r = await axios.get('/api/v1/financeiro/pmr/notas', {
         params: {
-          data_ini: dataIni, data_fim: dataFim, razao_social: nome,
-          segmentos: segmentosSel.length ? segmentosSel.join(',') : undefined,
-          regionais: regionaisSel.length ? regionaisSel.join(',') : undefined,
-          status: statusSel.length ? statusSel.join(',') : undefined,
-          motivos: motivosSel.length ? motivosSel.join(',') : undefined,
+          ...paramsBase,
+          razao_social: nome,
         },
       });
       setNotasCli(r.data);
@@ -290,7 +299,7 @@ export default function FinanceiroArena() {
     } finally {
       setLoadingNotas(false);
     }
-  }, [dataIni, dataFim, segmentosSel, regionaisSel, statusSel, motivosSel]);
+  }, [paramsBase]);
 
   const exportar = async () => {
     setBaixando(true);
@@ -302,7 +311,7 @@ export default function FinanceiroArena() {
       const url = window.URL.createObjectURL(new Blob([r.data]));
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${isPmp ? 'PMP' : 'PMR'}_${dataIni}_${dataFim}.xlsx`;
+      a.download = `${isPmp ? 'PMP' : 'PMR'}_${(isPmp ? pmpParams : paramsBase).data_ini}_${(isPmp ? pmpParams : paramsBase).data_fim}.xlsx`;
       a.click();
       window.URL.revokeObjectURL(url);
     } catch {}
@@ -373,12 +382,12 @@ export default function FinanceiroArena() {
       const r = await axios.post('/api/v1/financeiro/agente/chat', {
         pergunta: p,
         historico: chatAgente.slice(-6),
-        data_ini: dataIni,
-        data_fim: dataFim,
-        segmentos: segmentosSel.length ? segmentosSel.join(',') : undefined,
-        regionais: regionaisSel.length ? regionaisSel.join(',') : undefined,
-        status: statusSel.length ? statusSel.join(',') : undefined,
-        motivos: motivosSel.length ? motivosSel.join(',') : undefined,
+        data_ini: paramsBase.data_ini,
+        data_fim: paramsBase.data_fim,
+        segmentos: paramsBase.segmentos,
+        regionais: paramsBase.regionais,
+        status: paramsBase.status,
+        motivos: paramsBase.motivos,
         cgc: clienteSel?.cgc,
       });
       setChatAgente([...historico, { role: 'assistant', content: r.data.resposta }]);
@@ -422,7 +431,7 @@ export default function FinanceiroArena() {
         <Sparkles className="w-4 h-4" /> Analista Financeiro
       </button>
       {agenteAberto && (
-        <div className="fixed bottom-20 right-6 z-50 flex h-[500px] w-[390px] max-w-[calc(100vw-48px)] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+        <div className="fixed bottom-20 right-6 z-50 flex h-[min(760px,calc(100vh-110px))] w-[min(760px,calc(100vw-48px))] max-w-[calc(100vw-32px)] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
           <div className="flex items-center justify-between bg-gradient-to-r from-violet-600 to-indigo-600 px-4 py-3 text-white">
             <span className="flex items-center gap-2 text-sm font-black"><Sparkles className="w-4 h-4" /> Analista Financeiro</span>
             <button onClick={() => setAgenteAberto(false)}><X className="w-4 h-4" /></button>
@@ -567,7 +576,7 @@ export default function FinanceiroArena() {
              value={pmpFornecedoresSel} onChange={setPmpFornecedoresSel} />
         </>)}
 
-        <button onClick={toggleAtivo === 'PMP' ? buscarPmp : buscarDados} disabled={loading}
+        <button onClick={aplicarFiltros} disabled={loading}
           className="ml-auto bg-violet-600 hover:bg-violet-500 text-white px-5 py-1.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all disabled:opacity-50">
           {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Aplicar'}
         </button>
@@ -887,7 +896,7 @@ export default function FinanceiroArena() {
             <div className="bg-gradient-to-r from-emerald-50 to-white rounded-2xl border border-emerald-100 p-4 flex flex-wrap items-center gap-4">
               <div className="flex items-center gap-2">
                 <DollarSign className="w-5 h-5 text-emerald-600" />
-                <span className="text-[10px] font-black uppercase tracking-widest text-emerald-700">Ganho no Capital de Giro</span>
+                <span className="text-[10px] font-black uppercase tracking-widest text-emerald-700">Impacto no Capital de Giro</span>
               </div>
               <div className="text-2xl font-black text-emerald-700">{fmtRsFull(pmpGlobal.valor_por_dia)}
                 <span className="text-xs font-bold text-emerald-500 ml-1">por dia de PMP</span>
@@ -918,8 +927,9 @@ export default function FinanceiroArena() {
               </ResponsiveContainer>
             </div>
           )}
+          <div className="grid grid-cols-1 xl:grid-cols-5 gap-4">
           {pmpTipos.length > 0 && (
-            <div className="bg-white rounded-2xl border border-slate-100 p-5">
+            <div className="xl:col-span-3 bg-white rounded-2xl border border-slate-100 p-5">
               <div className="text-xs font-black uppercase tracking-widest text-slate-400 mb-1">PMP por Tipo D1</div>
               <div className="text-[10px] text-slate-400 mb-3">Barras = valor pago · linhas = prazos médios</div>
               <ResponsiveContainer width="100%" height={280}>
@@ -937,7 +947,7 @@ export default function FinanceiroArena() {
               </ResponsiveContainer>
             </div>
           )}
-          <div className="bg-white rounded-2xl border border-slate-100 overflow-hidden">
+          <div className="xl:col-span-2 bg-white rounded-2xl border border-slate-100 overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-100">
               <div className="text-xs font-black uppercase tracking-widest text-slate-400">Pagamentos por Fornecedor</div>
               <div className="text-[10px] text-slate-400">Agrupado exclusivamente por CLIFOR · {pmpFornecedores.length} fornecedores exibidos</div>
@@ -975,6 +985,7 @@ export default function FinanceiroArena() {
                 </table>
               </div>
             )}
+          </div>
           </div>
           {pmpFornecedorSel && (
             <div className="bg-white rounded-2xl border border-violet-100 overflow-hidden">
@@ -1014,7 +1025,7 @@ export default function FinanceiroArena() {
                   </table>
                 )}
               </div>
-            </div>
+              </div>
           )}
         </div>
       )}
