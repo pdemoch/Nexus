@@ -173,11 +173,11 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print,
         # B. Extração de Estoque D0 (API 90)
         lf_90 = await extrator.extrair_estoque_90()
 
-        # C. Transformações (Camada Silver e Estoque)
+        # C. Transformações (Camada Silver)
         # data_inicio é PASSADA: o transformer não recalcula a janela.
         lf_silver, lf_clientes, df_orc_final = transformer.processar_camada_silver(
             lf_150, lf_188, df_seg, df_orc, data_inicio_janela=data_inicio)
-        lf_estoque_d0 = transformer.processar_estoque_d0(lf_90)
+        await extrator.salvar_estoque_90_s3(lf_90, data_fim)
 
         # D. Cargas no Banco (Se houver dados retornados do cruzamento)
         if lf_silver is not None:
@@ -207,9 +207,6 @@ async def executar_pipeline_nexus(ciclo_alvo: str, log_callback=print,
                                          recarga_total=modo_recarga_total)
             loader.executar_carga_orcamento(df_orc_final, log_callback=log_callback)
 
-            # E. Carga de Estoque
-            if lf_estoque_d0 is not None:
-                loader.executar_carga_estoque(lf_estoque_d0.collect(), log_callback=log_callback)
         else:
             log_callback("⚠️ [AVISO] O cruzamento com o portfólio não retornou dados nesta rodada.")
 

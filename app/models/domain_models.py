@@ -51,7 +51,6 @@ class DimProduto(Base):
 
     vendas = relationship("FatoVendas", back_populates="produto_rel")
     forecasts = relationship("FatoIbpGranular", back_populates="produto_rel")
-    estoque = relationship("FatoEstoqueD0", back_populates="produto_rel")
     inbound = relationship("FatoInboundProducao", back_populates="produto_rel")
 
 class DimCliente(Base):
@@ -96,17 +95,6 @@ class FatoVendas(Base):
 
     produto_rel = relationship("DimProduto", back_populates="vendas")
     cliente_rel = relationship("DimCliente", back_populates="vendas")
-
-class FatoEstoqueD0(Base):
-    """Guarda a posição consolidada do armazém 05 (API 90)"""
-    __tablename__ = "fato_estoque_d0"
-    
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    sku = Column(String(50), ForeignKey("dim_produtos.sku"), nullable=False, index=True)
-    qtd_dispo = Column(Float, default=0.0)
-    data_atualizacao = Column(DateTime, default=datetime.utcnow)
-
-    produto_rel = relationship("DimProduto", back_populates="estoque")
 
 class FatoInboundProducao(Base):
     """Entradas futuras programadas (Input do Supply Chain)"""

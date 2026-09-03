@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.database import SessionLocal, engine
-from app.models.domain_models import FatoIbpGranular, FatoVendas, DimCliente, FatoOrcamento, FatoEstoqueD0
+from app.models.domain_models import FatoIbpGranular, FatoVendas, DimCliente, FatoOrcamento
 
 
 class NexusLoader:
@@ -689,30 +689,4 @@ class NexusLoader:
             log_callback("✅ [LOAD] Tabela de Orçamento substituída (Drop & Replace) com sucesso.")
         except Exception as e:
             log_callback(f"❌ [LOAD] Erro na carga de orçamento: {e}")
-            raise e
-
-    def executar_carga_estoque(self, df_estoque: pl.DataFrame, log_callback=print):
-        """Fotografia Diária: Apaga o estoque de ontem e grava a posição de hoje."""
-        log_callback("⏳ [LOAD] Atualizando Posição de Estoque D0 (Armazém)...")
-        try:
-            if df_estoque is None or df_estoque.is_empty():
-                log_callback("⚠️ [LOAD] Nenhum dado de estoque recebido.")
-                return
-
-            registros = df_estoque.to_dicts()
-
-            with SessionLocal() as db:
-                # 1. Apaga a fotografia anterior inteira
-                db.execute(text("DELETE FROM fato_estoque_d0"))
-
-                # 2. Insere o novo cenário real
-                lote_size = 5000
-                for i in range(0, len(registros), lote_size):
-                    lote = registros[i:i+lote_size]
-                    db.bulk_insert_mappings(FatoEstoqueD0, lote)
-
-                db.commit()
-            log_callback("✅ [LOAD] Estoque D0 (API 90) sincronizado com sucesso.")
-        except Exception as e:
-            log_callback(f"❌ [LOAD] Erro na carga de estoque: {e}")
             raise e

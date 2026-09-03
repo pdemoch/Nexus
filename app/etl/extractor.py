@@ -8,6 +8,7 @@ from datetime import date, timedelta, datetime
 import calendar
 from dateutil.relativedelta import relativedelta
 import boto3
+import io
 from botocore.exceptions import ClientError
 from pathlib import Path
 from typing import Optional, Any
@@ -34,26 +35,33 @@ class GobiExtractor:
         connector = aiohttp.TCPConnector(limit=10, keepalive_timeout=60)
         async with aiohttp.ClientSession(connector=connector) as session:
             try:
-                dados_90 = await self._fetch_json_with_retry(
-                    session, url,
-                    params={"streaming": "true", "format": "json",
-                            "limit": 5000, "offset": 0},
-                )
-                
+                dados_90 = []
+                cabecalho = None
+                limit = 5000
+                offset = 0
+                while True:
+                    lote = await self._fetch_json_with_retry(
+                        session, url,
+                        params={"streaming": "true", "format": "json",
+                                "limit": limit, "offset": offset},
+                    )
+                    if not lote:
+                        break
+                    # O endpoint pode devolver o cabeçalho como primeira linha
+                    # quando o formato tabular é usado.
+                    if isinstance(lote[0], list):
+                        cabecalho = lote[0]
+                        lote = [
+                            dict(zip(cabecalho, linha))
+                            for linha in lote[1:]
+                            if isinstance(linha, list)
+                        ]
+                    dados_90.extend(lote)
+                    offset += len(lote)
+                    if len(lote) < limit:
+                        break
                 if not dados_90:
                     raise RuntimeError("A API 90 não retornou dados de estoque.")
-
-                # Sem parâmetros, a API retorna apenas o cabeçalho como primeira
-                # linha; o endpoint /data com JSON retorna os registros.
-                if isinstance(dados_90[0], list):
-                    cabecalho = dados_90[0]
-                    dados_90 = [
-                        dict(zip(cabecalho, linha))
-                        for linha in dados_90[1:]
-                        if isinstance(linha, list)
-                    ]
-                if not dados_90:
-                    raise RuntimeError("A API 90 retornou somente o cabeçalho.")
                     
                 # Converte os dicionários da API num Polars LazyFrame super rápido
                 lf_90 = pl.LazyFrame(dados_90)
@@ -64,6 +72,27 @@ class GobiExtractor:
             except Exception as e:
                 print(f"❌ [EXTRACTOR] Erro crítico ao puxar API 90: {e}")
                 raise
+
+    async def salvar_estoque_90_s3(self, lf_90: pl.LazyFrame, data_referencia: date):
+        """Persiste a resposta bruta da API 90 em uma partição diária idempotente."""
+        if lf_90 is None:
+            raise ValueError("Não é possível salvar estoque vazio no S3.")
+        df_90 = await asyncio.to_thread(lf_90.collect)
+        if df_90.is_empty():
+            raise ValueError("A API 90 retornou um estoque vazio.")
+        buffer = io.BytesIO()
+        df_90.write_parquet(buffer)
+        buffer.seek(0)
+        bucket = os.getenv("NEXUS_S3_BUCKET", self.bucket_name if hasattr(self, "bucket_name") else "")
+        if not bucket:
+            raise RuntimeError("NEXUS_S3_BUCKET não configurado para o estoque da API 90.")
+        chave = f"estoque/{data_referencia:%Y/%m/%d}.parquet"
+        await asyncio.to_thread(
+            boto3.client("s3", region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1"))
+            .put_object,
+            Bucket=bucket, Key=chave, Body=buffer.getvalue(),
+        )
+        print(f"✅ [S3] Estoque API 90 completo salvo em s3://{bucket}/{chave} ({df_90.height} linhas).")
 
     async def _fetch_json_with_retry(self, session: aiohttp.ClientSession, url: str, params: dict, retries: int = 4) -> Optional[Any]:
         async with self.semaphore:
