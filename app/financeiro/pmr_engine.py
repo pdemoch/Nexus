@@ -140,6 +140,9 @@ def _carregar_base_sem_filtros(data_ini: date, data_fim: date) -> pd.DataFrame:
     # não perder parcelas no encadeamento iniciado pela E5.
     se1_f = se1[["Chave_F2", "Chave_E5", "e1_num", "e1_prefixo", "e1_parcela",
                  "e1_valor", "e1_vencto", "e1_vencrea", "Chave_A1"]].copy()
+    # Relatórios históricos podem repetir a mesma parcela em mais de uma
+    # extração mensal. A parcela é a unidade do título; não deduplicamos E5.
+    se1_f = se1_f.drop_duplicates("Chave_E5", keep="last")
 
     # O menor grão é cada recebimento E5. Primeiro localizamos seu título SE1.
     base = se5.merge(se1_f, on="Chave_E5", how="inner", validate="many_to_one")

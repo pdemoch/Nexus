@@ -850,6 +850,40 @@ export default function FinanceiroArena() {
               ))}
             </div>
           )}
+          {pmpFornecedores.length > 0 && (
+            <div className="bg-white rounded-2xl border border-slate-100 p-5">
+              <div className="text-xs font-black uppercase tracking-widest text-slate-400 mb-1">
+                PMP por fornecedor
+              </div>
+              <div className="text-[10px] text-slate-400 mb-3">
+                Principais fornecedores por valor pago · barras = valor pago · linha = PMP Pagamento
+              </div>
+              <ResponsiveContainer width="100%" height={260}>
+                <ComposedChart
+                  data={pmpFornecedores.slice(0, 15).map((f: any) => ({
+                    fornecedor: f.clifor,
+                    valor_pago: f.valor_total,
+                    pmp_pagamento: f.pmp_pagamento ?? f.pmp,
+                  }))}
+                  margin={{ top: 10, right: 20, left: 0, bottom: 45 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                  <XAxis dataKey="fornecedor" angle={-35} textAnchor="end"
+                    height={60} tick={{ fontSize: 9, fill: '#64748b' }} />
+                  <YAxis yAxisId="valor" tickFormatter={fmtRs}
+                    tick={{ fontSize: 9, fill: '#64748b' }} width={62} />
+                  <YAxis yAxisId="dias" orientation="right"
+                    tick={{ fontSize: 9, fill: '#64748b' }} width={38} />
+                  <Tooltip content={<TooltipCustom />} />
+                  <Legend wrapperStyle={{ fontSize: 10, fontWeight: 700 }} />
+                  <Bar yAxisId="valor" dataKey="valor_pago" name="Valor Pago"
+                    fill="#c7d2fe" radius={[4, 4, 0, 0]} />
+                  <Line yAxisId="dias" type="monotone" dataKey="pmp_pagamento"
+                    name="PMP Pagamento" stroke="#7c3aed" strokeWidth={2.5} dot={{ r: 3 }} />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+          )}
           <div className="bg-white rounded-2xl border border-slate-100 overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-100">
               <div className="text-xs font-black uppercase tracking-widest text-slate-400">Pagamentos por Fornecedor</div>
