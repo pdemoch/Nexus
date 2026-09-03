@@ -17,6 +17,7 @@ acidente no torneio anterior.
 import numpy as np
 import pandas as pd
 import warnings
+from app.core.constants import HORIZONTE
 
 warnings.filterwarnings("ignore")
 
@@ -25,10 +26,19 @@ try:
 except ImportError:
     _stats = None
 
-HORIZONTE = 5
 FORCA_SAZONAL = 0.35   # o índice sazonal entra a 35% da força estimada
 P_SAZONAL = 0.10       # e só quando o efeito-mês tem p abaixo disto
 PENALIDADE_VIES = 0.5  # peso do viés no score de validação
+
+try:
+    from prophet import Prophet as _Prophet
+except ImportError:
+    _Prophet = None
+
+try:
+    from xgboost import XGBRegressor as _XGBRegressor
+except ImportError:
+    _XGBRegressor = None
 
 
 # =====================================================================
@@ -100,10 +110,13 @@ _CANDIDATOS_POR_PERFIL = {
     'Lancamento': {'Ens_Media', 'Ens_Mediana', 'MM3', 'Media2m', 'UltimoMes'},
     'Intermitente': {'Croston', 'SBA', 'TSB', 'ADIDA', 'MAPA_SES', 'MMPond12',
                      'Ens_Media', 'Ens_Mediana', 'Ens_Aparada'},
-    'Sazonal': {'Sazonal_encolhido', 'SazonalNaive', 'SazonalCategoria',
+    'Sazonal': {'Sazonal_encolhido', 'SazonalNaive', 'AnualTendenciaRobusta',
+                'TendenciaSazonalRobusta', 'SazonalCategoria',
                 'SazonalHierarquica', 'ETS_AICc', 'Theta', 'MM12', 'MAPA_Theta',
-                'Ens_Media', 'Ens_Mediana', 'Ens_Aparada'},
-    'Tendencia': {'Theta', 'ETS_AICc', 'Holt_amortecido', 'TheilSen',
+                'Prophet', 'XGBoost', 'Ens_Media', 'Ens_Mediana', 'Ens_Aparada'},
+    'Tendencia': {'Theta', 'ETS_AICc', 'Prophet', 'XGBoost',
+                  'AnualTendenciaRobusta',
+                  'TendenciaSazonalRobusta', 'Holt_amortecido', 'TheilSen',
                   'RegressaoAmortecida', 'MMAdaptativa', 'MAPA_Theta',
                   'MAPA_SES', 'Ens_Media', 'Ens_Mediana', 'Ens_Aparada'},
     'Estavel': set(),
@@ -340,6 +353,43 @@ def _c_sazonal_naive(y, d, a, ctx):
     return saida
 
 
+def _c_anual_tendencia_robusta(y, d, a, ctx):
+    """Combina o mesmo mês de anos anteriores com tendência amortecida."""
+    if len(y) < 24:
+        return [_mp(y, min(12, len(y)))] * HORIZONTE
+    saida = []
+    recente = float(np.mean(y[-3:]))
+    anterior = float(np.mean(y[-15:-12]))
+    crescimento = np.clip((recente / anterior - 1.0) if anterior > 0 else 0.0, -0.20, 0.20)
+    for k in range(HORIZONTE):
+        valores = []
+        for atraso in (12, 24, 36):
+            pos = len(y) - atraso + k
+            if 0 <= pos < len(y):
+                valores.append(float(y[pos]))
+        base = float(np.median(valores)) if valores else float(np.mean(y[-12:]))
+        saida.append(base * (1.0 + 0.5 * crescimento))
+    return saida
+
+
+def _c_tendencia_sazonal_robusta(y, d, a, ctx):
+    """Tendência Theil-Sen amortecida e ajustada pelo índice anual do SKU."""
+    if len(y) < 24:
+        return [_mp(y, min(12, len(y)))] * HORIZONTE
+    w = y[-18:]
+    slopes = [(w[j] - w[i]) / (j - i)
+              for i in range(len(w) - 1) for j in range(i + 1, len(w))]
+    slope = float(np.median(slopes)) if slopes else 0.0
+    nivel = float(np.median(w))
+    saz, p = ctx.get('saz', (None, 1.0))
+    saida = []
+    for k, alvo in enumerate(a):
+        indice = float(saz[alvo.month]) if saz is not None and p < P_SAZONAL else 1.0
+        tendencia = nivel + 0.5 * slope * (k + 1)
+        saida.append(tendencia * (1.0 + FORCA_SAZONAL * (indice - 1.0)))
+    return saida
+
+
 def _c_sazonal_categoria(y, d, a, ctx):
     """Sazonalidade hierárquica: padrão da categoria encolhido para o SKU."""
     base = _mp(y, min(12, len(y)))
@@ -494,6 +544,62 @@ def _c_ets_aicc(y, d, a, ctx):
     return [float(l + t * sum(phi ** (j + 1) for j in range(k + 1))) for k in range(HORIZONTE)]
 
 
+def _c_prophet(y, d, a, ctx):
+    """Prophet opcional, treinado somente com o histórico recebido pelo fold."""
+    if _Prophet is None or len(y) < 24:
+        return [_c_ets_aicc(y, d, a, ctx)[0]] * HORIZONTE
+    treino = pd.DataFrame({"ds": pd.to_datetime(d), "y": np.maximum(y, 0.0)})
+    modelo = _Prophet(
+        yearly_seasonality=True,
+        weekly_seasonality=False,
+        daily_seasonality=False,
+        seasonality_mode="multiplicative",
+        changepoint_prior_scale=0.05,
+    )
+    modelo.fit(treino)
+    futuro = pd.DataFrame({"ds": pd.to_datetime(a)})
+    return modelo.predict(futuro)["yhat"].to_numpy(dtype=float).tolist()
+
+
+def _c_xgboost(y, d, a, ctx):
+    """XGBoost recursivo com defasagens e calendário, sem olhar o futuro."""
+    if _XGBRegressor is None or len(y) < 18:
+        return [_c_ets_aicc(y, d, a, ctx)[0]] * HORIZONTE
+    valores = np.maximum(np.asarray(y, dtype=float), 0.0)
+    datas = pd.to_datetime(d)
+    janela = 12
+
+    def atributos(serie, pos, data):
+        inicio = max(0, pos - janela)
+        hist = serie[inicio:pos]
+        if len(hist) < janela:
+            hist = np.pad(hist, (janela - len(hist), 0), mode="edge")
+        return list(hist[-janela:]) + [
+            np.sin(2 * np.pi * data.month / 12),
+            np.cos(2 * np.pi * data.month / 12),
+            float(np.mean(hist[-3:])),
+            float(np.mean(hist[-12:])),
+        ]
+
+    X = [atributos(valores, i, datas[i]) for i in range(janela, len(valores))]
+    y_treino = valores[janela:]
+    modelo = _XGBRegressor(
+        n_estimators=120, max_depth=2, learning_rate=0.04,
+        subsample=0.9, colsample_bytree=0.9, objective="reg:squarederror",
+        random_state=42, n_jobs=1, verbosity=0,
+    )
+    modelo.fit(np.asarray(X), y_treino)
+    serie = list(valores)
+    saida = []
+    for data in pd.to_datetime(a):
+        pos = len(serie)
+        pred = float(modelo.predict(np.asarray([atributos(np.asarray(serie), pos, data)]))[0])
+        pred = max(0.0, pred)
+        saida.append(pred)
+        serie.append(pred)
+    return saida
+
+
 def _c_theil_sen(y, d, a, ctx, janela=18):
     """
     Tendência por Theil-Sen: mediana das inclinações entre todos os pares de
@@ -549,12 +655,16 @@ ARENA = {
     'TSB':                 _c_tsb,
     'Sazonal_encolhido':   _c_sazonal_enc,
     'SazonalNaive':        _c_sazonal_naive,
+    'AnualTendenciaRobusta': _c_anual_tendencia_robusta,
+    'TendenciaSazonalRobusta': _c_tendencia_sazonal_robusta,
     'SazonalCategoria':    _c_sazonal_categoria,
     'SazonalHierarquica':  _c_sazonal_hierarquica,
     'MAPA_Theta':          _c_mapa_theta,
     'MAPA_SES':            _c_mapa_ses,
     'ADIDA':               _c_adida,
     'ETS_AICc':            _c_ets_aicc,
+    'Prophet':              _c_prophet,
+    'XGBoost':              _c_xgboost,
     'TheilSen':            _c_theil_sen,
     'Bootstrap':           _c_bootstrap,
 }
