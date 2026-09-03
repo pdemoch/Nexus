@@ -22,6 +22,21 @@ class Usuario(Base):
     criado_em = Column(DateTime, default=datetime.utcnow)
     ultima_atividade = Column(DateTime, default=datetime.utcnow)
 
+class UsuarioSessao(Base):
+    __tablename__ = "usuario_sessoes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    sessao_id = Column(String(64), unique=True, nullable=False, index=True)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False, index=True)
+    inicio = Column(DateTime, default=datetime.utcnow, nullable=False)
+    ultimo_sinal = Column(DateTime, default=datetime.utcnow, nullable=False)
+    encerramento = Column(DateTime, nullable=True)
+    duracao_segundos = Column(Integer, default=0, nullable=False)
+    total_heartbeats = Column(Integer, default=0, nullable=False)
+    ultimo_ip = Column(String(64), nullable=True)
+    user_agent = Column(String(500), nullable=True)
+    status = Column(String(20), default="ativa", nullable=False, index=True)
+
 class DimProduto(Base):
     __tablename__ = 'dim_produtos'
     

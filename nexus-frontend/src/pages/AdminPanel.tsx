@@ -35,6 +35,7 @@ export default function AdminPanel() {
 
   // ESTADOS DE AUDITORIA
   const [logsAuditoria, setLogsAuditoria] = useState<any[]>([]);
+  const [sessoesAuditoria, setSessoesAuditoria] = useState<any[]>([]);
   const [buscaAuditoria, setBuscaAuditoria] = useState('');
 
   // Auto-scroll do terminal
@@ -76,6 +77,10 @@ export default function AdminPanel() {
       try {
         const auditRes = await axios.get('/api/v1/admin/auditoria/logs');
         setLogsAuditoria(auditRes.data.dados || []);
+      } catch (e) {}
+      try {
+        const sessoesRes = await axios.get('/api/v1/admin/auditoria/sessoes');
+        setSessoesAuditoria(sessoesRes.data.dados || []);
       } catch (e) {}
 
     } catch (e) {
@@ -326,6 +331,25 @@ Confirma a RECARGA TOTAL?`
       log.sku.toLowerCase().includes(t)
     );
   }, [logsAuditoria, buscaAuditoria]);
+
+  const sessoesFiltradas = useMemo(() => {
+    if (!buscaAuditoria) return sessoesAuditoria;
+    const termo = buscaAuditoria.toLowerCase();
+    return sessoesAuditoria.filter(sessao =>
+      [sessao.usuario, sessao.email, sessao.funcao, sessao.status]
+        .filter(Boolean).some(valor => String(valor).toLowerCase().includes(termo))
+    );
+  }, [sessoesAuditoria, buscaAuditoria]);
+
+  const formatarDuracao = (segundos: number) => {
+    const total = Math.max(0, Number(segundos) || 0);
+    const horas = Math.floor(total / 3600);
+    const minutos = Math.floor((total % 3600) / 60);
+    const segundosRestantes = total % 60;
+    return horas
+      ? `${horas}h ${String(minutos).padStart(2, '0')}min`
+      : `${minutos}min ${String(segundosRestantes).padStart(2, '0')}s`;
+  };
 
   if (isLoading) {
     return (
@@ -740,6 +764,53 @@ Confirma a RECARGA TOTAL?`
                             )}
                         </tbody>
                     </table>
+                </div>
+
+                <div className="mt-10 pt-8 border-t border-slate-100">
+                    <div className="flex items-center justify-between mb-4">
+                        <div>
+                            <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest">Uso e sessões</h3>
+                            <p className="text-xs font-bold text-slate-400 mt-1">Tempo conectado e atividade medida pelos pulsos de sessão.</p>
+                        </div>
+                        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                            {sessoesFiltradas.length} sessões
+                        </span>
+                    </div>
+                    <div className="overflow-x-auto">
+                        <table className="w-full border-collapse">
+                            <thead>
+                                <tr className="text-left">
+                                    <th className="px-4 py-3 text-[10px] font-black text-slate-400 uppercase tracking-widest">Usuário</th>
+                                    <th className="px-4 py-3 text-[10px] font-black text-slate-400 uppercase tracking-widest">Início</th>
+                                    <th className="px-4 py-3 text-[10px] font-black text-slate-400 uppercase tracking-widest">Último pulso</th>
+                                    <th className="px-4 py-3 text-[10px] font-black text-slate-400 uppercase tracking-widest">Duração</th>
+                                    <th className="px-4 py-3 text-[10px] font-black text-slate-400 uppercase tracking-widest">Uso</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-50">
+                                {sessoesFiltradas.length === 0 ? (
+                                    <tr><td colSpan={5} className="py-8 text-center text-xs font-bold text-slate-300">Nenhuma sessão registrada.</td></tr>
+                                ) : sessoesFiltradas.map(sessao => (
+                                    <tr key={sessao.id} className="hover:bg-slate-50/50">
+                                        <td className="px-4 py-3">
+                                            <div className="text-sm font-black text-slate-700">{sessao.usuario}</div>
+                                            <div className="text-[10px] font-bold text-slate-400">{sessao.email} · {sessao.funcao}</div>
+                                        </td>
+                                        <td className="px-4 py-3 text-xs font-bold text-slate-500 whitespace-nowrap">{sessao.inicio}</td>
+                                        <td className="px-4 py-3 text-xs font-bold text-slate-500 whitespace-nowrap">{sessao.ultimo_sinal}</td>
+                                        <td className="px-4 py-3 text-xs font-black text-slate-700 whitespace-nowrap">{formatarDuracao(sessao.duracao_segundos)}</td>
+                                        <td className="px-4 py-3">
+                                            <div className="flex items-center gap-2">
+                                                <span className={`w-2 h-2 rounded-full ${sessao.status === 'online' ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+                                                <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">{sessao.status}</span>
+                                                <span className="text-[10px] font-bold text-slate-400">({sessao.heartbeats} pulsos)</span>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
 
             </div>

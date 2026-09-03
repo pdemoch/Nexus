@@ -23,13 +23,15 @@ export default function App() {
   const [isSystemLocked, setIsSystemLocked] = useState(false);
   const [latestLog, setLatestLog] = useState('');
 
-  // MOTOR DE HEARTBEAT
+  // MOTOR DE HEARTBEAT: mantém a sessão e mede o tempo de uso no servidor.
   useEffect(() => {
     if (!user) return;
     const enviarPulso = async () => {
       try { await axios.post('/api/v1/auth/heartbeat'); } catch (error) {}
     };
     enviarPulso();
+    const intervalId = setInterval(enviarPulso, 30000);
+    return () => clearInterval(intervalId);
   }, [user]);
 
   // RADAR DO SISTEMA — bloqueia a UI enquanto o pipeline/IA roda
@@ -70,6 +72,7 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    axios.post('/api/v1/auth/logout').catch(() => undefined);
     localStorage.removeItem('nexus_token');
     localStorage.removeItem('nexus_user');
     setUser(null);

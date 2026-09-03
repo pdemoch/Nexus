@@ -420,6 +420,66 @@ def salvar(payload: PayloadSalvar, db: Session = Depends(get_db), u: dict = Depe
         db.rollback(); raise HTTPException(500, repr(e))
 
 
+@router.get("/auditoria-impacto")
+def auditoria_impacto(responsavel: str = None, nivel_responsavel: str = None,
+                      db: Session = Depends(get_db), u: dict = Depends(require_metas)):
+    """Compara a meta atual com o BottomUP no mesmo escopo da carteira."""
+    try:
+        from app.api.routers.rls_metas import escopo_usuario, clausula_rls
+        ciclo = get_current_cycle(db)
+        escopo = escopo_usuario(u)
+        rls = clausula_rls(escopo, alias_cli="c")
+        params = {"ciclo": ciclo}
+        params.update(rls["params"])
+        filtro = f"AND {rls['where']}"
+        alvo = (responsavel or "").strip()
+        nivel = (nivel_responsavel or "").strip()
+        if alvo:
+            if not escopo["ve_tudo"]:
+                raise HTTPException(403, "Somente o Administrador pode selecionar outra alçada.")
+            if nivel not in ("Gerente", "Coordenador"):
+                raise HTTPException(422, "nivel_responsavel deve ser Gerente ou Coordenador.")
+            campo = "gerente_nome" if nivel == "Gerente" else "supervisor_nome"
+            filtro = f"AND TRIM(c.{campo}) = :responsavel_alvo"
+            params["responsavel_alvo"] = alvo
+        rows = db.execute(text(f"""
+            SELECT COALESCE(NULLIF(TRIM(c.supervisor_nome), ''), 'SEM COORDENADOR') AS coordenador,
+                   TRIM(f.sku) AS sku,
+                   COALESCE(NULLIF(TRIM(p.descricao), ''), 'SEM DESCRICAO') AS descricao,
+                   TO_CHAR(f.mes_projetado, 'YYYY-MM') AS mes,
+                   SUM(f.vol_bottomup) AS bottomup,
+                   SUM(f.vol_meta) AS meta,
+                   SUM(f.vol_bottomup * f.pmv_aplicado) AS bottomup_rs,
+                   SUM(f.vol_meta * f.pmv_aplicado) AS meta_rs
+            FROM fato_ibp_granular f
+            JOIN dim_clientes c ON c.cgc = f.cgc
+            JOIN dim_produtos p ON p.sku = f.sku
+            WHERE f.ciclo_sop = :ciclo {filtro}
+            GROUP BY c.supervisor_nome, f.sku, p.descricao, f.mes_projetado
+            ORDER BY coordenador, f.sku, f.mes_projetado
+        """), params).fetchall()
+        itens = []
+        for r in rows:
+            bu = float(r.bottomup or 0)
+            meta = float(r.meta or 0)
+            bu_rs = float(r.bottomup_rs or 0)
+            meta_rs = float(r.meta_rs or 0)
+            itens.append({
+                "coordenador": r.coordenador, "sku": r.sku, "descricao": r.descricao,
+                "mes": r.mes, "bottomup": int(bu), "meta": int(meta),
+                "delta_caixas": int(meta - bu),
+                "impacto_percentual": round((meta - bu) / bu * 100, 2) if bu else None,
+                "bottomup_rs": round(bu_rs, 2), "meta_rs": round(meta_rs, 2),
+                "delta_rs": round(meta_rs - bu_rs, 2),
+                "impacto_rs_percentual": round((meta_rs - bu_rs) / bu_rs * 100, 2) if bu_rs else None,
+            })
+        return {"ciclo": ciclo, "itens": itens}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, repr(e))
+
+
 # ---------------------------------------------------------------------------
 # GET /exportar  — Excel cópia de segurança do preenchimento
 # ---------------------------------------------------------------------------

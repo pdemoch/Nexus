@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from app.core.database import get_db
 from app.core.state import AppState
-from app.models.domain_models import ControleCiclo, DimProduto, DimCliente, FatoIbpGranular, AuditoriaAjuste
+from app.models.domain_models import ControleCiclo, DimProduto, DimCliente, FatoIbpGranular, AuditoriaAjuste, UsuarioSessao, Usuario
 from app.etl.pipeline import executar_pipeline_nexus
 from app.api.routers.router_auth import get_current_user
 from app.api.routers.shared_ibp import (
@@ -519,6 +519,34 @@ async def listar_logs_auditoria(db: Session = Depends(get_db), usuario_logado: d
         return {"status": "success", "dados": dados}
     except Exception as e:
         raise HTTPException(500, f"Erro ao carregar auditoria: {str(e)}")
+
+@router.get("/auditoria/sessoes")
+async def listar_sessoes_auditoria(db: Session = Depends(get_db), usuario_logado: dict = Depends(get_current_user)):
+    if usuario_logado.get("funcao") != "Administrador":
+        raise HTTPException(status_code=403, detail="Acesso negado.")
+    agora = datetime.datetime.utcnow()
+    sessoes = db.query(UsuarioSessao, Usuario).join(
+        Usuario, Usuario.id == UsuarioSessao.usuario_id
+    ).order_by(UsuarioSessao.inicio.desc()).limit(500).all()
+    dados = []
+    for sessao, usuario in sessoes:
+        ativa = sessao.status == "ativa" and (agora - sessao.ultimo_sinal).total_seconds() <= 90
+        duracao = sessao.duracao_segundos or 0
+        if ativa:
+            duracao = max(duracao, int((agora - sessao.inicio).total_seconds()))
+        dados.append({
+            "id": sessao.id,
+            "usuario": usuario.nome,
+            "email": usuario.email,
+            "funcao": usuario.funcao,
+            "inicio": sessao.inicio.strftime("%d/%m/%Y %H:%M"),
+            "ultimo_sinal": sessao.ultimo_sinal.strftime("%d/%m/%Y %H:%M"),
+            "encerramento": sessao.encerramento.strftime("%d/%m/%Y %H:%M") if sessao.encerramento else None,
+            "duracao_segundos": duracao,
+            "heartbeats": sessao.total_heartbeats or 0,
+            "status": "online" if ativa else "encerrada",
+        })
+    return {"status": "success", "dados": dados}
 
 
 # =====================================================================

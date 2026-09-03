@@ -1,14 +1,15 @@
 import bcrypt
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, Request
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.core.database import get_db
-from app.models.domain_models import Usuario, DimCliente
+from app.models.domain_models import Usuario, UsuarioSessao, DimCliente
+import uuid
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Autenticação e Usuários"])
 
@@ -56,22 +57,50 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         "funcao": usuario.funcao,
         "nome_vendedor": usuario.nome_vendedor,
         "gerente_nome": getattr(usuario, 'gerente_nome', None),
-        "supervisor_nome": getattr(usuario, 'supervisor_nome', None) # <-- ADICIONADO À SESSÃO
+        "supervisor_nome": getattr(usuario, 'supervisor_nome', None), # <-- ADICIONADO À SESSÃO
+        "sessao_id": payload.get("sessao_id"),
     }
 
 # ==========================================
 # MOTOR DE HEARTBEAT
 # ==========================================
 @router.post("/heartbeat")
-async def heartbeat(usuario_logado: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    try:
-        usuario = db.query(Usuario).filter(Usuario.id == usuario_logado['id']).first()
-        if usuario:
-            usuario.ultima_atividade = datetime.utcnow()
-            db.commit()
-        return {"status": "alive"}
-    except Exception:
-        return {"status": "error"}
+async def heartbeat(request: Request, usuario_logado: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    agora = datetime.utcnow()
+    usuario = db.query(Usuario).filter(Usuario.id == usuario_logado['id']).first()
+    if usuario is None:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    usuario.ultima_atividade = agora
+    sessao_id = usuario_logado.get("sessao_id")
+    sessao = db.query(UsuarioSessao).filter(
+        UsuarioSessao.sessao_id == sessao_id,
+        UsuarioSessao.usuario_id == usuario.id,
+        UsuarioSessao.status == "ativa",
+    ).first() if sessao_id else None
+    if sessao:
+        sessao.ultimo_sinal = agora
+        sessao.total_heartbeats = (sessao.total_heartbeats or 0) + 1
+        sessao.duracao_segundos = max(0, int((agora - sessao.inicio).total_seconds()))
+        sessao.ultimo_ip = request.client.host if request.client else None
+    db.commit()
+    return {"status": "alive", "sessao_registrada": sessao is not None}
+
+@router.post("/logout")
+async def logout(usuario_logado: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    agora = datetime.utcnow()
+    sessao_id = usuario_logado.get("sessao_id")
+    sessao = db.query(UsuarioSessao).filter(
+        UsuarioSessao.sessao_id == sessao_id,
+        UsuarioSessao.usuario_id == usuario_logado["id"],
+        UsuarioSessao.status == "ativa",
+    ).first() if sessao_id else None
+    if sessao:
+        sessao.encerramento = agora
+        sessao.ultimo_sinal = agora
+        sessao.duracao_segundos = max(0, int((agora - sessao.inicio).total_seconds()))
+        sessao.status = "encerrada"
+        db.commit()
+    return {"status": "logged_out"}
 
 # ==========================================
 # UTILITÁRIOS E PAYLOADS
@@ -103,7 +132,7 @@ class NovaSenhaPayload(BaseModel):
 # ROTAS DO SISTEMA
 # ==========================================
 @router.post("/login")
-async def login(payload: LoginPayload, db: Session = Depends(get_db)):
+async def login(request: Request, payload: LoginPayload, db: Session = Depends(get_db)):
     email_limpo = payload.email.lower().strip()
     
     try:
@@ -120,10 +149,22 @@ async def login(payload: LoginPayload, db: Session = Depends(get_db)):
             
         # GERAÇÃO DO TOKEN JWT (Adicionamos a função no token)
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        sessao_id = uuid.uuid4().hex
         access_token = create_access_token(
-            data={"sub": usuario.email, "funcao": usuario.funcao},
+            data={"sub": usuario.email, "funcao": usuario.funcao, "sessao_id": sessao_id},
             expires_delta=access_token_expires
         )
+        agora = datetime.utcnow()
+        usuario.ultima_atividade = agora
+        db.add(UsuarioSessao(
+            sessao_id=sessao_id,
+            usuario_id=usuario.id,
+            inicio=agora,
+            ultimo_sinal=agora,
+            ultimo_ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        ))
+        db.commit()
             
         return {
             "status": "success", 
@@ -249,6 +290,9 @@ async def rejeitar_usuario(user_id: int, db: Session = Depends(get_db)):
     try:
         usuario = db.query(Usuario).filter(Usuario.id == user_id).first()
         if usuario:
+            db.query(UsuarioSessao).filter(UsuarioSessao.usuario_id == user_id).delete(
+                synchronize_session=False
+            )
             db.delete(usuario)
             db.commit()
         return {"status": "success", "message": "Usuário rejeitado e deletado."}

@@ -133,6 +133,9 @@ function PreenchimentoMetas() {
   const [avancando,      setAvancando]      = useState(false);
   const [adminAlvo,      setAdminAlvo]      = useState<{ nome: string; nivel: string } | null>(null);
   const [modoEdicao,     setModoEdicao]     = useState<'caixas' | 'valor'>('caixas');
+  const [auditoriaAberta, setAuditoriaAberta] = useState(false);
+  const [auditoria, setAuditoria] = useState<any>(null);
+  const [carregandoAuditoria, setCarregandoAuditoria] = useState(false);
 
   const carregar = useCallback(async () => {
     setLoading(true);
@@ -146,6 +149,20 @@ function PreenchimentoMetas() {
     } finally { setLoading(false); }
   }, [adminAlvo]);
   useEffect(() => { carregar(); }, [carregar]);
+
+  const carregarAuditoria = async () => {
+    setCarregandoAuditoria(true);
+    try {
+      const params = adminAlvo
+        ? { responsavel: adminAlvo.nome, nivel_responsavel: adminAlvo.nivel }
+        : {};
+      const r = await axios.get('/api/v1/carteira/auditoria-impacto', { params });
+      setAuditoria(r.data);
+      setAuditoriaAberta(true);
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || 'Falha ao carregar auditoria.');
+    } finally { setCarregandoAuditoria(false); }
+  };
 
   const meses: string[]    = dados?.meses || [];
   const congeladaEtapa     = Boolean(dados?.etapa_congelada);
@@ -545,6 +562,11 @@ function PreenchimentoMetas() {
                 R$
               </button>
             </div>
+            <button onClick={carregarAuditoria} disabled={carregandoAuditoria}
+              className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-black bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-60">
+              {carregandoAuditoria ? <Loader2 className="w-4 h-4 animate-spin" /> : <BarChart2 className="w-4 h-4" />}
+              Auditoria
+            </button>
             {/* Cadeados — só Gerente e Admin */}
             {(souAdmin || funcao === 'Gerente') && (
               <button onClick={() => setPainelCadeados(true)}
@@ -671,6 +693,9 @@ function PreenchimentoMetas() {
               buscaAtiva={!!busca.trim()} />
           ))}
       </div>
+      {auditoriaAberta && (
+        <PainelAuditoria dados={auditoria} fechar={() => setAuditoriaAberta(false)} />
+      )}
 
       {/* GAVETA DOSSIÊ */}
 
@@ -679,6 +704,42 @@ function PreenchimentoMetas() {
       {painelCadeados && (
         <PainelCadeados fechar={() => setPainelCadeados(false)} recarregar={carregar} />
       )}
+    </div>
+  );
+}
+
+function PainelAuditoria({ dados, fechar }: { dados: any; fechar: () => void }) {
+  const itens = dados?.itens || [];
+  return (
+    <div className="fixed inset-0 z-30 bg-slate-900/20" onClick={fechar}>
+      <div className="absolute right-0 top-0 bottom-0 w-full max-w-3xl bg-white shadow-2xl overflow-y-auto p-6"
+        onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-base font-black text-slate-900">Auditoria de impacto</h2>
+            <p className="text-xs text-slate-400">Meta atual comparada ao vol_bottomup · ciclo {dados?.ciclo}</p>
+          </div>
+          <button onClick={fechar} className="p-2 rounded-lg text-slate-400 hover:bg-slate-100"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-[11px]">
+            <thead><tr className="border-b border-slate-200 text-[10px] uppercase tracking-wider text-slate-400">
+              <th className="py-2 pr-3">Coordenador / SKU</th><th>Mês</th><th>BottomUP cx</th><th>Meta cx</th>
+              <th>Impacto cx</th><th>Impacto %</th><th>BottomUP R$</th><th>Meta R$</th><th>Impacto R$</th>
+            </tr></thead>
+            <tbody>{itens.map((i: any, n: number) => (
+              <tr key={`${i.coordenador}-${i.sku}-${i.mes}-${n}`} className="border-b border-slate-100">
+                <td className="py-2 pr-3"><b>{i.coordenador}</b><br /><span className="text-slate-400">{i.sku} · {i.descricao}</span></td>
+                <td>{mesLabel(i.mes)}</td><td>{fmtCx(i.bottomup)}</td><td>{fmtCx(i.meta)}</td>
+                <td className={i.delta_caixas > 0 ? 'text-emerald-600' : i.delta_caixas < 0 ? 'text-red-600' : ''}>{fmtCx(i.delta_caixas)}</td>
+                <td>{i.impacto_percentual == null ? '—' : `${i.impacto_percentual.toFixed(2)}%`}</td>
+                <td>{fmtRs(i.bottomup_rs)}</td><td>{fmtRs(i.meta_rs)}</td><td>{fmtRs(i.delta_rs)}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+        {!itens.length && <div className="py-12 text-center text-sm text-slate-400">Nenhum dado de auditoria para esta carteira.</div>}
+      </div>
     </div>
   );
 }
