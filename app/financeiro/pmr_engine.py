@@ -265,8 +265,12 @@ def _carregar_base(data_ini: date, data_fim: date,
             logger.info("PMR: cache reutilizado para %s -> %s", data_ini, data_fim)
         else:
             base = _carregar_base_sem_filtros(data_ini, data_fim)
-            _BASE_CACHE[chave] = (agora, base.copy())
-            logger.info("PMR: base armazenada em cache para %s -> %s", data_ini, data_fim)
+            if not base.empty:
+                _BASE_CACHE[chave] = (agora, base.copy())
+                logger.info("PMR: base armazenada em cache para %s -> %s", data_ini, data_fim)
+            else:
+                logger.warning("PMR: base vazia nao foi armazenada em cache para %s -> %s",
+                               data_ini, data_fim)
 
     base = _aplicar_filtro(base, "segmento", segmento)
     base = _aplicar_filtro(base, "regional", regional)

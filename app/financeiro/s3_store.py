@@ -30,6 +30,7 @@ import io
 import os
 import logging
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Optional
@@ -170,18 +171,32 @@ def salvar_clientes(df: pd.DataFrame) -> bool:
 
 def _baixar_parquet(key: str) -> Optional[pd.DataFrame]:
     """Baixa um único parquet do S3 para memória."""
-    try:
-        obj = _s3().get_object(Bucket=_BUCKET, Key=key)
-        buf = io.BytesIO(obj["Body"].read())
-        return pd.read_parquet(buf, engine="pyarrow")
-    except ClientError as e:
-        if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
+    transient_codes = {"RequestTimeout", "RequestTimeTooSkewed", "SlowDown", "500", "503"}
+    for tentativa in range(3):
+        try:
+            obj = _s3().get_object(Bucket=_BUCKET, Key=key)
+            buf = io.BytesIO(obj["Body"].read())
+            return pd.read_parquet(buf, engine="pyarrow")
+        except ClientError as e:
+            code = str(e.response.get("Error", {}).get("Code", ""))
+            if code in ("NoSuchKey", "404"):
+                return None
+            if code not in transient_codes or tentativa == 2:
+                logger.error("S3 get_object %s/%s: %s", _BUCKET, key, e)
+                return None
+            logger.warning("S3 leitura temporariamente indisponivel (%s), tentativa %d/3: %s",
+                           key, tentativa + 1, code)
+        except (OSError, TimeoutError) as e:
+            if tentativa == 2:
+                logger.error("Erro ao ler parquet %s: %s", key, e)
+                return None
+            logger.warning("Leitura do parquet temporariamente indisponivel, tentativa %d/3: %s",
+                           tentativa + 1, key)
+        except Exception as e:
+            logger.error("Erro ao ler parquet %s: %s", key, e)
             return None
-        logger.error("S3 get_object %s/%s: %s", _BUCKET, key, e)
-        return None
-    except Exception as e:
-        logger.error("Erro ao ler parquet %s: %s", key, e)
-        return None
+        time.sleep(0.25 * (tentativa + 1))
+    return None
 
 
 def carregar_mensal(fonte: str,

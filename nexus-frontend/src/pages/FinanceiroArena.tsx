@@ -961,8 +961,8 @@ export default function FinanceiroArena() {
               </ResponsiveContainer>
             </div>
           )}
-          <div className="xl:col-span-2 bg-white rounded-2xl border border-slate-100 overflow-hidden">
-            <div className="px-4 py-3 border-b border-slate-100">
+          <div className="xl:col-span-2 bg-white rounded-2xl border border-slate-100 flex flex-col overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-100 flex-shrink-0">
               <div className="text-xs font-black uppercase tracking-widest text-slate-400">Pagamentos por Fornecedor</div>
               <div className="text-[10px] text-slate-400">Principais por valor pago · agrupado por CLIFOR · {pmpFornecedoresPrincipais.length} exibidos</div>
             </div>
@@ -971,7 +971,7 @@ export default function FinanceiroArena() {
             ) : !pmpFornecedores.length ? (
               <div className="flex items-center justify-center h-24 text-slate-300 text-xs font-bold">Sem dados</div>
             ) : (
-              <div className="overflow-auto">
+              <div className="overflow-auto flex-1" style={{ maxHeight: 340 }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
                   <thead>
                     <tr style={{ background: '#f8fafc' }}>
