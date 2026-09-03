@@ -158,6 +158,7 @@ export default function FinanceiroArena() {
   const [notasCli, setNotasCli]   = useState<any>(null);
   const [loadingNotas, setLoadingNotas] = useState(false);
   const [sortClientes, setSortClientes] = useState<{ key: string; dir: 1 | -1 }>({ key: 'valor_total', dir: -1 });
+  const [sortPmpFornecedores, setSortPmpFornecedores] = useState<{ key: string; dir: 1 | -1 }>({ key: 'valor_total', dir: -1 });
   const [sortNotas, setSortNotas] = useState<{ key: string; dir: 1 | -1 }>({ key: 'emissao', dir: 1 });
   const [agenteAberto, setAgenteAberto] = useState(false);
   const [perguntaAgente, setPerguntaAgente] = useState('');
@@ -370,6 +371,15 @@ export default function FinanceiroArena() {
     const bv = b[sortClientes.key] ?? '';
     return (typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv), 'pt-BR')) * sortClientes.dir;
   });
+  const pmpFornecedoresPrincipais = [...pmpFornecedores]
+    .sort((a, b) => {
+      const av = a[sortPmpFornecedores.key] ?? '';
+      const bv = b[sortPmpFornecedores.key] ?? '';
+      return (typeof av === 'number' && typeof bv === 'number'
+        ? av - bv
+        : String(av).localeCompare(String(bv), 'pt-BR')) * sortPmpFornecedores.dir;
+    })
+    .slice(0, 20);
   const notasOrdenadas = [...(notasCli?.notas || [])].sort((a, b) => {
     const av = a[sortNotas.key] ?? '';
     const bv = b[sortNotas.key] ?? '';
@@ -954,7 +964,7 @@ export default function FinanceiroArena() {
           <div className="xl:col-span-2 bg-white rounded-2xl border border-slate-100 overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-100">
               <div className="text-xs font-black uppercase tracking-widest text-slate-400">Pagamentos por Fornecedor</div>
-              <div className="text-[10px] text-slate-400">Agrupado exclusivamente por CLIFOR · {pmpFornecedores.length} fornecedores exibidos</div>
+              <div className="text-[10px] text-slate-400">Principais por valor pago · agrupado por CLIFOR · {pmpFornecedoresPrincipais.length} exibidos</div>
             </div>
             {loading ? (
               <div className="flex items-center justify-center h-40 text-slate-300"><Loader2 className="w-5 h-5 animate-spin" /></div>
@@ -965,15 +975,18 @@ export default function FinanceiroArena() {
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
                   <thead>
                     <tr style={{ background: '#f8fafc' }}>
-                      {['CLIFOR', 'Fornecedor', 'Pagamentos', 'Valor Pago', 'PMP Pag.', 'PMP Venc.', 'PMP Cond.'].map((h, i) => (
+                      {[['CLIFOR', 'clifor'], ['Fornecedor', 'nome'], ['Pagamentos', 'pagamentos'], ['Valor Pago', 'valor_total'],
+                        ['PMP Pag.', 'pmp_pagamento'], ['PMP Venc.', 'pmp_vencimento'], ['PMP Cond.', 'pmp_cond_pag']].map(([h, key], i) => (
                         <th key={h} style={{ padding: '8px 12px', textAlign: i < 2 ? 'left' : 'right', fontSize: 9,
                           fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.04em', color: '#94a3b8',
-                          borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>{h}</th>
+                          borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>
+                          <SortHeader label={h} onSort={() => ordenar(key, sortPmpFornecedores, setSortPmpFornecedores)} align={i < 2 ? 'left' : 'right'} />
+                        </th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {pmpFornecedores.map((f: any, i: number) => (
+                    {pmpFornecedoresPrincipais.map((f: any, i: number) => (
                       <tr key={`${f.clifor}-${i}`} onClick={() => abrirFornecedorPmp(f)}
                         style={{ background: pmpFornecedorSel?.clifor === f.clifor ? '#f5f3ff' : i % 2 ? '#f9fafb' : '#fff', borderBottom: '1px solid #f1f5f9', cursor: 'pointer' }}>
                         <td style={{ padding: '7px 12px', color: '#64748b', whiteSpace: 'nowrap' }}>{f.clifor}</td>
