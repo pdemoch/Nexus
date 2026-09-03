@@ -423,7 +423,12 @@ def salvar(payload: PayloadSalvar, db: Session = Depends(get_db), u: dict = Depe
 @router.get("/auditoria-impacto")
 def auditoria_impacto(responsavel: str = None, nivel_responsavel: str = None,
                       db: Session = Depends(get_db), u: dict = Depends(require_metas)):
-    """Compara a meta atual com o BottomUP no mesmo escopo da carteira."""
+    """Compara a meta atual com o BottomUP no mesmo escopo da carteira.
+
+    O impacto financeiro usa o PMV ponderado do BottomUP para não classificar
+    como alteração do coordenador uma simples mudança automática de CNPJ no
+    rateio. Se as caixas forem iguais, os valores em R$ também serão iguais.
+    """
     try:
         from app.api.routers.rls_metas import escopo_usuario, clausula_rls
         ciclo = get_current_cycle(db)
@@ -449,8 +454,18 @@ def auditoria_impacto(responsavel: str = None, nivel_responsavel: str = None,
                    TO_CHAR(f.mes_projetado, 'YYYY-MM') AS mes,
                    SUM(f.vol_bottomup) AS bottomup,
                    SUM(f.vol_meta) AS meta,
-                   SUM(f.vol_bottomup * f.pmv_aplicado) AS bottomup_rs,
-                   SUM(f.vol_meta * f.pmv_aplicado) AS meta_rs
+                   SUM(f.vol_bottomup) * COALESCE(
+                       SUM(f.vol_bottomup * f.pmv_aplicado)
+                       / NULLIF(SUM(f.vol_bottomup), 0),
+                       AVG(NULLIF(f.pmv_aplicado, 0)),
+                       0
+                   ) AS bottomup_rs,
+                   SUM(f.vol_meta) * COALESCE(
+                       SUM(f.vol_bottomup * f.pmv_aplicado)
+                       / NULLIF(SUM(f.vol_bottomup), 0),
+                       AVG(NULLIF(f.pmv_aplicado, 0)),
+                       0
+                   ) AS meta_rs
             FROM fato_ibp_granular f
             JOIN dim_clientes c ON c.cgc = f.cgc
             JOIN dim_produtos p ON p.sku = f.sku
@@ -480,11 +495,33 @@ def auditoria_impacto(responsavel: str = None, nivel_responsavel: str = None,
         raise HTTPException(500, repr(e))
 
 
+@router.get("/auditoria-impacto/exportar")
+def exportar_auditoria_impacto(responsavel: str = None, nivel_responsavel: str = None,
+                               db: Session = Depends(get_db), u: dict = Depends(require_metas)):
+    """Exporta a auditoria de impacto no mesmo escopo RLS da tela."""
+    dados = auditoria_impacto(responsavel, nivel_responsavel, db, u)
+    itens = dados.get("itens", [])
+    df = pd.DataFrame(itens)
+    if df.empty:
+        df = pd.DataFrame([{"aviso": "Nenhum impacto encontrado para o escopo selecionado."}])
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="auditoria_impacto")
+    buf.seek(0)
+    nome = f"auditoria_impacto_{dados['ciclo'].replace('/', '_')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={nome}"},
+    )
+
+
 # ---------------------------------------------------------------------------
 # GET /exportar  — Excel cópia de segurança do preenchimento
 # ---------------------------------------------------------------------------
 @router.get("/exportar")
-def exportar(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
+def exportar(responsavel: str = None, nivel_responsavel: str = None,
+             db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     try:
         from app.api.routers.rls_metas import escopo_usuario, clausula_rls
         ciclo  = get_current_cycle(db)
@@ -493,7 +530,17 @@ def exportar(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
         rls    = clausula_rls(escopo, alias_cli="c")
         params = {"c": ciclo, "m": meses}
         params.update(rls["params"])
+        if responsavel:
+            if not escopo["ve_tudo"]:
+                raise HTTPException(403, "Somente o Administrador pode selecionar outra alçada.")
+            if nivel_responsavel not in ("Gerente", "Coordenador"):
+                raise HTTPException(422, "nivel_responsavel deve ser Gerente ou Coordenador.")
+            campo = "gerente_nome" if nivel_responsavel == "Gerente" else "supervisor_nome"
+            rls = {"where": f"TRIM(c.{campo}) = :responsavel_alvo", "params": {"responsavel_alvo": responsavel.strip()}}
+            params.update(rls["params"])
         filtro_rls = f"AND {rls['where']}" if not escopo["ve_tudo"] else ""
+        if responsavel:
+            filtro_rls = f"AND {rls['where']}"
         rows = db.execute(text(f"""
             SELECT c.gerente_nome, c.supervisor_nome, f.vendedor_nome,
                    c.razaosocial, f.sku, p.descricao,

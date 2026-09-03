@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import axios from 'axios';
 import {
-  ChevronRight, ChevronDown, Save, Download, X, Lock, Unlock, ShieldCheck,
+  ChevronRight, ChevronDown, Save, Download, X, Lock, Unlock,
   Loader2, LineChart as LineIcon, LayoutGrid, ClipboardList, Search, BarChart2,
 } from 'lucide-react';
 import VisaoGeralMarketing from './VisaoGeralMarketing';
@@ -127,14 +127,11 @@ function PreenchimentoMetas() {
   const [dossieAlvo,     setDossieAlvo]     = useState<{
     sku: string; descricao: string; razao?: string; vendedor?: string;
   } | null>(null);
-  const [painelCadeados, setPainelCadeados] = useState(false);
   const [busca,          setBusca]          = useState('');
   const [fase,           setFase]           = useState<any>(null);
   const [avancando,      setAvancando]      = useState(false);
   const [adminAlvo,      setAdminAlvo]      = useState<{ nome: string; nivel: string } | null>(null);
   const [modoEdicao,     setModoEdicao]     = useState<'caixas' | 'valor'>('caixas');
-  const [auditoriaAberta, setAuditoriaAberta] = useState(false);
-  const [auditoria, setAuditoria] = useState<any>(null);
   const [carregandoAuditoria, setCarregandoAuditoria] = useState(false);
 
   const carregar = useCallback(async () => {
@@ -156,9 +153,18 @@ function PreenchimentoMetas() {
       const params = adminAlvo
         ? { responsavel: adminAlvo.nome, nivel_responsavel: adminAlvo.nivel }
         : {};
-      const r = await axios.get('/api/v1/carteira/auditoria-impacto', { params });
-      setAuditoria(r.data);
-      setAuditoriaAberta(true);
+      const r = await axios.get('/api/v1/carteira/auditoria-impacto/exportar', {
+        params,
+        responseType: 'blob',
+      });
+      const url = window.URL.createObjectURL(new Blob([r.data]));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `auditoria_impacto_${dados?.ciclo?.replace('/', '_') || 'ciclo'}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
     } catch (e: any) {
       alert(e?.response?.data?.detail || 'Falha ao carregar auditoria.');
     } finally { setCarregandoAuditoria(false); }
@@ -484,7 +490,13 @@ function PreenchimentoMetas() {
   const exportarExcel = async () => {
     if (temEdicoes) await salvar();
     try {
-      const resp = await axios.get('/api/v1/carteira/exportar', { responseType: 'blob' });
+      const resp = await axios.get('/api/v1/carteira/exportar', {
+        responseType: 'blob',
+        params: adminAlvo ? {
+          responsavel: adminAlvo.nome,
+          nivel_responsavel: adminAlvo.nivel,
+        } : undefined,
+      });
       const url = window.URL.createObjectURL(new Blob([resp.data]));
       const a = document.createElement('a');
       a.href = url; a.download = `metas_${dados?.ciclo?.replace('/','_') || 'ciclo'}.xlsx`;
@@ -567,13 +579,6 @@ function PreenchimentoMetas() {
               {carregandoAuditoria ? <Loader2 className="w-4 h-4 animate-spin" /> : <BarChart2 className="w-4 h-4" />}
               Auditoria
             </button>
-            {/* Cadeados — só Gerente e Admin */}
-            {(souAdmin || funcao === 'Gerente') && (
-              <button onClick={() => setPainelCadeados(true)}
-                className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-black bg-white border border-slate-200 text-slate-600 hover:bg-slate-50">
-                <ShieldCheck className="w-4 h-4" /> Cadeados
-              </button>
-            )}
             {/* Salvar — só existe como ação livre na fase Razão Social (última) ou para Admin */}
             {naFaseRazaoSocial && (
               <button onClick={salvar} disabled={!temEdicoes || salvando || bloqueado}
@@ -693,17 +698,10 @@ function PreenchimentoMetas() {
               buscaAtiva={!!busca.trim()} />
           ))}
       </div>
-      {auditoriaAberta && (
-        <PainelAuditoria dados={auditoria} fechar={() => setAuditoriaAberta(false)} />
-      )}
-
       {/* GAVETA DOSSIÊ */}
 
 
       {/* PAINEL DE CADEADOS */}
-      {painelCadeados && (
-        <PainelCadeados fechar={() => setPainelCadeados(false)} recarregar={carregar} />
-      )}
     </div>
   );
 }
@@ -1184,7 +1182,7 @@ function GavetaDossie({ alvo, fechar }: {
 }
 
 /* ── PAINEL DE CADEADOS ──────────────────────────────────────────── */
-function PainelCadeados({ fechar, recarregar }: { fechar: () => void; recarregar: () => void }) {
+function PainelCadeados({ fechar, recarregar, somenteTravar = false }: { fechar: () => void; recarregar: () => void; somenteTravar?: boolean }) {
   const [d, setD]         = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [em_acao, setEmAcao] = useState<string | null>(null);
@@ -1222,7 +1220,7 @@ function PainelCadeados({ fechar, recarregar }: { fechar: () => void; recarregar
           <div>
             <div className="text-sm font-black text-slate-900">Cadeados dos coordenadores</div>
             <div className="text-[10px] font-bold text-slate-400 mt-0.5">
-              Clique no botão para bloquear ou reabrir
+              {somenteTravar ? 'Você pode trancar; somente o Administrador pode reabrir.' : 'Clique no botão para bloquear ou reabrir'}
             </div>
           </div>
           <button onClick={fechar} className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100">
@@ -1261,7 +1259,7 @@ function PainelCadeados({ fechar, recarregar }: { fechar: () => void; recarregar
                       </div>
                     )}
                   </div>
-                  <button
+                  {(!somenteTravar || !c.bloqueado) && <button
                     onClick={() => toggle(c.nome, c.bloqueado)}
                     disabled={em_acao === c.nome}
                     className={`ml-3 shrink-0 flex items-center gap-1.5 text-[11px] font-black px-3 py-1.5 rounded-lg transition-colors
@@ -1274,7 +1272,7 @@ function PainelCadeados({ fechar, recarregar }: { fechar: () => void; recarregar
                       : c.bloqueado
                         ? <><Unlock className="w-3 h-3" /> Reabrir</>
                         : <><Lock className="w-3 h-3" /> Travar</>}
-                  </button>
+                  </button>}
                 </div>
               ))}
             </div>
