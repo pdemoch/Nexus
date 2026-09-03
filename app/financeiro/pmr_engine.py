@@ -145,7 +145,11 @@ def _carregar_base_sem_filtros(data_ini: date, data_fim: date) -> pd.DataFrame:
     se1_f = se1_f.drop_duplicates("Chave_E5", keep="last")
 
     # O menor grão é cada recebimento E5. Primeiro localizamos seu título SE1.
-    base = se5.merge(se1_f, on="Chave_E5", how="inner", validate="many_to_one")
+    # A SE5 também pode carregar Chave_A1. A chave do título SE1 é a
+    # referência autoritativa para o enriquecimento posterior com SA1.
+    base = se5.drop(columns=["Chave_A1"], errors="ignore").merge(
+        se1_f, on="Chave_E5", how="inner", validate="many_to_one"
+    )
     logger.info("PMR: apos join E5->SE1: %d movimentos", len(base))
 
     # Depois localizamos a nota SF2 pela chave da nota/título.
@@ -621,7 +625,7 @@ def obter_dados_brutos(data_ini: date, data_fim: date,
         "e1_num":        "Num. Titulo",
         "e1_parcela":    "Parcela",
         "e1_valor":      "Valor Titulo E1 (R$)",
-        "e1_vencto":      "Vencimento Cond. Pag",
+        "e1_vencto":      "Vencimento Cond. Pag.",
         "e1_vencrea":    "Vencimento Real",
         "e5_data":       "Data Pagamento (E5)",
         "e5_valor":      "Valor Recebido E5 (R$)",

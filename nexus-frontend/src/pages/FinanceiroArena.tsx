@@ -340,6 +340,15 @@ export default function FinanceiroArena() {
     maturacao: m.em_maturacao,
   }));
   const maxPMREvol = Math.max(...dadosEvolucao.flatMap(d => [d.pmr_pag, d.pmr_vnc, d.pmr_cond]), 60);
+  const maxPMPEvol = Math.max(...pmpEvolucao.flatMap(d => [
+    d.pmp_pagamento, d.pmp_vencimento, d.pmp_cond_pag,
+  ]), 60);
+  const maxPMPTipo = Math.max(...pmpTipos.flatMap(d => [
+    d.pmp_pagamento, d.pmp_vencimento, d.pmp_cond_pag,
+  ]), 60);
+  const pmpTiposOrdenados = [...pmpTipos].sort(
+    (a, b) => (Number(a.pmp_pagamento ?? 0) - Number(b.pmp_pagamento ?? 0))
+  );
   const ordenar = (key: string, atual: { key: string; dir: 1 | -1 }, setAtual: (v: { key: string; dir: 1 | -1 }) => void) => {
     setAtual({ key, dir: atual.key === key ? (atual.dir * -1) as 1 | -1 : 1 });
   };
@@ -848,35 +857,43 @@ export default function FinanceiroArena() {
       {toggleAtivo === 'PMP' && (
         <div className="space-y-4">
           {pmpGlobal && (
-            <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
               {[
-                { label: 'PMP Pagamento', value: pmpGlobal.pmp_pagamento ?? pmpGlobal.pmp, color: '#7c3aed', icon: Clock },
-                { label: 'PMP Vencimento', value: pmpGlobal.pmp_vencimento, color: '#2563eb', icon: Clock },
-                { label: 'PMP Cond. Pag.', value: pmpGlobal.pmp_cond_pag, color: '#0891b2', icon: Clock },
-                { label: 'Pagamentos', value: pmpGlobal.pagamentos, color: '#475569', icon: DollarSign },
-                { label: 'Valor Pago', value: pmpGlobal.valor_total, color: '#059669', icon: TrendingDown },
-              ].map(({ label, value, color, icon: Icon }) => (
+                { label: 'PMP Pagamento', value: pmpGlobal.pmp_pagamento ?? pmpGlobal.pmp, color: '#7c3aed', icon: Clock, desc: 'Emissão → pagamento real' },
+                { label: 'PMP Vencimento', value: pmpGlobal.pmp_vencimento, color: '#2563eb', icon: Clock, desc: 'Emissão → vencimento real' },
+                { label: 'PMP Cond. Pag.', value: pmpGlobal.pmp_cond_pag, color: '#0891b2', icon: Clock, desc: 'Emissão → vencimento contratual' },
+                { label: 'Delta Atraso', value: pmpGlobal.delta_atraso, color: corDelta(pmpGlobal.delta_atraso ?? 0),
+                  icon: (pmpGlobal.delta_atraso ?? 0) > 0 ? TrendingUp : TrendingDown,
+                  desc: 'PMP Pag. − PMP Cond. (+ = pagamento posterior ao prazo)' },
+              ].map(({ label, value, color, icon: Icon, desc }) => (
                 <div key={label} className="bg-white rounded-2xl border border-slate-100 p-4">
                   <div className="flex items-center gap-2 mb-1">
                     <Icon className="w-3.5 h-3.5" style={{ color }} />
                     <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</span>
                   </div>
                   <div className="text-3xl font-black mt-1" style={{ color }}>
-                    {label === 'Valor Pago' ? fmtRsFull(value || 0) : Number(value || 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 })}
-                    {label.startsWith('PMP') && <span className="text-sm font-bold text-slate-400 ml-1">dias</span>}
+                    {Number(value || 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 })}
+                    <span className="text-sm font-bold text-slate-400 ml-1">dias</span>
                   </div>
+                  {label === 'PMP Pagamento' && <div className="text-[10px] text-slate-400 mt-1 font-bold">
+                    {Number(pmpGlobal.pagamentos || 0).toLocaleString('pt-BR')} movimentos E5
+                  </div>}
+                  <div className="text-[10px] text-slate-400 mt-1">{desc}</div>
                 </div>
               ))}
             </div>
           )}
           {pmpGlobal && pmpGlobal.valor_por_dia > 0 && (
-            <div className="bg-gradient-to-r from-amber-50 to-white rounded-2xl border border-amber-100 p-4 flex flex-wrap items-center gap-4">
-              <div className="text-xs font-black uppercase tracking-widest text-amber-700">Impacto no caixa</div>
-              <div className="text-2xl font-black text-amber-700">{fmtRsFull(pmpGlobal.valor_por_dia)}
-                <span className="text-xs font-bold text-amber-500 ml-1">por dia de PMP</span>
+            <div className="bg-gradient-to-r from-emerald-50 to-white rounded-2xl border border-emerald-100 p-4 flex flex-wrap items-center gap-4">
+              <div className="flex items-center gap-2">
+                <DollarSign className="w-5 h-5 text-emerald-600" />
+                <span className="text-[10px] font-black uppercase tracking-widest text-emerald-700">Ganho no Capital de Giro</span>
+              </div>
+              <div className="text-2xl font-black text-emerald-700">{fmtRsFull(pmpGlobal.valor_por_dia)}
+                <span className="text-xs font-bold text-emerald-500 ml-1">por dia de PMP</span>
               </div>
               <div className="text-[11px] text-slate-500 max-w-xl">
-                Cada dia adicional de prazo médio representa aproximadamente <b>{fmtRs(pmpGlobal.valor_por_dia)}</b> de caixa preservado antes do pagamento.
+                Cada dia a mais no PMP representa aproximadamente <b>{fmtRs(pmpGlobal.valor_por_dia)}</b> ganhos de caixa antes do pagamento.
                 <span className="block text-[10px] text-slate-400 mt-0.5">Valor pago E5 ÷ {pmpGlobal.periodo?.dias_periodo ?? '—'} dias do período.</span>
               </div>
             </div>
@@ -890,9 +907,10 @@ export default function FinanceiroArena() {
                   <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                   <XAxis dataKey="mes" tick={{ fontSize: 10, fill: '#64748b' }} />
                   <YAxis yAxisId="valor" tickFormatter={fmtRs} width={68} tick={{ fontSize: 10, fill: '#64748b' }} />
-                  <YAxis yAxisId="dias" orientation="right" width={42} tick={{ fontSize: 10, fill: '#64748b' }} />
+                  <YAxis yAxisId="dias" orientation="right" domain={[0, Math.ceil(maxPMPEvol * 1.2)]}
+                    width={42} tick={{ fontSize: 10, fill: '#64748b' }} unit=" d" />
                   <Tooltip content={<TooltipCustom />} /><Legend wrapperStyle={{ fontSize: 10, fontWeight: 700 }} />
-                  <Bar yAxisId="valor" dataKey="valor_total" name="Valor Pago E5" fill="#fde68a" radius={[4, 4, 0, 0]} />
+                  <Bar yAxisId="valor" dataKey="valor_total" name="Valor Pago E5" fill="#a7f3d0" radius={[4, 4, 0, 0]} maxBarSize={48} />
                   <Line yAxisId="dias" type="monotone" dataKey="pmp_pagamento" name="PMP Pagamento" stroke="#7c3aed" strokeWidth={2.5} dot={{ r: 4 }} />
                   <Line yAxisId="dias" type="monotone" dataKey="pmp_vencimento" name="PMP Vencimento" stroke="#2563eb" strokeWidth={2} dot={{ r: 3 }} strokeDasharray="4 2" />
                   <Line yAxisId="dias" type="monotone" dataKey="pmp_cond_pag" name="PMP Cond. Pag." stroke="#0891b2" strokeWidth={2} dot={{ r: 3 }} strokeDasharray="2 3" />
@@ -905,15 +923,16 @@ export default function FinanceiroArena() {
               <div className="text-xs font-black uppercase tracking-widest text-slate-400 mb-1">PMP por Tipo D1</div>
               <div className="text-[10px] text-slate-400 mb-3">Barras = valor pago · linhas = prazos médios</div>
               <ResponsiveContainer width="100%" height={280}>
-                <ComposedChart data={pmpTipos} margin={{ top: 10, right: 20, left: 0, bottom: 35 }}>
+                <ComposedChart data={pmpTiposOrdenados} margin={{ top: 10, right: 20, left: 0, bottom: 35 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                   <XAxis dataKey="tipo" tick={{ fontSize: 9, fill: '#64748b' }} />
                   <YAxis yAxisId="valor" tickFormatter={fmtRs} width={68} tick={{ fontSize: 9, fill: '#64748b' }} />
-                  <YAxis yAxisId="dias" orientation="right" width={42} tick={{ fontSize: 9, fill: '#64748b' }} />
+                  <YAxis yAxisId="dias" orientation="right" domain={[0, Math.ceil(maxPMPTipo * 1.2)]}
+                    width={42} tick={{ fontSize: 9, fill: '#64748b' }} unit=" d" />
                   <Tooltip content={<TooltipCustom />} /><Legend wrapperStyle={{ fontSize: 10, fontWeight: 700 }} />
-                  <Bar yAxisId="valor" dataKey="valor_total" name="Valor Pago E5" fill="#fed7aa" radius={[4, 4, 0, 0]} />
-                  <Line yAxisId="dias" type="monotone" dataKey="pmp_pagamento" name="PMP Pagamento" stroke="#dc2626" strokeWidth={2.5} dot={{ r: 3 }} />
-                  <Line yAxisId="dias" type="monotone" dataKey="pmp_cond_pag" name="PMP Cond. Pag." stroke="#059669" strokeWidth={2} dot={{ r: 3 }} strokeDasharray="4 2" />
+                  <Bar yAxisId="valor" dataKey="valor_total" name="Valor Pago E5" fill="#c7d2fe" radius={[4, 4, 0, 0]} maxBarSize={48} />
+                  <Line yAxisId="dias" type="monotone" dataKey="pmp_pagamento" name="PMP Pagamento" stroke="#7c3aed" strokeWidth={2.5} dot={{ r: 3 }} />
+                  <Line yAxisId="dias" type="monotone" dataKey="pmp_cond_pag" name="PMP Cond. Pag." stroke="#f59e0b" strokeWidth={2} dot={{ r: 3 }} strokeDasharray="2 3" />
                 </ComposedChart>
               </ResponsiveContainer>
             </div>

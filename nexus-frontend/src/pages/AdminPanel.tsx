@@ -36,6 +36,7 @@ export default function AdminPanel() {
   // ESTADOS DE AUDITORIA
   const [logsAuditoria, setLogsAuditoria] = useState<any[]>([]);
   const [sessoesAuditoria, setSessoesAuditoria] = useState<any[]>([]);
+  const [isEndingSessions, setIsEndingSessions] = useState(false);
   const [subAbaAuditoria, setSubAbaAuditoria] = useState<'alteracoes' | 'sessoes'>('alteracoes');
   const [buscaAuditoria, setBuscaAuditoria] = useState('');
 
@@ -90,6 +91,17 @@ export default function AdminPanel() {
       setIsLoading(false);
     }
   }, []);
+
+  const encerrarTodasSessoes = async () => {
+    if (!window.confirm('Encerrar todas as sessões ativas? Todos os usuários precisarão entrar novamente.')) return;
+    setIsEndingSessions(true);
+    try {
+      await axios.post('/api/v1/admin/auditoria/sessoes/encerrar-todas');
+      await fetchData();
+    } finally {
+      setIsEndingSessions(false);
+    }
+  };
 
   // Polling sempre ativo: 3s quando pipeline rodando, 15s em idle
   // Não depende de isPipelineRunning para evitar stale closure no interval
@@ -785,9 +797,16 @@ Confirma a RECARGA TOTAL?`
                             <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest">Uso e sessões</h3>
                             <p className="text-xs font-bold text-slate-400 mt-1">Tempo conectado e atividade medida pelos pulsos de sessão.</p>
                         </div>
-                        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">
-                            {sessoesFiltradas.length} sessões
-                        </span>
+                        <div className="flex items-center gap-3">
+                            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                                {sessoesFiltradas.length} sessões
+                            </span>
+                            <button onClick={encerrarTodasSessoes} disabled={isEndingSessions}
+                                className="inline-flex items-center gap-2 rounded-xl bg-red-50 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-red-600 hover:bg-red-100 disabled:opacity-50">
+                                {isEndingSessions ? <Loader2 className="h-3 w-3 animate-spin" /> : <ShieldAlert className="h-3 w-3" />}
+                                Derrubar todos
+                            </button>
+                        </div>
                     </div>
                     <div>
                         <table className="w-full border-collapse">

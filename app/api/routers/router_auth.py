@@ -50,6 +50,16 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     usuario = db.query(Usuario).filter(Usuario.email == email).first()
     if usuario is None:
         raise credentials_exception
+
+    sessao_id = payload.get("sessao_id")
+    if sessao_id:
+        sessao = db.query(UsuarioSessao).filter(
+            UsuarioSessao.sessao_id == sessao_id,
+            UsuarioSessao.usuario_id == usuario.id,
+            UsuarioSessao.status == "ativa",
+        ).first()
+        if sessao is None:
+            raise credentials_exception
         
     return {
         "id": usuario.id,
@@ -58,7 +68,7 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         "nome_vendedor": usuario.nome_vendedor,
         "gerente_nome": getattr(usuario, 'gerente_nome', None),
         "supervisor_nome": getattr(usuario, 'supervisor_nome', None), # <-- ADICIONADO À SESSÃO
-        "sessao_id": payload.get("sessao_id"),
+        "sessao_id": sessao_id,
     }
 
 # ==========================================

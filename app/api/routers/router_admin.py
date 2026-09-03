@@ -549,6 +549,26 @@ async def listar_sessoes_auditoria(db: Session = Depends(get_db), usuario_logado
     return {"status": "success", "dados": dados}
 
 
+@router.post("/auditoria/sessoes/encerrar-todas")
+def encerrar_todas_sessoes(
+    db: Session = Depends(get_db),
+    usuario_logado: dict = Depends(get_current_user),
+):
+    if usuario_logado.get("funcao") != "Administrador":
+        raise HTTPException(status_code=403, detail="Acesso negado.")
+    agora = datetime.datetime.utcnow()
+    total = db.query(UsuarioSessao).filter(UsuarioSessao.status == "ativa").update(
+        {
+            UsuarioSessao.status: "encerrada",
+            UsuarioSessao.encerramento: agora,
+            UsuarioSessao.ultimo_sinal: agora,
+        },
+        synchronize_session=False,
+    )
+    db.commit()
+    return {"status": "success", "encerradas": total}
+
+
 # =====================================================================
 # GESTÃO DE USUÁRIOS E SEGURANÇA (SQL PURO)
 # =====================================================================
