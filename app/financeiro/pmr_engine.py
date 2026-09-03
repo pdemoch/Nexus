@@ -18,9 +18,9 @@ Regra de negócio crítica:
   excluídas do cálculo e do denominador.
 
 Cadeia de joins:
-  SF2 ─── SE1   (via Chave_F2, INNER)
+  SE5 ─── SE1   (via Chave_E5, INNER: começa nos recebimentos)
+  SE1 ─── SF2   (via Chave_F2, INNER: localiza nota/emissão)
   SE1 ─── SA1   (via Chave_A1, LEFT: enriquece regional/nome)
-  SE1 ─── SE5   (via Chave_E5, INNER: exclui não liquidadas)
 
 FIX de colisão: SF2 tambem carrega Chave_A1; descartada antes do merge
 com SE1 para nao gerar Chave_A1_x/_y e quebrar o join com SA1.
@@ -110,33 +110,47 @@ def _aplicar_filtro(base: pd.DataFrame, coluna: str, valor: FiltroValor) -> pd.D
 
 def _carregar_base_sem_filtros(data_ini: date, data_fim: date) -> pd.DataFrame:
     """
-    Monta a base analítica cruzando as quatro fontes do S3.
-    Retorna apenas registros de notas liquidadas (INNER com SE5).
+    Monta a base analítica começando nos recebimentos E5.
+    Retorna apenas movimentos E5 ligados a título SE1 e nota SF2.
     """
-    # O período é o recebimento: notas e títulos devem ser históricos.
-    sf2 = carregar_todos_mensal("notas_saida", data_fim)
-    if sf2.empty:
-        logger.warning("PMR: nenhuma nota encontrada em %s -> %s", data_ini, data_fim)
-        return pd.DataFrame()
-
-    logger.info("PMR: %d notas carregadas (%s -> %s)", len(sf2), data_ini, data_fim)
-
     se1 = carregar_todos_mensal("contas_receber", data_fim)
     se5 = carregar_mensal("movimentacao_bancaria", data_ini, data_fim)
+    sf2 = carregar_todos_mensal("notas_saida", data_fim)
     sa1 = carregar_clientes()
 
+    if se5.empty:
+        logger.warning("PMR: nenhum recebimento E5 encontrado em %s -> %s", data_ini, data_fim)
+        return pd.DataFrame()
+
+    se5 = se5.copy()
+    se5["e5_data"] = pd.to_datetime(se5["e5_data"], errors="coerce")
+    se5["e5_valor"] = pd.to_numeric(se5["e5_valor"], errors="coerce")
+    se5 = se5[se5["e5_data"].notna() & (se5["e5_valor"] > 0)]
+    if se5.empty:
+        logger.warning("PMR: nenhum recebimento E5 válido no período")
+        return pd.DataFrame()
     if se1.empty:
         logger.warning("PMR: contas_receber vazio no S3")
         return pd.DataFrame()
+    if sf2.empty:
+        logger.warning("PMR: notas_saida vazio no S3")
+        return pd.DataFrame()
 
     # Uma nota pode ter várias parcelas na SE1. Preserve cada Chave_E5 para
-    # não perder parcelas no merge com SF2.
+    # não perder parcelas no encadeamento iniciado pela E5.
     se1_f = se1[["Chave_F2", "Chave_E5", "e1_num", "e1_prefixo", "e1_parcela",
                  "e1_valor", "e1_vencto", "e1_vencrea", "Chave_A1"]].copy()
 
-    # FIX colisao: descarta Chave_A1 do SF2 antes do merge (canonica vem da SE1)
-    base = sf2.drop(columns=["Chave_A1"], errors="ignore").merge(se1_f, on="Chave_F2", how="inner")
-    logger.info("PMR: apos join SF2->SE1: %d registros", len(base))
+    # O menor grão é cada recebimento E5. Primeiro localizamos seu título SE1.
+    base = se5.merge(se1_f, on="Chave_E5", how="inner", validate="many_to_one")
+    logger.info("PMR: apos join E5->SE1: %d movimentos", len(base))
+
+    # Depois localizamos a nota SF2 pela chave da nota/título.
+    base = base.merge(
+        sf2.drop(columns=["Chave_A1"], errors="ignore"),
+        on="Chave_F2", how="inner", suffixes=("", "_sf2")
+    )
+    logger.info("PMR: apos join E5->SE1->SF2: %d movimentos", len(base))
 
     if not sa1.empty:
         sa1_d = sa1[["Chave_A1", "a1_cod", "a1_loja", "a1_nome", "a1_cgc", "regional", "segmento"]].drop_duplicates("Chave_A1")
@@ -158,19 +172,7 @@ def _carregar_base_sem_filtros(data_ini: date, data_fim: date) -> pd.DataFrame:
     if base.empty:
         return pd.DataFrame()
 
-    se5 = se5.copy()
-    se5["e5_data"] = pd.to_datetime(se5["e5_data"], errors="coerce")
-    se5["e5_valor"] = pd.to_numeric(se5["e5_valor"], errors="coerce")
-    se5 = se5[se5["e5_data"].notna() & (se5["e5_valor"] > 0)]
-    if se5.empty:
-        logger.warning("PMR: nenhum registro de movimentacao bancaria no S3")
-        return pd.DataFrame()
-
-    pago = se5.merge(base, on="Chave_E5", how="inner", validate="many_to_one")
-    logger.info("PMR: apos inner join com SE5: %d de %d notas (%d%% liquidadas)",
-                len(pago), len(base), int(len(pago) / max(len(base), 1) * 100))
-
-    return _calcular_dias(pago)
+    return _calcular_dias(base)
 
 
 def _carregar_status_clientes() -> pd.DataFrame:
@@ -461,7 +463,8 @@ def listar_clientes_busca(data_ini: date, data_fim: date,
 def obter_notas_cliente(data_ini: date, data_fim: date, cgc: str) -> dict[str, Any]:
     """
     Drill-down: todas as parcelas (nivel SE1) de um cliente no periodo,
-    com SF2 (NF/emissao), SE1 (titulo/vencimentos) e SE5 (pagamento).
+    começando em SE5 (pagamento), voltando para SE1 (titulo/vencimentos) e
+    depois para SF2 (NF/emissao).
     Ordenado por data de emissao. Uma linha por parcela.
     """
     # O resumo e consolidado por razao social; o detalhe precisa recuperar

@@ -1,7 +1,7 @@
 """Coleta e análise do agente financeiro.
 
 O modelo recebe somente um contexto calculado no backend. Assim, perguntas e
-simulações usam a mesma base E5 -> E1 -> SF2 do painel e não dados enviados
+simulações usam a mesma base E5 -> SE1 -> SF2 do painel e não dados enviados
 arbitrariamente pelo navegador.
 """
 
@@ -22,9 +22,8 @@ sugira acoes e simule cenarios de clientes, regionais e segmentos.
 REGRAS:
 - Use somente os numeros do CONTEXTO FINANCEIRO calculado pelo servidor.
 - PMR usa cada movimento efetivo da E5, e5_data como periodo e e5_valor como
-  peso. E1 fornece vencimentos e SF2 fornece a emissao.
-- A E1 e considerada somente quando e1_tipo = NF; nao existe filtro separado de
-  tipo E1 no painel.
+  peso. SE1 fornece vencimentos e SF2 fornece a emissao.
+- Somente movimentos E5 ligados a SE1 e SF2 com emissao valida entram no PMR.
 - O status e associado ao CNPJ: ATIVO, INATIVO ou SEM STATUS. O filtro e
   aplicado antes do calculo.
 - O motivo E5 (e5_motbx) e textual, aceita multiplas selecoes (OR) e tambem e
@@ -78,7 +77,7 @@ def construir_contexto(
             "dias_pagamento": "e5_data - f2_emissao",
             "dias_vencimento": "e1_vencrea - f2_emissao",
             "dias_condicao": "e1_vencto - f2_emissao",
-            "vinculo": "E5 -> E1 -> SF2",
+            "vinculo": "E5 -> SE1 -> SF2",
         },
         "periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
         "filtros": {
@@ -89,7 +88,7 @@ def construir_contexto(
             "status_opcoes": ["ATIVO", "INATIVO", "SEM STATUS"],
         },
         "indicadores_disponiveis": ["PMR"],
-        "indicadores_futuros": ["PMP", "PME", "CCC"],
+        "indicadores_indisponiveis": ["PMP", "PME", "CCC"],
         "reconciliacao": {"movimentos_validos": len(base)},
     }
     if base.empty:

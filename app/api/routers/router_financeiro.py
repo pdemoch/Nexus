@@ -9,10 +9,10 @@ CONTRATO DE RESPOSTA (rotas -filtrado / filtros / evolucao / notas / clientes-bu
   estrutura vazia valida (nunca undefined) para o .map() do frontend nao quebrar.
 """
 import traceback
-import pandas as pd
 import asyncio
 import logging
 from datetime import date
+import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
@@ -261,11 +261,11 @@ async def pmp_exportar(data_ini: date = Query(...), data_fim: date = Query(...),
                 ("Imagine a história de uma compra: a nota fiscal nasce na SF1, seus itens são detalhados na SD1, o título é registrado na SE2 e cada baixa aparece na SE5. O PMP acompanha essa história até o dinheiro sair da empresa.",),
                 ("A origem do cálculo é sempre a SE5: começamos em cada movimento bancário efetivamente baixado e, a partir dele, voltamos no tempo para localizar o título correspondente na SE2. Por isso, pagamentos parciais continuam separados e o valor de cada movimento E5 é o peso da média.",),
                 ("O cruzamento principal é SE5 → SE2 pela chave do título e pelo fornecedor (CLIFOR). Só entram no PMP os movimentos SE5 que encontram um título de fornecedor na SE2. E5 é uma tabela mista: também possui recebimentos e outros movimentos, que não devem ser tratados como pagamento a fornecedor.",),
-                ("A data de pagamento nasce na E5, em e5_data. Para medir o prazo, exigimos a data de emissão do título na SE2. A SF1/F1 apenas identifica a nota de entrada e seu valor bruto; não substitui a emissão do título. Assim, o PMP Pagamento é a diferença entre a emissão da SE2 e a baixa na E5.",),
+                ("A data de pagamento nasce na E5, em e5_data. Para medir o prazo, exigimos a data de emissão do título na SE2. A SF1 fornece a nota de entrada e seu valor bruto; a SD1 fornece o detalhe e o tipo de compra. Nenhuma delas substitui a emissão do título. Assim, o PMP Pagamento é a diferença entre a emissão da SE2 e a baixa na E5.",),
                 ("O PMP Vencimento compara a emissão com e2_vencrea, que representa o vencimento real do título. O PMP Condição de Pagamento compara a emissão com e2_vencto, que representa o prazo contratual originalmente informado.",),
                 ("A fórmula é: PMP = SOMA(dias de cada movimento × valor do movimento E5) ÷ SOMA(valor dos movimentos E5). O valor maior pesa mais, porque representa mais caixa efetivamente pago.",),
                 ("O Delta de Atraso é: PMP Pagamento − PMP Condição de Pagamento. Resultado positivo indica pagamento depois do prazo contratado; resultado negativo indica pagamento antes do prazo.",),
-                ("Depois de partir da E5, a SF1/F1 é consultada no nível da nota fiscal para localizar f1_valbrut, o valor bruto da entrada. A SD1 está no nível do item e serve para explicar a composição do produto, não para multiplicar o pagamento.",),
+                ("Depois de partir da E5, a SF1 é consultada no nível da nota fiscal para localizar f1_valbrut, o valor bruto da entrada. A SD1 está no nível do item e serve para explicar a composição do produto e o tipo de compra, não para multiplicar o pagamento.",),
                 ("O valor bruto da SF1 pode aparecer repetido no detalhe quando uma nota possui vários movimentos bancários na SE5. Isso é esperado: não somamos f1_valbrut novamente para calcular o PMP. O peso do cálculo é o valor de cada movimento E5.",),
                 ("Também não deduplicamos movimentos E5 por chave do título. Duas baixas para a mesma parcela podem representar pagamento parcial, complemento, juros ou outra movimentação legítima. Cada linha deve permanecer auditável.",),
                 ("Exemplo real deste arquivo: " + (
@@ -713,24 +713,24 @@ async def pmr_exportar(
         texto = [
             ("CÁLCULO DO PMR — PRAZO MÉDIO DE RECEBIMENTO", True),
             ("", False),
-            ("A história começa sempre na E5: cada movimento bancário informa que um recebimento aconteceu. A partir dessa baixa, voltamos no tempo para procurar o título correspondente na E1 e, depois, a nota F2/SF2 que originou aquele título.", False),
-            ("Somente depois de encontrar a emissão na E1 e a nota correspondente na F2/SF2 calculamos o prazo. A média é ponderada pelo valor efetivamente recebido em cada movimento E5.", False),
+            ("A história começa sempre na E5: cada movimento bancário informa que um recebimento aconteceu. A partir dessa baixa, voltamos no tempo para procurar o título correspondente na SE1 e, depois, a nota SF2/F2 que originou aquele título.", False),
+            ("Somente depois de encontrar o título na SE1 e a nota correspondente na SF2/F2, com sua data de emissão, calculamos o prazo. A média é ponderada pelo valor efetivamente recebido em cada movimento E5.", False),
             ("", False),
             ("EXEMPLO COM DADOS DESTE ARQUIVO:", True),
             (exemplo or "Não há pagamentos no período para montar um exemplo individual.", False),
             ("", False),
             ("FÓRMULA GERAL:", True),
             ("PMR = SOMA(dias_i × e5_valor_i) ÷ SOMA(e5_valor_i).", False),
-            ("A origem continua sendo a E5. Para cada e5_data, buscamos primeiro a emissão da E1 e o valor bruto da F2/SF2. Então calculamos: PMR Pagamento = e5_data − f2_emissao; PMR Vencimento = e1_vencrea − f2_emissao; PMR Condição de Pagamento = e1_vencto − f2_emissao.", False),
+            ("A origem continua sendo a E5. Para cada e5_data, buscamos primeiro o título e os vencimentos na SE1 e depois a emissão e o valor bruto da SF2/F2. Então calculamos: PMR Pagamento = e5_data − f2_emissao; PMR Vencimento = e1_vencrea − f2_emissao; PMR Condição de Pagamento = e1_vencto − f2_emissao.", False),
             ("", False),
             ("COMO AS TABELAS SE ENCAIXAM:", True),
-            ("A E5 informa cada entrada de dinheiro e a data em que ela ocorreu; ela é a tabela de origem do cálculo. A partir de cada linha E5, buscamos a parcela e a data de emissão na E1 e, em seguida, a nota F2/SF2 e seu valor bruto.", False),
-            ("O caminho de reconciliação é E5 → E1 → F2/SF2. Somente movimentos E5 que encontram uma parcela E1 com data de emissão e uma nota F2/SF2 correspondente conseguem gerar PMR. Sem a emissão da E1, não existe uma origem temporal confiável para o cálculo.", False),
+            ("A E5 informa cada entrada de dinheiro e a data em que ela ocorreu; ela é a tabela de origem do cálculo. A partir de cada linha E5, buscamos a parcela e os vencimentos na SE1 e, em seguida, a nota SF2/F2 e sua emissão e valor bruto.", False),
+            ("O caminho de reconciliação é E5 → SE1 → SF2. Somente movimentos E5 que encontram uma parcela SE1 e uma nota SF2/F2 com data de emissão conseguem gerar PMR. Sem a emissão da SF2, não existe uma origem temporal confiável para o cálculo.", False),
             ("A aba Dados Brutos fica no nível da parcela/movimento E5. Uma NF pode ter várias parcelas e uma parcela pode ter vários movimentos bancários; cada movimento permanece visível para auditoria.", False),
             ("O valor bruto da F2/SF2 pode aparecer repetido no detalhe porque uma mesma nota pode possuir vários movimentos E5. Isso não significa que o faturamento foi multiplicado: para faturamento, a NF é contada uma vez; para PMR, o peso é o valor de cada pagamento E5.", False),
             ("", False),
             ("REGRAS DE INCLUSÃO:", True),
-            ("Somente movimentos E5 ligados a títulos E1 e notas F2/SF2 com data de emissão entram no cálculo. Notas ainda não recebidas não entram no PMR, pois ainda não existe uma linha de origem na E5 com data de pagamento.", False),
+            ("Somente movimentos E5 ligados a títulos SE1 e notas SF2/F2 com data de emissão entram no cálculo. Notas ainda não recebidas não entram no PMR, pois ainda não existe uma linha de origem na E5 com data de pagamento.", False),
             ("A consolidação do resumo é feita pela Razão Social, mas o detalhe preserva CNPJ, loja, parcela e movimento bancário. Assim, uma empresa com vários CNPJs aparece consolidada no resumo sem perder a rastreabilidade.", False),
             ("Filtros aplicados ao Excel alteram o conjunto de movimentos E5 e todos os PMRs são recalculados sobre o novo conjunto.", False),
             ("", False),
@@ -763,7 +763,7 @@ async def pmr_exportar(
             ("SF2 (Notas de Saída) — relatório Gobi 595: nota fiscal, emissão e valor bruto.", False),
             ("SE1 (Contas a Receber) — relatório Gobi 596: título, parcela e vencimentos.", False),
             ("SE5 (Movimentação Bancária) — relatório Gobi 592: baixa, data e valor recebido.", False),
-            ("O cálculo financeiro desta aba usa o encadeamento SF2 → SE1 → SE5; não usa a dimensão interna de clientes como fonte de cálculo.", False),
+            ("O cálculo financeiro desta aba usa o encadeamento E5 → SE1 → SF2; não usa a dimensão interna de clientes como fonte de cálculo.", False),
             ("", False),
             ("NOTAS IMPORTANTES:", True),
             ("- Apenas títulos E1 liquidados por movimentos E5 e ligados a uma emissão SF2 entram no cálculo.", False),
