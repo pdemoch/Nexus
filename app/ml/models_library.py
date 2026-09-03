@@ -59,6 +59,19 @@ def montar_serie_mensal(df, coluna_data='mes_data', coluna_volume='volume') -> p
     return d
 
 
+def montar_serie_categoria(df, coluna_data='mes_data', coluna_volume='volume') -> pd.DataFrame:
+    """Agrega a espinha mensal de vendas de uma categoria."""
+    if df is None or len(df) == 0:
+        return pd.DataFrame({coluna_data: [], coluna_volume: []})
+    d = df[[coluna_data, coluna_volume]].copy()
+    d[coluna_data] = pd.to_datetime(d[coluna_data])
+    d[coluna_volume] = pd.to_numeric(d[coluna_volume], errors='coerce').fillna(0.0)
+    return montar_serie_mensal(
+        d.groupby(coluna_data, as_index=False)[coluna_volume].sum(),
+        coluna_data, coluna_volume,
+    )
+
+
 def score_validacao(erro_abs: float, volume_real: float, vies: float) -> float:
     """
     WMAPE + penalidade de viés — mesmo espírito do calcular_score_torneio
@@ -275,6 +288,35 @@ def _c_sazonal_naive(y, d, a, ctx):
     return saida
 
 
+def _c_sazonal_categoria(y, d, a, ctx):
+    """Sazonalidade hierárquica: padrão da categoria encolhido para o SKU."""
+    base = _mp(y, min(12, len(y)))
+    idx, p = ctx.get('categoria_saz', (None, 1.0))
+    if idx is None or p >= P_SAZONAL:
+        return [base] * HORIZONTE
+    return [float(base * (1 + FORCA_SAZONAL * (idx[a[k].month] - 1)))
+            for k in range(HORIZONTE)]
+
+
+def _c_sazonal_hierarquica(y, d, a, ctx):
+    """Combina o sinal mensal do SKU e da categoria, favorecendo a categoria."""
+    base = _mp(y, min(12, len(y)))
+    cat_idx, cat_p = ctx.get('categoria_saz', (None, 1.0))
+    sku_idx, sku_p = ctx.get('saz', (None, 1.0))
+    if cat_idx is None and sku_idx is None:
+        return [base] * HORIZONTE
+    saida = []
+    for k in range(HORIZONTE):
+        fatores = []
+        if cat_idx is not None and cat_p < P_SAZONAL:
+            fatores.append((cat_idx[a[k].month], 0.65))
+        if sku_idx is not None and sku_p < P_SAZONAL:
+            fatores.append((sku_idx[a[k].month], 0.35))
+        fator = sum(v * peso for v, peso in fatores) / sum(peso for _, peso in fatores) if fatores else 1.0
+        saida.append(float(base * (1 + FORCA_SAZONAL * (fator - 1))))
+    return saida
+
+
 
 # =====================================================================
 # AGREGAÇÃO TEMPORAL MÚLTIPLA E OUTROS CANDIDATOS DA LITERATURA RECENTE
@@ -455,6 +497,8 @@ ARENA = {
     'TSB':                 _c_tsb,
     'Sazonal_encolhido':   _c_sazonal_enc,
     'SazonalNaive':        _c_sazonal_naive,
+    'SazonalCategoria':    _c_sazonal_categoria,
+    'SazonalHierarquica':  _c_sazonal_hierarquica,
     'MAPA_Theta':          _c_mapa_theta,
     'MAPA_SES':            _c_mapa_ses,
     'ADIDA':               _c_adida,
@@ -476,7 +520,7 @@ def _limpar(v, socorro):
     return np.maximum(arr, 0.0)
 
 
-def gerar_todos_candidatos(y, datas, meses_alvo) -> dict:
+def gerar_todos_candidatos(y, datas, meses_alvo, contexto=None) -> dict:
     """
     Roda a arena inteira mais os três ensembles. TODO SKU passa por TODOS os
     candidatos; quem falha ou não tem base devolve o socorro (média dos 3
@@ -492,6 +536,9 @@ def gerar_todos_candidatos(y, datas, meses_alvo) -> dict:
         socorro = 0.0
 
     ctx = {'saz': _indices_sazonais(y, datas)}
+    if contexto:
+        cy, cd = contexto.get('categoria_y'), contexto.get('categoria_datas')
+        ctx['categoria_saz'] = _indices_sazonais(cy, cd) if cy is not None else (None, 1.0)
     cand = {}
     for nome, fn in ARENA.items():
         try:

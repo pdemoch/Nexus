@@ -61,7 +61,7 @@ from sqlalchemy import text
 from app.core.database import SessionLocal
 from app.core.constants import HORIZONTE, HORIZ_DECISAO
 from app.ml.models_library import (
-    ARENA, gerar_todos_candidatos, montar_serie_mensal,
+    ARENA, gerar_todos_candidatos, montar_serie_mensal, montar_serie_categoria,
 )
 
 logger = logging.getLogger(__name__)
@@ -125,8 +125,10 @@ class NexusForecaster:
                 FROM lim l
                 CROSS JOIN LATERAL generate_series(l.ini, l.fim, interval '1 month') AS g(mes)
             )
-            SELECT g.sku, g.mes_data, COALESCE(v.volume, 0)::float AS volume
+            SELECT g.sku, COALESCE(p.categoria, 'Sem categoria') AS categoria,
+                   g.mes_data, COALESCE(v.volume, 0)::float AS volume
             FROM grade g
+            JOIN dim_produtos p ON p.sku = g.sku
             LEFT JOIN v ON v.sku = g.sku AND v.mes_data = g.mes_data
             ORDER BY g.sku, g.mes_data
         """), db.bind, params={"corte": data_corte})
@@ -134,7 +136,8 @@ class NexusForecaster:
     # =================================================================
     # 2 e 3. O CAMPEONATO — TODO CANDIDATO PREVÊ O PASSADO
     # =================================================================
-    def _disputar(self, y: np.ndarray, datas: list) -> dict:
+    def _disputar(self, y: np.ndarray, datas: list, meses_alvo=None,
+                  categoria_y=None, categoria_datas=None) -> dict:
         """
         Origem rolante avançando de 1 mês, até JANELA_VALIDACAO origens.
 
@@ -154,14 +157,21 @@ class NexusForecaster:
         Devolve {horizonte: {candidato: pontos}}. Mais pontos, melhor.
         """
         n = len(y)
-        erros = {h: [] for h in range(HORIZONTE)}   # lista de (origem, {modelo: erro})
+        erros = {h: [] for h in range(HORIZONTE)}   # (origem, mês-alvo, erros)
         primeira = max(6, n - self.janela_validacao)
+        meses_alvo = meses_alvo or [pd.Timestamp(datas[-1]) + pd.offsets.MonthBegin(k + 1)
+                                    for k in range(HORIZONTE)]
 
         for i in range(primeira, n):
             y_tr, d_tr = y[:i], datas[:i]
             alvos = [d_tr[-1] + pd.offsets.MonthBegin(k + 1) for k in range(HORIZONTE)]
             try:
-                cand = gerar_todos_candidatos(y_tr, d_tr, alvos)
+                contexto = None
+                if categoria_y is not None and categoria_datas is not None:
+                    mask = np.asarray(categoria_datas) <= pd.Timestamp(d_tr[-1])
+                    contexto = {'categoria_y': np.asarray(categoria_y)[mask],
+                                'categoria_datas': list(np.asarray(categoria_datas)[mask])}
+                cand = gerar_todos_candidatos(y_tr, d_tr, alvos, contexto)
             except Exception as e:
                 logger.debug("Falha ao gerar candidatos na origem %d: %s", i, e)
                 continue
@@ -172,15 +182,17 @@ class NexusForecaster:
                 rodada = {nome: abs(float(pred[h]) - real)
                           for nome, pred in cand.items() if np.isfinite(pred[h])}
                 if rodada:
-                    erros[h].append((i, rodada))
+                    erros[h].append((i, alvos[h].month, rodada))
 
-        return {h: self._somar_pontos(erros[h], primeira, n) for h in range(HORIZONTE)}
+        return {h: self._somar_pontos(erros[h], primeira, n, meses_alvo[h].month)
+                for h in range(HORIZONTE)}
 
     # =================================================================
     # 4. A SOMA DE PONTOS
     # =================================================================
     @staticmethod
-    def _somar_pontos(rodadas: list, primeira: int, ultima: int) -> dict:
+    def _somar_pontos(rodadas: list, primeira: int, ultima: int,
+                      mes_alvo: int = None) -> dict:
         """
         Em cada origem os candidatos são ranqueados pelo erro daquela origem.
         O melhor leva N pontos (N = número de competidores), o segundo N-1, e
@@ -192,11 +204,19 @@ class NexusForecaster:
         """
         pontos = {}
         span = max(ultima - primeira, 1)
-        for i, rodada in rodadas:
+        for item in rodadas:
+            # Aceita também o formato antigo (origem, erros).
+            if len(item) == 2:
+                i, rodada = item
+                mes_origem_alvo = None
+            else:
+                i, mes_origem_alvo, rodada = item
             nomes = list(rodada.keys())
             n = len(nomes)
             ordem = pd.Series({m: rodada[m] for m in nomes}).rank(method='average')
             peso = 1.0 + (i - primeira) / span          # 1,0 -> 2,0
+            if mes_alvo is not None and mes_origem_alvo == mes_alvo:
+                peso *= 2.0                              # mesma época do calendário
             for m in nomes:
                 pontos[m] = pontos.get(m, 0.0) + (n - float(ordem[m]) + 1.0) * peso
         return pontos
@@ -214,7 +234,8 @@ class NexusForecaster:
     # =================================================================
     # 5 e 6. O VENCEDOR PREVÊ — E NUNCA SAI NULO
     # =================================================================
-    def prever_sku(self, y, datas, meses_alvo, campeoes_anteriores=None) -> tuple:
+    def prever_sku(self, y, datas, meses_alvo, campeoes_anteriores=None,
+                   categoria_y=None, categoria_datas=None) -> tuple:
         """
         Devolve (previsao[HORIZONTE], rotulo, acuracia, campeoes).
         Garantia: nenhum valor nulo, negativo ou infinito.
@@ -235,14 +256,17 @@ class NexusForecaster:
             # medido: de 6 a 11 meses a média simples de todo o histórico ganha
             return np.full(HORIZONTE, max(0.0, y.mean())), "Fallback_MediaSimples", 0.0, {}
 
-        cand = gerar_todos_candidatos(y, datas, meses_alvo)
+        contexto = None
+        if categoria_y is not None and categoria_datas is not None:
+            contexto = {'categoria_y': categoria_y, 'categoria_datas': categoria_datas}
+        cand = gerar_todos_candidatos(y, datas, meses_alvo, contexto)
 
         if n < MIN_MESES_TORNEIO:
             # o SKU passa por todos os modelos, mas não há origens suficientes
             # para um campeonato — o ensemble responde até o histórico crescer
             return self._sanear(cand['Ens_Media'], y), "SemTorneio_Ensemble", 0.0, {}
 
-        placar = self._disputar(y, datas)
+        placar = self._disputar(y, datas, meses_alvo, categoria_y, categoria_datas)
         previsao = np.zeros(HORIZONTE)
         rotulo, acuracias, campeoes = [], [], {}
 
@@ -318,6 +342,10 @@ class NexusForecaster:
                 return pl.DataFrame([])
 
             df_alpha['mes_data'] = pd.to_datetime(df_alpha['mes_data'])
+            # Mantém compatibilidade com leitores/mocks legados sem categoria.
+            if 'categoria' not in df_alpha.columns:
+                df_alpha['categoria'] = 'Sem categoria'
+            df_alpha['categoria'] = df_alpha['categoria'].fillna('Sem categoria')
             meses_alvo = [pd.Timestamp(inicio) + relativedelta(months=k) for k in range(HORIZONTE)]
             anteriores = self._campeoes_do_ciclo_anterior(db, ciclo_alvo)
 
@@ -328,10 +356,15 @@ class NexusForecaster:
 
             for sku in skus:
                 serie = montar_serie_mensal(df_alpha[df_alpha['sku'] == sku])
+                categoria = df_alpha.loc[df_alpha['sku'] == sku, 'categoria'].iloc[0]
+                serie_categoria = montar_serie_categoria(
+                    df_alpha[df_alpha['categoria'] == categoria])
                 try:
                     prev, rotulo, acuracia, _ = self.prever_sku(
                         serie['volume'].values, list(serie['mes_data']), meses_alvo,
-                        anteriores.get(str(sku))
+                        anteriores.get(str(sku)),
+                        serie_categoria['volume'].values,
+                        list(serie_categoria['mes_data']),
                     )
                 except Exception as e:
                     # Um SKU nunca derruba o ciclo e nunca sai sem número.
