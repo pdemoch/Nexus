@@ -553,6 +553,13 @@ function PreenchimentoMetas() {
                 {naFaseSku ? 'Trancar SKU e ratear p/ Executivos' : 'Trancar Executivo e ratear p/ Razão Social'}
               </button>
             )}
+            {(naFaseSku || naFaseExecutivo) && bloqueado && !(souAdmin && adminOperando) && (
+              <button disabled
+                title="A Demanda Comercial precisa congelar o plano antes do rateio."
+                className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-slate-100 text-slate-400 cursor-not-allowed">
+                <Lock className="w-4 h-4" /> Aguardando liberação
+              </button>
+            )}
             {souAdmin && adminOperando && (
               <button onClick={reabrirFaseAdmin}
                 className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-black bg-amber-500 text-white hover:bg-amber-600">
@@ -566,13 +573,12 @@ function PreenchimentoMetas() {
                   className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-amber-500 text-white hover:bg-amber-600">
                   <Unlock className="w-4 h-4" /> Reabrir etapa
                 </button>
-              ) : (
+              ) :
                 <button onClick={congelarEtapa} disabled={aguardandoUpstream}
                   className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black
                     ${aguardandoUpstream ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-emerald-600 text-white hover:bg-emerald-700'}`}>
                   <Lock className="w-4 h-4" /> Congelar etapa
                 </button>
-              )
             )}
             {/* Excel — somente a carteira do coordenador logado */}
             <button onClick={exportarExcel}
@@ -615,19 +621,28 @@ function PreenchimentoMetas() {
         </div>
       </div>
 
-      {/* A árvore permanece visível em todas as fases. Na fase SKU os SKUs
-          aparecem dentro de cada executivo para permitir navegar e abrir o
-          dossiê antes do rateio; na fase EXECUTIVO o SKU fica editável e, na
-          fase Razão Social, o ajuste final ocorre no cliente. */}
+      {/* Na fase SKU o contrato é SKU agregado; Executivo só aparece depois
+          do rateio. Nas fases seguintes a árvore detalhada é exibida. */}
       <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-8">
-        {arvoreVisivelOuCompleta.length === 0 && busca.trim() ? (
-          <div className="flex flex-col items-center justify-center py-16 text-slate-400">
-            <Search className="w-8 h-8 mb-2 opacity-30" />
-            <div className="text-sm font-bold">Nenhum resultado para "{busca}"</div>
-            <button onClick={() => setBusca('')} className="mt-3 text-xs font-black text-indigo-500 hover:underline">Limpar busca</button>
-          </div>
-        ) : (
-          arvoreVisivelOuCompleta.map((g: any) => (
+        {arvoreVisivelOuCompleta.length === 0 && busca.trim()
+          ? (
+            <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+              <Search className="w-8 h-8 mb-2 opacity-30" />
+              <div className="text-sm font-bold">Nenhum resultado para "{busca}"</div>
+              <button onClick={() => setBusca('')} className="mt-3 text-xs font-black text-indigo-500 hover:underline">Limpar busca</button>
+            </div>
+          )
+          : naFaseSku ? <ListaSkuCarteira
+            skus={skusAgregadosCarteira}
+            meses={meses}
+            somaSkuCarteira={somaSkuCarteira}
+            setSkuCarteira={setSkuCarteira}
+            bloqueado={bloqueado && !(souAdmin && adminOperando)}
+            modoEdicao={modoEdicao}
+            edits={edits}
+            setDossieAlvo={setDossieAlvo}
+            dossieAlvo={dossieAlvo}
+          /> : arvoreVisivelOuCompleta.map((g: any) => (
             <NoArvore key={g.nome} node={g} nivel={0}
               meses={meses} abertas={abertas} toggle={toggle}
               valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setCliente={setCliente}
@@ -638,8 +653,7 @@ function PreenchimentoMetas() {
               dossieAlvo={dossieAlvo}
               idPath={g.nome}
               buscaAtiva={!!busca.trim()} />
-          ))
-        )}
+          ))}
       </div>
 
       {/* GAVETA DOSSIÊ */}
@@ -658,7 +672,7 @@ function PreenchimentoMetas() {
    carteira (não há executivo/cliente ainda — só existem após o rateio
    desta fase). Dossiê disponível aqui é o dossiê agregado da carteira. */
 function ListaSkuCarteira({ skus, meses, somaSkuCarteira, setSkuCarteira,
-  bloqueado, edits, setDossieAlvo, dossieAlvo }: any) {
+  bloqueado, modoEdicao, edits, setDossieAlvo, dossieAlvo }: any) {
   if (!skus.length) {
     return <div className="py-16 text-center text-slate-400 text-sm font-bold">Nenhum SKU na carteira.</div>;
   }
@@ -675,6 +689,7 @@ function ListaSkuCarteira({ skus, meses, somaSkuCarteira, setSkuCarteira,
             const total   = somaSkuCarteira(s.sku, m);
             const pmv     = s.pmvPorMes[m] || 0;
             const ia      = s.iaPorMes[m] || 0;
+            const valor   = total * pmv;
             return (
               <div key={m} className="text-right">
                 <div className="text-[9px] font-bold text-indigo-400 pr-2 mb-0.5">
@@ -682,12 +697,20 @@ function ListaSkuCarteira({ skus, meses, somaSkuCarteira, setSkuCarteira,
                 </div>
                 <input
                   type="number"
-                  value={total}
-                  disabled={bloqueado}
-                  onChange={e => setSkuCarteira(s.sku, m, parseInt(e.target.value) || 0)}
+                  value={modoEdicao === 'valor' ? Math.round(valor) : total}
+                  disabled={bloqueado || (modoEdicao === 'valor' && pmv <= 0)}
+                  onChange={e => {
+                    const input = parseFloat(e.target.value) || 0;
+                    const volume = modoEdicao === 'valor'
+                      ? (pmv > 0 ? Math.round(input / pmv) : total)
+                      : Math.round(input);
+                    setSkuCarteira(s.sku, m, volume);
+                  }}
+                  title={modoEdicao === 'valor' && pmv <= 0 ? 'Sem PMV: edição monetária bloqueada' : undefined}
+                  inputMode={modoEdicao === 'valor' ? 'decimal' : 'numeric'}
                   className={`w-full text-right text-sm font-bold rounded-md px-2 py-1 border transition-colors
                     border-transparent bg-transparent text-slate-700
-                    ${bloqueado ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
+                    ${bloqueado || (modoEdicao === 'valor' && pmv <= 0) ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
                 />
                 <div className="text-[9px] font-bold text-slate-300 pr-2">IA {fmtCx(ia)} cx</div>
               </div>

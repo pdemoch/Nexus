@@ -168,7 +168,8 @@ def exportar_visao_geral(
 # GET /tabela  — árvore 5 níveis no contrato do MetasComercial.tsx
 # ---------------------------------------------------------------------------
 @router.get("/tabela")
-def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
+def tabela(responsavel: str = None, nivel_responsavel: str = None,
+           db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     """
     Retorna a árvore hierárquica (gerente→coordenador→vendedor→cliente→produto)
     no formato esperado pelo MetasComercial.tsx:
@@ -194,6 +195,16 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
         params = {"ciclo": ciclo, "meses": meses}
         params.update(rls["params"])
         filtro_resp = f"AND {rls['where']}"
+        alvo = (responsavel or "").strip()
+        nivel_alvo = (nivel_responsavel or "").strip()
+        if alvo:
+            if not escopo["ve_tudo"]:
+                raise HTTPException(403, "Somente o Administrador pode selecionar outra alçada.")
+            if nivel_alvo not in ("Gerente", "Coordenador"):
+                raise HTTPException(422, "nivel_responsavel deve ser Gerente ou Coordenador.")
+            campo_alvo = "gerente_nome" if nivel_alvo == "Gerente" else "supervisor_nome"
+            filtro_resp = f"AND TRIM(c.{campo_alvo}) = :responsavel_alvo"
+            params["responsavel_alvo"] = alvo
 
         rows = db.execute(text(f"""
             SELECT
@@ -298,6 +309,26 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
             for co in nomes_coord:
                 fases_coordenadores[co] = fase_atual_do_responsavel(db, ciclo, co)
 
+        responsaveis = db.execute(text("""
+            SELECT DISTINCT 'Gerente' AS nivel, TRIM(gerente_nome) AS nome
+            FROM dim_clientes WHERE NULLIF(TRIM(gerente_nome), '') IS NOT NULL
+            UNION
+            SELECT DISTINCT 'Coordenador', TRIM(supervisor_nome)
+            FROM dim_clientes WHERE NULLIF(TRIM(supervisor_nome), '') IS NOT NULL
+            ORDER BY 1, 2
+        """)).fetchall() if escopo["ve_tudo"] else []
+
+        if nome_resp:
+            fase_resp = nome_resp
+        elif alvo:
+            fase_resp = alvo
+        else:
+            fase_resp = None
+        fase_alvo = None
+        if fase_resp:
+            from app.api.routers.rls_metas import fase_atual_do_responsavel
+            fase_alvo = fase_atual_do_responsavel(db, ciclo, fase_resp)
+
         return {
             "ciclo": ciclo,
             "meses": meses_iso,
@@ -307,8 +338,10 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
             "motivo_bloqueio": ("Demanda Comercial ainda nao congelou o plano." if aguardando
                                  else "Etapa congelada pelo Administrador." if propria_congelada else None),
             "minha_carteira_congelada": minha_congelada,
-            "minha_fase": minha_fase,
+            "minha_fase": fase_alvo or minha_fase,
             "fases_coordenadores": fases_coordenadores,
+            "responsaveis": [{"nivel": r.nivel, "nome": r.nome} for r in responsaveis],
+            "responsavel_selecionado": {"nivel": nivel_alvo, "nome": alvo} if alvo else None,
             "sou_admin": u.get("funcao") == "Administrador",
             "funcao": u.get("funcao", ""),
             "arvore": arvore,
@@ -333,9 +366,9 @@ class PayloadSalvar(BaseModel):
 def salvar(payload: PayloadSalvar, db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     try:
         ciclo = get_current_cycle(db)
-        if not etapa_congelada(db, ciclo, ETAPA_BOTTOMUP):
+        if not etapa_congelada(db, ciclo, ETAPA_BOTTOMUP) and u.get("funcao") != "Administrador":
             raise HTTPException(423, "Demanda Comercial ainda nao congelou. Aguarde o bastao.")
-        if etapa_congelada(db, ciclo, ETAPA_METAS):
+        if etapa_congelada(db, ciclo, ETAPA_METAS) and u.get("funcao") != "Administrador":
             raise HTTPException(423, "Etapa congelada — não é possível salvar.")
 
         for aj in payload.ajustes:
@@ -747,6 +780,8 @@ class AjusteFase(BaseModel):
 class PayloadRatearFase(BaseModel):
     ajustes: List[AjusteFase]
     executivo_nome: Optional[str] = None  # obrigatório quando a fase corrente é EXECUTIVO
+    responsavel_nome: Optional[str] = None  # somente Administrador
+    responsavel_nivel: Optional[str] = None  # Gerente ou Coordenador
 
 
 @router.post("/ratear-fase")
@@ -771,15 +806,26 @@ def ratear_fase(payload: PayloadRatearFase, db: Session = Depends(get_db),
         )
 
         ciclo = get_current_cycle(db)
-        if not etapa_congelada(db, ciclo, ETAPA_BOTTOMUP):
+        if not etapa_congelada(db, ciclo, ETAPA_BOTTOMUP) and u.get("funcao") != "Administrador":
             raise HTTPException(423, "Demanda Comercial ainda nao congelou. Aguarde o bastao.")
-        if etapa_congelada(db, ciclo, ETAPA_METAS):
+        if etapa_congelada(db, ciclo, ETAPA_METAS) and u.get("funcao") != "Administrador":
             raise HTTPException(423, "Etapa congelada — não é possível ratear.")
 
         escopo = escopo_usuario(u)
         if escopo["ve_tudo"]:
-            raise HTTPException(400, "Admin não opera fases diretamente — use reabertura administrativa.")
-
+            nome = (payload.responsavel_nome or "").strip()
+            funcao = (payload.responsavel_nivel or "").strip()
+            if not nome or funcao not in (NIVEL_GERENTE, NIVEL_COORDENADOR):
+                raise HTTPException(422, "Administrador deve informar responsável e nível.")
+            escopo = {
+                **escopo,
+                "ve_tudo": False,
+                "nivel_ok": True,
+                "funcao": funcao,
+                "campo_rls": "gerente_nome" if funcao == NIVEL_GERENTE else "supervisor_nome",
+                "valor_rls": nome,
+                "nome_responsavel": nome,
+            }
         nome = escopo["nome_responsavel"]
         funcao = escopo["funcao"]
         garantir_tabela_fase_carteira(db)
@@ -805,7 +851,12 @@ def ratear_fase(payload: PayloadRatearFase, db: Session = Depends(get_db),
                     FROM fato_ibp_granular
                     WHERE ciclo_sop = :c AND sku = :s AND TO_CHAR(mes_projetado,'YYYY-MM') = :m
                 """), {"c": ciclo, "s": aj.sku, "m": aj.mes_projetado}).scalar() or 0
-                novo_total = int(round(aj.novo_valor_financeiro / pmv)) if pmv > 0 else 0
+                if pmv <= 0:
+                    raise HTTPException(
+                        422,
+                        f"SKU {aj.sku} sem PMV no mês {aj.mes_projetado}; edição em R$ bloqueada."
+                    )
+                novo_total = int(round(aj.novo_valor_financeiro / pmv))
             else:
                 raise HTTPException(422, "Informe novo_volume ou novo_valor_financeiro.")
 
