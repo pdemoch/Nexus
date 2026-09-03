@@ -2,7 +2,7 @@
 
 O modelo recebe somente um contexto calculado no backend. Assim, perguntas e
 simulações usam a mesma base E5 -> SE1 -> SF2 do painel e não dados enviados
-arbitrariamente pelo navegador.
+arbitrariamente pelo navegador
 """
 
 import json
@@ -22,7 +22,7 @@ sugira acoes e simule cenarios de clientes, regionais e segmentos.
 REGRAS:
 - Use somente os numeros do CONTEXTO FINANCEIRO calculado pelo servidor.
 - PMR usa cada movimento efetivo da E5, e5_data como periodo e e5_valor como
-  peso. SE1 fornece vencimentos e SF2 fornece a emissao.
+  peso. SE1 fornece vencimentos e SF2 fornece a emissao
 - Somente movimentos E5 ligados a SE1 e SF2 com emissao valida entram no PMR.
 - O status e associado ao CNPJ: ATIVO, INATIVO ou SEM STATUS. O filtro e
   aplicado antes do calculo.

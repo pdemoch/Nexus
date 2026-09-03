@@ -228,6 +228,53 @@ async def pmp_resumo(data_ini: date = Query(...), data_fim: date = Query(...),
     return await asyncio.to_thread(_pmp().calcular_pmp_resumo, data_ini, data_fim, *f)
 
 
+@router.get("/pmp/evolucao")
+async def pmp_evolucao(data_ini: date = Query(...), data_fim: date = Query(...),
+                      motivos: str = Query(None), tipos: str = Query(None),
+                      fornecedores: str = Query(None), clifor: str = Query(None),
+                      e5_motbx: str = Query(None), d1_tp: str = Query(None),
+                      fornecedor: str = Query(None), _: dict = Depends(get_current_user)):
+    _validar_datas(data_ini, data_fim)
+    f = _pmp_filters(motivos or e5_motbx, tipos or d1_tp, fornecedores or fornecedor, clifor)
+    return await asyncio.to_thread(_pmp().calcular_pmp_mensal, data_ini, data_fim, *f)
+
+
+@router.get("/pmp/tipos")
+async def pmp_tipos(data_ini: date = Query(...), data_fim: date = Query(...),
+                   motivos: str = Query(None), tipos: str = Query(None),
+                   fornecedores: str = Query(None), clifor: str = Query(None),
+                   e5_motbx: str = Query(None), d1_tp: str = Query(None),
+                   fornecedor: str = Query(None), _: dict = Depends(get_current_user)):
+    _validar_datas(data_ini, data_fim)
+    f = _pmp_filters(motivos or e5_motbx, tipos or d1_tp, fornecedores or fornecedor, clifor)
+    return await asyncio.to_thread(_pmp().calcular_pmp_tipos, data_ini, data_fim, *f)
+
+
+@router.get("/pmp/por-tipo")
+async def pmp_por_tipo(data_ini: date = Query(...), data_fim: date = Query(...),
+                      motivos: str = Query(None), tipos: str = Query(None),
+                      fornecedores: str = Query(None), clifor: str = Query(None),
+                      e5_motbx: str = Query(None), d1_tp: str = Query(None),
+                      fornecedor: str = Query(None), _: dict = Depends(get_current_user)):
+    """Alias compatível com versões anteriores do frontend."""
+    _validar_datas(data_ini, data_fim)
+    f = _pmp_filters(motivos or e5_motbx, tipos or d1_tp, fornecedores or fornecedor, clifor)
+    return await asyncio.to_thread(_pmp().calcular_pmp_tipos, data_ini, data_fim, *f)
+
+
+@router.get("/pmp/fornecedor-detalhe")
+async def pmp_fornecedor_detalhe(
+    data_ini: date = Query(...), data_fim: date = Query(...),
+    clifor: str = Query(...), e5_motbx: str = Query(None),
+    d1_tp: str = Query(None), _: dict = Depends(get_current_user),
+):
+    _validar_datas(data_ini, data_fim)
+    return await asyncio.to_thread(
+        _pmp().obter_pagamentos_fornecedor, data_ini, data_fim, clifor,
+        _split(e5_motbx), _split(d1_tp)
+    )
+
+
 @router.get("/pmp/exportar")
 async def pmp_exportar(data_ini: date = Query(...), data_fim: date = Query(...),
                        motivos: str = Query(None), tipos: str = Query(None),
@@ -256,6 +303,10 @@ async def pmp_exportar(data_ini: date = Query(...), data_fim: date = Query(...),
                     base[cols].to_excel(writer, index=False, sheet_name=sheet)
             pd.DataFrame(fornecedores_data["fornecedores"]).to_excel(
                 writer, index=False, sheet_name="Fornecedores")
+            pd.DataFrame(_pmp().calcular_pmp_mensal(data_ini, data_fim, *f)["meses"]).to_excel(
+                writer, index=False, sheet_name="Evolução Mensal")
+            pd.DataFrame(_pmp().calcular_pmp_tipos(data_ini, data_fim, *f)["tipos"]).to_excel(
+                writer, index=False, sheet_name="Tipos D1")
             narrativa = [
                 ("METODOLOGIA DO PMP — PRAZO MÉDIO DE PAGAMENTO",),
                 ("Imagine a história de uma compra: a nota fiscal nasce na SF1, seus itens são detalhados na SD1, o título é registrado na SE2 e cada baixa aparece na SE5. O PMP acompanha essa história até o dinheiro sair da empresa.",),
