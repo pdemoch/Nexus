@@ -27,6 +27,7 @@ com SE1 para nao gerar Chave_A1_x/_y e quebrar o join com SA1.
 """
 
 import logging
+import math
 import os
 import threading
 import time
@@ -64,10 +65,24 @@ FiltroValor = Optional[Union[str, list]]
 
 def _pmr(df: pd.DataFrame, col_dias: str) -> float:
     """PMR ponderado por e1_valor. Retorna 0.0 se denominador for zero."""
-    total = df["e5_valor"].sum()
-    if total == 0:
+    valores = pd.to_numeric(df["e5_valor"], errors="coerce")
+    dias = pd.to_numeric(df[col_dias], errors="coerce")
+    validos = valores.notna() & dias.notna() & np.isfinite(valores) & np.isfinite(dias)
+    valores = valores[validos]
+    dias = dias[validos]
+    total = valores.sum()
+    if total == 0 or not math.isfinite(float(total)):
         return 0.0
-    return float((df[col_dias] * df["e5_valor"]).sum() / total)
+    resultado = float((dias * valores).sum() / total)
+    return resultado if math.isfinite(resultado) else 0.0
+
+
+def _round_finite(value, digits: int = 2) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return round(number, digits) if math.isfinite(number) else 0.0
 
 
 def _calcular_dias(df: pd.DataFrame) -> pd.DataFrame:
@@ -282,7 +297,7 @@ def calcular_pmr_global(data_ini: date, data_fim: date,
     if base.empty:
         return _resposta_vazia(data_ini, data_fim)
 
-    valor_total = float(base["e5_valor"].sum())
+    valor_total = _round_finite(base["e5_valor"].sum())
     dias_periodo = max((data_fim - data_ini).days, 1)
     valor_por_dia = valor_total / dias_periodo
 
@@ -291,12 +306,12 @@ def calcular_pmr_global(data_ini: date, data_fim: date,
                            "dias_periodo": dias_periodo},
         "notas_base":     int(base["Chave_F2"].nunique()),
         "notas_pagas":    int(len(base)),
-        "valor_total":    round(valor_total, 2),
-        "valor_por_dia":  round(valor_por_dia, 2),
-        "pmr_pagamento":  round(_pmr(base, "dias_pagamento"),  2),
-        "pmr_vencimento": round(_pmr(base, "dias_vencimento"), 2),
-        "pmr_cond_pag":   round(_pmr(base, "dias_cond_pag"),   2),
-        "delta_atraso":   round(_pmr(base, "dias_pagamento") - _pmr(base, "dias_cond_pag"), 2),
+        "valor_total":    valor_total,
+        "valor_por_dia":  _round_finite(valor_por_dia),
+        "pmr_pagamento":  _round_finite(_pmr(base, "dias_pagamento")),
+        "pmr_vencimento": _round_finite(_pmr(base, "dias_vencimento")),
+        "pmr_cond_pag":   _round_finite(_pmr(base, "dias_cond_pag")),
+        "delta_atraso":   _round_finite(_pmr(base, "dias_pagamento") - _pmr(base, "dias_cond_pag")),
     }
 
 
@@ -315,11 +330,11 @@ def calcular_pmr_regional(data_ini: date, data_fim: date,
         regionais.append({
             "regional":       str(reg) if pd.notna(reg) else "SEM REGIONAL",
             "notas_pagas":    int(len(g)),
-            "valor_total":    round(float(g["e5_valor"].sum()), 2),
-            "pmr_pagamento":  round(_pmr(g, "dias_pagamento"),  2),
-            "pmr_vencimento": round(_pmr(g, "dias_vencimento"), 2),
-            "pmr_cond_pag":   round(_pmr(g, "dias_cond_pag"),   2),
-            "delta_atraso":   round(_pmr(g, "dias_pagamento") - _pmr(g, "dias_cond_pag"), 2),
+            "valor_total":    _round_finite(g["e5_valor"].sum()),
+            "pmr_pagamento":  _round_finite(_pmr(g, "dias_pagamento")),
+            "pmr_vencimento": _round_finite(_pmr(g, "dias_vencimento")),
+            "pmr_cond_pag":   _round_finite(_pmr(g, "dias_cond_pag")),
+            "delta_atraso":   _round_finite(_pmr(g, "dias_pagamento") - _pmr(g, "dias_cond_pag")),
         })
 
     regionais.sort(key=lambda r: r["valor_total"], reverse=True)
@@ -364,11 +379,11 @@ def calcular_pmr_clientes(data_ini: date, data_fim: date,
             "regional":       str(reg),
             "segmento":       str(seg),
             "notas_pagas":    int(len(g)),
-            "valor_total":    round(float(g["e5_valor"].sum()), 2),
-            "pmr_pagamento":  round(_pmr(g, "dias_pagamento"),  2),
-            "pmr_vencimento": round(_pmr(g, "dias_vencimento"), 2),
-            "pmr_cond_pag":   round(_pmr(g, "dias_cond_pag"),   2),
-            "delta_atraso":   round(_pmr(g, "dias_pagamento") - _pmr(g, "dias_cond_pag"), 2),
+            "valor_total":    _round_finite(g["e5_valor"].sum()),
+            "pmr_pagamento":  _round_finite(_pmr(g, "dias_pagamento")),
+            "pmr_vencimento": _round_finite(_pmr(g, "dias_vencimento")),
+            "pmr_cond_pag":   _round_finite(_pmr(g, "dias_cond_pag")),
+            "delta_atraso":   _round_finite(_pmr(g, "dias_pagamento") - _pmr(g, "dias_cond_pag")),
         })
 
     rows.sort(key=lambda r: r["valor_total"], reverse=True)
@@ -410,12 +425,12 @@ def calcular_pmr_mensal(data_ini: date, data_fim: date,
         meses.append({
             "mes":            mes.strftime("%Y-%m"),
             "notas_pagas":    int(len(g)),
-            "valor_total":    round(float(g["e5_valor"].sum()), 2),
-            "valor_recebido": round(float(g["e5_valor"].sum()), 2),
-            "pmr_pagamento":  round(_pmr(g, "dias_pagamento"),  2),
-            "pmr_vencimento": round(_pmr(g, "dias_vencimento"), 2),
-            "pmr_cond_pag":   round(_pmr(g, "dias_cond_pag"),   2),
-            "delta_atraso":   round(_pmr(g, "dias_pagamento") - _pmr(g, "dias_cond_pag"), 2),
+            "valor_total":    _round_finite(g["e5_valor"].sum()),
+            "valor_recebido": _round_finite(g["e5_valor"].sum()),
+            "pmr_pagamento":  _round_finite(_pmr(g, "dias_pagamento")),
+            "pmr_vencimento": _round_finite(_pmr(g, "dias_vencimento")),
+            "pmr_cond_pag":   _round_finite(_pmr(g, "dias_cond_pag")),
+            "delta_atraso":   _round_finite(_pmr(g, "dias_pagamento") - _pmr(g, "dias_cond_pag")),
         })
 
     meses.sort(key=lambda m: m["mes"])
