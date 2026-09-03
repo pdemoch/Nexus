@@ -36,6 +36,7 @@ export default function AdminPanel() {
   // ESTADOS DE AUDITORIA
   const [logsAuditoria, setLogsAuditoria] = useState<any[]>([]);
   const [sessoesAuditoria, setSessoesAuditoria] = useState<any[]>([]);
+  const [subAbaAuditoria, setSubAbaAuditoria] = useState<'alteracoes' | 'sessoes'>('alteracoes');
   const [buscaAuditoria, setBuscaAuditoria] = useState('');
 
   // Auto-scroll do terminal
@@ -698,7 +699,18 @@ Confirma a RECARGA TOTAL?`
                         />
                     </div>
                 </div>
+                <div className="flex items-center gap-2 mb-5">
+                    <button onClick={() => setSubAbaAuditoria('alteracoes')}
+                        className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors ${subAbaAuditoria === 'alteracoes' ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-50 text-slate-400 hover:text-slate-600'}`}>
+                        Alterações ({auditoriaFiltrada.length})
+                    </button>
+                    <button onClick={() => setSubAbaAuditoria('sessoes')}
+                        className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors ${subAbaAuditoria === 'sessoes' ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-50 text-slate-400 hover:text-slate-600'}`}>
+                        Sessões ({sessoesFiltradas.length})
+                    </button>
+                </div>
 
+                {subAbaAuditoria === 'alteracoes' && (
                 <div className="flex-1 overflow-x-auto custom-scrollbar">
                     <table className="w-full border-collapse">
                         <thead>
@@ -765,8 +777,9 @@ Confirma a RECARGA TOTAL?`
                         </tbody>
                     </table>
                 </div>
+                )}
 
-                <div className="mt-10 pt-8 border-t border-slate-100">
+                {subAbaAuditoria === 'sessoes' && <div className="flex-1 overflow-x-auto custom-scrollbar">
                     <div className="flex items-center justify-between mb-4">
                         <div>
                             <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest">Uso e sessões</h3>
@@ -776,7 +789,7 @@ Confirma a RECARGA TOTAL?`
                             {sessoesFiltradas.length} sessões
                         </span>
                     </div>
-                    <div className="overflow-x-auto">
+                    <div>
                         <table className="w-full border-collapse">
                             <thead>
                                 <tr className="text-left">
@@ -811,7 +824,7 @@ Confirma a RECARGA TOTAL?`
                             </tbody>
                         </table>
                     </div>
-                </div>
+                </div>}
 
             </div>
         )}
