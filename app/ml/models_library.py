@@ -72,6 +72,58 @@ def montar_serie_categoria(df, coluna_data='mes_data', coluna_volume='volume') -
     )
 
 
+def classificar_perfil_sku(y, datas=None) -> str:
+    """Classifica a série do SKU para orientar a arena por comportamento."""
+    valores = np.nan_to_num(np.asarray(y, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    n = len(valores)
+    if n <= 6:
+        return 'Lancamento'
+    if np.mean(valores <= 0) >= 0.35:
+        return 'Intermitente'
+    media = float(np.mean(valores))
+    cv = float(np.std(valores) / media) if media > 0 else 0.0
+    sazonal = False
+    if datas is not None and n >= 24:
+        _, p = _indices_sazonais(valores, datas)
+        sazonal = p < P_SAZONAL
+    if sazonal:
+        return 'Sazonal'
+    if n >= 6 and media > 0:
+        x = np.arange(n, dtype=float)
+        incl = float(np.polyfit(x, valores, 1)[0] / media)
+        if abs(incl) >= 0.02:
+            return 'Tendencia'
+    return 'Estavel' if cv < 0.6 else 'Volatil'
+
+
+_CANDIDATOS_POR_PERFIL = {
+    'Lancamento': {'Ens_Media', 'Ens_Mediana', 'MM3', 'Media2m', 'UltimoMes'},
+    'Intermitente': {'Croston', 'SBA', 'TSB', 'ADIDA', 'MAPA_SES', 'MMPond12',
+                     'Ens_Media', 'Ens_Mediana', 'Ens_Aparada'},
+    'Sazonal': {'Sazonal_encolhido', 'SazonalNaive', 'SazonalCategoria',
+                'SazonalHierarquica', 'ETS_AICc', 'Theta', 'MM12', 'MAPA_Theta',
+                'Ens_Media', 'Ens_Mediana', 'Ens_Aparada'},
+    'Tendencia': {'Theta', 'ETS_AICc', 'Holt_amortecido', 'TheilSen',
+                  'RegressaoAmortecida', 'MMAdaptativa', 'MAPA_Theta',
+                  'MAPA_SES', 'Ens_Media', 'Ens_Mediana', 'Ens_Aparada'},
+    'Estavel': set(),
+    'Volatil': {'MM3', 'MM6', 'MM12', 'Mediana12', 'MediaAparada12',
+                'Bootstrap', 'Ens_Mediana', 'Ens_Aparada', 'MMPond12'},
+}
+
+
+def filtrar_candidatos_por_perfil(candidatos: dict, perfil: str) -> dict:
+    """Mantém candidatos adequados, sem deixar a arena sem fallback."""
+    permitidos = _CANDIDATOS_POR_PERFIL.get(perfil, _CANDIDATOS_POR_PERFIL['Estavel'])
+    if not permitidos:
+        return candidatos
+    filtrados = {nome: previsao for nome, previsao in candidatos.items()
+                 if nome in permitidos}
+    if len(filtrados) >= 3:
+        return filtrados
+    return candidatos
+
+
 def score_validacao(erro_abs: float, volume_real: float, vies: float) -> float:
     """
     WMAPE + penalidade de viés — mesmo espírito do calcular_score_torneio

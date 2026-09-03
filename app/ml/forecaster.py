@@ -61,7 +61,8 @@ from sqlalchemy import text
 from app.core.database import SessionLocal
 from app.core.constants import HORIZONTE, HORIZ_DECISAO
 from app.ml.models_library import (
-    ARENA, gerar_todos_candidatos, montar_serie_mensal, montar_serie_categoria,
+    ARENA, classificar_perfil_sku, filtrar_candidatos_por_perfil,
+    gerar_todos_candidatos, montar_serie_mensal, montar_serie_categoria,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,6 @@ logger = logging.getLogger(__name__)
 JANELA_VALIDACAO = 24         # origens de validação por SKU
 MIN_MESES_TORNEIO = 18        # abaixo disso não há campeonato confiável
 HISTERESE = 0.0               # 0.0 = meritocracia pura a cada ciclo
-LIMITE_CRESCIMENTO_MEDIA = 0.05  # teto preventivo para cada SKU contra sua média histórica
 
 
 class NexusForecaster:
@@ -173,6 +173,8 @@ class NexusForecaster:
                     contexto = {'categoria_y': np.asarray(categoria_y)[mask],
                                 'categoria_datas': list(np.asarray(categoria_datas)[mask])}
                 cand = gerar_todos_candidatos(y_tr, d_tr, alvos, contexto)
+                cand = filtrar_candidatos_por_perfil(
+                    cand, classificar_perfil_sku(y_tr, d_tr))
             except Exception as e:
                 logger.debug("Falha ao gerar candidatos na origem %d: %s", i, e)
                 continue
@@ -250,26 +252,28 @@ class NexusForecaster:
             return np.zeros(HORIZONTE), "Fallback_Zero", 0.0, {}
         if n <= 2:
             previsao = np.full(HORIZONTE, max(0.0, y.mean()))
-            return self._limitar_media_historica(previsao, y), "Fallback_Media2m", 0.0, {}
+            return self._sanear(previsao, y), "Fallback_Media2m", 0.0, {}
         if n <= 5:
             # medido: com 3 a 5 meses o último mês fechado bate todos os demais
             previsao = np.full(HORIZONTE, max(0.0, y[-1]))
-            return self._limitar_media_historica(previsao, y), "Fallback_UltimoMes", 0.0, {}
+            return self._sanear(previsao, y), "Fallback_UltimoMes", 0.0, {}
         if n < 12:
             # medido: de 6 a 11 meses a média simples de todo o histórico ganha
             previsao = np.full(HORIZONTE, max(0.0, y.mean()))
-            return self._limitar_media_historica(previsao, y), "Fallback_MediaSimples", 0.0, {}
+            return self._sanear(previsao, y), "Fallback_MediaSimples", 0.0, {}
 
         contexto = None
         if categoria_y is not None and categoria_datas is not None:
             contexto = {'categoria_y': categoria_y, 'categoria_datas': categoria_datas}
         cand = gerar_todos_candidatos(y, datas, meses_alvo, contexto)
+        perfil = classificar_perfil_sku(y, datas)
+        cand = filtrar_candidatos_por_perfil(cand, perfil)
 
         if n < MIN_MESES_TORNEIO:
             # o SKU passa por todos os modelos, mas não há origens suficientes
             # para um campeonato — o ensemble responde até o histórico crescer
             previsao = self._sanear(cand['Ens_Media'], y)
-            return self._limitar_media_historica(previsao, y), "SemTorneio_Ensemble", 0.0, {}
+            return previsao, "SemTorneio_Ensemble", 0.0, {}
 
         placar = self._disputar(y, datas, meses_alvo, categoria_y, categoria_datas)
         previsao = np.zeros(HORIZONTE)
@@ -289,19 +293,7 @@ class NexusForecaster:
                 acuracias.append(100.0 * pontos[vencedor] / total * len(pontos))
 
         acuracia = float(np.clip(np.mean(acuracias), 0, 100)) if acuracias else 0.0
-        previsao = self._limitar_media_historica(self._sanear(previsao, y), y)
-        return previsao, "Torneio[" + "|".join(rotulo) + "]", acuracia, campeoes
-
-    @staticmethod
-    def _limitar_media_historica(previsao, y) -> np.ndarray:
-        """Impede crescimento acima de 5% da média histórica de cada SKU."""
-        media = float(np.mean(y)) if len(y) else 0.0
-        if not np.isfinite(media) or media <= 0:
-            valores = np.nan_to_num(np.asarray(previsao, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
-            return np.round(np.maximum(valores, 0.0), 2)
-        teto = media * (1.0 + LIMITE_CRESCIMENTO_MEDIA)
-        valores = np.nan_to_num(np.asarray(previsao, dtype=float), nan=0.0, posinf=teto, neginf=0.0)
-        return np.round(np.minimum(np.maximum(valores, 0.0), teto), 2)
+        return self._sanear(previsao, y), "Torneio[" + "|".join(rotulo) + "]", acuracia, campeoes
 
     @staticmethod
     def _sanear(previsao, y) -> np.ndarray:
