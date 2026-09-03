@@ -14,9 +14,10 @@ else:
     # Configurações de alta performance exclusivas para PostgreSQL
     engine = create_engine(
         SQLALCHEMY_DATABASE_URL, 
-        pool_pre_ping=True,  
-        pool_size=20,        
-        max_overflow=30     
+        pool_pre_ping=True,
+        pool_size=settings.DB_POOL_SIZE,
+        max_overflow=settings.DB_MAX_OVERFLOW,
+        pool_timeout=settings.DB_POOL_TIMEOUT,
     )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

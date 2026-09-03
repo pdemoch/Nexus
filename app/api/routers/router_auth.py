@@ -65,7 +65,7 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 # MOTOR DE HEARTBEAT
 # ==========================================
 @router.post("/heartbeat")
-async def heartbeat(request: Request, usuario_logado: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+def heartbeat(request: Request, usuario_logado: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     agora = datetime.utcnow()
     usuario = db.query(Usuario).filter(Usuario.id == usuario_logado['id']).first()
     if usuario is None:
@@ -86,7 +86,7 @@ async def heartbeat(request: Request, usuario_logado: dict = Depends(get_current
     return {"status": "alive", "sessao_registrada": sessao is not None}
 
 @router.post("/logout")
-async def logout(usuario_logado: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+def logout(usuario_logado: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     agora = datetime.utcnow()
     sessao_id = usuario_logado.get("sessao_id")
     sessao = db.query(UsuarioSessao).filter(
@@ -132,7 +132,7 @@ class NovaSenhaPayload(BaseModel):
 # ROTAS DO SISTEMA
 # ==========================================
 @router.post("/login")
-async def login(request: Request, payload: LoginPayload, db: Session = Depends(get_db)):
+def login(request: Request, payload: LoginPayload, db: Session = Depends(get_db)):
     email_limpo = payload.email.lower().strip()
     
     try:

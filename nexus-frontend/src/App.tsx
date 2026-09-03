@@ -30,13 +30,13 @@ export default function App() {
       try { await axios.post('/api/v1/auth/heartbeat'); } catch (error) {}
     };
     enviarPulso();
-    const intervalId = setInterval(enviarPulso, 30000);
+    const intervalId = setInterval(enviarPulso, 60000);
     return () => clearInterval(intervalId);
   }, [user]);
 
   // RADAR DO SISTEMA — bloqueia a UI enquanto o pipeline/IA roda
   useEffect(() => {
-    if (!user) return;
+    if (!user || user.funcao !== 'Administrador') return;
     const checkSystemStatus = async () => {
       try {
         const res = await axios.get('/api/v1/admin/pipeline/status');
@@ -62,6 +62,15 @@ export default function App() {
       if (parsedUser.funcao === 'Coordenador') setCurrentRoute('consenso');
       else setCurrentRoute('dashboard');
     }
+  }, []);
+
+  useEffect(() => {
+    const handleSessionExpired = () => {
+      setUser(null);
+      setCurrentRoute('login');
+    };
+    window.addEventListener('nexus:session-expired', handleSessionExpired);
+    return () => window.removeEventListener('nexus:session-expired', handleSessionExpired);
   }, []);
 
   const handleLoginSuccess = (userData: any) => {

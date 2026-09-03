@@ -26,6 +26,9 @@ class Settings:
     DB_HOST: str = os.getenv("DB_HOST", "")
     DB_PORT: str = os.getenv("DB_PORT", "5432")
     DB_NAME: str = os.getenv("DB_NAME", "")
+    DB_POOL_SIZE: int = int(os.getenv("DB_POOL_SIZE", "10"))
+    DB_MAX_OVERFLOW: int = int(os.getenv("DB_MAX_OVERFLOW", "10"))
+    DB_POOL_TIMEOUT: int = int(os.getenv("DB_POOL_TIMEOUT", "15"))
 
     # Monta a URL dinamicamente. Se a infra não preencher, usa o SQLite local como emergência.
     if DB_USER and DB_PASSWORD and DB_HOST and DB_NAME:

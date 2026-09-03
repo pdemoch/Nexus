@@ -23,6 +23,18 @@ axios.interceptors.request.use((config) => {
   return Promise.reject(error);
 });
 
+axios.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401 && localStorage.getItem('nexus_token')) {
+      localStorage.removeItem('nexus_token');
+      localStorage.removeItem('nexus_user');
+      window.dispatchEvent(new Event('nexus:session-expired'));
+    }
+    return Promise.reject(error);
+  },
+);
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />

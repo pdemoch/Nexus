@@ -3,7 +3,7 @@ import axios from 'axios';
 
 /**
  * Hook que mantém a sessão "viva" no banco de dados.
- * Ele avisa o backend a cada 30 segundos que o usuário está com a tela aberta.
+ * Ele avisa o backend a cada 60 segundos que o usuário está com a tela aberta.
  */
 export function useHeartbeat(token: string | null) {
   useEffect(() => {
@@ -23,8 +23,8 @@ export function useHeartbeat(token: string | null) {
     // Envia o primeiro pulso imediatamente ao carregar a tela
     enviarPulso();
 
-    // Configura o intervalo para bater a cada 30 segundos
-    const interval = setInterval(enviarPulso, 30000);
+    // Configura o intervalo para bater a cada 60 segundos
+    const interval = setInterval(enviarPulso, 60000);
 
     // Limpa o intervalo se o usuário fechar a tela ou fizer logout
     return () => clearInterval(interval);
