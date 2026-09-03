@@ -27,20 +27,33 @@ class GobiExtractor:
         Extrai a fotografia atual (D0) do estoque através da API 90 do Gobi.
         """
         # A sua classe já tem self.base_url apontada para os relatórios do Gobi.
-        url = f"{self.base_url}/90" 
+        url = f"{self.base_url}/90/data"
         
         print("📦 [EXTRACTOR] A puxar a fotografia de Estoque D0 (API 90)...")
         
         connector = aiohttp.TCPConnector(limit=10, keepalive_timeout=60)
         async with aiohttp.ClientSession(connector=connector) as session:
             try:
-                # Como a API 90 é a fotografia do momento, não precisamos passar datas (params vazio)
-                # Aproveitamos o motor de repetição (retry) que você já programou brilhantemente!
-                dados_90 = await self._fetch_json_with_retry(session, url, params={})
+                dados_90 = await self._fetch_json_with_retry(
+                    session, url,
+                    params={"streaming": "true", "format": "json",
+                            "limit": 5000, "offset": 0},
+                )
                 
                 if not dados_90:
-                    print("⚠️ [EXTRACTOR] A API 90 não retornou dados de estoque.")
-                    return None
+                    raise RuntimeError("A API 90 não retornou dados de estoque.")
+
+                # Sem parâmetros, a API retorna apenas o cabeçalho como primeira
+                # linha; o endpoint /data com JSON retorna os registros.
+                if isinstance(dados_90[0], list):
+                    cabecalho = dados_90[0]
+                    dados_90 = [
+                        dict(zip(cabecalho, linha))
+                        for linha in dados_90[1:]
+                        if isinstance(linha, list)
+                    ]
+                if not dados_90:
+                    raise RuntimeError("A API 90 retornou somente o cabeçalho.")
                     
                 # Converte os dicionários da API num Polars LazyFrame super rápido
                 lf_90 = pl.LazyFrame(dados_90)
@@ -50,7 +63,7 @@ class GobiExtractor:
                 
             except Exception as e:
                 print(f"❌ [EXTRACTOR] Erro crítico ao puxar API 90: {e}")
-                return None
+                raise
 
     async def _fetch_json_with_retry(self, session: aiohttp.ClientSession, url: str, params: dict, retries: int = 4) -> Optional[Any]:
         async with self.semaphore:
@@ -153,16 +166,22 @@ class GobiExtractor:
     def extrair_segmentos(self, caminho_arquivo: str) -> pl.DataFrame:
         try:
             caminho = Path(caminho_arquivo)
-            if caminho.exists():
-                df = pl.read_excel(caminho_arquivo)
-                df.columns = [c.lower().strip() for c in df.columns]
-                colunas_foco = ["produto", "bu", "categoria", "segmento", "2026"]
-                cols_existentes = [c for c in colunas_foco if c in df.columns]
-                df = df.select(cols_existentes)
-                if "produto" in df.columns: df = df.with_columns(pl.col("produto").cast(pl.Utf8))
-                return df
-        except Exception as e: print(f"Erro ao ler Segmentos.xlsx: {e}")
-        return pl.DataFrame()
+            if not caminho.exists():
+                raise FileNotFoundError(f"Arquivo de portfólio não encontrado: {caminho}")
+            df = pl.read_excel(caminho_arquivo)
+            df.columns = [c.lower().strip() for c in df.columns]
+            colunas_foco = ["produto", "bu", "categoria", "segmento", "2026"]
+            cols_existentes = [c for c in colunas_foco if c in df.columns]
+            obrigatorias = {"produto", "categoria", "2026"}
+            ausentes = obrigatorias.difference(cols_existentes)
+            if ausentes:
+                raise ValueError(f"Segmentos.xlsx sem colunas obrigatórias: {sorted(ausentes)}")
+            df = df.select(cols_existentes)
+            df = df.with_columns(pl.col("produto").cast(pl.Utf8))
+            return df
+        except Exception as e:
+            print(f"Erro ao ler Segmentos.xlsx: {e}")
+            raise
 
     def extrair_orcamento(self, caminho_arquivo: str) -> pl.DataFrame:
         try:
