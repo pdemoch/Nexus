@@ -364,13 +364,24 @@ function PreenchimentoMetas() {
      por executivo existir). */
   const skusAgregadosCarteira = useMemo(() => {
     if (!naFaseSku) return [];
-    const map: Record<string, { sku: string; descricao: string; pmvPorMes: Record<string, number>; iaPorMes: Record<string, number> }> = {};
+    const map: Record<string, {
+      sku: string; descricao: string;
+      pmvPorMes: Record<string, number>;
+      receitaPorMes: Record<string, number>;
+      volumePorMes: Record<string, number>;
+      iaPorMes: Record<string, number>;
+    }> = {};
     const walk = (n: any, rz: string | null) => {
       if (n.tipo === 'produto') {
-        if (!map[n.sku]) map[n.sku] = { sku: n.sku, descricao: n.descricao, pmvPorMes: {}, iaPorMes: {} };
+        if (!map[n.sku]) map[n.sku] = {
+          sku: n.sku, descricao: n.descricao, pmvPorMes: {},
+          receitaPorMes: {}, volumePorMes: {}, iaPorMes: {},
+        };
         meses.forEach(m => {
           const cel = n.meses[m]; if (!cel) return;
-          map[n.sku].pmvPorMes[m] = cel.pmv || 0;
+          const volume = cel.meta || 0;
+          map[n.sku].volumePorMes[m] = (map[n.sku].volumePorMes[m] || 0) + volume;
+          map[n.sku].receitaPorMes[m] = (map[n.sku].receitaPorMes[m] || 0) + volume * (cel.pmv || 0);
           map[n.sku].iaPorMes[m] = (map[n.sku].iaPorMes[m] || 0) + (cel.ia || 0);
         });
         return;
@@ -379,7 +390,12 @@ function PreenchimentoMetas() {
       (n.subRows || []).forEach((f: any) => walk(f, c));
     };
     (dados?.arvore || []).forEach((g: any) => walk(g, null));
-    return Object.values(map).sort((a, b) => a.descricao.localeCompare(b.descricao));
+    return Object.values(map).map(s => ({
+      ...s,
+      pmvPorMes: Object.fromEntries(meses.map(m => [
+        m, s.volumePorMes[m] > 0 ? s.receitaPorMes[m] / s.volumePorMes[m] : 0,
+      ])),
+    })).sort((a, b) => a.descricao.localeCompare(b.descricao));
   }, [dados, naFaseSku, meses]);
 
   /* Edição do SKU no nível carteira inteira: rateia entre TODOS os clientes
@@ -689,7 +705,7 @@ function ListaSkuCarteira({ skus, meses, somaSkuCarteira, setSkuCarteira,
             const total   = somaSkuCarteira(s.sku, m);
             const pmv     = s.pmvPorMes[m] || 0;
             const ia      = s.iaPorMes[m] || 0;
-            const valor   = total * pmv;
+            const valor   = s.receitaPorMes[m] || 0;
             return (
               <div key={m} className="text-right">
                 <div className="text-[9px] font-bold text-indigo-400 pr-2 mb-0.5">

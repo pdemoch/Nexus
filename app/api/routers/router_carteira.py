@@ -311,12 +311,22 @@ def tabela(responsavel: str = None, nivel_responsavel: str = None,
 
         responsaveis = db.execute(text("""
             SELECT DISTINCT 'Gerente' AS nivel, TRIM(gerente_nome) AS nome
-            FROM dim_clientes WHERE NULLIF(TRIM(gerente_nome), '') IS NOT NULL
+            FROM dim_clientes c
+            WHERE NULLIF(TRIM(c.gerente_nome), '') IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM fato_ibp_granular f
+                  WHERE f.ciclo_sop = :ciclo AND f.cgc = c.cgc
+              )
             UNION
             SELECT DISTINCT 'Coordenador', TRIM(supervisor_nome)
-            FROM dim_clientes WHERE NULLIF(TRIM(supervisor_nome), '') IS NOT NULL
+            FROM dim_clientes c
+            WHERE NULLIF(TRIM(c.supervisor_nome), '') IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM fato_ibp_granular f
+                  WHERE f.ciclo_sop = :ciclo AND f.cgc = c.cgc
+              )
             ORDER BY 1, 2
-        """)).fetchall() if escopo["ve_tudo"] else []
+        """), {"ciclo": ciclo}).fetchall() if escopo["ve_tudo"] else []
 
         if nome_resp:
             fase_resp = nome_resp
@@ -847,7 +857,7 @@ def ratear_fase(payload: PayloadRatearFase, db: Session = Depends(get_db),
                 novo_total = aj.novo_volume
             elif aj.novo_valor_financeiro is not None:
                 pmv = db.execute(text("""
-                    SELECT COALESCE(SUM(pmv_aplicado * vol_bottomup) / NULLIF(SUM(vol_bottomup), 0), 0)
+                    SELECT COALESCE(SUM(pmv_aplicado * vol_meta) / NULLIF(SUM(vol_meta), 0), 0)
                     FROM fato_ibp_granular
                     WHERE ciclo_sop = :c AND sku = :s AND TO_CHAR(mes_projetado,'YYYY-MM') = :m
                 """), {"c": ciclo, "s": aj.sku, "m": aj.mes_projetado}).scalar() or 0
