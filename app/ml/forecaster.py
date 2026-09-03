@@ -82,6 +82,7 @@ logger = logging.getLogger(__name__)
 JANELA_VALIDACAO = 24         # origens de validação por SKU
 MIN_MESES_TORNEIO = 18        # abaixo disso não há campeonato confiável
 HISTERESE = 0.0               # 0.0 = meritocracia pura a cada ciclo
+LIMITE_CRESCIMENTO_MEDIA = 0.05  # teto preventivo para cada SKU contra sua média histórica
 
 
 class NexusForecaster:
@@ -248,13 +249,16 @@ class NexusForecaster:
         if n == 0:
             return np.zeros(HORIZONTE), "Fallback_Zero", 0.0, {}
         if n <= 2:
-            return np.full(HORIZONTE, max(0.0, y.mean())), "Fallback_Media2m", 0.0, {}
+            previsao = np.full(HORIZONTE, max(0.0, y.mean()))
+            return self._limitar_media_historica(previsao, y), "Fallback_Media2m", 0.0, {}
         if n <= 5:
             # medido: com 3 a 5 meses o último mês fechado bate todos os demais
-            return np.full(HORIZONTE, max(0.0, y[-1])), "Fallback_UltimoMes", 0.0, {}
+            previsao = np.full(HORIZONTE, max(0.0, y[-1]))
+            return self._limitar_media_historica(previsao, y), "Fallback_UltimoMes", 0.0, {}
         if n < 12:
             # medido: de 6 a 11 meses a média simples de todo o histórico ganha
-            return np.full(HORIZONTE, max(0.0, y.mean())), "Fallback_MediaSimples", 0.0, {}
+            previsao = np.full(HORIZONTE, max(0.0, y.mean()))
+            return self._limitar_media_historica(previsao, y), "Fallback_MediaSimples", 0.0, {}
 
         contexto = None
         if categoria_y is not None and categoria_datas is not None:
@@ -264,7 +268,8 @@ class NexusForecaster:
         if n < MIN_MESES_TORNEIO:
             # o SKU passa por todos os modelos, mas não há origens suficientes
             # para um campeonato — o ensemble responde até o histórico crescer
-            return self._sanear(cand['Ens_Media'], y), "SemTorneio_Ensemble", 0.0, {}
+            previsao = self._sanear(cand['Ens_Media'], y)
+            return self._limitar_media_historica(previsao, y), "SemTorneio_Ensemble", 0.0, {}
 
         placar = self._disputar(y, datas, meses_alvo, categoria_y, categoria_datas)
         previsao = np.zeros(HORIZONTE)
@@ -284,7 +289,19 @@ class NexusForecaster:
                 acuracias.append(100.0 * pontos[vencedor] / total * len(pontos))
 
         acuracia = float(np.clip(np.mean(acuracias), 0, 100)) if acuracias else 0.0
-        return self._sanear(previsao, y), "Torneio[" + "|".join(rotulo) + "]", acuracia, campeoes
+        previsao = self._limitar_media_historica(self._sanear(previsao, y), y)
+        return previsao, "Torneio[" + "|".join(rotulo) + "]", acuracia, campeoes
+
+    @staticmethod
+    def _limitar_media_historica(previsao, y) -> np.ndarray:
+        """Impede crescimento acima de 5% da média histórica de cada SKU."""
+        media = float(np.mean(y)) if len(y) else 0.0
+        if not np.isfinite(media) or media <= 0:
+            valores = np.nan_to_num(np.asarray(previsao, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+            return np.round(np.maximum(valores, 0.0), 2)
+        teto = media * (1.0 + LIMITE_CRESCIMENTO_MEDIA)
+        valores = np.nan_to_num(np.asarray(previsao, dtype=float), nan=0.0, posinf=teto, neginf=0.0)
+        return np.round(np.minimum(np.maximum(valores, 0.0), teto), 2)
 
     @staticmethod
     def _sanear(previsao, y) -> np.ndarray:
