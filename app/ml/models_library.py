@@ -8,18 +8,19 @@ Nenhum candidato pode devolver nulo: quem não tem base para rodar devolve o
 próprio fallback interno e compete assim mesmo, como manda a regra de que todo
 SKU passa por todos os modelos.
 
-Sem dependência de prophet, pmdarima, statsmodels, xgboost ou lightgbm — todos
-os métodos são implementados aqui em numpy, o que elimina os erros silenciosos
-de "biblioteca não instalada" que faziam candidatos serem descartados por
-acidente no torneio anterior.
+Os modelos oficiais Prophet e XGBoost são opcionais para permitir execução em
+ambientes mínimos; quando instalados, ambos participam da arena normalmente.
 """
 
 import numpy as np
 import pandas as pd
 import warnings
+import logging
 from app.core.constants import HORIZONTE
 
 warnings.filterwarnings("ignore")
+logger = logging.getLogger(__name__)
+_LOGGED_CANDIDATE_ERRORS = set()
 
 try:
     from scipy import stats as _stats
@@ -705,8 +706,14 @@ def gerar_todos_candidatos(y, datas, meses_alvo, contexto=None) -> dict:
     for nome, fn in ARENA.items():
         try:
             cand[nome] = _limpar(fn(y, datas, meses_alvo, ctx), socorro)
-        except Exception:
+        except Exception as exc:
             cand[nome] = np.full(HORIZONTE, socorro)
+            if nome not in _LOGGED_CANDIDATE_ERRORS:
+                logger.warning(
+                    "Candidato %s indisponivel; usando fallback: %s: %s",
+                    nome, type(exc).__name__, exc,
+                )
+                _LOGGED_CANDIDATE_ERRORS.add(nome)
 
     # Ensembles entram como CANDIDATOS e disputam a eleição do vencedor.
     # A deduplicação evita que candidatos que colapsaram no mesmo número
