@@ -243,10 +243,14 @@ export default function FinanceiroArena() {
   const abrirFornecedorPmp = async (fornecedor: any) => {
     setPmpFornecedorSel(fornecedor);
     setPmpFornecedorDetalhe(null);
-    const r = await axios.get('/api/v1/financeiro/pmp/fornecedor-detalhe', {
-      params: { ...pmpParams, clifor: fornecedor.clifor },
-    });
-    setPmpFornecedorDetalhe(r.data);
+    try {
+      const r = await axios.get('/api/v1/financeiro/pmp/fornecedor-detalhe', {
+        params: { ...pmpParams, clifor: fornecedor.clifor },
+      });
+      setPmpFornecedorDetalhe(r.data);
+    } catch {
+      setPmpFornecedorDetalhe({ pagamentos: [], total: 0, resumo: {} });
+    }
   };
 
   const buscarFiltros = useCallback(async () => {
@@ -659,7 +663,7 @@ export default function FinanceiroArena() {
             ) : dadosEvolucao.length === 0 ? (
               <div className="flex items-center justify-center h-64 text-slate-300 text-xs font-bold">Sem dados</div>
             ) : (
-              <ResponsiveContainer width="100%" height={300}>
+              <ResponsiveContainer width="100%" height={300} minWidth={0}>
                 <ComposedChart data={dadosEvolucao} margin={{ top: 10, right: 20, left: 0, bottom: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                   <XAxis dataKey="mes" tick={{ fontSize: 10, fontWeight: 700, fill: '#64748b' }} />
@@ -932,7 +936,7 @@ export default function FinanceiroArena() {
             <div className="xl:col-span-3 bg-white rounded-2xl border border-slate-100 p-5">
               <div className="text-xs font-black uppercase tracking-widest text-slate-400 mb-1">PMP por Tipo D1</div>
               <div className="text-[10px] text-slate-400 mb-3">Barras = valor pago · linhas = prazos médios</div>
-              <ResponsiveContainer width="100%" height={280}>
+              <ResponsiveContainer width="100%" height={280} minWidth={0}>
                 <ComposedChart data={pmpTiposOrdenados} margin={{ top: 10, right: 20, left: 0, bottom: 35 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                   <XAxis dataKey="tipo" tick={{ fontSize: 9, fill: '#64748b' }} />

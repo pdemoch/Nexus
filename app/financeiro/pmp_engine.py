@@ -5,6 +5,8 @@ deduplicados e o peso é sempre o valor efetivamente pago.
 """
 from datetime import date
 import logging
+import math
+from functools import lru_cache
 from typing import Any
 import pandas as pd
 
@@ -21,6 +23,19 @@ def _col(df: pd.DataFrame, name: str) -> pd.Series:
     return df[name] if name in df else pd.Series("", index=df.index)
 
 
+def _finite_float(value, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return round(number, 2) if math.isfinite(number) else default
+
+
+def _date_text(value) -> str:
+    parsed = pd.to_datetime(value, errors="coerce")
+    return parsed.strftime("%Y-%m-%d") if not pd.isna(parsed) else ""
+
+
 def _norm_key(series: pd.Series) -> pd.Series:
     return series.fillna("").astype(str).str.strip().str.upper()
 
@@ -34,8 +49,10 @@ def _as_filter(value) -> list[str] | None:
     return values or None
 
 
-def _base(data_ini: date, data_fim: date, motivos=None, tipos=None,
-          fornecedores=None, clifor=None) -> pd.DataFrame:
+@lru_cache(maxsize=16)
+def _base_cached(data_ini: date, data_fim: date, motivos: tuple[str, ...] | None,
+                 tipos: tuple[str, ...] | None, fornecedores: tuple[str, ...] | None,
+                 clifor: tuple[str, ...] | None) -> pd.DataFrame:
     # A leitura começa na E5: só depois voltamos para o título SE2 e para a
     # nota SF1/F1 que contextualiza o pagamento.
     nf = carregar_todos_mensal("notas_entrada", data_fim)
@@ -133,6 +150,16 @@ def _base(data_ini: date, data_fim: date, motivos=None, tipos=None,
     if fornecedor_values:
         base = base[_norm_key(_col(base, "clifor")).isin(fornecedor_values)]
     return base
+
+
+def _base(data_ini: date, data_fim: date, motivos=None, tipos=None,
+          fornecedores=None, clifor=None) -> pd.DataFrame:
+    def _key(value) -> tuple[str, ...] | None:
+        normalized = _as_filter(value)
+        return tuple(normalized) if normalized else None
+
+    return _base_cached(data_ini, data_fim, _key(motivos), _key(tipos),
+                        _key(fornecedores), _key(clifor)).copy()
 
 
 def _resumo(df: pd.DataFrame) -> dict[str, Any]:
@@ -272,16 +299,19 @@ def obter_pagamentos_fornecedor(data_ini: date, data_fim: date, clifor: str,
             "nf": str(row.get("f1_doc", "")),
             "serie": str(row.get("f1_serie", "")),
             "tipo_d1": str(row.get("d1_tp", "") or "SEM VALOR"),
-            "emissao": pd.to_datetime(row.get("e2_emissao"), errors="coerce").strftime("%Y-%m-%d"),
-            "vencimento_real": pd.to_datetime(row.get("e2_vencrea"), errors="coerce").strftime("%Y-%m-%d"),
-            "vencimento_condicao": pd.to_datetime(row.get("e2_vencto"), errors="coerce").strftime("%Y-%m-%d"),
-            "data_pagamento": pd.to_datetime(row.get("e5_data"), errors="coerce").strftime("%Y-%m-%d"),
-            "valor_pago": round(float(row.get("e5_valor", 0) or 0), 2),
-            "valor_bruto_nf": round(float(row.get("f1_valbrut", 0) or 0), 2),
-            "pmp_pagamento": round(float(row.get("dias_pagamento", 0) or 0), 2),
-            "pmp_vencimento": round(float(row.get("dias_vencimento", 0) or 0), 2),
-            "pmp_cond_pag": round(float(row.get("dias_cond_pag", 0) or 0), 2),
-            "delta_atraso": round(float(row.get("dias_pagamento", 0) or 0) - float(row.get("dias_cond_pag", 0) or 0), 2),
+            "emissao": _date_text(row.get("e2_emissao")),
+            "vencimento_real": _date_text(row.get("e2_vencrea")),
+            "vencimento_condicao": _date_text(row.get("e2_vencto")),
+            "data_pagamento": _date_text(row.get("e5_data")),
+            "valor_pago": _finite_float(row.get("e5_valor")),
+            "valor_bruto_nf": _finite_float(row.get("f1_valbrut")),
+            "pmp_pagamento": _finite_float(row.get("dias_pagamento")),
+            "pmp_vencimento": _finite_float(row.get("dias_vencimento")),
+            "pmp_cond_pag": _finite_float(row.get("dias_cond_pag")),
+            "delta_atraso": _finite_float(
+                _finite_float(row.get("dias_pagamento"))
+                - _finite_float(row.get("dias_cond_pag"))
+            ),
         })
     return {"clifor": clifor, "nome": nome, "total": len(pagamentos),
             "resumo": _resumo(base), "pagamentos": pagamentos}
