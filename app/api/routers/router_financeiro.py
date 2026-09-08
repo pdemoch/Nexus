@@ -177,18 +177,20 @@ def _pmp_filters(motivos, tipos, fornecedores, clifor):
 
 @router.get("/pmp/filtros")
 async def pmp_filtros(data_ini: date = Query(...), data_fim: date = Query(...),
+                      motivos: str = Query(None), tipos: str = Query(None),
+                      fornecedores: str = Query(None), clifor: str = Query(None),
+                      e5_motbx: str = Query(None), d1_tp: str = Query(None),
+                      fornecedor: str = Query(None),
                       _: dict = Depends(get_current_user)):
-    def listar():
-        base = _pmp()._base(data_ini, data_fim)
-        if base.empty:
-            return {"e5_motbx": [], "d1_tp": [], "fornecedor": [], "motivos": [], "tipos": [], "fornecedores": [], "clifor": []}
-        valores = lambda col: sorted(_pmp()._norm_key(_pmp()._col(base, col)).replace("", "SEM VALOR").unique().tolist())
-        fornecedores = valores("clifor")
-        motivos = valores("e5_motbx")
-        tipos = valores("d1_tp")
-        return {"e5_motbx": motivos, "d1_tp": tipos, "fornecedor": fornecedores,
-                "motivos": motivos, "tipos": tipos, "fornecedores": fornecedores, "clifor": fornecedores}
-    return await asyncio.to_thread(listar)
+    _validar_datas(data_ini, data_fim)
+    return await asyncio.to_thread(
+        _pmp().listar_filtros_pmp,
+        data_ini, data_fim,
+        motivos or e5_motbx,
+        tipos or d1_tp,
+        fornecedores or fornecedor,
+        clifor,
+    )
 
 
 @router.get("/pmp/global-filtrado")

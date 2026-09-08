@@ -7,12 +7,13 @@ from datetime import date
 import logging
 import math
 from functools import lru_cache
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from app.financeiro.s3_store import carregar_todos_mensal, carregar_mensal, carregar_fornecedores
 
 logger = logging.getLogger(__name__)
+SEM_VALOR = "SEM VALOR"
 
 
 def _num(df: pd.DataFrame, col: str) -> pd.Series:
@@ -40,7 +41,11 @@ def _norm_key(series: pd.Series) -> pd.Series:
     return series.fillna("").astype(str).str.strip().str.upper()
 
 
-def _as_filter(value) -> list[str] | None:
+def _filter_key(series: pd.Series) -> pd.Series:
+    return _norm_key(series).replace("", SEM_VALOR)
+
+
+def _as_filter(value) -> Optional[List[str]]:
     if not value:
         return None
     if isinstance(value, str):
@@ -50,9 +55,9 @@ def _as_filter(value) -> list[str] | None:
 
 
 @lru_cache(maxsize=16)
-def _base_cached(data_ini: date, data_fim: date, motivos: tuple[str, ...] | None,
-                 tipos: tuple[str, ...] | None, fornecedores: tuple[str, ...] | None,
-                 clifor: tuple[str, ...] | None) -> pd.DataFrame:
+def _base_cached(data_ini: date, data_fim: date, motivos: Optional[Tuple[str, ...]],
+                 tipos: Optional[Tuple[str, ...]], fornecedores: Optional[Tuple[str, ...]],
+                 clifor: Optional[Tuple[str, ...]]) -> pd.DataFrame:
     # A leitura começa na E5: só depois voltamos para o título SE2 e para a
     # nota SF1/F1 que contextualiza o pagamento.
     nf = carregar_todos_mensal("notas_entrada", data_fim)
@@ -144,17 +149,17 @@ def _base_cached(data_ini: date, data_fim: date, motivos: tuple[str, ...] | None
     tipo_values = _as_filter(tipos)
     fornecedor_values = _as_filter(fornecedores) or _as_filter(clifor)
     if motivo_values:
-        base = base[_norm_key(_col(base, "e5_motbx")).isin(motivo_values)]
+        base = base[_filter_key(_col(base, "e5_motbx")).isin(motivo_values)]
     if tipo_values:
-        base = base[_norm_key(_col(base, "d1_tp")).isin(tipo_values)]
+        base = base[_filter_key(_col(base, "d1_tp")).isin(tipo_values)]
     if fornecedor_values:
-        base = base[_norm_key(_col(base, "clifor")).isin(fornecedor_values)]
+        base = base[_filter_key(_col(base, "clifor")).isin(fornecedor_values)]
     return base
 
 
 def _base(data_ini: date, data_fim: date, motivos=None, tipos=None,
           fornecedores=None, clifor=None) -> pd.DataFrame:
-    def _key(value) -> tuple[str, ...] | None:
+    def _key(value) -> Optional[Tuple[str, ...]]:
         normalized = _as_filter(value)
         return tuple(normalized) if normalized else None
 
@@ -162,7 +167,54 @@ def _base(data_ini: date, data_fim: date, motivos=None, tipos=None,
                         _key(fornecedores), _key(clifor)).copy()
 
 
-def _resumo(df: pd.DataFrame) -> dict[str, Any]:
+def _filtrar_base_df(base: pd.DataFrame, motivos=None, tipos=None,
+                    fornecedores=None, clifor=None) -> pd.DataFrame:
+    if base.empty:
+        return base
+    out = base
+    motivo_values = _as_filter(motivos)
+    tipo_values = _as_filter(tipos)
+    fornecedor_values = _as_filter(fornecedores) or _as_filter(clifor)
+    if motivo_values:
+        out = out[_filter_key(_col(out, "e5_motbx")).isin(motivo_values)]
+    if tipo_values:
+        out = out[_filter_key(_col(out, "d1_tp")).isin(tipo_values)]
+    if fornecedor_values:
+        out = out[_filter_key(_col(out, "clifor")).isin(fornecedor_values)]
+    return out
+
+
+def _valores_filtro(base: pd.DataFrame, coluna: str) -> List[str]:
+    if base.empty:
+        return []
+    return sorted(_filter_key(_col(base, coluna)).unique().tolist())
+
+
+def listar_filtros_pmp(data_ini: date, data_fim: date, motivos=None, tipos=None,
+                       fornecedores=None, clifor=None) -> Dict[str, List[str]]:
+    base = _base(data_ini, data_fim)
+    filtros = {
+        "e5_motbx": _valores_filtro(
+            _filtrar_base_df(base, tipos=tipos, fornecedores=fornecedores, clifor=clifor),
+            "e5_motbx",
+        ),
+        "d1_tp": _valores_filtro(
+            _filtrar_base_df(base, motivos=motivos, fornecedores=fornecedores, clifor=clifor),
+            "d1_tp",
+        ),
+        "fornecedor": _valores_filtro(
+            _filtrar_base_df(base, motivos=motivos, tipos=tipos),
+            "clifor",
+        ),
+    }
+    filtros["motivos"] = filtros["e5_motbx"]
+    filtros["tipos"] = filtros["d1_tp"]
+    filtros["fornecedores"] = filtros["fornecedor"]
+    filtros["clifor"] = filtros["fornecedor"]
+    return filtros
+
+
+def _resumo(df: pd.DataFrame) -> Dict[str, Any]:
     if df.empty:
         return {"pagamentos": 0, "valor_total": 0.0, "pmp": 0.0}
     valor = float(df["e5_valor"].sum())
@@ -182,7 +234,7 @@ def _resumo(df: pd.DataFrame) -> dict[str, Any]:
 
 
 def _resumo_fornecedores(base: pd.DataFrame, limit: int = 100,
-                        offset: int = 0) -> dict[str, Any]:
+                        offset: int = 0) -> Dict[str, Any]:
     if base.empty:
         return {"total": 0, "fornecedores": []}
     nomes = carregar_fornecedores()
@@ -196,58 +248,7 @@ def _resumo_fornecedores(base: pd.DataFrame, limit: int = 100,
     return {"total": len(rows), "fornecedores": rows[offset:offset + limit]}
 
 
-def calcular_pmp_global(data_ini: date, data_fim: date, motivos=None, tipos=None,
-                        fornecedores=None, clifor=None, e5_motbx=None, d1_tp=None,
-                        fornecedor=None) -> dict[str, Any]:
-    motivos = motivos if motivos is not None else e5_motbx
-    tipos = tipos if tipos is not None else d1_tp
-    fornecedores = fornecedores if fornecedores is not None else fornecedor
-    resumo = _resumo(_base(data_ini, data_fim, motivos, tipos, fornecedores, clifor))
-    dias_periodo = max((data_fim - data_ini).days, 1)
-    resumo["valor_por_dia"] = round(resumo["valor_total"] / dias_periodo, 2)
-    return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim),
-                         "dias_periodo": dias_periodo}, **resumo}
-
-
-def calcular_pmp_fornecedores(data_ini: date, data_fim: date,
-                              limit: int = 100, offset: int = 0, motivos=None,
-                              tipos=None, fornecedores=None, clifor=None,
-                              e5_motbx=None, d1_tp=None, fornecedor=None) -> dict[str, Any]:
-    motivos = motivos if motivos is not None else e5_motbx
-    tipos = tipos if tipos is not None else d1_tp
-    fornecedores = fornecedores if fornecedores is not None else fornecedor
-    base = _base(data_ini, data_fim, motivos, tipos, fornecedores, clifor)
-    resumo = _resumo_fornecedores(base, limit, offset)
-    return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
-            **resumo}
-
-
-def calcular_pmp_resumo(data_ini: date, data_fim: date, motivos=None, tipos=None,
-                        fornecedores=None, clifor=None) -> dict[str, Any]:
-    base = _base(data_ini, data_fim, motivos, tipos, fornecedores, clifor)
-    valores = lambda col: sorted(_norm_key(_col(base, col)).replace("", "SEM VALOR").unique().tolist())
-    motivos_disponiveis = valores("e5_motbx")
-    tipos_disponiveis = valores("d1_tp")
-    fornecedores_disponiveis = valores("clifor")
-    global_resumo = _resumo(base)
-    dias_periodo = max((data_fim - data_ini).days, 1)
-    global_resumo["valor_por_dia"] = round(global_resumo["valor_total"] / dias_periodo, 2)
-    return {
-        "periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim),
-                    "dias_periodo": dias_periodo},
-        "global": global_resumo,
-        "fornecedores": _resumo_fornecedores(base),
-        "filtros": {
-            "e5_motbx": motivos_disponiveis,
-            "d1_tp": tipos_disponiveis,
-            "fornecedor": fornecedores_disponiveis,
-        },
-    }
-
-
-def calcular_pmp_mensal(data_ini: date, data_fim: date, motivos=None, tipos=None,
-                        fornecedores=None, clifor=None) -> dict[str, Any]:
-    base = _base(data_ini, data_fim, motivos, tipos, fornecedores, clifor)
+def _resumo_mensal(base: pd.DataFrame, data_ini: date, data_fim: date) -> Dict[str, Any]:
     if base.empty:
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "meses": []}
     base = base.copy()
@@ -265,9 +266,7 @@ def calcular_pmp_mensal(data_ini: date, data_fim: date, motivos=None, tipos=None
             "meses": sorted(rows, key=lambda row: row["mes"])}
 
 
-def calcular_pmp_tipos(data_ini: date, data_fim: date, motivos=None, tipos=None,
-                       fornecedores=None, clifor=None) -> dict[str, Any]:
-    base = _base(data_ini, data_fim, motivos, tipos, fornecedores, clifor)
+def _resumo_tipos(base: pd.DataFrame, data_ini: date, data_fim: date) -> Dict[str, Any]:
     if base.empty:
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "tipos": []}
     rows = []
@@ -277,8 +276,63 @@ def calcular_pmp_tipos(data_ini: date, data_fim: date, motivos=None, tipos=None,
     return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "tipos": rows}
 
 
+def calcular_pmp_global(data_ini: date, data_fim: date, motivos=None, tipos=None,
+                        fornecedores=None, clifor=None, e5_motbx=None, d1_tp=None,
+                        fornecedor=None) -> Dict[str, Any]:
+    motivos = motivos if motivos is not None else e5_motbx
+    tipos = tipos if tipos is not None else d1_tp
+    fornecedores = fornecedores if fornecedores is not None else fornecedor
+    resumo = _resumo(_base(data_ini, data_fim, motivos, tipos, fornecedores, clifor))
+    dias_periodo = max((data_fim - data_ini).days, 1)
+    resumo["valor_por_dia"] = round(resumo["valor_total"] / dias_periodo, 2)
+    return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim),
+                         "dias_periodo": dias_periodo}, **resumo}
+
+
+def calcular_pmp_fornecedores(data_ini: date, data_fim: date,
+                              limit: int = 100, offset: int = 0, motivos=None,
+                              tipos=None, fornecedores=None, clifor=None,
+                              e5_motbx=None, d1_tp=None, fornecedor=None) -> Dict[str, Any]:
+    motivos = motivos if motivos is not None else e5_motbx
+    tipos = tipos if tipos is not None else d1_tp
+    fornecedores = fornecedores if fornecedores is not None else fornecedor
+    base = _base(data_ini, data_fim, motivos, tipos, fornecedores, clifor)
+    resumo = _resumo_fornecedores(base, limit, offset)
+    return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
+            **resumo}
+
+
+def calcular_pmp_resumo(data_ini: date, data_fim: date, motivos=None, tipos=None,
+                        fornecedores=None, clifor=None) -> Dict[str, Any]:
+    base = _base(data_ini, data_fim, motivos, tipos, fornecedores, clifor)
+    global_resumo = _resumo(base)
+    dias_periodo = max((data_fim - data_ini).days, 1)
+    global_resumo["valor_por_dia"] = round(global_resumo["valor_total"] / dias_periodo, 2)
+    return {
+        "periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim),
+                    "dias_periodo": dias_periodo},
+        "global": global_resumo,
+        "fornecedores": _resumo_fornecedores(base),
+        "evolucao": _resumo_mensal(base, data_ini, data_fim),
+        "tipos": _resumo_tipos(base, data_ini, data_fim),
+        "filtros": listar_filtros_pmp(data_ini, data_fim, motivos, tipos, fornecedores, clifor),
+    }
+
+
+def calcular_pmp_mensal(data_ini: date, data_fim: date, motivos=None, tipos=None,
+                        fornecedores=None, clifor=None) -> Dict[str, Any]:
+    base = _base(data_ini, data_fim, motivos, tipos, fornecedores, clifor)
+    return _resumo_mensal(base, data_ini, data_fim)
+
+
+def calcular_pmp_tipos(data_ini: date, data_fim: date, motivos=None, tipos=None,
+                       fornecedores=None, clifor=None) -> Dict[str, Any]:
+    base = _base(data_ini, data_fim, motivos, tipos, fornecedores, clifor)
+    return _resumo_tipos(base, data_ini, data_fim)
+
+
 def obter_pagamentos_fornecedor(data_ini: date, data_fim: date, clifor: str,
-                                motivos=None, tipos=None) -> dict[str, Any]:
+                                motivos=None, tipos=None) -> Dict[str, Any]:
     base = _base(data_ini, data_fim, motivos, tipos, [clifor])
     if base.empty:
         return {"clifor": clifor, "nome": None, "total": 0, "resumo": {}, "pagamentos": []}
@@ -317,7 +371,7 @@ def obter_pagamentos_fornecedor(data_ini: date, data_fim: date, clifor: str,
             "resumo": _resumo(base), "pagamentos": pagamentos}
 
 
-def calcular_pmp(data_ini: date, data_fim: date, **filters) -> dict[str, Any]:
+def calcular_pmp(data_ini: date, data_fim: date, **filters) -> Dict[str, Any]:
     """Alias estável para consumidores que não precisam escolher a granularidade."""
     return {"global": calcular_pmp_global(data_ini, data_fim, **filters),
             "fornecedores": calcular_pmp_fornecedores(data_ini, data_fim, **filters)}

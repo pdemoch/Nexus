@@ -36,6 +36,9 @@ const corDias = (d: number) =>
 const corDelta = (d: number) =>
   d < 0 ? '#059669' : d <= 10 ? '#d97706' : '#e11d48';
 
+const requestCancelado = (erro: any) =>
+  axios.isCancel?.(erro) || erro?.code === 'ERR_CANCELED' || erro?.name === 'CanceledError';
+
 const abrevReg = (r: string) => {
   const map: Record<string, string> = {
     'KEY ACCOUNT': 'KEY ACC',
@@ -114,12 +117,27 @@ const mesAno2Date = (mes: string, ano: string, fim = false) => {
   return `${ano}-${mes}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
+// Período padrão: últimos 4 meses fechados, terminando no mês anterior ao atual.
+// Ex.: hoje em 09/2026 → janela 04/2026 a 08/2026.
+const periodoPadrao = () => {
+  const hoje = new Date();
+  const fim = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1);
+  const ini = new Date(fim.getFullYear(), fim.getMonth() - 4, 1);
+  return {
+    mesIni: String(ini.getMonth() + 1).padStart(2, '0'),
+    anoIni: String(ini.getFullYear()),
+    mesFim: String(fim.getMonth() + 1).padStart(2, '0'),
+    anoFim: String(fim.getFullYear()),
+  };
+};
+
 export default function FinanceiroArena() {
   // ── Filtros ──
-  const [mesFim, setMesFim]   = useState('07');
-  const [anoFim, setAnoFim]   = useState('2026');
-  const [mesIni, setMesIni]   = useState('01');
-  const [anoIni, setAnoIni]   = useState('2026');
+  const periodoInicial = periodoPadrao();
+  const [mesFim, setMesFim]   = useState(periodoInicial.mesFim);
+  const [anoFim, setAnoFim]   = useState(periodoInicial.anoFim);
+  const [mesIni, setMesIni]   = useState(periodoInicial.mesIni);
+  const [anoIni, setAnoIni]   = useState(periodoInicial.anoIni);
   const [segmentosSel, setSegmentosSel] = useState<string[]>([]);
   const [regionaisSel, setRegionaisSel] = useState<string[]>([]);
   const [statusSel, setStatusSel] = useState<string[]>([]);
@@ -195,49 +213,55 @@ export default function FinanceiroArena() {
     });
   };
 
+  const pmpFiltrosParams = {
+    data_ini: dataIni,
+    data_fim: dataFim,
+    ...(pmpMotivosSel.length ? { e5_motbx: pmpMotivosSel.join(',') } : {}),
+    ...(pmpTiposSel.length ? { d1_tp: pmpTiposSel.join(',') } : {}),
+    ...(pmpFornecedoresSel.length ? { fornecedor: pmpFornecedoresSel.join(',') } : {}),
+  };
+
   // ─── Fetch principal ───────────────────────────────────────────────────────
-  const buscarDados = useCallback(async () => {
+  const buscarDados = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     setSemDados(false);
     try {
       const [gRes, rRes, cRes, eRes] = await Promise.all([
-        axios.get('/api/v1/financeiro/pmr/global-filtrado',   { params: paramsBase }),
-        axios.get('/api/v1/financeiro/pmr/regional-filtrado', { params: paramsBase }),
-        axios.get('/api/v1/financeiro/pmr/clientes-filtrado', { params: { ...paramsBase, limit: 100 } }),
-        axios.get('/api/v1/financeiro/pmr/evolucao',          { params: paramsBase }),
+        axios.get('/api/v1/financeiro/pmr/global-filtrado',   { params: paramsBase, signal }),
+        axios.get('/api/v1/financeiro/pmr/regional-filtrado', { params: paramsBase, signal }),
+        axios.get('/api/v1/financeiro/pmr/clientes-filtrado', { params: { ...paramsBase, limit: 100 }, signal }),
+        axios.get('/api/v1/financeiro/pmr/evolucao',          { params: paramsBase, signal }),
       ]);
       setGlobal(gRes.data);
       setRegionais(rRes.data.regionais || []);
       setClientes(cRes.data.clientes || []);
       setEvolucao(eRes.data.meses || []);
       if (!gRes.data.notas_pagas) setSemDados(true);
-    } catch {
+    } catch (e: any) {
+      if (requestCancelado(e)) return;
       setSemDados(true);
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appliedParams.pmr]);
 
-  const buscarPmp = useCallback(async () => {
+  const buscarPmp = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     try {
       const params = pmpParams;
-      const r = await axios.get('/api/v1/financeiro/pmp/resumo', { params });
-      const [evolucaoRes, tiposRes] = await Promise.allSettled([
-        axios.get('/api/v1/financeiro/pmp/evolucao', { params }),
-        axios.get('/api/v1/financeiro/pmp/tipos', { params }),
-      ]);
+      const r = await axios.get('/api/v1/financeiro/pmp/resumo', { params, signal });
       setPmpGlobal(r.data.global);
       setPmpFornecedores(r.data.fornecedores?.fornecedores || []);
-      setPmpEvolucao(evolucaoRes.status === 'fulfilled' ? evolucaoRes.value.data.meses || [] : []);
-      setPmpTipos(tiposRes.status === 'fulfilled' ? tiposRes.value.data.tipos || [] : []);
+      setPmpEvolucao(r.data.evolucao?.meses || []);
+      setPmpTipos(r.data.tipos?.tipos || []);
       setPmpFiltros(r.data.filtros || { e5_motbx: [], d1_tp: [], fornecedor: [] });
-    } catch {
+    } catch (e: any) {
+      if (requestCancelado(e)) return;
       setPmpGlobal(null);
       setPmpFornecedores([]);
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   }, [appliedParams.pmp]);
 
@@ -266,9 +290,36 @@ export default function FinanceiroArena() {
   useEffect(() => {
     if (toggleAtivo === 'PMR') buscarFiltros();
   }, [buscarFiltros, toggleAtivo]);
+
+  const buscarFiltrosPmp = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const r = await axios.get('/api/v1/financeiro/pmp/filtros', {
+        params: pmpFiltrosParams,
+        signal,
+      });
+      const novos = r.data || { e5_motbx: [], d1_tp: [], fornecedor: [] };
+      setPmpFiltros(novos);
+      setPmpMotivosSel(sel => sel.filter(v => (novos.e5_motbx || novos.motivos || []).includes(v)));
+      setPmpTiposSel(sel => sel.filter(v => (novos.d1_tp || novos.tipos || []).includes(v)));
+      setPmpFornecedoresSel(sel => sel.filter(v => (novos.fornecedor || novos.fornecedores || novos.clifor || []).includes(v)));
+    } catch (e: any) {
+      if (!requestCancelado(e)) setPmpFiltros({ e5_motbx: [], d1_tp: [], fornecedor: [] });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataIni, dataFim, pmpMotivosSel.join(','), pmpTiposSel.join(','), pmpFornecedoresSel.join(',')]);
+
   useEffect(() => {
-    if (toggleAtivo === 'PMR') buscarDados();
-    if (toggleAtivo === 'PMP') buscarPmp();
+    if (toggleAtivo !== 'PMP') return;
+    const controller = new AbortController();
+    buscarFiltrosPmp(controller.signal);
+    return () => controller.abort();
+  }, [buscarFiltrosPmp, toggleAtivo]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    if (toggleAtivo === 'PMR') buscarDados(controller.signal);
+    if (toggleAtivo === 'PMP') buscarPmp(controller.signal);
+    return () => controller.abort();
   }, [buscarDados, buscarPmp, toggleAtivo]);
 
   // ─── Autocomplete de cliente (debounced) ─────────────────────────────────────
@@ -505,7 +556,7 @@ export default function FinanceiroArena() {
             {baixando ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
             Excel
           </button>
-          <button onClick={toggleAtivo === 'PMP' ? buscarPmp : buscarDados} disabled={loading}
+          <button onClick={() => { toggleAtivo === 'PMP' ? buscarPmp() : buscarDados(); }} disabled={loading}
             className="p-2 bg-white border border-slate-200 rounded-xl text-slate-500 hover:bg-slate-50 transition-all">
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
           </button>
