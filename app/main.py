@@ -23,8 +23,20 @@ from app.api.routers import (
 from app.core.config import settings
 from app.models.domain_models import Base
 from app.core.database import engine
+from sqlalchemy import inspect, text as sql_text
 
 Base.metadata.create_all(bind=engine)
+
+inspector = inspect(engine)
+if (
+    "fato_ibp_granular" in inspector.get_table_names()
+    and "vol_irrestrita" not in {col["name"] for col in inspector.get_columns("fato_ibp_granular")}
+):
+    with engine.begin() as conn:
+        conn.execute(sql_text("""
+            ALTER TABLE fato_ibp_granular
+            ADD COLUMN vol_irrestrita INTEGER DEFAULT 0
+        """))
 
 app = FastAPI(
     title="Nexus IBP 3.0 API",

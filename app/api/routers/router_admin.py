@@ -585,15 +585,17 @@ async def excluir_usuario_sistema(user_id: int, db: Session = Depends(get_db), u
         )
 
     try:
-        db.execute(text("DELETE FROM usuarios WHERE id = :id"), {"id": user_id})
+        usuario = db.query(Usuario).filter(Usuario.id == user_id).first()
+        if usuario is None:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+
+        db.query(UsuarioSessao).filter(UsuarioSessao.usuario_id == user_id).delete(synchronize_session=False)
+        db.delete(usuario)
         db.commit()
         return {"status": "success", "message": "Utilizador removido com sucesso do Nexus."}
-    except Exception as e:
+    except HTTPException:
         db.rollback()
-        try:
-            db.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_id})
-            db.commit()
-            return {"status": "success", "message": "Utilizador removido com sucesso do Nexus."}
-        except Exception as e2:
-            db.rollback()
-            raise HTTPException(status_code=500, detail="Erro interno ao excluir utilizador. Contacte o suporte.")
+        raise
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Erro interno ao excluir utilizador. Contacte o suporte.")

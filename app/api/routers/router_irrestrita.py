@@ -1,8 +1,8 @@
 """
 router_irrestrita.py  —  Demanda Irrestrita
 
-Tela de consenso entre IA, Marketing (vol_topdown) e Comercial (vol_bottomup).
-Grava sempre em vol_bottomup e propaga para jusante (Metas, Supply, Final).
+Tela de consenso pos-Metas. Ajusta a demanda irrestrita em vol_irrestrita,
+rateada pelos percentuais impl?citos em vol_meta, e propaga para Supply e Final.
 
 Contrato:
   GET  /api/v1/irrestrita/status
@@ -11,11 +11,11 @@ Contrato:
   GET  /api/v1/irrestrita/exportar    → Excel
   GET  /api/v1/irrestrita/resumo      → Visão Geral (mesmo payload das outras telas)
   GET  /api/v1/irrestrita/exportar-visao-geral
-  GET  /api/v1/irrestrita/dossie      → dossiê do SKU (coluna_meta = vol_bottomup)
-  POST /api/v1/irrestrita/congelar    → Admin congela ETAPA_BOTTOMUP
-  POST /api/v1/irrestrita/reabrir     → Admin reabre ETAPA_BOTTOMUP
+  GET  /api/v1/irrestrita/dossie      → dossiê do SKU (coluna_meta = vol_irrestrita)
+  POST /api/v1/irrestrita/congelar    → Admin congela ETAPA_IRRESTRITA
+  POST /api/v1/irrestrita/reabrir     → Admin reabre ETAPA_IRRESTRITA
 
-Posição no bastão: TopDown → **BottomUp (esta tela)** → Metas → Supply → Final
+Posição no bastão: TopDown → BottomUP → Metas → **Irrestrita (esta tela)** → Supply → Final
 """
 
 import io
@@ -42,8 +42,8 @@ from app.api.routers.shared_ibp import (
     propagar_linha_jusante,
     escrever_volume_rateado,
     registrar_log_auditoria,
-    ETAPA_TOPDOWN,
-    ETAPA_BOTTOMUP,
+    ETAPA_METAS,
+    ETAPA_IRRESTRITA,
 )
 
 router = APIRouter(prefix="/api/v1/irrestrita", tags=["Demanda Irrestrita"])
@@ -82,8 +82,8 @@ def _parse_mes(mes_str: str):
 @router.get("/status")
 def status(db: Session = Depends(get_db), _: dict = Depends(require_irrestrita)):
     ciclo = get_current_cycle(db)
-    upstream_ok = etapa_congelada(db, ciclo, ETAPA_TOPDOWN)
-    propria     = etapa_congelada(db, ciclo, ETAPA_BOTTOMUP)
+    upstream_ok = etapa_congelada(db, ciclo, ETAPA_METAS)
+    propria     = etapa_congelada(db, ciclo, ETAPA_IRRESTRITA)
     return {
         "ciclo": ciclo,
         "congelada": propria or not upstream_ok,
@@ -130,7 +130,8 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_irrestrita))
     Cada célula SKU/mês traz:
       ia        → vol_ia   (previsão do modelo)
       topdown   → vol_topdown (proposta do Marketing)
-      bottomup  → vol_bottomup (proposta do Comercial — EDITÁVEL)
+      meta        → vol_meta (Metas Comercial)
+      irrestrita  → vol_irrestrita (Demanda Irrestrita — EDITÁVEL)
       realizado_ap → vendido mesmo mês ano passado (âncora)
       orcamento → orçamento em R$ (referência empresa)
       pmv       → preço médio de venda aplicado
@@ -139,12 +140,12 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_irrestrita))
     meses    = get_working_window_months(db)
     meses_iso = [m.strftime("%Y-%m-%d") for m in meses]
 
-    upstream_ok       = etapa_congelada(db, ciclo, ETAPA_TOPDOWN)
-    propria_congelada = etapa_congelada(db, ciclo, ETAPA_BOTTOMUP)
+    upstream_ok       = etapa_congelada(db, ciclo, ETAPA_METAS)
+    propria_congelada = etapa_congelada(db, ciclo, ETAPA_IRRESTRITA)
     aguardando        = not upstream_ok
     congelada         = propria_congelada or aguardando
 
-    # ── Plano: IA + TopDown + BottomUp por SKU/mês ──────────────────────────
+    # ── Plano: IA + TopDown + Irrestrita por SKU/mês ──────────────────────────
     plano = db.execute(text("""
         SELECT f.sku,
                COALESCE(p.descricao, 'SEM DESCRICAO') AS descricao,
@@ -153,9 +154,11 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_irrestrita))
                TO_CHAR(f.mes_projetado, 'YYYY-MM-DD') AS mes,
                SUM(f.vol_ia)                           AS ia,
                SUM(f.vol_topdown)                      AS topdown,
-               SUM(f.vol_bottomup)                     AS bottomup,
+               SUM(f.vol_meta)                           AS meta,
+               SUM(f.vol_irrestrita)                    AS irrestrita,
                COALESCE(
-                   SUM(f.vol_bottomup * f.pmv_aplicado) / NULLIF(SUM(f.vol_bottomup), 0),
+                   SUM(f.vol_irrestrita * f.pmv_aplicado) / NULLIF(SUM(f.vol_irrestrita), 0),
+                   SUM(f.vol_meta * f.pmv_aplicado) / NULLIF(SUM(f.vol_meta), 0),
                    SUM(f.vol_ia * f.pmv_aplicado) / NULLIF(SUM(f.vol_ia), 0),
                    0
                )                                       AS pmv
@@ -195,11 +198,11 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_irrestrita))
 
     # ── Monta árvore ──────────────────────────────────────────────────────
     tree: dict = {}
-    tot: dict = {mi: {"ia": 0, "topdown": 0, "bottomup": 0, "fat_bu": 0.0,
+    tot: dict = {mi: {"ia": 0, "topdown": 0, "meta": 0, "irrestrita": 0, "fat_irrestrita": 0.0,
                        "cx_ap": 0, "rs_ap": 0.0} for mi in meses_iso}
 
     # NOTA: os totais de "real. ano ant." (cx_ap / rs_ap) são acumulados
-    # DENTRO do loop abaixo, célula por célula — igual ia/topdown/bottomup —
+    # DENTRO do loop abaixo, célula por célula — igual ia/topdown/irrestrita —
     # em vez de somados direto de realizado_ap.values() antes do loop.
     #
     # BUG CORRIGIDO: a versão anterior somava TODO realizado_ap.values(),
@@ -215,7 +218,8 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_irrestrita))
     for r in plano:
         ia  = int(r.ia or 0)
         td  = int(r.topdown or 0)
-        bu  = int(r.bottomup or 0)
+        meta = int(r.meta or 0)
+        ir  = int(r.irrestrita or 0)
         pmv = float(r.pmv or 0)
 
         cat = tree.setdefault(r.categoria, {"nome": r.categoria, "segmentos": {}})
@@ -227,7 +231,8 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_irrestrita))
         sk["meses"][r.mes] = {
             "ia":          ia,
             "topdown":     td,
-            "bottomup":    bu,
+            "meta":        meta,
+            "irrestrita":  ir,
             "pmv":         round(pmv, 2),
             "orcamento":   orc_idx.get(r.sku, {}).get(r.mes),
             "realizado_ap": realizado_ap_cel,
@@ -235,9 +240,10 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_irrestrita))
         }
         tot[r.mes]["ia"]       += ia
         tot[r.mes]["topdown"]  += td
-        tot[r.mes]["bottomup"] += bu
-        tot[r.mes]["fat_bu"]   += bu * pmv
-        # Mesmo escopo do card "Comercial": só soma se o SKU está em plano
+        tot[r.mes]["meta"]      += meta
+        tot[r.mes]["irrestrita"] += ir
+        tot[r.mes]["fat_irrestrita"] += ir * pmv
+        # Mesmo escopo do card "Irrestrita": só soma se o SKU está em plano
         # (ativo, faz parte do ciclo). Nunca lê realizado_ap.values() direto.
         if realizado_ap_cel:
             tot[r.mes]["cx_ap"] += realizado_ap_cel["cx"]
@@ -262,7 +268,7 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_irrestrita))
         "congelada_propria":  propria_congelada,
         "aguardando_upstream": aguardando,
         "motivo_bloqueio": (
-            "Demanda Marketing ainda não congelou o plano." if aguardando
+            "Metas Comercial ainda não congelou o plano." if aguardando
             else "Etapa congelada pelo Administrador." if propria_congelada else None
         ),
         "sou_admin": u.get("funcao") == "Administrador",
@@ -272,7 +278,7 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_irrestrita))
 
 
 # ---------------------------------------------------------------------------
-# POST /salvar  — grava vol_bottomup e propaga
+# POST /salvar  — grava vol_irrestrita e propaga
 # ---------------------------------------------------------------------------
 class AjusteIrrestrita(BaseModel):
     sku: str
@@ -290,25 +296,25 @@ def salvar(payload: PayloadSalvar,
            u: dict = Depends(require_irrestrita)):
     try:
         ciclo = get_current_cycle(db)
-        if etapa_congelada(db, ciclo, ETAPA_BOTTOMUP):
+        if etapa_congelada(db, ciclo, ETAPA_IRRESTRITA):
             raise HTTPException(423, "Etapa já congelada. Reabra para editar.")
-        if not etapa_congelada(db, ciclo, ETAPA_TOPDOWN):
-            raise HTTPException(423, "Demanda Marketing ainda não congelou o plano.")
+        if not etapa_congelada(db, ciclo, ETAPA_METAS):
+            raise HTTPException(423, "Metas Comercial ainda não congelou o plano.")
 
         nome_user = u.get("nome", u.get("email", "?"))
         total = 0
         for aj in payload.ajustes:
             data_alvo = _parse_mes(aj.mes_projetado)
             antigo = db.execute(text("""
-                SELECT COALESCE(SUM(vol_bottomup), 0) FROM fato_ibp_granular
+                SELECT COALESCE(SUM(vol_irrestrita), 0) FROM fato_ibp_granular
                 WHERE ciclo_sop = :c AND sku = :s AND mes_projetado = :m
             """), {"c": ciclo, "s": aj.sku, "m": data_alvo}).scalar()
 
             total += escrever_volume_rateado(
                 db=db, ciclo=ciclo, sku=aj.sku, mes=data_alvo,
-                volume_alvo=int(aj.novo_volume), etapa=ETAPA_BOTTOMUP,
+                volume_alvo=int(aj.novo_volume), etapa=ETAPA_IRRESTRITA,
             )
-            propagar_linha_jusante(db, ciclo, aj.sku, data_alvo, ETAPA_BOTTOMUP)
+            propagar_linha_jusante(db, ciclo, aj.sku, data_alvo, ETAPA_IRRESTRITA)
             registrar_log_auditoria(
                 db=db, ciclo=ciclo, origem="Demanda Irrestrita",
                 usuario=nome_user, sku=aj.sku, cliente="TODOS_OS_CLIENTES",
@@ -336,13 +342,15 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_irrestrita
                    TO_CHAR(f.mes_projetado, 'MM/YYYY') AS mes,
                    SUM(f.vol_ia)                        AS ia,
                    SUM(f.vol_topdown)                   AS topdown,
-                   SUM(f.vol_bottomup)                  AS bottomup,
+                   SUM(f.vol_meta)                      AS meta,
+                   SUM(f.vol_irrestrita)                  AS irrestrita,
                    COALESCE(
-                   SUM(f.vol_bottomup * f.pmv_aplicado) / NULLIF(SUM(f.vol_bottomup), 0),
+                   SUM(f.vol_irrestrita * f.pmv_aplicado) / NULLIF(SUM(f.vol_irrestrita), 0),
+                   SUM(f.vol_meta * f.pmv_aplicado) / NULLIF(SUM(f.vol_meta), 0),
                    SUM(f.vol_ia * f.pmv_aplicado) / NULLIF(SUM(f.vol_ia), 0),
                    0
                )                                       AS pmv,
-                   SUM(f.vol_bottomup * f.pmv_aplicado) AS receita
+                   SUM(f.vol_irrestrita * f.pmv_aplicado) AS receita
             FROM fato_ibp_granular f
             LEFT JOIN dim_produtos p ON p.sku = f.sku
             WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:m)
@@ -358,7 +366,8 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_irrestrita
             "Mês":              r.mes,
             "IA (cx)":          int(r.ia or 0),
             "Marketing (cx)":   int(r.topdown or 0),
-            "Comercial (cx)":   int(r.bottomup or 0),
+            "Metas (cx)":       int(r.meta or 0),
+            "Irrestrita (cx)":  int(r.irrestrita or 0),
             "PMV (R$)":         round(float(r.pmv or 0), 2),
             "Receita Prev. (R$)": round(float(r.receita or 0), 2),
         } for r in rows]
@@ -382,7 +391,7 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_irrestrita
 
 
 # ---------------------------------------------------------------------------
-# GET /dossie  — dossiê do SKU (coluna_meta = vol_bottomup)
+# GET /dossie  — dossiê do SKU (coluna_meta = vol_irrestrita)
 # ---------------------------------------------------------------------------
 @router.get("/dossie")
 def dossie(sku: str, db: Session = Depends(get_db),
@@ -395,20 +404,20 @@ def dossie(sku: str, db: Session = Depends(get_db),
             text("SELECT descricao FROM dim_produtos WHERE sku = :s"), {"s": sku}
         ).scalar()
         return montar_dossie(db, sku, ciclo, meses, descricao=desc,
-                             coluna_meta="vol_bottomup")
+                             coluna_meta="vol_irrestrita")
     except Exception as e:
         raise HTTPException(500, repr(e))
 
 
 # ---------------------------------------------------------------------------
-# POST /congelar  — (Admin) fecha ETAPA_BOTTOMUP e passa o bastão
+# POST /congelar  — (Admin) fecha ETAPA_IRRESTRITA e passa o bastão
 # ---------------------------------------------------------------------------
 @router.post("/congelar")
 def congelar(db: Session = Depends(get_db), _: dict = Depends(require_admin)):
     try:
         ciclo = get_current_cycle(db)
-        congelar_etapa(db, ciclo, ETAPA_BOTTOMUP)
-        res = propagar_para_jusante(db, ciclo, ETAPA_BOTTOMUP)
+        congelar_etapa(db, ciclo, ETAPA_IRRESTRITA)
+        res = propagar_para_jusante(db, ciclo, ETAPA_IRRESTRITA)
         db.commit()
         return {"status": "congelada", "propagacao": res}
     except Exception as e:
@@ -416,13 +425,13 @@ def congelar(db: Session = Depends(get_db), _: dict = Depends(require_admin)):
 
 
 # ---------------------------------------------------------------------------
-# POST /reabrir  — (Admin) reabre ETAPA_BOTTOMUP
+# POST /reabrir  — (Admin) reabre ETAPA_IRRESTRITA
 # ---------------------------------------------------------------------------
 @router.post("/reabrir")
 def reabrir(db: Session = Depends(get_db), _: dict = Depends(require_admin)):
     try:
         ciclo = get_current_cycle(db)
-        reabrir_etapa(db, ciclo, ETAPA_BOTTOMUP)
+        reabrir_etapa(db, ciclo, ETAPA_IRRESTRITA)
         db.commit()
         return {"status": "reaberta"}
     except Exception as e:

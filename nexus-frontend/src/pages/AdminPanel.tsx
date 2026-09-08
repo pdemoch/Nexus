@@ -476,6 +476,7 @@ Confirma a RECARGA TOTAL?`
                                 <option value="TopDown">Top-Down (Marketing)</option>
                                 <option value="BottomUP">Bottom-Up (Gerência Comercial)</option>
                                 <option value="Metas">Metas / Consenso (Vendas)</option>
+                                <option value="Irrestrita">Demanda Irrestrita</option>
                                 <option value="Supply">Supply (Fábrica)</option>
                                 <option value="Final">S&OP Global (Final)</option>
                             </select>

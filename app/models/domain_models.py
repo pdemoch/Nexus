@@ -128,6 +128,7 @@ class FatoIbpGranular(Base):
     vol_bottomup = Column(Integer, default=0)
     vol_final = Column(Integer, default=0) 
     vol_meta = Column(Integer, default=0) 
+    vol_irrestrita = Column(Integer, default=0)
     
     pmv_aplicado = Column(Float, default=0.0)
     

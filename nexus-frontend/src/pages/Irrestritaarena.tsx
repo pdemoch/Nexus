@@ -11,8 +11,8 @@ import VisaoGeralMarketing from './VisaoGeralMarketing';
 /* =====================================================================
    DEMANDA IRRESTRITA
    Hierarquia: Categoria → SKU (segmento removido da visualização)
-   Compara: IA × Marketing (vol_topdown) × Ano Anterior × Comercial (vol_bottomup)
-   Edita: vol_bottomup — propaga para Metas → Supply → Final
+   Compara: IA × Marketing (vol_topdown) × Metas (vol_meta) × Ano Anterior
+   Edita: vol_irrestrita — propaga para Supply → Final
    ===================================================================== */
 
 const fmtCx = (n: number) => new Intl.NumberFormat('pt-BR').format(Math.round(n || 0));
@@ -26,9 +26,9 @@ const mesLabel = (iso: string) => {
 };
 
 /* Delta % de um valor em relação ao comercial (base) */
-function delta(ref: number, bu: number): { pct: number; cor: string; sinal: string } | null {
-  if (!ref || !bu) return null;
-  const pct = ((ref - bu) / bu) * 100;
+function delta(ref: number, base: number): { pct: number; cor: string; sinal: string } | null {
+  if (!ref || !base) return null;
+  const pct = ((ref - base) / base) * 100;
   const abs = Math.abs(pct);
   const cor = abs >= 20 ? (pct > 0 ? '#e11d48' : '#2563eb')
              : abs >= 8  ? (pct > 0 ? '#d97706' : '#7c3aed')
@@ -87,7 +87,7 @@ function PreenchimentoIrrestrita() {
   const aguardando       = Boolean(dados?.aguardando_upstream);
   const souAdmin         = dados?.sou_admin === true;
 
-  const valBU = (sku: string, mes: string, original: number) => {
+  const valIrrestrita = (sku: string, mes: string, original: number) => {
     const k = `${sku}|${mes}`;
     return k in edits ? edits[k] : (original || 0);
   };
@@ -95,7 +95,7 @@ function PreenchimentoIrrestrita() {
     setEdits(p => ({ ...p, [`${sku}|${mes}`]: Math.max(0, Math.round(v || 0)) }));
 
   /* Adotar uma fonte inteira (todos os meses do SKU de uma vez) */
-  const adotarFonte = (sku: string, fonte: 'ia' | 'topdown' | 'realizado_ap', skuData: any) => {
+  const adotarFonte = (sku: string, fonte: 'ia' | 'topdown' | 'meta' | 'realizado_ap', skuData: any) => {
     const novo: Record<string, number> = {};
     meses.forEach(m => {
       const cel = skuData.meses[m];
@@ -128,22 +128,24 @@ function PreenchimentoIrrestrita() {
     const fat: Record<string, number> = {};
     const ia:  Record<string, number> = {};
     const td:  Record<string, number> = {};
+    const meta: Record<string, number> = {};
     const ap:  Record<string, number> = {};
-    meses.forEach(m => { vol[m] = 0; fat[m] = 0; ia[m] = 0; td[m] = 0; ap[m] = 0; });
+    meses.forEach(m => { vol[m] = 0; fat[m] = 0; ia[m] = 0; td[m] = 0; meta[m] = 0; ap[m] = 0; });
     categoriasFlatadas.forEach((cat: any) =>
       cat.skus.forEach((s: any) =>
         meses.forEach(m => {
           const cel = s.meses[m]; if (!cel) return;
-          const bu  = valBU(s.sku, m, cel.bottomup);
-          vol[m] += bu;
-          fat[m] += bu * (cel.pmv || 0);
+          const ir  = valIrrestrita(s.sku, m, cel.irrestrita ?? cel.bottomup);
+          vol[m] += ir;
+          fat[m] += ir * (cel.pmv || 0);
           ia[m]  += cel.ia || 0;
           td[m]  += cel.topdown || 0;
+          meta[m] += cel.meta || 0;
           ap[m]  += cel.realizado_ap?.cx || 0;
         })
       )
     );
-    return { vol, fat, ia, td, ap };
+    return { vol, fat, ia, td, meta, ap };
   }, [dados, edits, meses, busca]);
 
   const temEdicoes = Object.keys(edits).length > 0;
@@ -164,7 +166,7 @@ function PreenchimentoIrrestrita() {
   };
 
   const congelarEtapa = async () => {
-    if (!confirm('Congelar Demanda Irrestrita? A etapa Metas Comercial será liberada.')) return;
+    if (!confirm('Congelar Demanda Irrestrita? A etapa Supply será liberada.')) return;
     try {
       if (temEdicoes) await salvar();
       await axios.post('/api/v1/irrestrita/congelar', {});
@@ -217,8 +219,8 @@ function PreenchimentoIrrestrita() {
             <div className="min-w-0">
               <h1 className="text-lg font-black text-slate-900 tracking-tight">Demanda Irrestrita</h1>
               <p className="text-xs font-medium text-slate-400">
-                Ciclo {dados?.ciclo} · selecione IA, Marketing ou Ano Anterior — ou insira manualmente
-                {aguardando && <span className="ml-2 text-orange-500 font-bold">· aguardando Marketing congelar</span>}
+                Ciclo {dados?.ciclo} · selecione IA, Marketing, Metas ou Ano Anterior — ou insira manualmente
+                {aguardando && <span className="ml-2 text-orange-500 font-bold">· aguardando Metas congelar</span>}
                 {!aguardando && propria && <span className="ml-2 text-amber-600 font-bold">· etapa congelada</span>}
               </p>
             </div>
@@ -267,7 +269,7 @@ function PreenchimentoIrrestrita() {
               <div className="w-2 h-2 rounded-full bg-orange-400 shrink-0 animate-pulse" />
               <div>
                 <div className="text-xs font-black text-orange-700">Preenchimento bloqueado</div>
-                <div className="text-[11px] text-orange-600">Demanda Marketing ainda não congelou o plano deste ciclo.</div>
+                <div className="text-[11px] text-orange-600">Metas Comercial ainda não congelou o plano deste ciclo.</div>
               </div>
             </div>
           )}
@@ -279,10 +281,11 @@ function PreenchimentoIrrestrita() {
               Total da carteira
             </div>
             {meses.map(m => {
-              const bu  = totaisVivos.vol[m];
+              const ir  = totaisVivos.vol[m];
               const fat = totaisVivos.fat[m];
               const ia  = totaisVivos.ia[m];
               const td  = totaisVivos.td[m];
+              const meta = totaisVivos.meta[m];
               // Totais do ano anterior: vêm do backend (soma direta da fato_vendas)
               // Nunca re-precificado pelo PMV atual — é o valor real que aconteceu.
               const ap    = dados?.totais?.[m]?.cx_ap ?? 0;
@@ -294,15 +297,16 @@ function PreenchimentoIrrestrita() {
                   return a + cel.orcamento;
                 }, 0), 0);
 
-              const dIA = delta(ia, bu);
-              const dTD = delta(td, bu);
-              const dAP = ap > 0 ? delta(ap, bu) : null;
+              const dIA = delta(ia, ir);
+              const dTD = delta(td, ir);
+              const dMeta = delta(meta, ir);
+              const dAP = ap > 0 ? delta(ap, ir) : null;
               return (
                 <div key={m} className="bg-slate-50 rounded-xl px-3 py-2 space-y-2">
                   <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">{mesLabel(m)}</div>
 
                   {/* Linha de referências em caixas */}
-                  <div className="grid grid-cols-3 gap-1">
+                  <div className="grid grid-cols-4 gap-1">
                     {/* IA */}
                     <div className="flex flex-col items-center bg-violet-50 rounded-lg px-1 py-1.5">
                       <span className="text-[8px] font-black uppercase tracking-wider text-violet-400 flex items-center gap-0.5 mb-0.5"><Zap className="w-2 h-2"/>IA</span>
@@ -315,6 +319,12 @@ function PreenchimentoIrrestrita() {
                       <span className="text-[11px] font-black text-slate-700">{fmtCx(td)}</span>
                       {dTD && <span className="text-[9px] font-black" style={{ color: dTD.cor }}>{dTD.sinal}</span>}
                     </div>
+                    {/* Metas */}
+                    <div className="flex flex-col items-center bg-emerald-50 rounded-lg px-1 py-1.5">
+                      <span className="text-[8px] font-black uppercase tracking-wider text-emerald-500 flex items-center gap-0.5 mb-0.5"><ShoppingCart className="w-2 h-2"/>Meta</span>
+                      <span className="text-[11px] font-black text-slate-700">{fmtCx(meta)}</span>
+                      {dMeta && <span className="text-[9px] font-black" style={{ color: dMeta.cor }}>{dMeta.sinal}</span>}
+                    </div>
                     {/* Ano anterior */}
                     <div className="flex flex-col items-center bg-slate-100 rounded-lg px-1 py-1.5">
                       <span className="text-[8px] font-black uppercase tracking-wider text-slate-400 flex items-center gap-0.5 mb-0.5"><History className="w-2 h-2"/>Ant.</span>
@@ -326,12 +336,12 @@ function PreenchimentoIrrestrita() {
                   {/* Divisor */}
                   <div className="h-px bg-slate-200" />
 
-                  {/* Comercial — volume decidido */}
+                  {/* Irrestrita — volume decidido */}
                   <div>
                     <div className="text-[8px] font-black uppercase tracking-wider text-emerald-500 flex items-center gap-0.5 mb-0.5">
-                      <ShoppingCart className="w-2 h-2" /> Comercial
+                      <ShoppingCart className="w-2 h-2" /> Irrestrita
                     </div>
-                    <div className="text-sm font-black text-slate-900">{fmtCx(bu)} <span className="text-[10px] font-bold text-slate-400">cx</span></div>
+                    <div className="text-sm font-black text-slate-900">{fmtCx(ir)} <span className="text-[10px] font-bold text-slate-400">cx</span></div>
                     <div className="text-[10px] font-bold text-emerald-600">{fmtRs(fat)}</div>
                   </div>
 
@@ -363,9 +373,10 @@ function PreenchimentoIrrestrita() {
               style={{ gridTemplateColumns: `220px repeat(${meses.length}, ${colMes}) 44px` }}>
               <div>Categoria / SKU</div>
               {meses.map(m => (
-                <div key={m} className="grid grid-cols-3 gap-1 text-center">
+                <div key={m} className="grid grid-cols-4 gap-1 text-center">
                   <span className="text-violet-400 flex items-center justify-center gap-0.5"><Zap className="w-2.5 h-2.5" />IA</span>
                   <span className="text-indigo-400 flex items-center justify-center gap-0.5"><TrendingUp className="w-2.5 h-2.5" />Mkt</span>
+                  <span className="text-emerald-500 flex items-center justify-center gap-0.5"><ShoppingCart className="w-2.5 h-2.5" />Meta</span>
                   <span className="text-slate-400 flex items-center justify-center gap-0.5"><History className="w-2.5 h-2.5" />Ano ant.</span>
                 </div>
               ))}
@@ -391,7 +402,7 @@ function PreenchimentoIrrestrita() {
             const somacat = (m: string, campo: string) =>
               cat.skus.reduce((acc: number, s: any) => {
                 const cel = s.meses[m]; if (!cel) return acc;
-                if (campo === 'bu') return acc + valBU(s.sku, m, cel.bottomup);
+                if (campo === 'irrestrita') return acc + valIrrestrita(s.sku, m, cel.irrestrita ?? cel.bottomup);
                 if (campo === 'realizado_ap') return acc + (cel.realizado_ap?.cx || 0);
                 return acc + (cel[campo] || 0);
               }, 0);
@@ -413,15 +424,17 @@ function PreenchimentoIrrestrita() {
                     </div>
                   </div>
                   {meses.map(m => {
-                    const bu  = somacat(m, 'bu');
+                    const ir  = somacat(m, 'irrestrita');
                     const ia  = somacat(m, 'ia');
                     const td  = somacat(m, 'topdown');
+                    const meta = somacat(m, 'meta');
                     const ap  = somacat(m, 'realizado_ap');
-                    const dIA = delta(ia, bu);
-                    const dTD = delta(td, bu);
-                    const dAP = delta(ap, bu);
+                    const dIA = delta(ia, ir);
+                    const dTD = delta(td, ir);
+                    const dMeta = delta(meta, ir);
+                    const dAP = delta(ap, ir);
                     return (
-                      <div key={m} className="grid grid-cols-3 gap-1 items-end">
+                      <div key={m} className="grid grid-cols-4 gap-1 items-end">
                         {/* IA */}
                         <div className="text-center">
                           <div className="text-[10px] font-bold text-slate-500">{fmtCx(ia)}</div>
@@ -432,6 +445,11 @@ function PreenchimentoIrrestrita() {
                           <div className="text-[10px] font-bold text-slate-500">{fmtCx(td)}</div>
                           {dTD && <div className="text-[9px] font-black" style={{ color: dTD.cor }}>{dTD.sinal}</div>}
                         </div>
+                        {/* Metas */}
+                        <div className="text-center">
+                          <div className="text-[10px] font-bold text-slate-500">{fmtCx(meta)}</div>
+                          {dMeta && <div className="text-[9px] font-black" style={{ color: dMeta.cor }}>{dMeta.sinal}</div>}
+                        </div>
                         {/* Ano ant */}
                         <div className="text-center">
                           <div className="text-[10px] font-bold text-slate-500">{ap > 0 ? fmtCx(ap) : '—'}</div>
@@ -440,21 +458,21 @@ function PreenchimentoIrrestrita() {
                       </div>
                     );
                   })}
-                  {/* Comercial separado — fora do grid de refs */}
+                  {/* Irrestrita separada — fora do grid de refs */}
                   <div />
                 </button>
-                {/* Comercial da categoria abaixo do botão — totais */}
+                {/* Irrestrita da categoria abaixo do botão — totais */}
                 {!catAberta && (
                   <div className="grid gap-2 px-3 pt-0.5 pb-2"
                     style={{ gridTemplateColumns: `220px repeat(${meses.length}, ${colMes}) 44px` }}>
                     <div />
                     {meses.map(m => (
                       <div key={m} className="text-center">
-                        <div className="text-sm font-black text-slate-900">{fmtCx(somacat(m, 'bu'))} <span className="text-[10px] text-slate-400">cx</span></div>
+                        <div className="text-sm font-black text-slate-900">{fmtCx(somacat(m, 'irrestrita'))} <span className="text-[10px] text-slate-400">cx</span></div>
                         <div className="text-[10px] font-bold text-emerald-600">
                           {fmtRs(cat.skus.reduce((acc: number, s: any) => {
                             const cel = s.meses[m]; if (!cel) return acc;
-                            return acc + valBU(s.sku, m, cel.bottomup) * (cel.pmv || 0);
+                            return acc + valIrrestrita(s.sku, m, cel.irrestrita ?? cel.bottomup) * (cel.pmv || 0);
                           }, 0))}
                         </div>
                       </div>
@@ -467,11 +485,11 @@ function PreenchimentoIrrestrita() {
                 {catAberta && cat.skus.map((s: any) => {
                   const skuAberto  = dossieAberto?.sku === s.sku;
 
-                  /* semáforo: divergência máxima IA vs Comercial em qualquer mês */
+                  /* semáforo: divergência máxima IA vs Irrestrita em qualquer mês */
                   const maxDiv = meses.reduce<'alta' | 'media' | null>((acc, m) => {
                     const cel = s.meses[m]; if (!cel) return acc;
-                    const bu  = valBU(s.sku, m, cel.bottomup);
-                    const pct = cel.ia && bu ? Math.abs(cel.ia - bu) / Math.max(cel.ia, bu) : 0;
+                    const ir  = valIrrestrita(s.sku, m, cel.irrestrita ?? cel.bottomup);
+                    const pct = cel.ia && ir ? Math.abs(cel.ia - ir) / Math.max(cel.ia, ir) : 0;
                     const d   = pct >= 0.4 ? 'alta' : pct >= 0.2 ? 'media' : null;
                     return d === 'alta' ? 'alta' : (d === 'media' && acc !== 'alta' ? 'media' : acc);
                   }, null);
@@ -502,6 +520,11 @@ function PreenchimentoIrrestrita() {
                               <TrendingUp className="w-2.5 h-2.5" /> Mkt
                             </button>
                             <button disabled={congelada}
+                              onClick={() => adotarFonte(s.sku, 'meta', s)}
+                              className="text-[9px] font-black px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-600 hover:bg-emerald-200 disabled:opacity-40 flex items-center gap-0.5">
+                              <ShoppingCart className="w-2.5 h-2.5" /> Meta
+                            </button>
+                            <button disabled={congelada}
                               onClick={() => adotarFonte(s.sku, 'realizado_ap', s)}
                               className="text-[9px] font-black px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 hover:bg-slate-200 disabled:opacity-40 flex items-center gap-0.5">
                               <History className="w-2.5 h-2.5" /> Ano ant.
@@ -513,18 +536,19 @@ function PreenchimentoIrrestrita() {
                         {meses.map(m => {
                           const cel    = s.meses[m];
                           if (!cel) return <div key={m} />;
-                          const bu     = valBU(s.sku, m, cel.bottomup);
+                          const ir     = valIrrestrita(s.sku, m, cel.irrestrita ?? cel.bottomup);
                           const editado = `${s.sku}|${m}` in edits;
-                          const dIA    = delta(cel.ia || 0, bu);
-                          const dTD    = delta(cel.topdown || 0, bu);
+                          const dIA    = delta(cel.ia || 0, ir);
+                          const dTD    = delta(cel.topdown || 0, ir);
                           const apCx   = cel.realizado_ap?.cx ?? null;
                           const apRs   = cel.realizado_ap?.rs ?? null;
-                          const dAP    = apCx ? delta(apCx, bu) : null;
+                          const dMeta  = delta(cel.meta || 0, ir);
+                          const dAP    = apCx ? delta(apCx, ir) : null;
 
                           return (
                             <div key={m} className="space-y-1">
-                              {/* ── LINHA DE REFERÊNCIAS ── 3 colunas clicáveis */}
-                              <div className="grid grid-cols-3 gap-1">
+                              {/* ── LINHA DE REFERÊNCIAS ── 4 colunas clicáveis */}
+                              <div className="grid grid-cols-4 gap-1">
                                 {/* IA */}
                                 <button disabled={congelada}
                                   onClick={() => setCelula(s.sku, m, cel.ia || 0)}
@@ -545,6 +569,16 @@ function PreenchimentoIrrestrita() {
                                     ? <span className="text-[9px] font-black" style={{ color: dTD.cor }}>{dTD.sinal}</span>
                                     : <span className="text-[9px] text-slate-300">—</span>}
                                 </button>
+                                {/* Metas */}
+                                <button disabled={congelada}
+                                  onClick={() => setCelula(s.sku, m, cel.meta || 0)}
+                                  className="flex flex-col items-center py-1 px-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 hover:ring-1 hover:ring-emerald-300 transition-all disabled:cursor-not-allowed"
+                                  title="Adotar Metas neste mês">
+                                  <span className="text-[10px] font-black text-slate-600">{fmtCx(cel.meta || 0)}</span>
+                                  {dMeta
+                                    ? <span className="text-[9px] font-black" style={{ color: dMeta.cor }}>{dMeta.sinal}</span>
+                                    : <span className="text-[9px] text-slate-300">—</span>}
+                                </button>
                                 {/* Ano anterior */}
                                 <button disabled={congelada || !apCx}
                                   onClick={() => apCx && setCelula(s.sku, m, apCx)}
@@ -559,12 +593,12 @@ function PreenchimentoIrrestrita() {
                                 </button>
                               </div>
 
-                              {/* ── COMERCIAL — input principal ── */}
+                              {/* ── IRRESTRITA — input principal ── */}
                               <div className={`rounded-xl border-2 transition-all
                                 ${editado ? 'border-emerald-400 bg-emerald-50 shadow-sm shadow-emerald-100' : 'border-slate-100 bg-white'}`}>
                                 <input
                                   type="number"
-                                  value={bu}
+                                  value={ir}
                                   disabled={congelada}
                                   onChange={e => setCelula(s.sku, m, parseInt(e.target.value) || 0)}
                                   className={`w-full text-center text-base font-black pt-2 pb-1 bg-transparent outline-none rounded-xl
@@ -573,7 +607,7 @@ function PreenchimentoIrrestrita() {
                                 />
                                 {cel.pmv > 0 && (
                                   <div className="text-center text-[10px] font-bold text-slate-400 pb-1.5">
-                                    {fmtRs(bu * (cel.pmv || 0))}
+                                    {fmtRs(ir * (cel.pmv || 0))}
                                   </div>
                                 )}
                                 {/* Orçamento como referência discreta */}

@@ -38,6 +38,7 @@ from app.api.routers.shared_ibp import (
     reabrir_etapa, etapa_congelada, registrar_log_auditoria, parse_date_safe,
     ETAPA_SUPPLY,
     ETAPA_METAS,
+    ETAPA_IRRESTRITA,
 )
 
 router = APIRouter(prefix="/api/v1/supply", tags=["Supply Review"])
@@ -259,7 +260,7 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_supply)):
     ciclo = get_current_cycle(db)
     meses = get_working_window_months(db)
     meses_iso = [m.strftime("%Y-%m-%d") for m in meses]
-    upstream_ok   = etapa_congelada(db, ciclo, ETAPA_METAS)
+    upstream_ok   = etapa_congelada(db, ciclo, ETAPA_IRRESTRITA)
     propria_congelada = etapa_congelada(db, ciclo, ETAPA_SUPPLY)
     aguardando    = not upstream_ok
     congelada     = propria_congelada or aguardando
@@ -351,7 +352,7 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_supply)):
         "sou_admin": u.get("funcao") == "Administrador",
         "congelada_propria": propria_congelada,
         "aguardando_upstream": aguardando,
-        "motivo_bloqueio": ("Metas Comercial ainda nao congelou o plano." if aguardando
+        "motivo_bloqueio": ("Demanda Irrestrita ainda nao congelou o plano." if aguardando
                              else "Etapa congelada pelo Administrador." if propria_congelada else None),
         "meses": meses_iso,
         "categorias": categorias,
@@ -495,8 +496,8 @@ def salvar(payload: PayloadSalvar, db: Session = Depends(get_db),
     """
     try:
         ciclo = get_current_cycle(db)
-        if not etapa_congelada(db, ciclo, ETAPA_METAS):
-            raise HTTPException(423, "Metas Comercial ainda nao congelou. Aguarde o bastao.")
+        if not etapa_congelada(db, ciclo, ETAPA_IRRESTRITA):
+            raise HTTPException(423, "Demanda Irrestrita ainda nao congelou. Aguarde o bastao.")
         if etapa_congelada(db, ciclo, ETAPA_SUPPLY):
             raise HTTPException(423, "Etapa já congelada pelo Administrador.")
 

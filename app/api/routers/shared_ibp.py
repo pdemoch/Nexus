@@ -43,31 +43,34 @@ from app.models.domain_models import (
 ETAPA_TOPDOWN  = "TopDown"
 ETAPA_BOTTOMUP = "BottomUP"
 ETAPA_METAS    = "Metas"
+ETAPA_IRRESTRITA = "Irrestrita"
 ETAPA_SUPPLY   = "Supply"
 ETAPA_FINAL    = "Final"
 STATUS_CONGELADO = "CONGELADO"
 
 # Ordem do bastão (montante -> jusante).
-ORDEM_ETAPAS = [ETAPA_TOPDOWN, ETAPA_BOTTOMUP, ETAPA_METAS, ETAPA_SUPPLY, ETAPA_FINAL]
+ORDEM_ETAPAS = [ETAPA_TOPDOWN, ETAPA_BOTTOMUP, ETAPA_METAS, ETAPA_IRRESTRITA, ETAPA_SUPPLY, ETAPA_FINAL]
 
 # Qual coluna cada etapa GRAVA.
 CAMPO_DA_ETAPA: Dict[str, str] = {
     ETAPA_TOPDOWN:  "vol_topdown",
     ETAPA_BOTTOMUP: "vol_bottomup",
     ETAPA_METAS:    "vol_meta",
+    ETAPA_IRRESTRITA: "vol_irrestrita",
     ETAPA_SUPPLY:   "vol_supply",
     ETAPA_FINAL:    "vol_final",
 }
 
 # Cascata de PESO de rateio por etapa (primeiro com soma > 0 vence).
-# Supply e Final rateiam sobre a META (decisão comercial já informada),
-# NÃO sobre histórico — conforme definido.
+# Irrestrita rateia sobre a META. Supply parte da Irrestrita e Final respeita
+# Supply como última etapa operacional, caindo para Irrestrita/Meta/IA se vazio.
 PESO_DA_ETAPA: Dict[str, List[str]] = {
     ETAPA_TOPDOWN:  ["vol_ia"],
     ETAPA_BOTTOMUP: ["vol_topdown", "vol_ia"],
     ETAPA_METAS:    ["vol_bottomup", "vol_topdown", "vol_ia"],
-    ETAPA_SUPPLY:   ["vol_meta", "vol_bottomup", "vol_ia"],
-    ETAPA_FINAL:    ["vol_meta", "vol_supply", "vol_ia"],
+    ETAPA_IRRESTRITA: ["vol_meta", "vol_bottomup", "vol_ia"],
+    ETAPA_SUPPLY:   ["vol_irrestrita", "vol_meta", "vol_bottomup", "vol_ia"],
+    ETAPA_FINAL:    ["vol_supply", "vol_irrestrita", "vol_meta", "vol_ia"],
 }
 
 # Regra N-2.

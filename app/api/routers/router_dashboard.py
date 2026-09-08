@@ -7,13 +7,13 @@ número final (vol_final). Acesso amplo (Admin, Gerente, Supply, Marketing,
 C-Level via Sidebar), mas só o ADMIN congela/publica.
 
 Capacidades exclusivas desta tela:
-  • Comparador de cenários por SKU: as 5 camadas (IA/TopDown/BottomUP/Meta/
+  • Comparador de cenários por SKU: as 6 camadas (IA/TopDown/BottomUP/Meta/Irrestrita/
     Supply) lado a lado; o CEO adota qualquer uma como Final ou digita a sua.
   • Toggles: caixas<->R$, vs Orçamento, vs Ciclo Anterior.
   • Abertura micro: categoria -> segmento -> SKU -> razão social.
   • Dossiê enriquecido (via /dossie): plurianual + PMV + FVA + dispersão.
 
-Grava vol_final. Rateia sobre vol_meta (decisão comercial). Publicar = congelar
+Grava vol_final. Rateia sobre Supply/Irrestrita/Meta conforme bastão. Publicar = congelar
 a etapa Final (só Admin).
 """
 
@@ -35,7 +35,7 @@ from app.api.routers.shared_ibp import (
     get_current_cycle, get_previous_cycle, get_working_window_months,
     escrever_volume_rateado, congelar_etapa, reabrir_etapa, etapa_congelada,
     registrar_log_auditoria, parse_date_safe, ETAPA_FINAL,
-    CAMPO_DA_ETAPA, ETAPA_TOPDOWN, ETAPA_BOTTOMUP, ETAPA_METAS, ETAPA_SUPPLY,
+    CAMPO_DA_ETAPA, ETAPA_TOPDOWN, ETAPA_BOTTOMUP, ETAPA_METAS, ETAPA_IRRESTRITA, ETAPA_SUPPLY,
 )
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["Demanda Final (Dashboard)"])
@@ -202,13 +202,16 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(get_current_user)):
                SUM(f.vol_topdown)   AS topdown,
                SUM(f.vol_bottomup)  AS bottomup,
                SUM(f.vol_meta)      AS meta,
+               SUM(f.vol_irrestrita) AS irrestrita,
                SUM(f.vol_supply)    AS supply,
                SUM(f.vol_final)     AS final,
                SUM(f.vol_final * f.pmv_aplicado) AS receita_final,
                SUM(f.vol_ia    * f.pmv_aplicado) AS receita_ia
         FROM fato_ibp_granular f
         LEFT JOIN dim_produtos p ON p.sku = f.sku
+        JOIN dim_clientes c ON c.cgc = f.cgc
         WHERE f.ciclo_sop = :c AND f.mes_projetado = ANY(:meses)
+          AND UPPER(TRIM(COALESCE(c.bloqueado, 'ATIVO'))) != 'INATIVO'
         GROUP BY f.sku, p.descricao, p.categoria, p.segmento, f.mes_projetado
     """), {"c": ciclo, "meses": meses}).fetchall()
 
@@ -216,8 +219,10 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(get_current_user)):
     ant = defaultdict(dict)
     ant_rows = db.execute(text("""
         SELECT sku, TO_CHAR(mes_projetado,'YYYY-MM-DD') AS mes, SUM(vol_final) AS final
-        FROM fato_ibp_granular
-        WHERE ciclo_sop = :ca AND mes_projetado = ANY(:meses)
+        FROM fato_ibp_granular f
+        JOIN dim_clientes c ON c.cgc = f.cgc
+        WHERE f.ciclo_sop = :ca AND f.mes_projetado = ANY(:meses)
+          AND UPPER(TRIM(COALESCE(c.bloqueado, 'ATIVO'))) != 'INATIVO'
         GROUP BY sku, mes_projetado
     """), {"ca": ciclo_ant, "meses": meses}).fetchall()
     for r in ant_rows:
@@ -313,6 +318,7 @@ def dossie(sku: str, db: Session = Depends(get_db), _: dict = Depends(get_curren
                    SUM(vol_topdown)  AS topdown,
                    SUM(vol_bottomup) AS bottomup,
                    SUM(vol_meta)     AS meta,
+                   SUM(vol_irrestrita) AS irrestrita,
                    SUM(vol_supply)   AS supply,
                    SUM(vol_final)    AS final
             FROM fato_ibp_granular
@@ -324,8 +330,9 @@ def dossie(sku: str, db: Session = Depends(get_db), _: dict = Depends(get_curren
         for r in camadas:
             vals = {"ia": int(r.ia or 0), "topdown": int(r.topdown or 0),
                     "bottomup": int(r.bottomup or 0), "meta": int(r.meta or 0),
-                    "supply": int(r.supply or 0), "final": int(r.final or 0)}
-            plan = [vals["topdown"], vals["bottomup"], vals["meta"], vals["supply"]]
+                    "irrestrita": int(r.irrestrita or 0), "supply": int(r.supply or 0),
+                    "final": int(r.final or 0)}
+            plan = [vals["topdown"], vals["bottomup"], vals["meta"], vals["irrestrita"], vals["supply"]]
             pos  = [v for v in plan if v > 0]
             disp = (max(pos) - min(pos)) / max(pos) if pos else 0.0
             cenarios.append({"mes": r.mes, **vals, "dispersao": round(disp, 3)})
@@ -340,11 +347,11 @@ def dossie(sku: str, db: Session = Depends(get_db), _: dict = Depends(get_curren
 def adotar_cenario(sku: str, mes: str, camada: str,
                    db: Session = Depends(get_db), _: dict = Depends(require_decisor)):
     """
-    Copia o volume de uma camada (topdown/bottomup/meta/supply/ia) para o Final
-    de um SKU/mês. É o 'adotar cenário' da gaveta. Rateia por vol_meta.
+    Copia o volume de uma camada (topdown/bottomup/meta/irrestrita/supply/ia) para o Final
+    de um SKU/mês. É o 'adotar cenário' da gaveta.
     """
     mapa = {"ia": "vol_ia", "topdown": "vol_topdown", "bottomup": "vol_bottomup",
-            "meta": "vol_meta", "supply": "vol_supply"}
+            "meta": "vol_meta", "irrestrita": "vol_irrestrita", "supply": "vol_supply"}
     if camada not in mapa:
         raise HTTPException(400, f"Camada inválida: {camada}")
     try:
@@ -372,7 +379,7 @@ def adotar_cenario(sku: str, mes: str, camada: str,
 @router.post("/salvar")
 def salvar(payload: PayloadSalvar, db: Session = Depends(get_db),
            usuario: dict = Depends(require_decisor)):
-    """Edição direta do Final pelo C-Level. Trava de balanço, peso vol_meta."""
+    """Edição direta do Final pelo C-Level. Trava de balanço via bastão."""
     try:
         ciclo = get_current_cycle(db)
         if not etapa_congelada(db, ciclo, ETAPA_SUPPLY):
@@ -437,7 +444,7 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(get_current_user))
                COALESCE(p.categoria,'') AS categoria, COALESCE(p.segmento,'') AS segmento,
                TO_CHAR(f.mes_projetado,'MM/YYYY') AS mes,
                SUM(f.vol_ia) AS ia, SUM(f.vol_topdown) AS td, SUM(f.vol_bottomup) AS bu,
-               SUM(f.vol_meta) AS meta, SUM(f.vol_supply) AS sup, SUM(f.vol_final) AS fin,
+               SUM(f.vol_meta) AS meta, SUM(f.vol_irrestrita) AS irr, SUM(f.vol_supply) AS sup, SUM(f.vol_final) AS fin,
                SUM(f.vol_final * f.pmv_aplicado) AS receita_final,
                SUM(f.vol_ia    * f.pmv_aplicado) AS receita_ia
         FROM fato_ibp_granular f
