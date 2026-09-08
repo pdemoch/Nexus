@@ -95,6 +95,60 @@ function ratearMaiorResto(total: number, pesos: number[]): number[] {
   return inteiros;
 }
 
+function ratearVolumesPorValor(
+  valorAlvo: number,
+  folhas: Array<{ pmv: number; pesoBase: number }>
+): number[] {
+  const alvo = Math.max(0, Math.round(valorAlvo || 0));
+  if (!folhas.length || alvo === 0) return folhas.map(() => 0);
+
+  const pesosValor = folhas.map(f => Math.max(0, f.pesoBase) * f.pmv);
+  const somaPesos = pesosValor.reduce((s, p) => s + p, 0);
+  const cotasValor = folhas.map((_, i) =>
+    somaPesos > 0 ? (alvo * pesosValor[i]) / somaPesos : alvo / folhas.length
+  );
+
+  const volumes = cotasValor.map((cota, i) =>
+    folhas[i].pmv > 0 ? Math.max(0, Math.floor(cota / folhas[i].pmv)) : 0
+  );
+
+  const valorAtual = () =>
+    volumes.reduce((s, v, i) => s + v * folhas[i].pmv, 0);
+  const erroAtual = () => Math.abs(alvo - valorAtual());
+
+  let erro = erroAtual();
+  for (let iter = 0; iter < 10000; iter++) {
+    const atual = valorAtual();
+    let melhorIdx = -1;
+    let melhorDelta = 0;
+    let melhorErro = erro;
+
+    folhas.forEach((f, i) => {
+      const erroAdd = Math.abs(alvo - (atual + f.pmv));
+      if (erroAdd + 0.0001 < melhorErro) {
+        melhorIdx = i;
+        melhorDelta = 1;
+        melhorErro = erroAdd;
+      }
+
+      if (volumes[i] > 0) {
+        const erroSub = Math.abs(alvo - (atual - f.pmv));
+        if (erroSub + 0.0001 < melhorErro) {
+          melhorIdx = i;
+          melhorDelta = -1;
+          melhorErro = erroSub;
+        }
+      }
+    });
+
+    if (melhorIdx < 0) break;
+    volumes[melhorIdx] += melhorDelta;
+    erro = melhorErro;
+  }
+
+  return volumes;
+}
+
 const INDENT: Record<string, string> = {
   gerente: 'pl-0', coordenador: 'pl-4', executivo: 'pl-8',
   cliente: 'pl-12', produto: 'pl-16',
@@ -241,12 +295,11 @@ function PreenchimentoMetas() {
   ) => {
     const editaveis = clientesDoSku.filter(c => c.pmv > 0);
     if (!editaveis.length) return;
-    const pesos = editaveis.map(c => c.pesoBase * c.pmv);
-    const partes = ratearMaiorResto(Math.max(0, Math.round(novoValor)), pesos);
+    const volumes = ratearVolumesPorValor(novoValor, editaveis);
     setEdits(prev => {
       const next = { ...prev };
       editaveis.forEach((c, i) => {
-        next[keyOf(c.razao, sku, mes)] = Math.max(0, Math.round(partes[i] / c.pmv));
+        next[keyOf(c.razao, sku, mes)] = volumes[i];
       });
       return next;
     });
@@ -281,12 +334,11 @@ function PreenchimentoMetas() {
     walk(node, null);
     const editaveis = folhas.filter(f => f.pmv > 0);
     if (!editaveis.length) return;
-    const pesos = editaveis.map(f => f.pesoBase * f.pmv);
-    const valoresRateados = ratearMaiorResto(Math.round(Math.max(0, valorAlvo || 0)), pesos);
+    const volumes = ratearVolumesPorValor(valorAlvo, editaveis);
     setEdits(prev => {
       const next = { ...prev };
       editaveis.forEach((f, i) => {
-        next[keyOf(f.razao, f.sku, mes)] = Math.max(0, Math.round(valoresRateados[i] / f.pmv));
+        next[keyOf(f.razao, f.sku, mes)] = volumes[i];
       });
       return next;
     });
