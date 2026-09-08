@@ -131,7 +131,7 @@ function PreenchimentoMetas() {
   const [fase,           setFase]           = useState<any>(null);
   const [avancando,      setAvancando]      = useState(false);
   const [adminAlvo,      setAdminAlvo]      = useState<{ nome: string; nivel: string } | null>(null);
-  const [modoEdicao,     setModoEdicao]     = useState<'caixas' | 'valor'>('caixas');
+  const [modoEdicao,     setModoEdicao]     = useState<'caixas' | 'valor'>('valor');
   const [carregandoAuditoria, setCarregandoAuditoria] = useState(false);
 
   const carregar = useCallback(async () => {
@@ -201,6 +201,35 @@ function PreenchimentoMetas() {
     return k in edits ? edits[k] : (original || 0);
   };
 
+  const baixarBlob = (blob: Blob, nome: string) => {
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = nome;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+  };
+
+  const payloadAjustes = () => ({
+    ajustes: Object.entries(edits).map(([k, v]) => {
+      const [razao_social, sku, mes] = k.split('||');
+      return { razao_social, sku, mes_projetado: mes, novo_volume: v };
+    }),
+    ...(adminAlvo ? { nome_alvo: adminAlvo.nome, nivel_alvo: adminAlvo.nivel } : {}),
+  });
+
+  const evidenciaNome = (prefixo: string) =>
+    `${prefixo}_${dados?.ciclo?.replace('/', '_') || 'ciclo'}.xlsx`;
+
+  const executarComEvidencia = async (endpoint: string, prefixoArquivo: string) => {
+    const r = await axios.post(endpoint, payloadAjustes(), { responseType: 'blob' });
+    baixarBlob(new Blob([r.data]), evidenciaNome(prefixoArquivo));
+    setEdits({});
+    await carregar();
+  };
+
   /* Edição no nível SKU do executivo: rateia pelos clientes proporcionalmente */
   const setSkuExecutivo = (
     clientesDoSku: Array<{ razao: string; mes: string; pesoHist: number; original: number }>,
@@ -224,6 +253,40 @@ function PreenchimentoMetas() {
   const setClienteValor = (razao: string, sku: string, mes: string, valor: number, pmv: number) => {
     if (pmv <= 0) return;
     setCliente(razao, sku, mes, Math.round(Math.max(0, valor || 0) / pmv));
+  };
+
+  const setNodeValor = (node: any, mes: string, valorAlvo: number) => {
+    const folhas: Array<{ razao: string; sku: string; pmv: number; atualVol: number; pesoHist: number }> = [];
+    const walk = (n: any, razaoCtx: string | null) => {
+      if (n.tipo === 'produto') {
+        const cel = n.meses?.[mes];
+        if (!cel) return;
+        folhas.push({
+          razao: razaoCtx || '',
+          sku: n.sku,
+          pmv: cel.pmv || 0,
+          atualVol: valorCliente(razaoCtx || '', n.sku, mes, cel.meta || 0),
+          pesoHist: cel.peso_historico || 0,
+        });
+        return;
+      }
+      const novoCtx = n.tipo === 'cliente' ? n.nome : razaoCtx;
+      (n.subRows || []).forEach((f: any) => walk(f, novoCtx));
+    };
+    walk(node, null);
+    const editaveis = folhas.filter(f => f.pmv > 0);
+    if (!editaveis.length) return;
+    const pesosAtuais = editaveis.map(f => f.atualVol * f.pmv);
+    const temValorAtual = pesosAtuais.some(v => v > 0);
+    const pesos = temValorAtual ? pesosAtuais : editaveis.map(f => f.pesoHist);
+    const valoresRateados = ratearMaiorResto(Math.round(Math.max(0, valorAlvo || 0)), pesos);
+    setEdits(prev => {
+      const next = { ...prev };
+      editaveis.forEach((f, i) => {
+        next[keyOf(f.razao, f.sku, mes)] = Math.max(0, Math.round(valoresRateados[i] / f.pmv));
+      });
+      return next;
+    });
   };
 
   /* Soma de um SKU de um executivo num mês (para exibir no input do SKU) */
@@ -283,14 +346,34 @@ function PreenchimentoMetas() {
     if (!temEdicoes) return;
     setSalvando(true);
     try {
-      const ajustes = Object.entries(edits).map(([k, v]) => {
-        const [razao_social, sku, mes] = k.split('||');
-        return { razao_social, sku, mes_projetado: mes, novo_volume: v };
-      });
-      await axios.post('/api/v1/carteira/salvar', { ajustes });
-      await carregar();
+      await executarComEvidencia('/api/v1/carteira/salvar-evidencia', 'metas_salvar');
     } catch (e: any) {
       alert(e?.response?.data?.detail || 'Falha ao salvar.');
+    } finally { setSalvando(false); }
+  };
+
+  const passarCoordenadores = async () => {
+    if (!confirm('Passar metas financeiras para os coordenadores? Será baixado um XLSX de evidência.')) return;
+    setAvancando(true);
+    try {
+      await executarComEvidencia('/api/v1/carteira/passar-coordenadores-evidencia', 'metas_para_coordenadores');
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || 'Falha ao passar para coordenadores.');
+    } finally { setAvancando(false); }
+  };
+
+  const salvarETrancar = async () => {
+    if (!confirm('Salvar e trancar sua distribuição? A variação precisa ficar dentro de ±5% da meta recebida.')) return;
+    setSalvando(true);
+    try {
+      await executarComEvidencia('/api/v1/carteira/trancar-evidencia', 'metas_trancadas');
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail;
+      if (detail?.itens?.length) {
+        alert(`${detail.mensagem}\n${detail.itens.map((i: any) => `${i.mes}: ${i.variacao_pct}%`).join('\n')}`);
+      } else {
+        alert(detail || 'Falha ao trancar.');
+      }
     } finally { setSalvando(false); }
   };
 
@@ -374,12 +457,20 @@ function PreenchimentoMetas() {
   };
 
   const congelarEtapa = async () => {
-    if (!confirm('Congelar Metas Comercial? A etapa Supply será liberada.')) return;
+    if (!confirm('Aprovar Metas Comercial? A etapa Irrestrita será liberada.')) return;
     try {
-      if (temEdicoes) await salvar();
-      await axios.post('/api/v1/carteira/congelar', {});
+      const r = await axios.post('/api/v1/carteira/aprovar-evidencia', payloadAjustes(), { responseType: 'blob' });
+      baixarBlob(new Blob([r.data]), evidenciaNome('metas_aprovadas'));
+      setEdits({});
       await carregar();
-    } catch (e: any) { alert(e?.response?.data?.detail || 'Falha ao congelar.'); }
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail;
+      if (detail?.coordenadores_pendentes?.length) {
+        alert(`${detail.mensagem}\n${detail.coordenadores_pendentes.join('\n')}`);
+      } else {
+        alert(detail || 'Falha ao aprovar metas.');
+      }
+    }
   };
 
   /* Lista agregada de SKUs da carteira INTEIRA — usada só na fase SKU
@@ -525,11 +616,9 @@ function PreenchimentoMetas() {
               {!aguardandoUpstream && minhaCongelada && <span className="ml-2 text-emerald-600 font-bold">· sua carteira bloqueada</span>}
               {!aguardandoUpstream && congeladaEtapa && <span className="ml-2 text-amber-600 font-bold">· etapa congelada</span>}
             </p>
-            {faseAtual && (!souAdmin || adminOperando) && (
-              <div className="mt-2">
-                <StepperFase funcao={faseFuncao} faseAtual={faseAtual} />
-              </div>
-            )}
+            <div className="mt-2 text-[10px] font-bold text-indigo-500">
+              Edição financeira reativa: Coordenador → Executivo → SKU → Razão Social
+            </div>
           </div>
           <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
             {souAdmin && (
@@ -579,28 +668,24 @@ function PreenchimentoMetas() {
               {carregandoAuditoria ? <Loader2 className="w-4 h-4 animate-spin" /> : <BarChart2 className="w-4 h-4" />}
               Auditoria
             </button>
-            {/* Salvar — só existe como ação livre na fase Razão Social (última) ou para Admin */}
-            {naFaseRazaoSocial && (
-              <button onClick={salvar} disabled={!temEdicoes || salvando || bloqueado}
-                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all
-                  ${temEdicoes && !bloqueado ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}>
-                {salvando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                Salvar{temEdicoes ? ` (${Object.keys(edits).length})` : ''}
-              </button>
-            )}
-            {/* Trancar/Avançar fase — SKU e Executivo (Gerente e Coordenador) */}
-            {(naFaseSku || naFaseExecutivo) && (!bloqueado || (souAdmin && adminOperando)) && (
-              <button onClick={avancarFase} disabled={avancando}
+            <button onClick={salvar} disabled={!temEdicoes || salvando || bloqueado}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all
+                ${temEdicoes && !bloqueado ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}>
+              {salvando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              Salvar + XLSX{temEdicoes ? ` (${Object.keys(edits).length})` : ''}
+            </button>
+            {(funcao === 'Gerente' || (souAdmin && (!adminAlvo || adminAlvo.nivel === 'Gerente'))) && (
+              <button onClick={passarCoordenadores} disabled={avancando || bloqueado}
                 className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-60">
                 {avancando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />}
-                {naFaseSku ? 'Trancar SKU e ratear p/ Executivos' : 'Trancar Executivo e ratear p/ Razão Social'}
+                Passar para coordenadores
               </button>
             )}
-            {(naFaseSku || naFaseExecutivo) && bloqueado && !(souAdmin && adminOperando) && (
-              <button disabled
-                title="A Demanda Comercial precisa congelar o plano antes do rateio."
-                className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-slate-100 text-slate-400 cursor-not-allowed">
-                <Lock className="w-4 h-4" /> Aguardando liberação
+            {(funcao === 'Coordenador' || adminAlvo?.nivel === 'Coordenador') && (
+              <button onClick={salvarETrancar} disabled={salvando || (bloqueado && !(souAdmin && adminOperando))}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60">
+                {salvando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />}
+                Salvar e trancar
               </button>
             )}
             {souAdmin && adminOperando && (
@@ -620,7 +705,7 @@ function PreenchimentoMetas() {
                 <button onClick={congelarEtapa} disabled={aguardandoUpstream}
                   className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black
                     ${aguardandoUpstream ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-emerald-600 text-white hover:bg-emerald-700'}`}>
-                  <Lock className="w-4 h-4" /> Congelar etapa
+                  <Lock className="w-4 h-4" /> Aprovar Metas
                 </button>
             )}
             {/* Excel — somente a carteira do coordenador logado */}
@@ -675,23 +760,14 @@ function PreenchimentoMetas() {
               <button onClick={() => setBusca('')} className="mt-3 text-xs font-black text-indigo-500 hover:underline">Limpar busca</button>
             </div>
           )
-          : naFaseSku ? <ListaSkuCarteira
-            skus={skusAgregadosCarteira}
-            meses={meses}
-            somaSkuCarteira={somaSkuCarteira}
-            setSkuCarteira={setSkuCarteira}
-            bloqueado={bloqueado && !(souAdmin && adminOperando)}
-            modoEdicao={modoEdicao}
-            edits={edits}
-            setDossieAlvo={setDossieAlvo}
-            dossieAlvo={dossieAlvo}
-          /> : arvoreVisivelOuCompleta.map((g: any) => (
+          : arvoreVisivelOuCompleta.map((g: any) => (
             <NoArvore key={g.nome} node={g} nivel={0}
               meses={meses} abertas={abertas} toggle={toggle}
               valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setCliente={setCliente}
               somaSkuExecutivo={somaSkuExecutivo}
-              bloqueado={bloqueado || faseAtual === 'RAZAO_SOCIAL'} edits={edits}
+              bloqueado={bloqueado && !(souAdmin && adminOperando)} edits={edits}
               modoEdicao={modoEdicao} setClienteValor={setClienteValor}
+              setNodeValor={setNodeValor}
               setDossieAlvo={setDossieAlvo}
               dossieAlvo={dossieAlvo}
               idPath={g.nome}
@@ -821,7 +897,7 @@ function ListaSkuCarteira({ skus, meses, somaSkuCarteira, setSkuCarteira,
 function NoArvore({ node, nivel, meses, abertas, toggle,
   valorCliente, setSkuExecutivo, setCliente, somaSkuExecutivo,
   bloqueado, edits, setDossieAlvo, dossieAlvo, idPath, buscaAtiva,
-  modoEdicao, setClienteValor }: any) {
+  modoEdicao, setClienteValor, setNodeValor }: any) {
 
   const buscaAtv = buscaAtiva;
   const aberta   = buscaAtv || abertas.has(idPath);
@@ -1055,7 +1131,15 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
           </div>
           {meses.map((m: string) => (
             <div key={m} className="text-right">
-              <div className="text-[9px] font-bold text-indigo-400">{fmtRs(fatMes(m))}</div>
+              <input
+                type="number"
+                value={Math.round(fatMes(m))}
+                disabled={bloqueado}
+                onChange={e => setNodeValor(node, m, parseFloat(e.target.value) || 0)}
+                inputMode="decimal"
+                className={`w-full text-right text-xs font-black rounded-md px-2 py-1 border transition-colors
+                  ${bloqueado ? 'cursor-not-allowed opacity-60 border-transparent bg-transparent text-slate-500' : 'border-transparent bg-transparent text-indigo-600 hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
+              />
               <div className="text-xs font-bold text-slate-500">{fmtCx(somaMes(m))} cx</div>
             </div>
           ))}
@@ -1071,6 +1155,7 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
             somaSkuExecutivo={somaSkuExecutivo}
             bloqueado={bloqueado} edits={edits}
             modoEdicao={modoEdicao} setClienteValor={setClienteValor}
+            setNodeValor={setNodeValor}
             setDossieAlvo={setDossieAlvo}
             dossieAlvo={dossieAlvo}
             idPath={`${idPath}>${skuNode.sku}`}
@@ -1138,6 +1223,7 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
           valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setCliente={setCliente}
           somaSkuExecutivo={somaSkuExecutivo}
           bloqueado={bloqueado} edits={edits}
+          setNodeValor={setNodeValor}
           setDossieAlvo={setDossieAlvo}
           dossieAlvo={dossieAlvo}
           idPath={`${idPath}>${f.nome || f.sku}`}
@@ -1288,12 +1374,15 @@ function ConsolidadoMetas() {
   const [dados,   setDados]   = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [abertas, setAbertas] = useState<Set<string>>(new Set());
+  const [aprovando, setAprovando] = useState(false);
 
-  useEffect(() => {
+  const carregar = () => {
+    setLoading(true);
     axios.get('/api/v1/carteira/consolidado')
       .then(r => setDados(r.data))
       .finally(() => setLoading(false));
-  }, []);
+  };
+  useEffect(() => { carregar(); }, []);
 
   const meses: string[] = dados?.meses || [];
   const mesLabel = (iso: string) => {
@@ -1308,6 +1397,25 @@ function ConsolidadoMetas() {
 
   const toggle = (id: string) =>
     setAbertas(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  const aprovarMetas = async () => {
+    if (!confirm('Aprovar Metas Comercial e liberar Demanda Irrestrita? Será baixado um XLSX de evidência.')) return;
+    setAprovando(true);
+    try {
+      const r = await axios.post('/api/v1/carteira/aprovar-evidencia', { ajustes: [] }, { responseType: 'blob' });
+      const url = window.URL.createObjectURL(new Blob([r.data]));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `metas_aprovadas_${dados?.ciclo?.replace('/', '_') || 'ciclo'}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+      carregar();
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || 'Falha ao aprovar metas.');
+    } finally { setAprovando(false); }
+  };
 
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center text-slate-400">
@@ -1340,11 +1448,29 @@ function ConsolidadoMetas() {
 
         {/* CABEÇALHO */}
         <div className="sticky top-0 z-20 bg-white border-b border-slate-200">
-          <div className="px-6 pt-5 pb-3">
-            <h1 className="text-lg font-black text-slate-900 tracking-tight">Consolidado de Metas</h1>
-            <p className="text-xs font-medium text-slate-400">
-              Ciclo {dados?.ciclo} · somente leitura · compara o plano dos coordenadores com a Demanda Comercial
-            </p>
+          <div className="px-6 pt-5 pb-3 flex items-center justify-between gap-3">
+            <div>
+              <h1 className="text-lg font-black text-slate-900 tracking-tight">Consolidado de Metas</h1>
+              <p className="text-xs font-medium text-slate-400">
+                Ciclo {dados?.ciclo} · compara o plano dos coordenadores com a Demanda Comercial
+              </p>
+              {(dados?.coordenadores_pendentes || []).length > 0 && (
+                <div className="mt-2 text-[11px] font-bold text-orange-600">
+                  Faltam trancar: {(dados?.coordenadores_pendentes || []).join(', ')}
+                </div>
+              )}
+            </div>
+            {dados?.pode_aprovar && (
+              <button onClick={aprovarMetas}
+                disabled={aprovando || (dados?.coordenadores_pendentes || []).length > 0}
+                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black
+                  ${(dados?.coordenadores_pendentes || []).length === 0
+                    ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                    : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}>
+                {aprovando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />}
+                Aprovar Metas
+              </button>
+            )}
           </div>
 
           {/* Totais por mês */}
@@ -1442,43 +1568,71 @@ function ConsolidadoMetas() {
                 </button>
 
                 {/* Linhas SKU */}
-                {catAberta && cat.skus.map((s: any) => (
-                  <div key={s.sku}
-                    className="grid gap-2 px-3 py-2 items-center ml-3 mt-0.5 rounded-xl hover:bg-white"
-                    style={{ gridTemplateColumns: colGrid }}>
-                    <div className="min-w-0 pl-2">
-                      <div className="text-xs font-bold text-slate-700 truncate">{s.descricao}</div>
-                      <div className="text-[10px] font-bold text-slate-300">{s.sku}</div>
-                    </div>
-                    {meses.map(m => {
-                      const cel  = s.meses[m];
-                      if (!cel) return <div key={m} />;
-                      const meta = cel.meta || 0;
-                      const bu   = cel.bu   || 0;
-                      const d    = cel.delta_pct;
-                      const cor  = d == null ? '#94a3b8' : Math.abs(d) >= 15 ? '#e11d48' : Math.abs(d) >= 5 ? '#d97706' : '#059669';
-                      const editado = meta !== bu;
-                      return (
-                        <div key={m} className={`grid grid-cols-3 gap-1 items-center px-1 py-1 rounded-lg ${editado ? 'bg-violet-50' : ''}`}>
-                          <div className="text-center">
-                            <div className="text-[11px] font-black text-violet-700">{fmtCx(meta)}</div>
-                            {cel.pmv > 0 && <div className="text-[9px] text-violet-400">{fmtRs(meta * cel.pmv)}</div>}
-                          </div>
-                          <div className="text-center">
-                            <div className="text-[11px] font-bold text-indigo-500">{fmtCx(bu)}</div>
-                            {cel.pmv > 0 && <div className="text-[9px] text-indigo-300">{fmtRs(bu * cel.pmv)}</div>}
-                          </div>
-                          <div className="text-center">
-                            <div className="text-[11px] font-black" style={{ color: cor }}>
-                              {d == null ? '—' : `${d >= 0 ? '+' : ''}${d.toFixed(0)}%`}
-                            </div>
-                            {d != null && <div className="text-[9px] text-slate-300">{fmtCx(Math.abs(cel.delta_cx))} cx</div>}
+                {catAberta && cat.skus.map((s: any) => {
+                  const skuKey = `${cat.nome}>${s.sku}`;
+                  const skuAberto = abertas.has(skuKey);
+                  return (
+                    <div key={s.sku}>
+                      <button onClick={() => toggle(skuKey)}
+                        className="w-full grid gap-2 px-3 py-2 items-center ml-3 mt-0.5 rounded-xl hover:bg-white"
+                        style={{ gridTemplateColumns: colGrid }}>
+                        <div className="min-w-0 pl-2 flex items-center gap-2">
+                          {skuAberto ? <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                     : <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
+                          <div className="min-w-0 text-left">
+                            <div className="text-xs font-bold text-slate-700 truncate">{s.descricao}</div>
+                            <div className="text-[10px] font-bold text-slate-300">{s.sku}</div>
                           </div>
                         </div>
-                      );
-                    })}
-                  </div>
-                ))}
+                        {meses.map(m => {
+                          const cel  = s.meses[m];
+                          if (!cel) return <div key={m} />;
+                          const meta = cel.meta || 0;
+                          const bu   = cel.bu   || 0;
+                          const d    = cel.delta_pct;
+                          const cor  = d == null ? '#94a3b8' : Math.abs(d) >= 15 ? '#e11d48' : Math.abs(d) >= 5 ? '#d97706' : '#059669';
+                          const editado = meta !== bu;
+                          return (
+                            <div key={m} className={`grid grid-cols-3 gap-1 items-center px-1 py-1 rounded-lg ${editado ? 'bg-violet-50' : ''}`}>
+                              <div className="text-center">
+                                <div className="text-[11px] font-black text-violet-700">{fmtCx(meta)}</div>
+                                {cel.pmv > 0 && <div className="text-[9px] text-violet-400">{fmtRs(meta * cel.pmv)}</div>}
+                              </div>
+                              <div className="text-center">
+                                <div className="text-[11px] font-bold text-indigo-500">{fmtCx(bu)}</div>
+                                {cel.pmv > 0 && <div className="text-[9px] text-indigo-300">{fmtRs(bu * cel.pmv)}</div>}
+                              </div>
+                              <div className="text-center">
+                                <div className="text-[11px] font-black" style={{ color: cor }}>
+                                  {d == null ? '—' : `${d >= 0 ? '+' : ''}${d.toFixed(0)}%`}
+                                </div>
+                                {d != null && <div className="text-[9px] text-slate-300">{fmtCx(Math.abs(cel.delta_cx))} cx</div>}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </button>
+                      {skuAberto && (
+                        <div className="ml-8 mr-2 mb-2 rounded-xl bg-white border border-slate-100 overflow-hidden">
+                          <div className="px-3 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400 border-b border-slate-100">
+                            Impacto por coordenador neste SKU
+                          </div>
+                          {(s.impactos_coordenadores || []).map((i: any) => (
+                            <div key={`${s.sku}-${i.coordenador}`}
+                              className="grid grid-cols-4 gap-2 px-3 py-2 text-[11px] border-b border-slate-50 last:border-0">
+                              <div className="font-bold text-slate-700 truncate">{i.coordenador}</div>
+                              <div className="text-right text-violet-600 font-bold">{fmtRs(i.meta_rs)}</div>
+                              <div className="text-right text-indigo-500 font-bold">{fmtRs(i.bu_rs)}</div>
+                              <div className={`text-right font-black ${i.delta_rs > 0 ? 'text-emerald-600' : i.delta_rs < 0 ? 'text-red-600' : 'text-slate-400'}`}>
+                                {fmtRs(i.delta_rs)}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             );
           })}

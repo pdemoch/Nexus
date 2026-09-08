@@ -372,6 +372,286 @@ class AjusteMeta(BaseModel):
 class PayloadSalvar(BaseModel):
     ajustes: List[AjusteMeta]
 
+
+class PayloadAcaoMetas(PayloadSalvar):
+    nome_alvo: Optional[str] = None
+    nivel_alvo: Optional[str] = None
+
+
+DDL_METAS_FINANCEIRAS = """
+CREATE TABLE IF NOT EXISTS metas_financeiras_responsavel (
+    id               SERIAL PRIMARY KEY,
+    ciclo_sop        VARCHAR(7)   NOT NULL,
+    nivel            VARCHAR(20)  NOT NULL,
+    nome_responsavel VARCHAR(120) NOT NULL,
+    mes_projetado    DATE         NOT NULL,
+    valor_meta       NUMERIC(18,2) NOT NULL DEFAULT 0,
+    definido_por     VARCHAR(120),
+    atualizado_em    TIMESTAMP DEFAULT NOW(),
+    UNIQUE (ciclo_sop, nivel, nome_responsavel, mes_projetado)
+);
+CREATE INDEX IF NOT EXISTS ix_metas_fin_resp_ciclo ON metas_financeiras_responsavel (ciclo_sop, nivel, nome_responsavel);
+"""
+
+
+def garantir_tabela_metas_financeiras(db: Session) -> None:
+    for stmt in DDL_METAS_FINANCEIRAS.strip().split(";"):
+        s = stmt.strip()
+        if s:
+            db.execute(text(s))
+
+
+def _stream_xlsx(buf: io.BytesIO, nome: str) -> StreamingResponse:
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{nome}"'},
+    )
+
+
+def _escopo_efetivo_para_acao(u: dict, responsavel: Optional[str], nivel: Optional[str]) -> tuple[dict, dict]:
+    from app.api.routers.rls_metas import escopo_usuario, NIVEL_GERENTE, NIVEL_COORDENADOR
+    escopo = escopo_usuario(u)
+    if escopo["ve_tudo"] and responsavel:
+        nv = (nivel or "").strip()
+        if nv not in (NIVEL_GERENTE, NIVEL_COORDENADOR):
+            raise HTTPException(422, "nivel_alvo deve ser Gerente ou Coordenador.")
+        return {
+            **escopo,
+            "ve_tudo": False,
+            "funcao": nv,
+            "campo_rls": "gerente_nome" if nv == NIVEL_GERENTE else "supervisor_nome",
+            "valor_rls": responsavel.strip(),
+            "nome_responsavel": responsavel.strip(),
+        }, escopo
+    return escopo, escopo
+
+
+def _aplicar_ajustes_meta(db: Session, ciclo: str, ajustes: List[AjusteMeta], escopo: Optional[dict] = None) -> None:
+    filtro_escopo = ""
+    params_escopo: dict = {}
+    if escopo is not None:
+        filtro_escopo, params_escopo = _filtro_escopo_sql(escopo, alias_cli="c")
+    for aj in ajustes:
+        check_imutabilidade_mes(aj.mes_projetado, aj.sku, contexto="Meta")
+
+        result = db.execute(text("""
+            SELECT f.id AS fato_id, f.cgc,
+                   COALESCE(SUM(v.qt_pedido),0) AS peso_historico
+            FROM fato_ibp_granular f
+            JOIN dim_clientes c ON f.cgc = c.cgc
+            LEFT JOIN fato_vendas v
+                ON v.cgc = f.cgc AND v.sku = f.sku
+                AND v.data_pedido >= CURRENT_DATE - INTERVAL '4 months'
+            WHERE f.ciclo_sop = :ciclo
+              AND TO_CHAR(f.mes_projetado,'YYYY-MM') = :mes
+              AND f.sku = :sku
+              AND TRIM(c.razaosocial) = TRIM(:razao)
+              {filtro_escopo}
+            GROUP BY f.id, f.cgc ORDER BY f.id
+        """.format(filtro_escopo=filtro_escopo)), {
+            "ciclo": ciclo,
+            "mes": aj.mes_projetado,
+            "sku": aj.sku,
+            "razao": aj.razao_social,
+            **params_escopo,
+        }).fetchall()
+
+        if not result:
+            raise HTTPException(
+                404,
+                f"Nenhuma linha encontrada para {aj.razao_social} / {aj.sku} / {aj.mes_projetado}."
+            )
+
+        pesos = [max(0.0, float(r.peso_historico or 0)) for r in result]
+        partes = ratear_maior_resto(aj.novo_volume, pesos)
+
+        for r, parte in zip(result, partes):
+            db.execute(text("UPDATE fato_ibp_granular SET vol_meta=:v WHERE id=:id"),
+                       {"v": int(parte), "id": r.fato_id})
+
+        propagar_linha_jusante(db, ciclo, aj.sku, aj.mes_projetado, ETAPA_METAS)
+
+
+def _filtro_escopo_sql(escopo: dict, alias_cli: str = "c") -> tuple[str, dict]:
+    from app.api.routers.rls_metas import clausula_rls
+    rls = clausula_rls(escopo, alias_cli=alias_cli)
+    return f"AND {rls['where']}", dict(rls["params"])
+
+
+def _registrar_metas_coordenadores(db: Session, ciclo: str, escopo: dict, definido_por: str) -> None:
+    garantir_tabela_metas_financeiras(db)
+    filtro, params = _filtro_escopo_sql(escopo, alias_cli="c")
+    params["ciclo"] = ciclo
+    rows = db.execute(text(f"""
+        SELECT
+            COALESCE(NULLIF(TRIM(c.supervisor_nome),''), 'SEM COORDENADOR') AS coordenador,
+            f.mes_projetado,
+            COALESCE(SUM(f.vol_meta * f.pmv_aplicado), 0) AS valor_meta
+        FROM fato_ibp_granular f
+        JOIN dim_clientes c ON c.cgc = f.cgc
+        WHERE f.ciclo_sop = :ciclo {filtro}
+        GROUP BY coordenador, f.mes_projetado
+    """), params).fetchall()
+    for r in rows:
+        db.execute(text("""
+            INSERT INTO metas_financeiras_responsavel
+                (ciclo_sop, nivel, nome_responsavel, mes_projetado, valor_meta, definido_por)
+            VALUES (:c, 'Coordenador', :n, :m, :v, :p)
+            ON CONFLICT (ciclo_sop, nivel, nome_responsavel, mes_projetado)
+            DO UPDATE SET valor_meta=:v, definido_por=:p, atualizado_em=NOW()
+        """), {
+            "c": ciclo,
+            "n": r.coordenador,
+            "m": r.mes_projetado,
+            "v": round(float(r.valor_meta or 0), 2),
+            "p": definido_por,
+        })
+
+
+def _validar_tolerancia_coordenador(db: Session, ciclo: str, coordenador: str) -> list[dict]:
+    garantir_tabela_metas_financeiras(db)
+    rows = db.execute(text("""
+        WITH atual AS (
+            SELECT f.mes_projetado,
+                   COALESCE(SUM(f.vol_meta * f.pmv_aplicado), 0) AS valor_atual
+            FROM fato_ibp_granular f
+            JOIN dim_clientes c ON c.cgc = f.cgc
+            WHERE f.ciclo_sop = :ciclo
+              AND TRIM(c.supervisor_nome) = :coordenador
+            GROUP BY f.mes_projetado
+        ),
+        alvo AS (
+            SELECT mes_projetado, valor_meta AS valor_alvo
+            FROM metas_financeiras_responsavel
+            WHERE ciclo_sop = :ciclo
+              AND nivel = 'Coordenador'
+              AND TRIM(nome_responsavel) = :coordenador
+        ),
+        base AS (
+            SELECT f.mes_projetado,
+                   COALESCE(SUM(f.vol_bottomup * f.pmv_aplicado), 0) AS valor_alvo
+            FROM fato_ibp_granular f
+            JOIN dim_clientes c ON c.cgc = f.cgc
+            WHERE f.ciclo_sop = :ciclo
+              AND TRIM(c.supervisor_nome) = :coordenador
+            GROUP BY f.mes_projetado
+        )
+        SELECT TO_CHAR(a.mes_projetado, 'YYYY-MM') AS mes,
+               a.valor_atual,
+               COALESCE(al.valor_alvo, b.valor_alvo, 0) AS valor_alvo,
+               CASE WHEN COALESCE(al.valor_alvo, b.valor_alvo, 0) > 0
+                    THEN (a.valor_atual - COALESCE(al.valor_alvo, b.valor_alvo, 0))
+                         / COALESCE(al.valor_alvo, b.valor_alvo, 0)
+                    ELSE 0 END AS variacao
+        FROM atual a
+        LEFT JOIN alvo al ON al.mes_projetado = a.mes_projetado
+        LEFT JOIN base b ON b.mes_projetado = a.mes_projetado
+        ORDER BY a.mes_projetado
+    """), {"ciclo": ciclo, "coordenador": coordenador.strip()}).fetchall()
+    fora = []
+    for r in rows:
+        variacao = float(r.variacao or 0)
+        if abs(variacao) > 0.05:
+            fora.append({
+                "mes": r.mes,
+                "valor_atual": round(float(r.valor_atual or 0), 2),
+                "valor_alvo": round(float(r.valor_alvo or 0), 2),
+                "variacao_pct": round(variacao * 100, 2),
+            })
+    return fora
+
+
+def _coordenadores_pendentes(db: Session, ciclo: str, escopo: dict) -> list[str]:
+    from app.api.routers.rls_metas import garantir_tabela_cadeados
+    garantir_tabela_cadeados(db)
+    filtro, params = _filtro_escopo_sql(escopo, alias_cli="c")
+    params["ciclo"] = ciclo
+    rows = db.execute(text(f"""
+        SELECT DISTINCT COALESCE(NULLIF(TRIM(c.supervisor_nome),''), 'SEM COORDENADOR') AS coordenador
+        FROM dim_clientes c
+        WHERE EXISTS (
+            SELECT 1 FROM fato_ibp_granular f
+            WHERE f.ciclo_sop = :ciclo AND f.cgc = c.cgc
+        )
+        {filtro}
+        ORDER BY 1
+    """), params).fetchall()
+    todos = [r.coordenador for r in rows if r.coordenador]
+    if not todos:
+        return []
+    travados = db.execute(text("""
+        SELECT TRIM(nome_responsavel) AS nome
+        FROM controle_metas_responsavel
+        WHERE ciclo_sop = :ciclo
+          AND nivel = 'Coordenador'
+          AND status = 'CONGELADO'
+    """), {"ciclo": ciclo}).fetchall()
+    travados_set = {r.nome for r in travados if r.nome in todos}
+    return [n for n in todos if n not in travados_set]
+
+
+def _gerar_evidencia_metas(db: Session, ciclo: str, escopo: dict, nome_arquivo: str) -> StreamingResponse:
+    filtro, params = _filtro_escopo_sql(escopo, alias_cli="c")
+    params["ciclo"] = ciclo
+    rows = db.execute(text(f"""
+        SELECT
+            f.ciclo_sop,
+            TO_CHAR(f.mes_projetado, 'YYYY-MM') AS mes,
+            COALESCE(NULLIF(TRIM(c.gerente_nome),''), 'SEM GERENTE') AS gerente,
+            COALESCE(NULLIF(TRIM(c.supervisor_nome),''), 'SEM COORDENADOR') AS coordenador,
+            COALESCE(NULLIF(TRIM(f.vendedor_nome),''), 'SEM VENDEDOR') AS executivo,
+            TRIM(f.sku) AS sku,
+            COALESCE(NULLIF(TRIM(p.descricao),''), 'SEM DESCRICAO') AS descricao,
+            COALESCE(NULLIF(TRIM(c.razaosocial),''), 'SEM RAZAO SOCIAL') AS razao_social,
+            f.cgc,
+            COALESCE(f.vol_bottomup, 0) AS vol_bottomup,
+            COALESCE(f.vol_meta, 0) AS vol_meta,
+            COALESCE(f.pmv_aplicado, 0) AS pmv,
+            COALESCE(f.vol_bottomup * f.pmv_aplicado, 0) AS valor_bottomup,
+            COALESCE(f.vol_meta * f.pmv_aplicado, 0) AS valor_meta
+        FROM fato_ibp_granular f
+        JOIN dim_clientes c ON c.cgc = f.cgc
+        LEFT JOIN dim_produtos p ON p.sku = f.sku
+        WHERE f.ciclo_sop = :ciclo {filtro}
+        ORDER BY gerente, coordenador, executivo, sku, razao_social, f.mes_projetado, f.cgc
+    """), params).fetchall()
+    df = pd.DataFrame([dict(r._mapping) for r in rows])
+    if df.empty:
+        df = pd.DataFrame(columns=[
+            "ciclo_sop", "mes", "gerente", "coordenador", "executivo", "sku",
+            "descricao", "razao_social", "cgc", "vol_bottomup", "vol_meta",
+            "pmv", "valor_bottomup", "valor_meta"
+        ])
+    else:
+        df["delta_caixas"] = df["vol_meta"] - df["vol_bottomup"]
+        df["delta_valor"] = df["valor_meta"] - df["valor_bottomup"]
+
+    tela_cols = ["gerente", "coordenador", "executivo", "sku", "descricao", "razao_social", "mes"]
+    if df.empty:
+        df_tela = pd.DataFrame(columns=tela_cols + ["vol_bottomup", "valor_bottomup", "vol_meta", "valor_meta", "delta_caixas", "delta_valor"])
+    else:
+        df_tela = df.groupby(tela_cols, as_index=False).agg({
+            "vol_bottomup": "sum",
+            "valor_bottomup": "sum",
+            "vol_meta": "sum",
+            "valor_meta": "sum",
+            "delta_caixas": "sum",
+            "delta_valor": "sum",
+        })
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        df_tela.to_excel(w, index=False, sheet_name="Tela")
+        df.to_excel(w, index=False, sheet_name="Granular")
+        pd.DataFrame([
+            {"campo": "ciclo", "valor": ciclo},
+            {"campo": "escopo", "valor": escopo.get("nome_responsavel") or "ADMIN"},
+            {"campo": "nivel", "valor": escopo.get("funcao") or "Administrador"},
+        ]).to_excel(w, index=False, sheet_name="Evidencia")
+    return _stream_xlsx(buf, nome_arquivo)
+
 @router.post("/salvar")
 def salvar(payload: PayloadSalvar, db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     try:
@@ -381,39 +661,82 @@ def salvar(payload: PayloadSalvar, db: Session = Depends(get_db), u: dict = Depe
         if etapa_congelada(db, ciclo, ETAPA_METAS) and u.get("funcao") != "Administrador":
             raise HTTPException(423, "Etapa congelada — não é possível salvar.")
 
-        for aj in payload.ajustes:
-            check_imutabilidade_mes(aj.mes_projetado, aj.sku, contexto="Meta")
-
-            result = db.execute(text("""
-                SELECT f.id AS fato_id, f.cgc,
-                       COALESCE(SUM(v.qt_pedido),0) AS peso_historico
-                FROM fato_ibp_granular f
-                JOIN dim_clientes c ON f.cgc = c.cgc
-                LEFT JOIN fato_vendas v
-                    ON v.cgc = f.cgc AND v.sku = f.sku
-                    AND v.data_pedido >= CURRENT_DATE - INTERVAL '4 months'
-                WHERE f.ciclo_sop = :ciclo
-                  AND TO_CHAR(f.mes_projetado,'YYYY-MM') = :mes
-                  AND f.sku = :sku
-                  AND TRIM(c.razaosocial) = TRIM(:razao)
-                GROUP BY f.id, f.cgc ORDER BY f.id
-            """), {"ciclo": ciclo, "mes": aj.mes_projetado,
-                   "sku": aj.sku, "razao": aj.razao_social}).fetchall()
-
-            if not result: continue
-
-            pesos     = [max(0.0, float(r.peso_historico or 0)) for r in result]
-            partes    = ratear_maior_resto(aj.novo_volume, pesos)
-
-            for r, parte in zip(result, partes):
-                db.execute(text("UPDATE fato_ibp_granular SET vol_meta=:v WHERE id=:id"),
-                           {"v": int(parte), "id": r.fato_id})
-
-            # Propaga para jusante (Supply, Final) — nunca toca vol_ia
-            propagar_linha_jusante(db, ciclo, aj.sku, aj.mes_projetado, ETAPA_METAS)
-
+        from app.api.routers.rls_metas import escopo_usuario
+        _aplicar_ajustes_meta(db, ciclo, payload.ajustes, escopo_usuario(u))
         db.commit()
         return {"status": "ok"}
+    except HTTPException:
+        db.rollback(); raise
+    except Exception as e:
+        db.rollback(); raise HTTPException(500, repr(e))
+
+
+@router.post("/salvar-evidencia")
+def salvar_evidencia(payload: PayloadAcaoMetas, db: Session = Depends(get_db),
+                     u: dict = Depends(require_metas)):
+    try:
+        ciclo = get_current_cycle(db)
+        if not etapa_congelada(db, ciclo, ETAPA_BOTTOMUP) and u.get("funcao") != "Administrador":
+            raise HTTPException(423, "Demanda Comercial ainda nao congelou. Aguarde o bastao.")
+        if etapa_congelada(db, ciclo, ETAPA_METAS) and u.get("funcao") != "Administrador":
+            raise HTTPException(423, "Etapa congelada — não é possível salvar.")
+        escopo_acao, escopo_executor = _escopo_efetivo_para_acao(u, payload.nome_alvo, payload.nivel_alvo)
+        _aplicar_ajustes_meta(db, ciclo, payload.ajustes, escopo_acao)
+        db.commit()
+        nome = f"metas_salvar_{ciclo.replace('/','_')}_{(escopo_acao.get('nome_responsavel') or 'admin').replace(' ','_')}.xlsx"
+        return _gerar_evidencia_metas(db, ciclo, escopo_acao, nome)
+    except HTTPException:
+        db.rollback(); raise
+    except Exception as e:
+        db.rollback(); raise HTTPException(500, repr(e))
+
+
+@router.post("/passar-coordenadores-evidencia")
+def passar_coordenadores_evidencia(payload: PayloadAcaoMetas, db: Session = Depends(get_db),
+                                   u: dict = Depends(require_metas)):
+    try:
+        ciclo = get_current_cycle(db)
+        if not etapa_congelada(db, ciclo, ETAPA_BOTTOMUP) and u.get("funcao") != "Administrador":
+            raise HTTPException(423, "Demanda Comercial ainda nao congelou. Aguarde o bastao.")
+        escopo_acao, escopo_executor = _escopo_efetivo_para_acao(u, payload.nome_alvo, payload.nivel_alvo)
+        if escopo_acao.get("funcao") not in ("Gerente", "Administrador"):
+            raise HTTPException(403, "Somente Gerente ou Administrador passa metas para coordenadores.")
+        _aplicar_ajustes_meta(db, ciclo, payload.ajustes, escopo_acao)
+        executor = escopo_executor.get("nome_responsavel") or u.get("nome") or u.get("email") or "ADMIN"
+        _registrar_metas_coordenadores(db, ciclo, escopo_acao, executor)
+        db.commit()
+        nome = f"metas_passar_coordenadores_{ciclo.replace('/','_')}_{(escopo_acao.get('nome_responsavel') or 'admin').replace(' ','_')}.xlsx"
+        return _gerar_evidencia_metas(db, ciclo, escopo_acao, nome)
+    except HTTPException:
+        db.rollback(); raise
+    except Exception as e:
+        db.rollback(); raise HTTPException(500, repr(e))
+
+
+@router.post("/trancar-evidencia")
+def trancar_evidencia(payload: PayloadAcaoMetas, db: Session = Depends(get_db),
+                      u: dict = Depends(require_metas)):
+    try:
+        from app.api.routers.rls_metas import escopo_usuario, travar_cadeado, NIVEL_COORDENADOR
+        ciclo = get_current_cycle(db)
+        if not etapa_congelada(db, ciclo, ETAPA_BOTTOMUP) and u.get("funcao") != "Administrador":
+            raise HTTPException(423, "Demanda Comercial ainda nao congelou. Aguarde o bastao.")
+        if etapa_congelada(db, ciclo, ETAPA_METAS) and u.get("funcao") != "Administrador":
+            raise HTTPException(423, "Etapa congelada — não é possível trancar.")
+        escopo_acao, escopo_executor = _escopo_efetivo_para_acao(u, payload.nome_alvo, payload.nivel_alvo)
+        if escopo_acao.get("funcao") != NIVEL_COORDENADOR:
+            raise HTTPException(403, "Somente carteiras de Coordenador usam Salvar e trancar.")
+        _aplicar_ajustes_meta(db, ciclo, payload.ajustes, escopo_acao)
+        fora = _validar_tolerancia_coordenador(db, ciclo, escopo_acao["nome_responsavel"])
+        if fora and u.get("funcao") != "Administrador":
+            raise HTTPException(422, {"mensagem": "Coordenador fora da tolerância de ±5%.", "itens": fora})
+        if escopo_executor["ve_tudo"]:
+            travar_cadeado(db, escopo_executor, ciclo, nome_alvo=escopo_acao["nome_responsavel"], nivel_alvo=NIVEL_COORDENADOR)
+        else:
+            travar_cadeado(db, escopo_acao, ciclo)
+        db.commit()
+        nome = f"metas_trancar_{ciclo.replace('/','_')}_{escopo_acao['nome_responsavel'].replace(' ','_')}.xlsx"
+        return _gerar_evidencia_metas(db, ciclo, escopo_acao, nome)
     except HTTPException:
         db.rollback(); raise
     except Exception as e:
@@ -423,12 +746,7 @@ def salvar(payload: PayloadSalvar, db: Session = Depends(get_db), u: dict = Depe
 @router.get("/auditoria-impacto")
 def auditoria_impacto(responsavel: str = None, nivel_responsavel: str = None,
                       db: Session = Depends(get_db), u: dict = Depends(require_metas)):
-    """Compara a meta atual com o BottomUP no mesmo escopo da carteira.
-
-    O impacto financeiro usa o PMV ponderado do BottomUP para não classificar
-    como alteração do coordenador uma simples mudança automática de CNPJ no
-    rateio. Se as caixas forem iguais, os valores em R$ também serão iguais.
-    """
+    """Compara a meta atual com o BottomUP no mesmo escopo da carteira."""
     try:
         from app.api.routers.rls_metas import escopo_usuario, clausula_rls
         ciclo = get_current_cycle(db)
@@ -454,18 +772,8 @@ def auditoria_impacto(responsavel: str = None, nivel_responsavel: str = None,
                    TO_CHAR(f.mes_projetado, 'YYYY-MM') AS mes,
                    SUM(f.vol_bottomup) AS bottomup,
                    SUM(f.vol_meta) AS meta,
-                   SUM(f.vol_bottomup) * COALESCE(
-                       SUM(f.vol_bottomup * f.pmv_aplicado)
-                       / NULLIF(SUM(f.vol_bottomup), 0),
-                       AVG(NULLIF(f.pmv_aplicado, 0)),
-                       0
-                   ) AS bottomup_rs,
-                   SUM(f.vol_meta) * COALESCE(
-                       SUM(f.vol_bottomup * f.pmv_aplicado)
-                       / NULLIF(SUM(f.vol_bottomup), 0),
-                       AVG(NULLIF(f.pmv_aplicado, 0)),
-                       0
-                   ) AS meta_rs
+                   SUM(f.vol_bottomup * f.pmv_aplicado) AS bottomup_rs,
+                   SUM(f.vol_meta * f.pmv_aplicado) AS meta_rs
             FROM fato_ibp_granular f
             JOIN dim_clientes c ON c.cgc = f.cgc
             JOIN dim_produtos p ON p.sku = f.sku
@@ -672,13 +980,19 @@ def dossie(sku: str, razao_social: str = None, vendedor_nome: str = None,
 # por categoria → SKU, sem filtro de RLS (visão da empresa toda)
 # ---------------------------------------------------------------------------
 @router.get("/consolidado")
-def consolidado(db: Session = Depends(get_db), _: dict = Depends(require_metas)):
+def consolidado(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     try:
+        if u.get("funcao") not in ("Administrador", "Gerente"):
+            raise HTTPException(403, "Consolidado disponível somente para Gerente e Administrador.")
+        from app.api.routers.rls_metas import escopo_usuario
         ciclo = get_current_cycle(db)
+        escopo = escopo_usuario(u)
         meses = get_working_window_months(db)
         meses_iso = [m.strftime("%Y-%m-%d") for m in meses]
+        filtro, params = _filtro_escopo_sql(escopo, alias_cli="c")
+        params.update({"ciclo": ciclo, "meses": meses})
 
-        rows = db.execute(text("""
+        rows = db.execute(text(f"""
             SELECT
                 COALESCE(p.categoria, 'SEM CATEGORIA') AS categoria,
                 COALESCE(p.segmento,  'SEM SEGMENTO')  AS segmento,
@@ -694,11 +1008,40 @@ def consolidado(db: Session = Depends(get_db), _: dict = Depends(require_metas))
                     0
                 )                   AS pmv
             FROM fato_ibp_granular f
+            JOIN dim_clientes c ON c.cgc = f.cgc
             LEFT JOIN dim_produtos p ON p.sku = f.sku
             WHERE f.ciclo_sop = :ciclo AND f.mes_projetado = ANY(:meses)
+              {filtro}
             GROUP BY p.categoria, p.segmento, f.sku, p.descricao, f.mes_projetado
             ORDER BY p.categoria, p.segmento, p.descricao, f.mes_projetado
-        """), {"ciclo": ciclo, "meses": meses}).fetchall()
+        """), params).fetchall()
+
+        impactos = db.execute(text(f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(c.supervisor_nome),''), 'SEM COORDENADOR') AS coordenador,
+                TRIM(f.sku) AS sku,
+                COALESCE(SUM(f.vol_meta), 0) AS meta,
+                COALESCE(SUM(f.vol_bottomup), 0) AS bu,
+                COALESCE(SUM(f.vol_meta * f.pmv_aplicado), 0) AS meta_rs,
+                COALESCE(SUM(f.vol_bottomup * f.pmv_aplicado), 0) AS bu_rs
+            FROM fato_ibp_granular f
+            JOIN dim_clientes c ON c.cgc = f.cgc
+            WHERE f.ciclo_sop = :ciclo AND f.mes_projetado = ANY(:meses)
+              {filtro}
+            GROUP BY coordenador, f.sku
+            ORDER BY f.sku, ABS(COALESCE(SUM(f.vol_meta * f.pmv_aplicado), 0) - COALESCE(SUM(f.vol_bottomup * f.pmv_aplicado), 0)) DESC
+        """), params).fetchall()
+        impactos_por_sku: dict = {}
+        for r in impactos:
+            impactos_por_sku.setdefault(r.sku, []).append({
+                "coordenador": r.coordenador,
+                "meta": int(r.meta or 0),
+                "bu": int(r.bu or 0),
+                "delta_cx": int((r.meta or 0) - (r.bu or 0)),
+                "meta_rs": round(float(r.meta_rs or 0), 2),
+                "bu_rs": round(float(r.bu_rs or 0), 2),
+                "delta_rs": round(float((r.meta_rs or 0) - (r.bu_rs or 0)), 2),
+            })
 
         # Monta árvore categoria → SKUs (segmento oculto na visualização)
         tree: dict = {}
@@ -721,6 +1064,7 @@ def consolidado(db: Session = Depends(get_db), _: dict = Depends(require_metas))
                 "delta_cx":  delta_cx,
                 "delta_pct": delta_pct,
             }
+            sk["impactos_coordenadores"] = impactos_por_sku.get(r.sku, [])
 
         categorias = [
             {
@@ -733,6 +1077,9 @@ def consolidado(db: Session = Depends(get_db), _: dict = Depends(require_metas))
         return {
             "ciclo":      ciclo,
             "meses":      meses_iso,
+            "sou_admin":  u.get("funcao") == "Administrador",
+            "pode_aprovar": u.get("funcao") in ("Administrador", "Gerente"),
+            "coordenadores_pendentes": _coordenadores_pendentes(db, ciclo, escopo),
             "categorias": categorias,
         }
     except Exception as e:
@@ -748,6 +1095,39 @@ def congelar(db: Session = Depends(get_db), _: dict = Depends(require_admin)):
         res = propagar_para_jusante(db, ciclo, ETAPA_METAS)
         db.commit()
         return {"status": "congelada", "propagacao": res}
+    except Exception as e:
+        db.rollback(); raise HTTPException(500, repr(e))
+
+
+@router.post("/aprovar-evidencia")
+def aprovar_evidencia(payload: PayloadAcaoMetas = PayloadAcaoMetas(ajustes=[]),
+                      db: Session = Depends(get_db), u: dict = Depends(require_metas)):
+    try:
+        ciclo = get_current_cycle(db)
+        if u.get("funcao") not in ("Administrador", "Gerente"):
+            raise HTTPException(403, "Somente Gerente ou Administrador aprova metas.")
+        if not etapa_congelada(db, ciclo, ETAPA_BOTTOMUP) and u.get("funcao") != "Administrador":
+            raise HTTPException(423, "Demanda Comercial ainda nao congelou. Aguarde o bastao.")
+        if etapa_congelada(db, ciclo, ETAPA_METAS):
+            raise HTTPException(423, "Metas Comercial já está aprovada/congelada.")
+
+        escopo_acao, _ = _escopo_efetivo_para_acao(u, payload.nome_alvo, payload.nivel_alvo)
+        if payload.ajustes:
+            _aplicar_ajustes_meta(db, ciclo, payload.ajustes, escopo_acao)
+        pendentes = _coordenadores_pendentes(db, ciclo, escopo_acao)
+        if pendentes:
+            raise HTTPException(422, {
+                "mensagem": "Ainda existem coordenadores sem trancar as metas.",
+                "coordenadores_pendentes": pendentes,
+            })
+
+        congelar_etapa(db, ciclo, ETAPA_METAS)
+        propagar_para_jusante(db, ciclo, ETAPA_METAS)
+        db.commit()
+        nome = f"metas_aprovadas_{ciclo.replace('/','_')}_{(escopo_acao.get('nome_responsavel') or 'admin').replace(' ','_')}.xlsx"
+        return _gerar_evidencia_metas(db, ciclo, escopo_acao, nome)
+    except HTTPException:
+        db.rollback(); raise
     except Exception as e:
         db.rollback(); raise HTTPException(500, repr(e))
 
@@ -1022,78 +1402,3 @@ def reabrir_fase_ep(payload: PayloadReabrirFase, db: Session = Depends(get_db),
     except HTTPException: raise
     except Exception as e:
         db.rollback(); raise HTTPException(500, repr(e))
-
-
-# ---------------------------------------------------------------------------
-# GET /consolidado  — visão somente leitura: vol_meta vs vol_bu por categoria/SKU
-# ---------------------------------------------------------------------------
-@router.get("/consolidado")
-def consolidado(db: Session = Depends(get_db), _: dict = Depends(require_metas)):
-    """
-    Visão de consenso somente leitura.
-    Compara o vol_meta acumulado pelos coordenadores com o vol_bu que veio
-    da Demanda Comercial — por categoria e SKU, para todos os meses da janela.
-    Permite identificar divergências entre o plano dos coordenadores e comercial.
-    """
-    try:
-        ciclo = get_current_cycle(db)
-        meses = get_working_window_months(db)
-        meses_iso = [m.strftime("%Y-%m-%d") for m in meses]
-
-        rows = db.execute(text("""
-            SELECT
-                COALESCE(p.categoria, 'SEM CATEGORIA') AS categoria,
-                COALESCE(p.segmento,  'SEM SEGMENTO')  AS segmento,
-                f.sku,
-                COALESCE(p.descricao, 'SEM DESCRICAO') AS descricao,
-                TO_CHAR(f.mes_projetado, 'YYYY-MM-DD')  AS mes,
-                SUM(f.vol_meta)                          AS meta,
-                SUM(f.vol_bottomup)                      AS bu,
-                SUM(f.vol_ia)                            AS ia,
-                COALESCE(
-                    SUM(f.vol_meta * f.pmv_aplicado) / NULLIF(SUM(f.vol_meta), 0),
-                    SUM(f.vol_ia   * f.pmv_aplicado) / NULLIF(SUM(f.vol_ia), 0),
-                    0
-                )                                        AS pmv
-            FROM fato_ibp_granular f
-            LEFT JOIN dim_produtos p ON p.sku = f.sku
-            WHERE f.ciclo_sop = :ciclo AND f.mes_projetado = ANY(:meses)
-            GROUP BY p.categoria, p.segmento, f.sku, p.descricao, f.mes_projetado
-            ORDER BY p.categoria, p.descricao, f.mes_projetado
-        """), {"ciclo": ciclo, "meses": meses}).fetchall()
-
-        # Monta árvore categoria → SKU (achata segmento, igual à Irrestrita)
-        tree: dict = {}
-        for r in rows:
-            cat = tree.setdefault(r.categoria, {"nome": r.categoria, "skus": {}})
-            sk  = cat["skus"].setdefault(r.sku, {
-                "sku": r.sku, "descricao": r.descricao, "meses": {}
-            })
-            meta = int(r.meta or 0)
-            bu   = int(r.bu or 0)
-            ia   = int(r.ia or 0)
-            pmv  = round(float(r.pmv or 0), 2)
-            sk["meses"][r.mes] = {
-                "meta":      meta,
-                "bu":        bu,
-                "ia":        ia,
-                "pmv":       pmv,
-                "delta_cx":  meta - bu,
-                "delta_pct": round((meta - bu) / bu * 100, 1) if bu else None,
-            }
-
-        categorias = [
-            {
-                "nome": cat["nome"],
-                "skus": sorted(cat["skus"].values(), key=lambda s: s["descricao"])
-            }
-            for cat in sorted(tree.values(), key=lambda c: c["nome"])
-        ]
-
-        return {
-            "ciclo":      ciclo,
-            "meses":      meses_iso,
-            "categorias": categorias,
-        }
-    except Exception as e:
-        raise HTTPException(500, repr(e))
