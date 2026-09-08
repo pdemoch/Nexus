@@ -10,7 +10,12 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
-from app.financeiro.s3_store import carregar_todos_mensal, carregar_mensal, carregar_fornecedores
+from app.financeiro.s3_store import (
+    carregar_todos_mensal,
+    carregar_mensal,
+    carregar_fornecedores,
+    carregar_sb1,
+)
 
 logger = logging.getLogger(__name__)
 SEM_VALOR = "SEM VALOR"
@@ -45,6 +50,11 @@ def _filter_key(series: pd.Series) -> pd.Series:
     return _norm_key(series).replace("", SEM_VALOR)
 
 
+def _first_col(df: pd.DataFrame, names) -> str:
+    lower_map = {str(col).lower(): col for col in df.columns}
+    return next((lower_map[name.lower()] for name in names if name.lower() in lower_map), "")
+
+
 def _as_filter(value) -> Optional[List[str]]:
     if not value:
         return None
@@ -76,7 +86,7 @@ def _base_cached(data_ini: date, data_fim: date, motivos: Optional[Tuple[str, ..
     key_map = {
         "e2_num": "e5_numero", "e2_prefixo": "e5_prefixo",
         "e2_parcela": "e5_parcela", "e2_filial": "e5_filial",
-        "e2_tipo": "e5_tipo",
+        "e2_tipo": "e5_tipo", "e2_loja": "e5_loja",
     }
     join_keys = []
     for e2_key, e5_key in key_map.items():
@@ -124,16 +134,34 @@ def _base_cached(data_ini: date, data_fim: date, motivos: Optional[Tuple[str, ..
         nf["_join_e2_num"] = _norm_key(_col(nf, "f1_doc"))
         nf["_join_e2_prefixo"] = _norm_key(_col(nf, "f1_serie"))
         nf["_join_e2_filial"] = _norm_key(_col(nf, "f1_filial"))
+        nf["_join_e2_loja"] = _norm_key(_col(nf, "f1_loja"))
         keys = [c for c in ("_join_e2_num", "_join_e2_prefixo", "_join_e2_filial")
                 if c in base]
+        if "_join_e2_loja" in base:
+            keys.append("_join_e2_loja")
         if keys:
-            cols = keys + ["clifor", "f1_emissao"]
+            group_keys = ["clifor"] + keys
+            cols = group_keys + ["f1_emissao"]
             if "f1_valbrut" in nf.columns:
                 cols.append("f1_valbrut")
+            for c in ("f1_doc", "f1_serie", "f1_filial", "f1_loja"):
+                if c in nf.columns:
+                    cols.append(c)
             if "d1_tp" in nf.columns:
                 cols.append("d1_tp")
-            n = nf[cols].drop_duplicates(keys + ["clifor"])
-            base = base.merge(n, on=["clifor"] + keys, how="left")
+            n = nf[cols].copy()
+            if "d1_tp" in n.columns:
+                n["_d1_tipos"] = _filter_key(n["d1_tp"])
+            agg = {"f1_emissao": "first"}
+            if "f1_valbrut" in n.columns:
+                agg["f1_valbrut"] = "sum"
+            for c in ("f1_doc", "f1_serie", "f1_filial", "f1_loja"):
+                if c in n.columns:
+                    agg[c] = "first"
+            if "_d1_tipos" in n.columns:
+                agg["_d1_tipos"] = lambda s: "|".join(sorted(set(x for x in s if x)))
+            n = n.groupby(group_keys, dropna=False, as_index=False).agg(agg)
+            base = base.merge(n, on=group_keys, how="left")
     emissao_titulo = pd.to_datetime(_col(base, "e2_emissao"), errors="coerce")
     vencimento_real = pd.to_datetime(_col(base, "e2_vencrea"), errors="coerce")
     vencimento_condicao = pd.to_datetime(_col(base, "e2_vencto"), errors="coerce")
@@ -151,7 +179,12 @@ def _base_cached(data_ini: date, data_fim: date, motivos: Optional[Tuple[str, ..
     if motivo_values:
         base = base[_filter_key(_col(base, "e5_motbx")).isin(motivo_values)]
     if tipo_values:
-        base = base[_filter_key(_col(base, "d1_tp")).isin(tipo_values)]
+        if "_d1_tipos" in base:
+            base = base[base["_d1_tipos"].fillna("").apply(
+                lambda raw: bool(set(str(raw).split("|")) & set(tipo_values))
+            )]
+        else:
+            base = base[_filter_key(_col(base, "d1_tp")).isin(tipo_values)]
     if fornecedor_values:
         base = base[_filter_key(_col(base, "clifor")).isin(fornecedor_values)]
     return base
@@ -178,7 +211,12 @@ def _filtrar_base_df(base: pd.DataFrame, motivos=None, tipos=None,
     if motivo_values:
         out = out[_filter_key(_col(out, "e5_motbx")).isin(motivo_values)]
     if tipo_values:
-        out = out[_filter_key(_col(out, "d1_tp")).isin(tipo_values)]
+        if "_d1_tipos" in out:
+            out = out[out["_d1_tipos"].fillna("").apply(
+                lambda raw: bool(set(str(raw).split("|")) & set(tipo_values))
+            )]
+        else:
+            out = out[_filter_key(_col(out, "d1_tp")).isin(tipo_values)]
     if fornecedor_values:
         out = out[_filter_key(_col(out, "clifor")).isin(fornecedor_values)]
     return out
@@ -187,6 +225,11 @@ def _filtrar_base_df(base: pd.DataFrame, motivos=None, tipos=None,
 def _valores_filtro(base: pd.DataFrame, coluna: str) -> List[str]:
     if base.empty:
         return []
+    if coluna == "d1_tp" and "_d1_tipos" in base:
+        valores = set()
+        for raw in base["_d1_tipos"].fillna(""):
+            valores.update(x for x in str(raw).split("|") if x)
+        return sorted(valores)
     return sorted(_filter_key(_col(base, coluna)).unique().tolist())
 
 
@@ -270,10 +313,76 @@ def _resumo_tipos(base: pd.DataFrame, data_ini: date, data_fim: date) -> Dict[st
     if base.empty:
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "tipos": []}
     rows = []
-    for tipo, grupo in base.assign(_tipo=_norm_key(_col(base, "d1_tp")).replace("", "SEM VALOR")).groupby("_tipo"):
-        rows.append({"tipo": str(tipo), **_resumo(grupo)})
+    if "_d1_tipos" in base:
+        tipos = _valores_filtro(base, "d1_tp")
+        for tipo in tipos:
+            grupo = base[base["_d1_tipos"].fillna("").apply(lambda raw: tipo in str(raw).split("|"))]
+            rows.append({"tipo": str(tipo), **_resumo(grupo)})
+    else:
+        for tipo, grupo in base.assign(_tipo=_filter_key(_col(base, "d1_tp"))).groupby("_tipo"):
+            rows.append({"tipo": str(tipo), **_resumo(grupo)})
     rows.sort(key=lambda row: row["valor_total"], reverse=True)
     return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "tipos": rows}
+
+
+def _lookup_descricoes_sb1() -> Dict[str, str]:
+    sb1 = carregar_sb1()
+    if sb1.empty:
+        return {}
+    cod_col = _first_col(sb1, ("b1_cod", "codigo", "cod", "sku", "produto"))
+    desc_col = _first_col(sb1, ("b1_desc", "descricao", "desc", "produto_descricao"))
+    if not cod_col or not desc_col:
+        return {}
+    codigos = _norm_key(sb1[cod_col])
+    descricoes = sb1[desc_col].fillna("").astype(str).str.strip()
+    return {
+        str(codigo): str(descricao)
+        for codigo, descricao in zip(codigos, descricoes)
+        if str(codigo) and str(descricao)
+    }
+
+
+def _lookup_itens_d1(data_fim: date, clifor: str) -> Dict[Tuple[str, str, str, str, str], List[Dict[str, Any]]]:
+    nf = carregar_todos_mensal("notas_entrada", data_fim)
+    if nf.empty:
+        return {}
+    nf = nf.copy()
+    nf["clifor"] = _norm_key(_col(nf, "f1_fornece"))
+    nf = nf[nf["clifor"].eq(str(clifor).strip().upper())]
+    if nf.empty:
+        return {}
+
+    cod_col = _first_col(nf, ("d1_cod", "d1_codigo", "d1_produto", "d1_item"))
+    if not cod_col:
+        return {}
+    quant_col = _first_col(nf, ("d1_quant", "d1_qtd", "d1_quantidade"))
+    vunit_col = _first_col(nf, ("d1_vunit", "d1_vlrunit", "d1_prunit"))
+    total_col = _first_col(nf, ("d1_total", "d1_valor", "d1_vtotal"))
+    tp_col = _first_col(nf, ("d1_tp", "d1_tipo"))
+
+    descricoes = _lookup_descricoes_sb1()
+    lookup = {}
+    for row in nf.to_dict("records"):
+        key = (
+            str(row.get("clifor", "")).strip().upper(),
+            str(row.get("f1_doc", "")).strip().upper(),
+            str(row.get("f1_serie", "")).strip().upper(),
+            str(row.get("f1_filial", "")).strip().upper(),
+            str(row.get("f1_loja", "")).strip().upper(),
+        )
+        codigo = str(row.get(cod_col, "")).strip().upper()
+        if not codigo:
+            continue
+        item = {
+            "codigo": codigo,
+            "descricao": descricoes.get(codigo, ""),
+            "tipo_d1": str(row.get(tp_col, "") or SEM_VALOR).strip() if tp_col else SEM_VALOR,
+            "quantidade": _finite_float(row.get(quant_col)) if quant_col else 0.0,
+            "valor_unitario": _finite_float(row.get(vunit_col)) if vunit_col else 0.0,
+            "valor_total": _finite_float(row.get(total_col)) if total_col else 0.0,
+        }
+        lookup.setdefault(key, []).append(item)
+    return lookup
 
 
 def calcular_pmp_global(data_ini: date, data_fim: date, motivos=None, tipos=None,
@@ -343,16 +452,26 @@ def obter_pagamentos_fornecedor(data_ini: date, data_fim: date, clifor: str,
         encontrados = nome_df[_norm_key(nome_df["clifor"]).eq(_norm_key(pd.Series([clifor])).iloc[0])]
         if not encontrados.empty:
             nome = str(encontrados.iloc[0][nome_col])
+    itens_por_nf = _lookup_itens_d1(data_fim, clifor)
     pagamentos = []
     for row in base.sort_values("e5_data").to_dict("records"):
+        chave_nf = (
+            str(row.get("clifor", "")).strip().upper(),
+            str(row.get("_join_e2_num", row.get("f1_doc", ""))).strip().upper(),
+            str(row.get("_join_e2_prefixo", row.get("f1_serie", ""))).strip().upper(),
+            str(row.get("_join_e2_filial", row.get("f1_filial", ""))).strip().upper(),
+            str(row.get("_join_e2_loja", row.get("f1_loja", ""))).strip().upper(),
+        )
+        itens = itens_por_nf.get(chave_nf, [])
         pagamentos.append({
             "clifor": str(row.get("clifor", "")),
             "fornecedor": nome or "",
             "titulo": str(row.get("e2_num", "")),
             "parcela": str(row.get("e2_parcela", "")).strip(),
-            "nf": str(row.get("f1_doc", "")),
-            "serie": str(row.get("f1_serie", "")),
-            "tipo_d1": str(row.get("d1_tp", "") or "SEM VALOR"),
+            "nf": str(row.get("f1_doc", row.get("_join_e2_num", ""))),
+            "serie": str(row.get("f1_serie", row.get("_join_e2_prefixo", ""))),
+            "tipo_d1": str(row.get("_d1_tipos", "") or SEM_VALOR),
+            "itens_d1": itens,
             "emissao": _date_text(row.get("e2_emissao")),
             "vencimento_real": _date_text(row.get("e2_vencrea")),
             "vencimento_condicao": _date_text(row.get("e2_vencto")),

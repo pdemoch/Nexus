@@ -161,6 +161,7 @@ export default function FinanceiroArena() {
   const [pmpTipos, setPmpTipos] = useState<any[]>([]);
   const [pmpFornecedorSel, setPmpFornecedorSel] = useState<any>(null);
   const [pmpFornecedorDetalhe, setPmpFornecedorDetalhe] = useState<any>(null);
+  const [pmpPagamentoSel, setPmpPagamentoSel] = useState<any>(null);
   const [regionais, setRegionais] = useState<any[]>([]);
   const [clientes, setClientes]   = useState<any[]>([]);
   const [evolucao, setEvolucao]   = useState<any[]>([]);
@@ -268,6 +269,7 @@ export default function FinanceiroArena() {
   const abrirFornecedorPmp = async (fornecedor: any) => {
     setPmpFornecedorSel(fornecedor);
     setPmpFornecedorDetalhe(null);
+    setPmpPagamentoSel(null);
     try {
       const r = await axios.get('/api/v1/financeiro/pmp/fornecedor-detalhe', {
         params: { ...pmpParams, clifor: fornecedor.clifor },
@@ -1067,7 +1069,7 @@ export default function FinanceiroArena() {
                     {pmpFornecedorDetalhe?.resumo && <> · <b>{pmpFornecedorDetalhe.total}</b> movimentos · pago {fmtRs(pmpFornecedorDetalhe.resumo.valor_total)}</>}
                   </div>
                 </div>
-                <button onClick={() => { setPmpFornecedorSel(null); setPmpFornecedorDetalhe(null); }}
+                <button onClick={() => { setPmpFornecedorSel(null); setPmpFornecedorDetalhe(null); setPmpPagamentoSel(null); }}
                   className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100"><X className="w-4 h-4" /></button>
               </div>
               <div className="overflow-auto" style={{ maxHeight: 360 }}>
@@ -1078,21 +1080,81 @@ export default function FinanceiroArena() {
                 ) : (
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
                     <thead><tr style={{ background: '#f8fafc' }}>
-                      {['Título', 'Parc.', 'NF', 'Tipo D1', 'Emissão', 'Vencto Real', 'Pagamento', 'Valor Pago', 'PMP Pag.', 'PMP Cond.', 'Delta'].map(h =>
+                      {['Título', 'Parc.', 'NF', 'Tipo D1', 'Emissão', 'Vencto Real', 'Pagamento', 'Valor Pago', 'PMP Pag.', 'PMP Cond.', 'Delta', 'Itens'].map(h =>
                         <th key={h} style={{ padding: '7px 10px', textAlign: ['Título', 'Parc.', 'NF', 'Tipo D1', 'Emissão', 'Vencto Real', 'Pagamento'].includes(h) ? 'left' : 'right', fontSize: 9, color: '#94a3b8', whiteSpace: 'nowrap' }}>{h}</th>)}
                     </tr></thead>
                     <tbody>{pmpFornecedorDetalhe.pagamentos.map((p: any, i: number) =>
-                      <tr key={`${p.titulo}-${p.parcela}-${p.data_pagamento}-${i}`} style={{ background: i % 2 ? '#f9fafb' : '#fff', borderBottom: '1px solid #f1f5f9' }}>
+                      <tr key={`${p.titulo}-${p.parcela}-${p.data_pagamento}-${i}`}
+                        onClick={() => setPmpPagamentoSel(p)}
+                        style={{
+                          background: pmpPagamentoSel === p ? '#f5f3ff' : i % 2 ? '#f9fafb' : '#fff',
+                          borderBottom: '1px solid #f1f5f9',
+                          cursor: 'pointer',
+                        }}>
                         <td style={{ padding: '6px 10px' }}>{p.titulo}</td><td style={{ padding: '6px 10px' }}>{p.parcela || '—'}</td>
-                        <td style={{ padding: '6px 10px' }}>{p.nf}/{p.serie}</td><td style={{ padding: '6px 10px' }}>{p.tipo_d1}</td>
+                        <td style={{ padding: '6px 10px' }}>{p.nf}/{p.serie}</td>
+                        <td style={{ padding: '6px 10px' }}>{p.tipo_d1}</td>
                         <td style={{ padding: '6px 10px' }}>{p.emissao}</td><td style={{ padding: '6px 10px' }}>{p.vencimento_real}</td>
                         <td style={{ padding: '6px 10px' }}>{p.data_pagamento}</td><td style={{ padding: '6px 10px', textAlign: 'right' }}>{fmtRs(p.valor_pago)}</td>
                         <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 900, color: corDias(p.pmp_pagamento) }}>{p.pmp_pagamento} d</td>
                         <td style={{ padding: '6px 10px', textAlign: 'right' }}>{p.pmp_cond_pag} d</td><td style={{ padding: '6px 10px', textAlign: 'right' }}>{p.delta_atraso} d</td>
+                        <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 900, color: p.itens_d1?.length ? '#7c3aed' : '#cbd5e1' }}>
+                          {p.itens_d1?.length || 0}
+                        </td>
                       </tr>)}</tbody>
                   </table>
                 )}
               </div>
+              {pmpFornecedorDetalhe?.pagamentos?.length && (
+                <div className="border-t border-slate-100 p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <div className="text-xs font-black uppercase tracking-widest text-slate-500">
+                        Itens da nota SF1 / SD1 / SB1
+                      </div>
+                      <div className="text-[10px] text-slate-400">
+                        {pmpPagamentoSel
+                          ? `Título ${pmpPagamentoSel.titulo} · NF ${pmpPagamentoSel.nf}/${pmpPagamentoSel.serie}`
+                          : 'Selecione uma linha da tabela acima para ver os itens da nota.'}
+                      </div>
+                    </div>
+                    {pmpPagamentoSel && (
+                      <button onClick={() => setPmpPagamentoSel(null)}
+                        className="text-[10px] font-black text-slate-400 hover:text-slate-700">
+                        limpar seleção
+                      </button>
+                    )}
+                  </div>
+                  {!pmpPagamentoSel ? (
+                    <div className="flex items-center justify-center h-20 text-slate-300 text-xs font-bold border border-dashed border-slate-200 rounded-xl">
+                      Clique em um pagamento para abrir a composição da nota.
+                    </div>
+                  ) : !pmpPagamentoSel.itens_d1?.length ? (
+                    <div className="flex items-center justify-center h-20 text-slate-300 text-xs font-bold border border-dashed border-slate-200 rounded-xl">
+                      Sem itens D1 vinculados a esta nota/título.
+                    </div>
+                  ) : (
+                    <div className="overflow-auto" style={{ maxHeight: 260 }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                        <thead><tr style={{ background: '#f8fafc' }}>
+                          {['Código', 'Descrição SB1', 'Tipo D1', 'Quantidade', 'Valor Unit.', 'Valor Total'].map((h, idx) =>
+                            <th key={h} style={{ padding: '7px 10px', textAlign: idx < 3 ? 'left' : 'right', fontSize: 9, color: '#94a3b8', whiteSpace: 'nowrap' }}>{h}</th>)}
+                        </tr></thead>
+                        <tbody>{pmpPagamentoSel.itens_d1.map((item: any, idx: number) => (
+                          <tr key={`${item.codigo}-${idx}`} style={{ background: idx % 2 ? '#f9fafb' : '#fff', borderBottom: '1px solid #f1f5f9' }}>
+                            <td style={{ padding: '6px 10px', fontWeight: 900, color: '#334155' }}>{item.codigo}</td>
+                            <td style={{ padding: '6px 10px', color: '#475569' }}>{item.descricao || 'Sem descrição SB1'}</td>
+                            <td style={{ padding: '6px 10px', color: '#64748b' }}>{item.tipo_d1 || 'SEM VALOR'}</td>
+                            <td style={{ padding: '6px 10px', textAlign: 'right' }}>{Number(item.quantidade || 0).toLocaleString('pt-BR')}</td>
+                            <td style={{ padding: '6px 10px', textAlign: 'right' }}>{fmtRs(item.valor_unitario || 0)}</td>
+                            <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 900 }}>{fmtRs(item.valor_total || 0)}</td>
+                          </tr>
+                        ))}</tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
               </div>
           )}
         </div>
