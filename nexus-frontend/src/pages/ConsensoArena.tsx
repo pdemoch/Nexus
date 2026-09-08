@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import axios from 'axios';
 import {
-  ChevronRight, ChevronDown, Save, Download, X, Lock, Unlock,
+  ChevronRight, ChevronDown, Save, X, Lock, Unlock,
   Loader2, LineChart as LineIcon, LayoutGrid, ClipboardList, Search, BarChart2,
 } from 'lucide-react';
 import VisaoGeralMarketing from './VisaoGeralMarketing';
@@ -22,6 +22,10 @@ const fmtCx = (n: number) => new Intl.NumberFormat('pt-BR').format(Math.round(n 
 const fmtRs = (n: number) => new Intl.NumberFormat('pt-BR', {
   style: 'currency', currency: 'BRL', maximumFractionDigits: 0,
 }).format(Math.round(n || 0));
+const parseInteiroFormatado = (valor: string) => {
+  const digitos = valor.replace(/\D/g, '');
+  return digitos ? parseInt(digitos, 10) : 0;
+};
 const mesLabel = (iso: string) => {
   const [y, m] = iso.split('-');
   const nomes = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
@@ -50,38 +54,6 @@ const INDENT: Record<string, string> = {
   gerente: 'pl-0', coordenador: 'pl-4', executivo: 'pl-8',
   cliente: 'pl-12', produto: 'pl-16',
 };
-
-/* ── STEPPER DE FASE (cascata SKU → Executivo → Razão Social) ──────
-   Gerente só tem a fase SKU (rateia direto para Coordenadores).
-   Coordenador percorre as 3 fases dentro da própria tela. */
-function StepperFase({ funcao, faseAtual }: { funcao: string; faseAtual: string }) {
-  const passos = funcao === 'Gerente'
-    ? [{ id: 'SKU', label: 'SKU' }]
-    : [
-        { id: 'SKU', label: 'SKU' },
-        { id: 'EXECUTIVO', label: 'Executivo' },
-        { id: 'RAZAO_SOCIAL', label: 'Razão Social' },
-      ];
-  const idxAtual = passos.findIndex(p => p.id === faseAtual);
-  return (
-    <div className="flex items-center gap-1.5">
-      {passos.map((p, i) => {
-        const concluido = i < idxAtual;
-        const atual     = i === idxAtual;
-        return (
-          <React.Fragment key={p.id}>
-            <div className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wide
-              ${concluido ? 'bg-emerald-100 text-emerald-700' : atual ? 'bg-violet-100 text-violet-700' : 'bg-slate-100 text-slate-400'}`}>
-              {concluido && <Lock className="w-2.5 h-2.5" />}
-              {p.label}
-            </div>
-            {i < passos.length - 1 && <div className="w-3 h-px bg-slate-200" />}
-          </React.Fragment>
-        );
-      })}
-    </div>
-  );
-}
 
 /* ── COMPONENTE RAIZ ─────────────────────────────────────────────── */
 export default function MetasComercial() {
@@ -128,11 +100,8 @@ function PreenchimentoMetas() {
     sku: string; descricao: string; razao?: string; vendedor?: string;
   } | null>(null);
   const [busca,          setBusca]          = useState('');
-  const [fase,           setFase]           = useState<any>(null);
   const [avancando,      setAvancando]      = useState(false);
   const [adminAlvo,      setAdminAlvo]      = useState<{ nome: string; nivel: string } | null>(null);
-  const [modoEdicao,     setModoEdicao]     = useState<'caixas' | 'valor'>('valor');
-  const [carregandoAuditoria, setCarregandoAuditoria] = useState(false);
 
   const carregar = useCallback(async () => {
     setLoading(true);
@@ -142,33 +111,9 @@ function PreenchimentoMetas() {
         : {};
       const r = await axios.get('/api/v1/carteira/tabela', { params });
       setDados(r.data); setEdits({});
-      setFase(r.data?.minha_fase || null);
     } finally { setLoading(false); }
   }, [adminAlvo]);
   useEffect(() => { carregar(); }, [carregar]);
-
-  const carregarAuditoria = async () => {
-    setCarregandoAuditoria(true);
-    try {
-      const params = adminAlvo
-        ? { responsavel: adminAlvo.nome, nivel_responsavel: adminAlvo.nivel }
-        : {};
-      const r = await axios.get('/api/v1/carteira/auditoria-impacto/exportar', {
-        params,
-        responseType: 'blob',
-      });
-      const url = window.URL.createObjectURL(new Blob([r.data]));
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `auditoria_impacto_${dados?.ciclo?.replace('/', '_') || 'ciclo'}.xlsx`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
-    } catch (e: any) {
-      alert(e?.response?.data?.detail || 'Falha ao carregar auditoria.');
-    } finally { setCarregandoAuditoria(false); }
-  };
 
   const meses: string[]    = dados?.meses || [];
   const congeladaEtapa     = Boolean(dados?.etapa_congelada);
@@ -183,15 +128,6 @@ function PreenchimentoMetas() {
   const bloqueado          = congeladaEtapa || minhaCongelada ||
     (aguardandoUpstream && !souAdmin);
 
-  // Fase da cascata (Gerente: só SKU; Coordenador: SKU -> EXECUTIVO -> RAZAO_SOCIAL).
-  // Admin não tem fase própria (fase === null): trabalha em modo livre (compatibilidade).
-  const faseAtual: string | null = fase?.fase_atual ?? null;
-  const naFaseRazaoSocial = (souAdmin && !adminOperando) ||
-    ((!souAdmin || adminOperando) &&
-      (faseAtual === 'RAZAO_SOCIAL' || faseAtual === null));
-  const naFaseSku         = (!souAdmin || adminOperando) && faseAtual === 'SKU';
-  const naFaseExecutivo   = (!souAdmin || adminOperando) && faseAtual === 'EXECUTIVO';
-  const faseFuncao = adminAlvo?.nivel || funcao;
   const responsaveis = (dados?.responsaveis || []) as Array<{ nome: string; nivel: string }>;
 
   /* Chave de edição: sempre no nível razão social */
@@ -299,23 +235,6 @@ function PreenchimentoMetas() {
     }, 0);
   };
 
-  /* Soma de um SKU na carteira INTEIRA do responsável logado (todos executivos),
-     usada na fase SKU, onde o coordenador ajusta o total do SKU antes de ratear
-     para executivos (que só existem como agregação — não há input próprio aqui). */
-  const somaSkuCarteira = (sku: string, mes: string): number => {
-    let total = 0;
-    const walk = (n: any, rz: string | null) => {
-      if (n.tipo === 'produto') {
-        if (n.sku === sku) total += valorCliente(rz || '', sku, mes, n.meses[mes]?.meta || 0);
-        return;
-      }
-      const c = n.tipo === 'cliente' ? n.nome : rz;
-      (n.subRows || []).forEach((f: any) => walk(f, c));
-    };
-    (dados?.arvore || []).forEach((g: any) => walk(g, null));
-    return total;
-  };
-
   /* Totalizadores globais */
   const totaisVivos = useMemo(() => {
     const vol: Record<string, number> = {};
@@ -340,8 +259,7 @@ function PreenchimentoMetas() {
 
   const temEdicoes = Object.keys(edits).length > 0;
 
-  /* Salvar: envia por razão social (contrato do backend) — só a carteira do coordenador.
-     Só é usado na fase RAZAO_SOCIAL (última fase) ou pelo Admin (modo livre). */
+  /* Salvar: envia ajustes por razão social, contrato granular esperado pelo backend. */
   const salvar = async () => {
     if (!temEdicoes) return;
     setSalvando(true);
@@ -377,85 +295,6 @@ function PreenchimentoMetas() {
     } finally { setSalvando(false); }
   };
 
-  /* Avança a fase corrente (SKU ou EXECUTIVO): grava o rateio em cascata via
-     /ratear-fase e move a máquina de estado para a próxima etapa. */
-  const avancarFase = async () => {
-    if (!faseAtual || (!adminOperando && souAdmin)) return;
-    const mensagem = naFaseSku
-      ? 'Concluir a fase de SKU? Os totais serão rateados para os Executivos e você passará a editar por Executivo.'
-      : 'Concluir a fase de Executivo? Os totais serão rateados para as Razões Sociais e você passará à edição final por cliente.';
-    if (!confirm(mensagem)) return;
-    setAvancando(true);
-    try {
-      // Reúne todos os (sku, mes) tocados na árvore para montar os ajustes da fase.
-      const chaves = new Set<string>();
-      const walk = (n: any) => {
-        if (n.tipo === 'produto') { meses.forEach(m => chaves.add(`${n.sku}||${m}`)); return; }
-        (n.subRows || []).forEach(walk);
-      };
-      (dados?.arvore || []).forEach(walk);
-
-      if (naFaseSku) {
-        const ajustes = Array.from(chaves).map(k => {
-          const [sku, mes] = k.split('||');
-          return { sku, mes_projetado: mes, novo_volume: Math.round(somaSkuCarteira(sku, mes)) };
-        });
-        const r = await axios.post('/api/v1/carteira/ratear-fase', {
-          ajustes,
-          ...(adminAlvo ? {
-            responsavel_nome: adminAlvo.nome,
-            responsavel_nivel: adminAlvo.nivel,
-          } : {}),
-        });
-        setFase(r.data?.fase || null);
-      } else if (naFaseExecutivo) {
-        // Na fase Executivo, cada executivo ajusta seus próprios SKUs — percorremos
-        // por executivo (nó 'vendedor') e enviamos um POST por executivo.
-        const porExecutivo: Record<string, { sku: string; mes: string; total: number }[]> = {};
-        const walkExec = (n: any) => {
-          if (n.tipo === 'vendedor') {
-            const skuMap: Record<string, number> = {};
-            (n.subRows || []).forEach((cli: any) => {
-              (cli.subRows || []).forEach((prod: any) => {
-                meses.forEach(m => {
-                  const cel = prod.meses[m]; if (!cel) return;
-                  const key = `${prod.sku}||${m}`;
-                  skuMap[key] = (skuMap[key] || 0) + valorCliente(cli.nome, prod.sku, m, cel.meta);
-                });
-              });
-            });
-            porExecutivo[n.nome] = Object.entries(skuMap).map(([k, total]) => {
-              const [sku, mes] = k.split('||');
-              return { sku, mes, total };
-            });
-            return;
-          }
-          (n.subRows || []).forEach(walkExec);
-        };
-        (dados?.arvore || []).forEach(walkExec);
-
-        let ultimaFase: any = fase;
-        for (const [executivo, itens] of Object.entries(porExecutivo)) {
-          const ajustes = itens.map(i => ({ sku: i.sku, mes_projetado: i.mes, novo_volume: Math.round(i.total) }));
-          if (!ajustes.length) continue;
-          const r = await axios.post('/api/v1/carteira/ratear-fase', {
-            ajustes, executivo_nome: executivo,
-            ...(adminAlvo ? {
-              responsavel_nome: adminAlvo.nome,
-              responsavel_nivel: adminAlvo.nivel,
-            } : {}),
-          });
-          ultimaFase = r.data?.fase || ultimaFase;
-        }
-        setFase(ultimaFase);
-      }
-      setEdits({});
-      await carregar();
-    } catch (e: any) {
-      alert(e?.response?.data?.detail || 'Falha ao avançar a fase.');
-    } finally { setAvancando(false); }
-  };
-
   const congelarEtapa = async () => {
     if (!confirm('Aprovar Metas Comercial? A etapa Irrestrita será liberada.')) return;
     try {
@@ -472,70 +311,6 @@ function PreenchimentoMetas() {
       }
     }
   };
-
-  /* Lista agregada de SKUs da carteira INTEIRA — usada só na fase SKU
-     (Gerente e Coordenador ajustam o total do SKU antes de qualquer rateio
-     por executivo existir). */
-  const skusAgregadosCarteira = useMemo(() => {
-    if (!naFaseSku) return [];
-    const map: Record<string, {
-      sku: string; descricao: string;
-      pmvPorMes: Record<string, number>;
-      receitaPorMes: Record<string, number>;
-      volumePorMes: Record<string, number>;
-      iaPorMes: Record<string, number>;
-    }> = {};
-    const walk = (n: any, rz: string | null) => {
-      if (n.tipo === 'produto') {
-        if (!map[n.sku]) map[n.sku] = {
-          sku: n.sku, descricao: n.descricao, pmvPorMes: {},
-          receitaPorMes: {}, volumePorMes: {}, iaPorMes: {},
-        };
-        meses.forEach(m => {
-          const cel = n.meses[m]; if (!cel) return;
-          const volume = cel.meta || 0;
-          map[n.sku].volumePorMes[m] = (map[n.sku].volumePorMes[m] || 0) + volume;
-          map[n.sku].receitaPorMes[m] = (map[n.sku].receitaPorMes[m] || 0) + volume * (cel.pmv || 0);
-          map[n.sku].iaPorMes[m] = (map[n.sku].iaPorMes[m] || 0) + (cel.ia || 0);
-        });
-        return;
-      }
-      const c = n.tipo === 'cliente' ? n.nome : rz;
-      (n.subRows || []).forEach((f: any) => walk(f, c));
-    };
-    (dados?.arvore || []).forEach((g: any) => walk(g, null));
-    return Object.values(map).map(s => ({
-      ...s,
-      pmvPorMes: Object.fromEntries(meses.map(m => [
-        m, s.volumePorMes[m] > 0 ? s.receitaPorMes[m] / s.volumePorMes[m] : 0,
-      ])),
-    })).sort((a, b) => a.descricao.localeCompare(b.descricao));
-  }, [dados, naFaseSku, meses]);
-
-  /* Edição do SKU no nível carteira inteira: rateia entre TODOS os clientes
-     da carteira que compram esse SKU, proporcionalmente ao histórico. */
-  const setSkuCarteira = (sku: string, mes: string, novoTotal: number) => {
-    const clientesDoSku: Array<{ razao: string; pesoHist: number }> = [];
-    const walk = (n: any, rz: string | null) => {
-      if (n.tipo === 'produto') {
-        if (n.sku === sku && n.meses[mes]) {
-          clientesDoSku.push({ razao: rz || '', pesoHist: n.meses[mes].peso_historico ?? 0 });
-        }
-        return;
-      }
-      const c = n.tipo === 'cliente' ? n.nome : rz;
-      (n.subRows || []).forEach((f: any) => walk(f, c));
-    };
-    (dados?.arvore || []).forEach((g: any) => walk(g, null));
-    const pesos  = clientesDoSku.map(c => c.pesoHist);
-    const partes = ratearMaiorResto(Math.max(0, Math.round(novoTotal)), pesos);
-    setEdits(prev => {
-      const next = { ...prev };
-      clientesDoSku.forEach((c, i) => { next[keyOf(c.razao, sku, mes)] = partes[i]; });
-      return next;
-    });
-  };
-
 
   const reabrirEtapa = async () => {
     if (!confirm('Reabrir Metas Comercial?')) return;
@@ -577,24 +352,6 @@ function PreenchimentoMetas() {
       }).filter(Boolean);
     return filtra(dados?.arvore || []);
   }, [dados, busca]);
-
-  const exportarExcel = async () => {
-    if (temEdicoes) await salvar();
-    try {
-      const resp = await axios.get('/api/v1/carteira/exportar', {
-        responseType: 'blob',
-        params: adminAlvo ? {
-          responsavel: adminAlvo.nome,
-          nivel_responsavel: adminAlvo.nivel,
-        } : undefined,
-      });
-      const url = window.URL.createObjectURL(new Blob([resp.data]));
-      const a = document.createElement('a');
-      a.href = url; a.download = `metas_${dados?.ciclo?.replace('/','_') || 'ciclo'}.xlsx`;
-      document.body.appendChild(a); a.click(); document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
-    } catch { alert('Erro ao gerar o Excel.'); }
-  };
 
   if (loading) {
     return <div className="min-h-screen flex items-center justify-center text-slate-400">
@@ -651,23 +408,6 @@ function PreenchimentoMetas() {
                 </button>
               )}
             </div>
-            <div className="flex items-center rounded-xl border border-slate-200 bg-white p-0.5">
-              <button onClick={() => setModoEdicao('caixas')}
-                className={`px-2.5 py-1.5 rounded-lg text-[10px] font-black transition-colors
-                  ${modoEdicao === 'caixas' ? 'bg-indigo-100 text-indigo-700' : 'text-slate-400 hover:text-slate-600'}`}>
-                Caixas
-              </button>
-              <button onClick={() => setModoEdicao('valor')}
-                className={`px-2.5 py-1.5 rounded-lg text-[10px] font-black transition-colors
-                  ${modoEdicao === 'valor' ? 'bg-indigo-100 text-indigo-700' : 'text-slate-400 hover:text-slate-600'}`}>
-                R$
-              </button>
-            </div>
-            <button onClick={carregarAuditoria} disabled={carregandoAuditoria}
-              className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-black bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-60">
-              {carregandoAuditoria ? <Loader2 className="w-4 h-4 animate-spin" /> : <BarChart2 className="w-4 h-4" />}
-              Auditoria
-            </button>
             <button onClick={salvar} disabled={!temEdicoes || salvando || bloqueado}
               className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all
                 ${temEdicoes && !bloqueado ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}>
@@ -708,11 +448,6 @@ function PreenchimentoMetas() {
                   <Lock className="w-4 h-4" /> Aprovar Metas
                 </button>
             )}
-            {/* Excel — somente a carteira do coordenador logado */}
-            <button onClick={exportarExcel}
-              className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-black bg-white border border-slate-200 text-slate-600 hover:bg-slate-50">
-              <Download className="w-4 h-4" /> Excel
-            </button>
           </div>
         </div>
 
@@ -749,8 +484,6 @@ function PreenchimentoMetas() {
         </div>
       </div>
 
-      {/* Na fase SKU o contrato é SKU agregado; Executivo só aparece depois
-          do rateio. Nas fases seguintes a árvore detalhada é exibida. */}
       <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-8">
         {arvoreVisivelOuCompleta.length === 0 && busca.trim()
           ? (
@@ -766,7 +499,7 @@ function PreenchimentoMetas() {
               valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setCliente={setCliente}
               somaSkuExecutivo={somaSkuExecutivo}
               bloqueado={bloqueado && !(souAdmin && adminOperando)} edits={edits}
-              modoEdicao={modoEdicao} setClienteValor={setClienteValor}
+              setClienteValor={setClienteValor}
               setNodeValor={setNodeValor}
               setDossieAlvo={setDossieAlvo}
               dossieAlvo={dossieAlvo}
@@ -782,122 +515,11 @@ function PreenchimentoMetas() {
   );
 }
 
-function PainelAuditoria({ dados, fechar }: { dados: any; fechar: () => void }) {
-  const itens = dados?.itens || [];
-  return (
-    <div className="fixed inset-0 z-30 bg-slate-900/20" onClick={fechar}>
-      <div className="absolute right-0 top-0 bottom-0 w-full max-w-3xl bg-white shadow-2xl overflow-y-auto p-6"
-        onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h2 className="text-base font-black text-slate-900">Auditoria de impacto</h2>
-            <p className="text-xs text-slate-400">Meta atual comparada ao vol_bottomup · ciclo {dados?.ciclo}</p>
-          </div>
-          <button onClick={fechar} className="p-2 rounded-lg text-slate-400 hover:bg-slate-100"><X className="w-4 h-4" /></button>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-[11px]">
-            <thead><tr className="border-b border-slate-200 text-[10px] uppercase tracking-wider text-slate-400">
-              <th className="py-2 pr-3">Coordenador / SKU</th><th>Mês</th><th>BottomUP cx</th><th>Meta cx</th>
-              <th>Impacto cx</th><th>Impacto %</th><th>BottomUP R$</th><th>Meta R$</th><th>Impacto R$</th>
-            </tr></thead>
-            <tbody>{itens.map((i: any, n: number) => (
-              <tr key={`${i.coordenador}-${i.sku}-${i.mes}-${n}`} className="border-b border-slate-100">
-                <td className="py-2 pr-3"><b>{i.coordenador}</b><br /><span className="text-slate-400">{i.sku} · {i.descricao}</span></td>
-                <td>{mesLabel(i.mes)}</td><td>{fmtCx(i.bottomup)}</td><td>{fmtCx(i.meta)}</td>
-                <td className={i.delta_caixas > 0 ? 'text-emerald-600' : i.delta_caixas < 0 ? 'text-red-600' : ''}>{fmtCx(i.delta_caixas)}</td>
-                <td>{i.impacto_percentual == null ? '—' : `${i.impacto_percentual.toFixed(2)}%`}</td>
-                <td>{fmtRs(i.bottomup_rs)}</td><td>{fmtRs(i.meta_rs)}</td><td>{fmtRs(i.delta_rs)}</td>
-              </tr>
-            ))}</tbody>
-          </table>
-        </div>
-        {!itens.length && <div className="py-12 text-center text-sm text-slate-400">Nenhum dado de auditoria para esta carteira.</div>}
-      </div>
-    </div>
-  );
-}
-
-/* ── LISTA AGREGADA DE SKUs DA CARTEIRA (fase SKU) ──────────────────
-   Edição no nível SKU × Mês, um único total por SKU para toda a
-   carteira (não há executivo/cliente ainda — só existem após o rateio
-   desta fase). Dossiê disponível aqui é o dossiê agregado da carteira. */
-function ListaSkuCarteira({ skus, meses, somaSkuCarteira, setSkuCarteira,
-  bloqueado, modoEdicao, edits, setDossieAlvo, dossieAlvo }: any) {
-  if (!skus.length) {
-    return <div className="py-16 text-center text-slate-400 text-sm font-bold">Nenhum SKU na carteira.</div>;
-  }
-  return (
-    <div>
-      {skus.map((s: any) => (
-        <div key={s.sku} className="mb-0.5 grid gap-2 px-3 py-2 items-center rounded-lg bg-white border border-slate-100 hover:border-slate-200"
-          style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(130px, 1fr)) 40px` }}>
-          <div className="min-w-0">
-            <div className="text-xs font-bold text-slate-700 truncate">{s.descricao}</div>
-            <div className="text-[10px] font-bold text-slate-300">{s.sku}</div>
-          </div>
-          {meses.map((m: string) => {
-            const total   = somaSkuCarteira(s.sku, m);
-            const pmv     = s.pmvPorMes[m] || 0;
-            const ia      = s.iaPorMes[m] || 0;
-            const valor   = s.receitaPorMes[m] || 0;
-            return (
-              <div key={m} className="text-right">
-                <div className="text-[9px] font-bold text-indigo-400 pr-2 mb-0.5">
-                  {pmv ? fmtRs(total * pmv) : '—'}
-                </div>
-                <input
-                  type="number"
-                  value={modoEdicao === 'valor' ? Math.round(valor) : total}
-                  disabled={bloqueado || (modoEdicao === 'valor' && pmv <= 0)}
-                  onChange={e => {
-                    const input = parseFloat(e.target.value) || 0;
-                    const volume = modoEdicao === 'valor'
-                      ? (pmv > 0 ? Math.round(input / pmv) : total)
-                      : Math.round(input);
-                    setSkuCarteira(s.sku, m, volume);
-                  }}
-                  title={modoEdicao === 'valor' && pmv <= 0 ? 'Sem PMV: edição monetária bloqueada' : undefined}
-                  inputMode={modoEdicao === 'valor' ? 'decimal' : 'numeric'}
-                  className={`w-full text-right text-sm font-bold rounded-md px-2 py-1 border transition-colors
-                    border-transparent bg-transparent text-slate-700
-                    ${bloqueado || (modoEdicao === 'valor' && pmv <= 0) ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
-                />
-                <div className="text-[9px] font-bold text-slate-300 pr-2">IA {fmtCx(ia)} cx</div>
-              </div>
-            );
-          })}
-          <button
-            onClick={() => setDossieAlvo((prev: any) => prev?.sku === s.sku ? null : { sku: s.sku, descricao: s.descricao })}
-            className={`justify-self-center p-1.5 rounded-lg transition-colors
-              ${dossieAlvo?.sku === s.sku ? 'bg-indigo-100 text-indigo-600' : 'text-slate-300 hover:bg-indigo-50 hover:text-indigo-600'}`}
-            title="Ver dossiê do SKU (agregado da sua carteira)">
-            <LineIcon className="w-4 h-4" />
-          </button>
-          {dossieAlvo?.sku === s.sku && (
-            <div className="col-span-full ml-4 mr-2 mb-1">
-              <DossieInferior
-                prefixoApi="/api/v1/carteira"
-                tipo="sku"
-                id={s.sku}
-                titulo={s.descricao}
-                subtitulo={`${s.sku} · sua carteira`}
-                paramsExtra={{}}
-                onFechar={() => setDossieAlvo(null)}
-              />
-            </div>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
-
 /* ── NÓ RECURSIVO DA ÁRVORE ──────────────────────────────────────── */
 function NoArvore({ node, nivel, meses, abertas, toggle,
   valorCliente, setSkuExecutivo, setCliente, somaSkuExecutivo,
   bloqueado, edits, setDossieAlvo, dossieAlvo, idPath, buscaAtiva,
-  modoEdicao, setClienteValor, setNodeValor }: any) {
+  setClienteValor, setNodeValor }: any) {
 
   const buscaAtv = buscaAtiva;
   const aberta   = buscaAtv || abertas.has(idPath);
@@ -963,25 +585,30 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
             });
             return (
               <div key={m} className="text-right">
-                <div className="text-[9px] font-bold text-indigo-400 pr-2 mb-0.5">
-                  {pmv ? fmtRs(totalSku * pmv) : '—'}
-                </div>
                 <input
-                  type="number"
-                  value={modoEdicao === 'valor' ? Math.round(valorAtual) : totalSku}
-                  disabled={bloqueado}
+                  type="text"
+                  value={fmtRs(valorAtual)}
+                  disabled={bloqueado || pmv <= 0}
                   onChange={e => {
-                    const valor = parseFloat(e.target.value) || 0;
-                    const volume = modoEdicao === 'valor'
-                      ? (pmv > 0 ? Math.round(valor / pmv) : totalSku)
-                      : Math.round(valor);
+                    const valor = parseInteiroFormatado(e.target.value);
+                    const volume = pmv > 0 ? Math.round(valor / pmv) : totalSku;
                     setSkuExecutivo(clientesInfo, sku, m, volume);
                   }}
-                  title={modoEdicao === 'valor' && pmv <= 0 ? 'Sem PMV: edição monetária bloqueada' : undefined}
-                  inputMode={modoEdicao === 'valor' ? 'decimal' : 'numeric'}
+                  title={pmv <= 0 ? 'Sem PMV: edição monetária bloqueada' : undefined}
+                  inputMode="numeric"
                   className={`w-full text-right text-sm font-bold rounded-md px-2 py-1 border transition-colors
-                    ${temEdit ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-transparent bg-transparent text-slate-700'}
-                    ${bloqueado || (modoEdicao === 'valor' && pmv <= 0) ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
+                    ${temEdit ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-transparent bg-transparent text-indigo-600'}
+                    ${bloqueado || pmv <= 0 ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
+                />
+                <input
+                  type="text"
+                  value={fmtCx(totalSku)}
+                  disabled={bloqueado}
+                  onChange={e => setSkuExecutivo(clientesInfo, sku, m, parseInteiroFormatado(e.target.value))}
+                  inputMode="numeric"
+                  className={`w-full text-right text-xs font-bold rounded-md px-2 py-0.5 border transition-colors mt-0.5
+                    ${temEdit ? 'border-indigo-200 bg-white text-slate-700' : 'border-transparent bg-transparent text-slate-500'}
+                    ${bloqueado ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
                 />
                 <div className="text-[9px] font-bold text-slate-300 pr-2">IA {fmtCx(ia)} cx</div>
               </div>
@@ -1019,22 +646,28 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
                 return (
                   <div key={m} className="text-right">
                     <input
-                      type="number"
-                      value={modoEdicao === 'valor' ? Math.round(val * (cel.pmv || 0)) : val}
-                      disabled={bloqueado || (modoEdicao === 'valor' && (cel.pmv || 0) <= 0)}
+                      type="text"
+                      value={fmtRs(val * (cel.pmv || 0))}
+                      disabled={bloqueado || (cel.pmv || 0) <= 0}
                       onChange={e => {
-                        const valor = parseFloat(e.target.value) || 0;
-                        if (modoEdicao === 'valor') {
-                          setClienteValor(cli.nome, sku, m, valor, cel.pmv || 0);
-                        } else {
-                          setCliente(cli.nome, sku, m, Math.round(valor));
-                        }
+                        const valor = parseInteiroFormatado(e.target.value);
+                        setClienteValor(cli.nome, sku, m, valor, cel.pmv || 0);
                       }}
-                      title={modoEdicao === 'valor' && (cel.pmv || 0) <= 0 ? 'Sem PMV: edição monetária bloqueada' : undefined}
-                      inputMode={modoEdicao === 'valor' ? 'decimal' : 'numeric'}
+                      title={(cel.pmv || 0) <= 0 ? 'Sem PMV: edição monetária bloqueada' : undefined}
+                      inputMode="numeric"
                       className={`w-full text-right text-xs font-bold rounded-md px-2 py-1 border transition-colors
-                        ${editado ? 'border-violet-300 bg-violet-50 text-violet-700' : 'border-transparent bg-transparent text-slate-500'}
-                        ${bloqueado || (modoEdicao === 'valor' && (cel.pmv || 0) <= 0) ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-100 focus:border-violet-400 focus:bg-white focus:outline-none'}`}
+                        ${editado ? 'border-violet-300 bg-violet-50 text-violet-700' : 'border-transparent bg-transparent text-indigo-600'}
+                        ${bloqueado || (cel.pmv || 0) <= 0 ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-100 focus:border-violet-400 focus:bg-white focus:outline-none'}`}
+                    />
+                    <input
+                      type="text"
+                      value={fmtCx(val)}
+                      disabled={bloqueado}
+                      onChange={e => setCliente(cli.nome, sku, m, parseInteiroFormatado(e.target.value))}
+                      inputMode="numeric"
+                      className={`w-full text-right text-[11px] font-bold rounded-md px-2 py-0.5 border transition-colors mt-0.5
+                        ${editado ? 'border-violet-200 bg-white text-slate-700' : 'border-transparent bg-transparent text-slate-500'}
+                        ${bloqueado ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-100 focus:border-violet-400 focus:bg-white focus:outline-none'}`}
                     />
                   </div>
                 );
@@ -1120,31 +753,45 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
 
     return (
       <div className="mb-0.5">
-        <button onClick={() => !buscaAtv && toggle(idPath)}
+        <div
           className="w-full grid gap-2 px-3 py-2 items-center rounded-lg hover:bg-white transition-colors"
           style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(130px, 1fr)) 40px` }}>
-          <div className={`flex items-center gap-1.5 min-w-0 ${INDENT.executivo}`}>
+          <button onClick={() => !buscaAtv && toggle(idPath)}
+            className={`flex items-center gap-1.5 min-w-0 text-left ${INDENT.executivo}`}>
             {aberta ? <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                     : <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
+                    : <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
             <span className="truncate font-bold text-slate-600 text-xs">{node.nome}</span>
             <span className="text-[9px] font-black uppercase tracking-wider text-slate-300 ml-1 shrink-0">executivo</span>
-          </div>
+          </button>
           {meses.map((m: string) => (
             <div key={m} className="text-right">
               <input
-                type="number"
-                value={Math.round(fatMes(m))}
+                type="text"
+                value={fmtRs(fatMes(m))}
                 disabled={bloqueado}
-                onChange={e => setNodeValor(node, m, parseFloat(e.target.value) || 0)}
-                inputMode="decimal"
+                onChange={e => setNodeValor(node, m, parseInteiroFormatado(e.target.value))}
+                inputMode="numeric"
                 className={`w-full text-right text-xs font-black rounded-md px-2 py-1 border transition-colors
                   ${bloqueado ? 'cursor-not-allowed opacity-60 border-transparent bg-transparent text-slate-500' : 'border-transparent bg-transparent text-indigo-600 hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
               />
-              <div className="text-xs font-bold text-slate-500">{fmtCx(somaMes(m))} cx</div>
+              <input
+                type="text"
+                value={fmtCx(somaMes(m))}
+                disabled={bloqueado}
+                onChange={e => {
+                  const volAtual = somaMes(m);
+                  const valorAtual = fatMes(m);
+                  const pmvMedio = volAtual > 0 ? valorAtual / volAtual : 0;
+                  if (pmvMedio > 0) setNodeValor(node, m, parseInteiroFormatado(e.target.value) * pmvMedio);
+                }}
+                inputMode="numeric"
+                className={`w-full text-right text-[11px] font-bold rounded-md px-2 py-0.5 border transition-colors mt-0.5
+                  ${bloqueado ? 'cursor-not-allowed opacity-60 border-transparent bg-transparent text-slate-500' : 'border-transparent bg-transparent text-slate-500 hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
+              />
             </div>
           ))}
           <div />
-        </button>
+        </div>
         {aberta && skusAgrupados.map(skuNode => (
           <NoArvore
             key={skuNode.sku}
@@ -1154,7 +801,7 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
             valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setCliente={setCliente}
             somaSkuExecutivo={somaSkuExecutivo}
             bloqueado={bloqueado} edits={edits}
-            modoEdicao={modoEdicao} setClienteValor={setClienteValor}
+            setClienteValor={setClienteValor}
             setNodeValor={setNodeValor}
             setDossieAlvo={setDossieAlvo}
             dossieAlvo={dossieAlvo}
@@ -1195,11 +842,12 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
 
   return (
     <div className="mb-0.5">
-      <button onClick={() => !buscaAtv && toggle(idPath)}
+      <div
         className={`w-full grid gap-2 px-3 py-2 items-center rounded-lg transition-colors
           ${nivel === 0 ? 'bg-white border border-slate-100 hover:border-slate-200' : 'hover:bg-white'}`}
         style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(130px, 1fr)) 40px` }}>
-        <div className={`flex items-center gap-1.5 min-w-0 ${INDENT[node.tipo] || ''}`}>
+        <button onClick={() => !buscaAtv && toggle(idPath)}
+          className={`flex items-center gap-1.5 min-w-0 text-left ${INDENT[node.tipo] || ''}`}>
           {aberta ? <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                    : <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
           <span className={`truncate ${nivel === 0 ? 'font-black text-slate-800 text-sm' : 'font-bold text-slate-600 text-xs'}`}>
@@ -1208,15 +856,36 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
           <span className="text-[9px] font-black uppercase tracking-wider text-slate-300 ml-1 shrink-0">
             {tipoLabel[node.tipo] || node.tipo}
           </span>
-        </div>
+        </button>
         {meses.map((m: string) => (
           <div key={m} className="text-right">
-            <div className="text-[9px] font-bold text-indigo-400">{fmtRs(fatMes(m))}</div>
-            <div className="text-xs font-bold text-slate-500">{fmtCx(somaMes(m))} cx</div>
+            <input
+              type="text"
+              value={fmtRs(fatMes(m))}
+              disabled={bloqueado}
+              onChange={e => setNodeValor(node, m, parseInteiroFormatado(e.target.value))}
+              inputMode="numeric"
+              className={`w-full text-right text-xs font-black rounded-md px-2 py-1 border transition-colors
+                ${bloqueado ? 'cursor-not-allowed opacity-60 border-transparent bg-transparent text-slate-500' : 'border-transparent bg-transparent text-indigo-600 hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
+            />
+            <input
+              type="text"
+              value={fmtCx(somaMes(m))}
+              disabled={bloqueado}
+              onChange={e => {
+                const volAtual = somaMes(m);
+                const valorAtual = fatMes(m);
+                const pmvMedio = volAtual > 0 ? valorAtual / volAtual : 0;
+                if (pmvMedio > 0) setNodeValor(node, m, parseInteiroFormatado(e.target.value) * pmvMedio);
+              }}
+              inputMode="numeric"
+              className={`w-full text-right text-[11px] font-bold rounded-md px-2 py-0.5 border transition-colors mt-0.5
+                ${bloqueado ? 'cursor-not-allowed opacity-60 border-transparent bg-transparent text-slate-500' : 'border-transparent bg-transparent text-slate-500 hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
+            />
           </div>
         ))}
         <div />
-      </button>
+      </div>
       {aberta && (node.subRows || []).map((f: any, i: number) => (
         <NoArvore key={(f.nome || f.sku) + i} node={f} nivel={nivel + 1}
           meses={meses} abertas={abertas} toggle={toggle}
@@ -1228,7 +897,7 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
           dossieAlvo={dossieAlvo}
           idPath={`${idPath}>${f.nome || f.sku}`}
           buscaAtiva={buscaAtv}
-          modoEdicao={modoEdicao} setClienteValor={setClienteValor} />
+          setClienteValor={setClienteValor} />
       ))}
     </div>
   );
