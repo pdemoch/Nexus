@@ -22,10 +22,55 @@ const fmtCx = (n: number) => new Intl.NumberFormat('pt-BR').format(Math.round(n 
 const fmtRs = (n: number) => new Intl.NumberFormat('pt-BR', {
   style: 'currency', currency: 'BRL', maximumFractionDigits: 0,
 }).format(Math.round(n || 0));
-const parseInteiroFormatado = (valor: string) => {
-  const digitos = valor.replace(/\D/g, '');
-  return digitos ? parseInt(digitos, 10) : 0;
-};
+
+function CampoNumeroEditavel({
+  value,
+  format,
+  onChange,
+  disabled,
+  className,
+  title,
+}: {
+  value: number;
+  format: (value: number) => string;
+  onChange: (value: number) => void;
+  disabled?: boolean;
+  className?: string;
+  title?: string;
+}) {
+  const [focused, setFocused] = useState(false);
+  const [draft, setDraft] = useState('');
+
+  const valueRounded = Math.round(value || 0);
+  const displayValue = focused ? draft : format(valueRounded);
+
+  return (
+    <input
+      type="text"
+      value={displayValue}
+      disabled={disabled}
+      title={title}
+      inputMode="numeric"
+      onFocus={(e) => {
+        const input = e.currentTarget;
+        setFocused(true);
+        setDraft(valueRounded === 0 ? '' : String(valueRounded));
+        window.setTimeout(() => input.select(), 0);
+      }}
+      onChange={(e) => {
+        const digits = e.target.value.replace(/\D/g, '');
+        setDraft(digits);
+        onChange(digits ? parseInt(digits, 10) : 0);
+      }}
+      onBlur={() => {
+        setFocused(false);
+        setDraft('');
+      }}
+      className={className}
+    />
+  );
+}
+
 const mesLabel = (iso: string) => {
   const [y, m] = iso.split('-');
   const nomes = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
@@ -53,6 +98,14 @@ function ratearMaiorResto(total: number, pesos: number[]): number[] {
 const INDENT: Record<string, string> = {
   gerente: 'pl-0', coordenador: 'pl-4', executivo: 'pl-8',
   cliente: 'pl-12', produto: 'pl-16',
+};
+
+const pesoRateioBottomUp = (cel: any) => {
+  const bottomup = Math.max(0, Number(cel?.bottomup || 0));
+  if (bottomup > 0) return bottomup;
+  const historico = Math.max(0, Number(cel?.peso_historico || 0));
+  if (historico > 0) return historico;
+  return Math.max(0, Number(cel?.meta || 0));
 };
 
 /* ── COMPONENTE RAIZ ─────────────────────────────────────────────── */
@@ -168,15 +221,32 @@ function PreenchimentoMetas() {
 
   /* Edição no nível SKU do executivo: rateia pelos clientes proporcionalmente */
   const setSkuExecutivo = (
-    clientesDoSku: Array<{ razao: string; mes: string; pesoHist: number; original: number }>,
+    clientesDoSku: Array<{ razao: string; mes: string; pesoBase: number; original: number; pmv: number }>,
     sku: string, mes: string, novoTotal: number
   ) => {
-    const pesos = clientesDoSku.map(c => c.pesoHist);
+    const pesos = clientesDoSku.map(c => c.pesoBase);
     const partes = ratearMaiorResto(Math.max(0, Math.round(novoTotal)), pesos);
     setEdits(prev => {
       const next = { ...prev };
       clientesDoSku.forEach((c, i) => {
         next[keyOf(c.razao, sku, mes)] = partes[i];
+      });
+      return next;
+    });
+  };
+
+  const setSkuExecutivoValor = (
+    clientesDoSku: Array<{ razao: string; mes: string; pesoBase: number; original: number; pmv: number }>,
+    sku: string, mes: string, novoValor: number
+  ) => {
+    const editaveis = clientesDoSku.filter(c => c.pmv > 0);
+    if (!editaveis.length) return;
+    const pesos = editaveis.map(c => c.pesoBase * c.pmv);
+    const partes = ratearMaiorResto(Math.max(0, Math.round(novoValor)), pesos);
+    setEdits(prev => {
+      const next = { ...prev };
+      editaveis.forEach((c, i) => {
+        next[keyOf(c.razao, sku, mes)] = Math.max(0, Math.round(partes[i] / c.pmv));
       });
       return next;
     });
@@ -192,7 +262,7 @@ function PreenchimentoMetas() {
   };
 
   const setNodeValor = (node: any, mes: string, valorAlvo: number) => {
-    const folhas: Array<{ razao: string; sku: string; pmv: number; atualVol: number; pesoHist: number }> = [];
+    const folhas: Array<{ razao: string; sku: string; pmv: number; pesoBase: number }> = [];
     const walk = (n: any, razaoCtx: string | null) => {
       if (n.tipo === 'produto') {
         const cel = n.meses?.[mes];
@@ -201,8 +271,7 @@ function PreenchimentoMetas() {
           razao: razaoCtx || '',
           sku: n.sku,
           pmv: cel.pmv || 0,
-          atualVol: valorCliente(razaoCtx || '', n.sku, mes, cel.meta || 0),
-          pesoHist: cel.peso_historico || 0,
+          pesoBase: pesoRateioBottomUp(cel),
         });
         return;
       }
@@ -212,14 +281,41 @@ function PreenchimentoMetas() {
     walk(node, null);
     const editaveis = folhas.filter(f => f.pmv > 0);
     if (!editaveis.length) return;
-    const pesosAtuais = editaveis.map(f => f.atualVol * f.pmv);
-    const temValorAtual = pesosAtuais.some(v => v > 0);
-    const pesos = temValorAtual ? pesosAtuais : editaveis.map(f => f.pesoHist);
+    const pesos = editaveis.map(f => f.pesoBase * f.pmv);
     const valoresRateados = ratearMaiorResto(Math.round(Math.max(0, valorAlvo || 0)), pesos);
     setEdits(prev => {
       const next = { ...prev };
       editaveis.forEach((f, i) => {
         next[keyOf(f.razao, f.sku, mes)] = Math.max(0, Math.round(valoresRateados[i] / f.pmv));
+      });
+      return next;
+    });
+  };
+
+  const setNodeVolume = (node: any, mes: string, volumeAlvo: number) => {
+    const folhas: Array<{ razao: string; sku: string; pesoBase: number }> = [];
+    const walk = (n: any, razaoCtx: string | null) => {
+      if (n.tipo === 'produto') {
+        const cel = n.meses?.[mes];
+        if (!cel) return;
+        folhas.push({
+          razao: razaoCtx || '',
+          sku: n.sku,
+          pesoBase: pesoRateioBottomUp(cel),
+        });
+        return;
+      }
+      const novoCtx = n.tipo === 'cliente' ? n.nome : razaoCtx;
+      (n.subRows || []).forEach((f: any) => walk(f, novoCtx));
+    };
+    walk(node, null);
+    if (!folhas.length) return;
+    const pesos = folhas.map(f => f.pesoBase);
+    const volumesRateados = ratearMaiorResto(Math.max(0, Math.round(volumeAlvo || 0)), pesos);
+    setEdits(prev => {
+      const next = { ...prev };
+      folhas.forEach((f, i) => {
+        next[keyOf(f.razao, f.sku, mes)] = Math.max(0, Math.round(volumesRateados[i]));
       });
       return next;
     });
@@ -496,11 +592,12 @@ function PreenchimentoMetas() {
           : arvoreVisivelOuCompleta.map((g: any) => (
             <NoArvore key={g.nome} node={g} nivel={0}
               meses={meses} abertas={abertas} toggle={toggle}
-              valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setCliente={setCliente}
+              valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setSkuExecutivoValor={setSkuExecutivoValor} setCliente={setCliente}
               somaSkuExecutivo={somaSkuExecutivo}
               bloqueado={bloqueado && !(souAdmin && adminOperando)} edits={edits}
               setClienteValor={setClienteValor}
               setNodeValor={setNodeValor}
+              setNodeVolume={setNodeVolume}
               setDossieAlvo={setDossieAlvo}
               dossieAlvo={dossieAlvo}
               idPath={g.nome}
@@ -517,9 +614,9 @@ function PreenchimentoMetas() {
 
 /* ── NÓ RECURSIVO DA ÁRVORE ──────────────────────────────────────── */
 function NoArvore({ node, nivel, meses, abertas, toggle,
-  valorCliente, setSkuExecutivo, setCliente, somaSkuExecutivo,
+  valorCliente, setSkuExecutivo, setSkuExecutivoValor, setCliente, somaSkuExecutivo,
   bloqueado, edits, setDossieAlvo, dossieAlvo, idPath, buscaAtiva,
-  setClienteValor, setNodeValor }: any) {
+  setClienteValor, setNodeValor, setNodeVolume }: any) {
 
   const buscaAtv = buscaAtiva;
   const aberta   = buscaAtv || abertas.has(idPath);
@@ -552,7 +649,6 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
           </div>
           {meses.map((m: string) => {
             const totalSku  = somaSkuExecutivo(clientes, sku, m);
-            const cel0      = clientes[0]?.subRows?.find((p: any) => p.sku === sku)?.meses[m];
             const pmvSoma = clientes.reduce((s: number, cli: any) => {
               const p = (cli.subRows || []).find((pr: any) => pr.sku === sku);
               const cel = p?.meses?.[m];
@@ -579,33 +675,29 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
               return {
                 razao: cli.nome,
                 mes: m,
-                pesoHist: prod?.meses[m]?.peso_historico ?? 0,
+                pesoBase: pesoRateioBottomUp(prod?.meses[m]),
                 original: prod?.meses[m]?.meta ?? 0,
+                pmv: prod?.meses[m]?.pmv ?? 0,
               };
             });
+            const podeEditarValor = clientesInfo.some(c => c.pmv > 0);
             return (
               <div key={m} className="text-right">
-                <input
-                  type="text"
-                  value={fmtRs(valorAtual)}
-                  disabled={bloqueado || pmv <= 0}
-                  onChange={e => {
-                    const valor = parseInteiroFormatado(e.target.value);
-                    const volume = pmv > 0 ? Math.round(valor / pmv) : totalSku;
-                    setSkuExecutivo(clientesInfo, sku, m, volume);
-                  }}
-                  title={pmv <= 0 ? 'Sem PMV: edição monetária bloqueada' : undefined}
-                  inputMode="numeric"
+                <CampoNumeroEditavel
+                  value={valorAtual}
+                  format={fmtRs}
+                  disabled={bloqueado || !podeEditarValor}
+                  onChange={valor => setSkuExecutivoValor(clientesInfo, sku, m, valor)}
+                  title={!podeEditarValor ? 'Sem PMV: edição monetária bloqueada' : undefined}
                   className={`w-full text-right text-sm font-bold rounded-md px-2 py-1 border transition-colors
                     ${temEdit ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-transparent bg-transparent text-indigo-600'}
-                    ${bloqueado || pmv <= 0 ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
+                    ${bloqueado || !podeEditarValor ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
                 />
-                <input
-                  type="text"
-                  value={fmtCx(totalSku)}
+                <CampoNumeroEditavel
+                  value={totalSku}
+                  format={fmtCx}
                   disabled={bloqueado}
-                  onChange={e => setSkuExecutivo(clientesInfo, sku, m, parseInteiroFormatado(e.target.value))}
-                  inputMode="numeric"
+                  onChange={valor => setSkuExecutivo(clientesInfo, sku, m, valor)}
                   className={`w-full text-right text-xs font-bold rounded-md px-2 py-0.5 border transition-colors mt-0.5
                     ${temEdit ? 'border-indigo-200 bg-white text-slate-700' : 'border-transparent bg-transparent text-slate-500'}
                     ${bloqueado ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
@@ -645,26 +737,21 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
                 const editado = `${cli.nome}||${sku}||${m}` in edits;
                 return (
                   <div key={m} className="text-right">
-                    <input
-                      type="text"
-                      value={fmtRs(val * (cel.pmv || 0))}
+                    <CampoNumeroEditavel
+                      value={val * (cel.pmv || 0)}
+                      format={fmtRs}
                       disabled={bloqueado || (cel.pmv || 0) <= 0}
-                      onChange={e => {
-                        const valor = parseInteiroFormatado(e.target.value);
-                        setClienteValor(cli.nome, sku, m, valor, cel.pmv || 0);
-                      }}
+                      onChange={valor => setClienteValor(cli.nome, sku, m, valor, cel.pmv || 0)}
                       title={(cel.pmv || 0) <= 0 ? 'Sem PMV: edição monetária bloqueada' : undefined}
-                      inputMode="numeric"
                       className={`w-full text-right text-xs font-bold rounded-md px-2 py-1 border transition-colors
                         ${editado ? 'border-violet-300 bg-violet-50 text-violet-700' : 'border-transparent bg-transparent text-indigo-600'}
                         ${bloqueado || (cel.pmv || 0) <= 0 ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-100 focus:border-violet-400 focus:bg-white focus:outline-none'}`}
                     />
-                    <input
-                      type="text"
-                      value={fmtCx(val)}
+                    <CampoNumeroEditavel
+                      value={val}
+                      format={fmtCx}
                       disabled={bloqueado}
-                      onChange={e => setCliente(cli.nome, sku, m, parseInteiroFormatado(e.target.value))}
-                      inputMode="numeric"
+                      onChange={valor => setCliente(cli.nome, sku, m, valor)}
                       className={`w-full text-right text-[11px] font-bold rounded-md px-2 py-0.5 border transition-colors mt-0.5
                         ${editado ? 'border-violet-200 bg-white text-slate-700' : 'border-transparent bg-transparent text-slate-500'}
                         ${bloqueado ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-100 focus:border-violet-400 focus:bg-white focus:outline-none'}`}
@@ -765,26 +852,19 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
           </button>
           {meses.map((m: string) => (
             <div key={m} className="text-right">
-              <input
-                type="text"
-                value={fmtRs(fatMes(m))}
+              <CampoNumeroEditavel
+                value={fatMes(m)}
+                format={fmtRs}
                 disabled={bloqueado}
-                onChange={e => setNodeValor(node, m, parseInteiroFormatado(e.target.value))}
-                inputMode="numeric"
+                onChange={valor => setNodeValor(node, m, valor)}
                 className={`w-full text-right text-xs font-black rounded-md px-2 py-1 border transition-colors
                   ${bloqueado ? 'cursor-not-allowed opacity-60 border-transparent bg-transparent text-slate-500' : 'border-transparent bg-transparent text-indigo-600 hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
               />
-              <input
-                type="text"
-                value={fmtCx(somaMes(m))}
+              <CampoNumeroEditavel
+                value={somaMes(m)}
+                format={fmtCx}
                 disabled={bloqueado}
-                onChange={e => {
-                  const volAtual = somaMes(m);
-                  const valorAtual = fatMes(m);
-                  const pmvMedio = volAtual > 0 ? valorAtual / volAtual : 0;
-                  if (pmvMedio > 0) setNodeValor(node, m, parseInteiroFormatado(e.target.value) * pmvMedio);
-                }}
-                inputMode="numeric"
+                onChange={valor => setNodeVolume(node, m, valor)}
                 className={`w-full text-right text-[11px] font-bold rounded-md px-2 py-0.5 border transition-colors mt-0.5
                   ${bloqueado ? 'cursor-not-allowed opacity-60 border-transparent bg-transparent text-slate-500' : 'border-transparent bg-transparent text-slate-500 hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
               />
@@ -798,11 +878,12 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
             node={{ ...skuNode, tipo: 'produto_executivo', executivoNome: node.nome }}
             nivel={nivel + 1}
             meses={meses} abertas={abertas} toggle={toggle}
-            valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setCliente={setCliente}
+            valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setSkuExecutivoValor={setSkuExecutivoValor} setCliente={setCliente}
             somaSkuExecutivo={somaSkuExecutivo}
             bloqueado={bloqueado} edits={edits}
             setClienteValor={setClienteValor}
             setNodeValor={setNodeValor}
+            setNodeVolume={setNodeVolume}
             setDossieAlvo={setDossieAlvo}
             dossieAlvo={dossieAlvo}
             idPath={`${idPath}>${skuNode.sku}`}
@@ -859,26 +940,19 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
         </button>
         {meses.map((m: string) => (
           <div key={m} className="text-right">
-            <input
-              type="text"
-              value={fmtRs(fatMes(m))}
+            <CampoNumeroEditavel
+              value={fatMes(m)}
+              format={fmtRs}
               disabled={bloqueado}
-              onChange={e => setNodeValor(node, m, parseInteiroFormatado(e.target.value))}
-              inputMode="numeric"
+              onChange={valor => setNodeValor(node, m, valor)}
               className={`w-full text-right text-xs font-black rounded-md px-2 py-1 border transition-colors
                 ${bloqueado ? 'cursor-not-allowed opacity-60 border-transparent bg-transparent text-slate-500' : 'border-transparent bg-transparent text-indigo-600 hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
             />
-            <input
-              type="text"
-              value={fmtCx(somaMes(m))}
+            <CampoNumeroEditavel
+              value={somaMes(m)}
+              format={fmtCx}
               disabled={bloqueado}
-              onChange={e => {
-                const volAtual = somaMes(m);
-                const valorAtual = fatMes(m);
-                const pmvMedio = volAtual > 0 ? valorAtual / volAtual : 0;
-                if (pmvMedio > 0) setNodeValor(node, m, parseInteiroFormatado(e.target.value) * pmvMedio);
-              }}
-              inputMode="numeric"
+              onChange={valor => setNodeVolume(node, m, valor)}
               className={`w-full text-right text-[11px] font-bold rounded-md px-2 py-0.5 border transition-colors mt-0.5
                 ${bloqueado ? 'cursor-not-allowed opacity-60 border-transparent bg-transparent text-slate-500' : 'border-transparent bg-transparent text-slate-500 hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
             />
@@ -889,10 +963,11 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
       {aberta && (node.subRows || []).map((f: any, i: number) => (
         <NoArvore key={(f.nome || f.sku) + i} node={f} nivel={nivel + 1}
           meses={meses} abertas={abertas} toggle={toggle}
-          valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setCliente={setCliente}
+          valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setSkuExecutivoValor={setSkuExecutivoValor} setCliente={setCliente}
           somaSkuExecutivo={somaSkuExecutivo}
           bloqueado={bloqueado} edits={edits}
           setNodeValor={setNodeValor}
+          setNodeVolume={setNodeVolume}
           setDossieAlvo={setDossieAlvo}
           dossieAlvo={dossieAlvo}
           idPath={`${idPath}>${f.nome || f.sku}`}

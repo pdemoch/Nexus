@@ -266,6 +266,7 @@ def tabela(responsavel: str = None, nivel_responsavel: str = None,
             })
             prod["meses"][r.mes] = {
                 "meta":           int(r.meta or 0),
+                "bottomup":       int(r.bottomup or 0),
                 "ia":             int(r.ia or 0),
                 "pmv":            round(float(r.pmv or 0), 2),
                 "peso_historico": peso_map.get((rz, sk), 0.0),
