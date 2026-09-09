@@ -369,6 +369,9 @@ class AjusteMeta(BaseModel):
     sku: str
     mes_projetado: str
     novo_volume: int
+    gerente_nome: Optional[str] = None
+    coordenador_nome: Optional[str] = None
+    vendedor_nome: Optional[str] = None
 
 class PayloadSalvar(BaseModel):
     ajustes: List[AjusteMeta]
@@ -436,6 +439,23 @@ def _aplicar_ajustes_meta(db: Session, ciclo: str, ajustes: List[AjusteMeta], es
         filtro_escopo, params_escopo = _filtro_escopo_sql(escopo, alias_cli="c")
     for aj in ajustes:
         check_imutabilidade_mes(aj.mes_projetado, aj.sku, contexto="Meta")
+        filtro_hierarquia = ""
+        params_hierarquia = {}
+        if aj.gerente_nome:
+            filtro_hierarquia += """
+              AND COALESCE(NULLIF(TRIM(c.gerente_nome),''), 'SEM GERENTE') = :gerente_nome
+            """
+            params_hierarquia["gerente_nome"] = aj.gerente_nome.strip()
+        if aj.coordenador_nome:
+            filtro_hierarquia += """
+              AND COALESCE(NULLIF(TRIM(c.supervisor_nome),''), 'SEM COORDENADOR') = :coordenador_nome
+            """
+            params_hierarquia["coordenador_nome"] = aj.coordenador_nome.strip()
+        if aj.vendedor_nome:
+            filtro_hierarquia += """
+              AND COALESCE(NULLIF(TRIM(f.vendedor_nome),''), 'SEM VENDEDOR') = :vendedor_nome
+            """
+            params_hierarquia["vendedor_nome"] = aj.vendedor_nome.strip()
 
         result = db.execute(text("""
             SELECT f.id AS fato_id, f.cgc,
@@ -449,20 +469,22 @@ def _aplicar_ajustes_meta(db: Session, ciclo: str, ajustes: List[AjusteMeta], es
               AND TO_CHAR(f.mes_projetado,'YYYY-MM') = :mes
               AND f.sku = :sku
               AND TRIM(c.razaosocial) = TRIM(:razao)
+              {filtro_hierarquia}
               {filtro_escopo}
             GROUP BY f.id, f.cgc ORDER BY f.id
-        """.format(filtro_escopo=filtro_escopo)), {
+        """.format(filtro_hierarquia=filtro_hierarquia, filtro_escopo=filtro_escopo)), {
             "ciclo": ciclo,
             "mes": aj.mes_projetado,
             "sku": aj.sku,
             "razao": aj.razao_social,
+            **params_hierarquia,
             **params_escopo,
         }).fetchall()
 
         if not result:
             raise HTTPException(
                 404,
-                f"Nenhuma linha encontrada para {aj.razao_social} / {aj.sku} / {aj.mes_projetado}."
+                f"Nenhuma linha encontrada para {aj.gerente_nome or 'gerente'} / {aj.coordenador_nome or 'coordenador'} / {aj.vendedor_nome or 'executivo'} / {aj.razao_social} / {aj.sku} / {aj.mes_projetado}."
             )
 
         pesos = [max(0.0, float(r.peso_historico or 0)) for r in result]

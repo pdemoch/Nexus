@@ -77,6 +77,15 @@ const mesLabel = (iso: string) => {
   return `${nomes[parseInt(m)-1]}/${y.slice(2)}`;
 };
 
+const editKeyOf = (
+  gerente: string,
+  coordenador: string,
+  vendedor: string,
+  razao: string,
+  sku: string,
+  mes: string
+) => `${gerente}||${coordenador}||${vendedor}||${razao}||${sku}||${mes}`;
+
 /* Rateio por maior resto — igual ao backend */
 function ratearMaiorResto(total: number, pesos: number[]): number[] {
   const soma = pesos.reduce((a, b) => a + b, 0);
@@ -201,7 +210,7 @@ function PreenchimentoMetas() {
   const [loading,        setLoading]        = useState(true);
   const [salvando,       setSalvando]       = useState(false);
   const [abertas,        setAbertas]        = useState<Set<string>>(new Set());
-  // edits: chave razao||sku||mes → volume (nível cliente, sempre)
+  // edits: chave gerente||coordenador||vendedor||razao||sku||mes → volume (nível cliente, sempre)
   const [edits,          setEdits]          = useState<Record<string, number>>({});
   const [dossieAlvo,     setDossieAlvo]     = useState<{
     sku: string; descricao: string; razao?: string; vendedor?: string;
@@ -238,9 +247,8 @@ function PreenchimentoMetas() {
   const responsaveis = (dados?.responsaveis || []) as Array<{ nome: string; nivel: string }>;
 
   /* Chave de edição: sempre no nível razão social */
-  const keyOf       = (razao: string, sku: string, mes: string) => `${razao}||${sku}||${mes}`;
-  const valorCliente = (razao: string, sku: string, mes: string, original: number) => {
-    const k = keyOf(razao, sku, mes);
+  const valorCliente = (gerente: string, coordenador: string, vendedor: string, razao: string, sku: string, mes: string, original: number) => {
+    const k = editKeyOf(gerente, coordenador, vendedor, razao, sku, mes);
     return k in edits ? edits[k] : (original || 0);
   };
 
@@ -257,8 +265,8 @@ function PreenchimentoMetas() {
 
   const payloadAjustes = () => ({
     ajustes: Object.entries(edits).map(([k, v]) => {
-      const [razao_social, sku, mes] = k.split('||');
-      return { razao_social, sku, mes_projetado: mes, novo_volume: v };
+      const [gerente_nome, coordenador_nome, vendedor_nome, razao_social, sku, mes] = k.split('||');
+      return { gerente_nome, coordenador_nome, vendedor_nome, razao_social, sku, mes_projetado: mes, novo_volume: v };
     }),
     ...(adminAlvo ? { nome_alvo: adminAlvo.nome, nivel_alvo: adminAlvo.nivel } : {}),
   });
@@ -275,7 +283,7 @@ function PreenchimentoMetas() {
 
   /* Edição no nível SKU do executivo: rateia pelos clientes proporcionalmente */
   const setSkuExecutivo = (
-    clientesDoSku: Array<{ razao: string; mes: string; pesoBase: number; original: number; pmv: number }>,
+    clientesDoSku: Array<{ gerente: string; coordenador: string; vendedor: string; razao: string; mes: string; pesoBase: number; original: number; pmv: number }>,
     sku: string, mes: string, novoTotal: number
   ) => {
     const pesos = clientesDoSku.map(c => c.pesoBase);
@@ -283,14 +291,14 @@ function PreenchimentoMetas() {
     setEdits(prev => {
       const next = { ...prev };
       clientesDoSku.forEach((c, i) => {
-        next[keyOf(c.razao, sku, mes)] = partes[i];
+        next[editKeyOf(c.gerente, c.coordenador, c.vendedor, c.razao, sku, mes)] = partes[i];
       });
       return next;
     });
   };
 
   const setSkuExecutivoValor = (
-    clientesDoSku: Array<{ razao: string; mes: string; pesoBase: number; original: number; pmv: number }>,
+    clientesDoSku: Array<{ gerente: string; coordenador: string; vendedor: string; razao: string; mes: string; pesoBase: number; original: number; pmv: number }>,
     sku: string, mes: string, novoValor: number
   ) => {
     const editaveis = clientesDoSku.filter(c => c.pmv > 0);
@@ -299,28 +307,31 @@ function PreenchimentoMetas() {
     setEdits(prev => {
       const next = { ...prev };
       editaveis.forEach((c, i) => {
-        next[keyOf(c.razao, sku, mes)] = volumes[i];
+        next[editKeyOf(c.gerente, c.coordenador, c.vendedor, c.razao, sku, mes)] = volumes[i];
       });
       return next;
     });
   };
 
   /* Edição direta no nível cliente (override manual) */
-  const setCliente = (razao: string, sku: string, mes: string, v: number) =>
-    setEdits(prev => ({ ...prev, [keyOf(razao, sku, mes)]: Math.max(0, Math.round(v || 0)) }));
+  const setCliente = (gerente: string, coordenador: string, vendedor: string, razao: string, sku: string, mes: string, v: number) =>
+    setEdits(prev => ({ ...prev, [editKeyOf(gerente, coordenador, vendedor, razao, sku, mes)]: Math.max(0, Math.round(v || 0)) }));
 
-  const setClienteValor = (razao: string, sku: string, mes: string, valor: number, pmv: number) => {
+  const setClienteValor = (gerente: string, coordenador: string, vendedor: string, razao: string, sku: string, mes: string, valor: number, pmv: number) => {
     if (pmv <= 0) return;
-    setCliente(razao, sku, mes, Math.round(Math.max(0, valor || 0) / pmv));
+    setCliente(gerente, coordenador, vendedor, razao, sku, mes, Math.round(Math.max(0, valor || 0) / pmv));
   };
 
-  const setNodeValor = (node: any, mes: string, valorAlvo: number) => {
-    const folhas: Array<{ razao: string; sku: string; pmv: number; pesoBase: number }> = [];
-    const walk = (n: any, razaoCtx: string | null) => {
+  const setNodeValor = (node: any, mes: string, valorAlvo: number, contexto?: { gerente?: string; coordenador?: string; vendedor?: string }) => {
+    const folhas: Array<{ gerente: string; coordenador: string; vendedor: string; razao: string; sku: string; pmv: number; pesoBase: number }> = [];
+    const walk = (n: any, gerenteCtx: string | null, coordenadorCtx: string | null, vendedorCtx: string | null, razaoCtx: string | null) => {
       if (n.tipo === 'produto') {
         const cel = n.meses?.[mes];
         if (!cel) return;
         folhas.push({
+          gerente: gerenteCtx || 'SEM GERENTE',
+          coordenador: coordenadorCtx || 'SEM COORDENADOR',
+          vendedor: vendedorCtx || 'SEM VENDEDOR',
           razao: razaoCtx || '',
           sku: n.sku,
           pmv: cel.pmv || 0,
@@ -328,58 +339,79 @@ function PreenchimentoMetas() {
         });
         return;
       }
+      const novoGerente = n.tipo === 'gerente' ? n.nome : gerenteCtx;
+      const novoCoordenador = n.tipo === 'coordenador' ? n.nome : coordenadorCtx;
+      const novoVendedor = n.tipo === 'vendedor' ? n.nome : vendedorCtx;
       const novoCtx = n.tipo === 'cliente' ? n.nome : razaoCtx;
-      (n.subRows || []).forEach((f: any) => walk(f, novoCtx));
+      (n.subRows || []).forEach((f: any) => walk(f, novoGerente, novoCoordenador, novoVendedor, novoCtx));
     };
-    walk(node, null);
+    walk(
+      node,
+      contexto?.gerente || null,
+      contexto?.coordenador || null,
+      contexto?.vendedor || null,
+      null
+    );
     const editaveis = folhas.filter(f => f.pmv > 0);
     if (!editaveis.length) return;
     const volumes = ratearVolumesPorValor(valorAlvo, editaveis);
     setEdits(prev => {
       const next = { ...prev };
       editaveis.forEach((f, i) => {
-        next[keyOf(f.razao, f.sku, mes)] = volumes[i];
+        next[editKeyOf(f.gerente, f.coordenador, f.vendedor, f.razao, f.sku, mes)] = volumes[i];
       });
       return next;
     });
   };
 
-  const setNodeVolume = (node: any, mes: string, volumeAlvo: number) => {
-    const folhas: Array<{ razao: string; sku: string; pesoBase: number }> = [];
-    const walk = (n: any, razaoCtx: string | null) => {
+  const setNodeVolume = (node: any, mes: string, volumeAlvo: number, contexto?: { gerente?: string; coordenador?: string; vendedor?: string }) => {
+    const folhas: Array<{ gerente: string; coordenador: string; vendedor: string; razao: string; sku: string; pesoBase: number }> = [];
+    const walk = (n: any, gerenteCtx: string | null, coordenadorCtx: string | null, vendedorCtx: string | null, razaoCtx: string | null) => {
       if (n.tipo === 'produto') {
         const cel = n.meses?.[mes];
         if (!cel) return;
         folhas.push({
+          gerente: gerenteCtx || 'SEM GERENTE',
+          coordenador: coordenadorCtx || 'SEM COORDENADOR',
+          vendedor: vendedorCtx || 'SEM VENDEDOR',
           razao: razaoCtx || '',
           sku: n.sku,
           pesoBase: pesoRateioBottomUp(cel),
         });
         return;
       }
+      const novoGerente = n.tipo === 'gerente' ? n.nome : gerenteCtx;
+      const novoCoordenador = n.tipo === 'coordenador' ? n.nome : coordenadorCtx;
+      const novoVendedor = n.tipo === 'vendedor' ? n.nome : vendedorCtx;
       const novoCtx = n.tipo === 'cliente' ? n.nome : razaoCtx;
-      (n.subRows || []).forEach((f: any) => walk(f, novoCtx));
+      (n.subRows || []).forEach((f: any) => walk(f, novoGerente, novoCoordenador, novoVendedor, novoCtx));
     };
-    walk(node, null);
+    walk(
+      node,
+      contexto?.gerente || null,
+      contexto?.coordenador || null,
+      contexto?.vendedor || null,
+      null
+    );
     if (!folhas.length) return;
     const pesos = folhas.map(f => f.pesoBase);
     const volumesRateados = ratearMaiorResto(Math.max(0, Math.round(volumeAlvo || 0)), pesos);
     setEdits(prev => {
       const next = { ...prev };
       folhas.forEach((f, i) => {
-        next[keyOf(f.razao, f.sku, mes)] = Math.max(0, Math.round(volumesRateados[i]));
+        next[editKeyOf(f.gerente, f.coordenador, f.vendedor, f.razao, f.sku, mes)] = Math.max(0, Math.round(volumesRateados[i]));
       });
       return next;
     });
   };
 
   /* Soma de um SKU de um executivo num mês (para exibir no input do SKU) */
-  const somaSkuExecutivo = (clientes: any[], sku: string, mes: string): number => {
+  const somaSkuExecutivo = (gerente: string, coordenador: string, vendedor: string, clientes: any[], sku: string, mes: string): number => {
     return clientes.reduce((s, cli) => {
       const prods = cli.subRows || [];
       const prod  = prods.find((p: any) => p.sku === sku);
       if (!prod || !prod.meses[mes]) return s;
-      return s + valorCliente(cli.nome, sku, mes, prod.meses[mes].meta);
+      return s + valorCliente(gerente, coordenador, vendedor, cli.nome, sku, mes, prod.meses[mes].meta);
     }, 0);
   };
 
@@ -388,20 +420,23 @@ function PreenchimentoMetas() {
     const vol: Record<string, number> = {};
     const fat: Record<string, number> = {};
     meses.forEach(m => { vol[m] = 0; fat[m] = 0; });
-    const walkProd = (prod: any, razao: string) => {
+    const walkProd = (prod: any, gerente: string, coordenador: string, vendedor: string, razao: string) => {
       meses.forEach(m => {
         const cel = prod.meses[m]; if (!cel) return;
-        const v = valorCliente(razao, prod.sku, m, cel.meta);
+        const v = valorCliente(gerente, coordenador, vendedor, razao, prod.sku, m, cel.meta);
         vol[m] += v;
         fat[m] += v * (cel.pmv || 0);
       });
     };
-    const walk = (node: any, razaoCtx: string | null) => {
-      if (node.tipo === 'produto') { walkProd(node, razaoCtx || ''); return; }
+    const walk = (node: any, gerenteCtx: string | null, coordenadorCtx: string | null, vendedorCtx: string | null, razaoCtx: string | null) => {
+      if (node.tipo === 'produto') { walkProd(node, gerenteCtx || 'SEM GERENTE', coordenadorCtx || 'SEM COORDENADOR', vendedorCtx || 'SEM VENDEDOR', razaoCtx || ''); return; }
+      const novoGerente = node.tipo === 'gerente' ? node.nome : gerenteCtx;
+      const novoCoordenador = node.tipo === 'coordenador' ? node.nome : coordenadorCtx;
+      const novoVendedor = node.tipo === 'vendedor' ? node.nome : vendedorCtx;
       const novoCtx = node.tipo === 'cliente' ? node.nome : razaoCtx;
-      (node.subRows || []).forEach((f: any) => walk(f, novoCtx));
+      (node.subRows || []).forEach((f: any) => walk(f, novoGerente, novoCoordenador, novoVendedor, novoCtx));
     };
-    (dados?.arvore || []).forEach((g: any) => walk(g, null));
+    (dados?.arvore || []).forEach((g: any) => walk(g, null, null, null, null));
     return { vol, fat };
   }, [dados, edits, meses]);
 
@@ -653,6 +688,7 @@ function PreenchimentoMetas() {
               setDossieAlvo={setDossieAlvo}
               dossieAlvo={dossieAlvo}
               idPath={g.nome}
+              hierarquia={{ gerente: g.nome, coordenador: 'SEM COORDENADOR', vendedor: 'SEM VENDEDOR' }}
               buscaAtiva={!!busca.trim()} />
           ))}
       </div>
@@ -668,10 +704,15 @@ function PreenchimentoMetas() {
 function NoArvore({ node, nivel, meses, abertas, toggle,
   valorCliente, setSkuExecutivo, setSkuExecutivoValor, setCliente, somaSkuExecutivo,
   bloqueado, edits, setDossieAlvo, dossieAlvo, idPath, buscaAtiva,
-  setClienteValor, setNodeValor, setNodeVolume }: any) {
+  setClienteValor, setNodeValor, setNodeVolume, hierarquia }: any) {
 
   const buscaAtv = buscaAtiva;
   const aberta   = buscaAtv || abertas.has(idPath);
+  const ctx = {
+    gerente: node.tipo === 'gerente' ? node.nome : (hierarquia?.gerente || 'SEM GERENTE'),
+    coordenador: node.tipo === 'coordenador' ? node.nome : (hierarquia?.coordenador || 'SEM COORDENADOR'),
+    vendedor: node.tipo === 'vendedor' ? node.nome : (hierarquia?.vendedor || 'SEM VENDEDOR'),
+  };
 
   /* ── NÓ PRODUTO — renderizado dentro do nível EXECUTIVO (vendedor) ── */
   /* Este nó representa um SKU agregado dos clientes do executivo.       */
@@ -700,11 +741,11 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
             </button>
           </div>
           {meses.map((m: string) => {
-            const totalSku  = somaSkuExecutivo(clientes, sku, m);
+            const totalSku  = somaSkuExecutivo(ctx.gerente, ctx.coordenador, node.executivoNome || ctx.vendedor, clientes, sku, m);
             const pmvSoma = clientes.reduce((s: number, cli: any) => {
               const p = (cli.subRows || []).find((pr: any) => pr.sku === sku);
               const cel = p?.meses?.[m];
-              const volume = cel ? valorCliente(cli.nome, sku, m, cel.meta) : 0;
+              const volume = cel ? valorCliente(ctx.gerente, ctx.coordenador, node.executivoNome || ctx.vendedor, cli.nome, sku, m, cel.meta) : 0;
               return s + volume * (cel?.pmv || 0);
             }, 0);
             const pmvComVolume = clientes.reduce((s: number, cli: any) => {
@@ -720,11 +761,14 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
               return s + (p?.meses[m]?.ia || 0);
             }, 0);
             const temEdit   = clientes.some((cli: any) =>
-              `${cli.nome}||${sku}||${m}` in edits
+              editKeyOf(ctx.gerente, ctx.coordenador, node.executivoNome || ctx.vendedor, cli.nome, sku, m) in edits
             );
             const clientesInfo = clientes.map((cli: any) => {
               const prod = (cli.subRows || []).find((p: any) => p.sku === sku);
               return {
+                gerente: ctx.gerente,
+                coordenador: ctx.coordenador,
+                vendedor: node.executivoNome || 'SEM VENDEDOR',
                 razao: cli.nome,
                 mes: m,
                 pesoBase: pesoRateioBottomUp(prod?.meses[m]),
@@ -785,15 +829,16 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
               {meses.map((m: string) => {
                 const cel     = prod.meses[m];
                 if (!cel) return <div key={m} />;
-                const val     = valorCliente(cli.nome, sku, m, cel.meta);
-                const editado = `${cli.nome}||${sku}||${m}` in edits;
+                const vendedor = node.executivoNome || ctx.vendedor;
+                const val     = valorCliente(ctx.gerente, ctx.coordenador, vendedor, cli.nome, sku, m, cel.meta);
+                const editado = editKeyOf(ctx.gerente, ctx.coordenador, vendedor, cli.nome, sku, m) in edits;
                 return (
                   <div key={m} className="text-right">
                     <CampoNumeroEditavel
                       value={val * (cel.pmv || 0)}
                       format={fmtRs}
                       disabled={bloqueado || (cel.pmv || 0) <= 0}
-                      onChange={valor => setClienteValor(cli.nome, sku, m, valor, cel.pmv || 0)}
+                      onChange={valor => setClienteValor(ctx.gerente, ctx.coordenador, vendedor, cli.nome, sku, m, valor, cel.pmv || 0)}
                       title={(cel.pmv || 0) <= 0 ? 'Sem PMV: edição monetária bloqueada' : undefined}
                       className={`w-full text-right text-xs font-bold rounded-md px-2 py-1 border transition-colors
                         ${editado ? 'border-violet-300 bg-violet-50 text-violet-700' : 'border-transparent bg-transparent text-indigo-600'}
@@ -803,7 +848,7 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
                       value={val}
                       format={fmtCx}
                       disabled={bloqueado}
-                      onChange={valor => setCliente(cli.nome, sku, m, valor)}
+                      onChange={valor => setCliente(ctx.gerente, ctx.coordenador, vendedor, cli.nome, sku, m, valor)}
                       className={`w-full text-right text-[11px] font-bold rounded-md px-2 py-0.5 border transition-colors mt-0.5
                         ${editado ? 'border-violet-200 bg-white text-slate-700' : 'border-transparent bg-transparent text-slate-500'}
                         ${bloqueado ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-100 focus:border-violet-400 focus:bg-white focus:outline-none'}`}
@@ -882,12 +927,12 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
     const somaMes = (m: string) =>
       (node.subRows || []).reduce((s: number, cli: any) =>
         s + (cli.subRows || []).reduce((ss: number, p: any) =>
-          ss + valorCliente(cli.nome, p.sku, m, p.meses[m]?.meta || 0), 0), 0);
+          ss + valorCliente(ctx.gerente, ctx.coordenador, node.nome || 'SEM VENDEDOR', cli.nome, p.sku, m, p.meses[m]?.meta || 0), 0), 0);
     const fatMes = (m: string) =>
       (node.subRows || []).reduce((s: number, cli: any) =>
         s + (cli.subRows || []).reduce((ss: number, p: any) => {
           const cel = p.meses[m]; if (!cel) return ss;
-          return ss + valorCliente(cli.nome, p.sku, m, cel.meta) * (cel.pmv || 0);
+          return ss + valorCliente(ctx.gerente, ctx.coordenador, node.nome || 'SEM VENDEDOR', cli.nome, p.sku, m, cel.meta) * (cel.pmv || 0);
         }, 0), 0);
 
     return (
@@ -908,7 +953,7 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
                 value={fatMes(m)}
                 format={fmtRs}
                 disabled={bloqueado}
-                onChange={valor => setNodeValor(node, m, valor)}
+                onChange={valor => setNodeValor(node, m, valor, ctx)}
                 className={`w-full text-right text-xs font-black rounded-md px-2 py-1 border transition-colors
                   ${bloqueado ? 'cursor-not-allowed opacity-60 border-transparent bg-transparent text-slate-500' : 'border-transparent bg-transparent text-indigo-600 hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
               />
@@ -916,7 +961,7 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
                 value={somaMes(m)}
                 format={fmtCx}
                 disabled={bloqueado}
-                onChange={valor => setNodeVolume(node, m, valor)}
+                onChange={valor => setNodeVolume(node, m, valor, ctx)}
                 className={`w-full text-right text-[11px] font-bold rounded-md px-2 py-0.5 border transition-colors mt-0.5
                   ${bloqueado ? 'cursor-not-allowed opacity-60 border-transparent bg-transparent text-slate-500' : 'border-transparent bg-transparent text-slate-500 hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
               />
@@ -938,6 +983,7 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
             setNodeVolume={setNodeVolume}
             setDossieAlvo={setDossieAlvo}
             dossieAlvo={dossieAlvo}
+            hierarquia={{ ...ctx, vendedor: node.nome || 'SEM VENDEDOR' }}
             idPath={`${idPath}>${skuNode.sku}`}
             buscaAtiva={buscaAtv}
           />
@@ -951,25 +997,31 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
 
   const somaMes = (m: string): number => {
     let s = 0;
-    const walk = (n: any, rz: string | null) => {
-      if (n.tipo === 'produto') { s += valorCliente(rz || '', n.sku, m, n.meses[m]?.meta || 0); return; }
+    const walk = (n: any, gerente: string | null, coordenador: string | null, vendedor: string | null, rz: string | null) => {
+      if (n.tipo === 'produto') { s += valorCliente(gerente || 'SEM GERENTE', coordenador || 'SEM COORDENADOR', vendedor || 'SEM VENDEDOR', rz || '', n.sku, m, n.meses[m]?.meta || 0); return; }
+      const g = n.tipo === 'gerente' ? n.nome : gerente;
+      const co = n.tipo === 'coordenador' ? n.nome : coordenador;
+      const v = n.tipo === 'vendedor' ? n.nome : vendedor;
       const c = n.tipo === 'cliente' ? n.nome : rz;
-      (n.subRows || []).forEach((f: any) => walk(f, c));
+      (n.subRows || []).forEach((f: any) => walk(f, g, co, v, c));
     };
-    walk(node, null);
+    walk(node, ctx.gerente, ctx.coordenador, ctx.vendedor, null);
     return s;
   };
   const fatMes = (m: string): number => {
     let f = 0;
-    const walk = (n: any, rz: string | null) => {
+    const walk = (n: any, gerente: string | null, coordenador: string | null, vendedor: string | null, rz: string | null) => {
       if (n.tipo === 'produto') {
         const cel = n.meses[m]; if (!cel) return;
-        f += valorCliente(rz || '', n.sku, m, cel.meta || 0) * (cel.pmv || 0); return;
+        f += valorCliente(gerente || 'SEM GERENTE', coordenador || 'SEM COORDENADOR', vendedor || 'SEM VENDEDOR', rz || '', n.sku, m, cel.meta || 0) * (cel.pmv || 0); return;
       }
+      const g = n.tipo === 'gerente' ? n.nome : gerente;
+      const co = n.tipo === 'coordenador' ? n.nome : coordenador;
+      const v = n.tipo === 'vendedor' ? n.nome : vendedor;
       const c = n.tipo === 'cliente' ? n.nome : rz;
-      (n.subRows || []).forEach((sub: any) => walk(sub, c));
+      (n.subRows || []).forEach((sub: any) => walk(sub, g, co, v, c));
     };
-    walk(node, null);
+    walk(node, ctx.gerente, ctx.coordenador, ctx.vendedor, null);
     return f;
   };
 
@@ -996,7 +1048,7 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
               value={fatMes(m)}
               format={fmtRs}
               disabled={bloqueado}
-              onChange={valor => setNodeValor(node, m, valor)}
+              onChange={valor => setNodeValor(node, m, valor, ctx)}
               className={`w-full text-right text-xs font-black rounded-md px-2 py-1 border transition-colors
                 ${bloqueado ? 'cursor-not-allowed opacity-60 border-transparent bg-transparent text-slate-500' : 'border-transparent bg-transparent text-indigo-600 hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
             />
@@ -1004,7 +1056,7 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
               value={somaMes(m)}
               format={fmtCx}
               disabled={bloqueado}
-              onChange={valor => setNodeVolume(node, m, valor)}
+              onChange={valor => setNodeVolume(node, m, valor, ctx)}
               className={`w-full text-right text-[11px] font-bold rounded-md px-2 py-0.5 border transition-colors mt-0.5
                 ${bloqueado ? 'cursor-not-allowed opacity-60 border-transparent bg-transparent text-slate-500' : 'border-transparent bg-transparent text-slate-500 hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
             />
@@ -1022,6 +1074,7 @@ function NoArvore({ node, nivel, meses, abertas, toggle,
           setNodeVolume={setNodeVolume}
           setDossieAlvo={setDossieAlvo}
           dossieAlvo={dossieAlvo}
+          hierarquia={ctx}
           idPath={`${idPath}>${f.nome || f.sku}`}
           buscaAtiva={buscaAtv}
           setClienteValor={setClienteValor} />
