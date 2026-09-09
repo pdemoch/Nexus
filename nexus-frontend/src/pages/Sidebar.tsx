@@ -13,7 +13,7 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
 
   const allNavItems = [
     { id: 'dashboard', label: 'Demanda Final', icon: LayoutDashboard, roles: ['Administrador', 'Gerente', 'Supply Chain', 'Marketing', 'C-Level'] },
-    { id: 'auditoria', label: 'KPIs', icon: Crosshair, roles: ['Administrador', 'C-Level', 'Gerente', 'Marketing'] },
+    { id: 'auditoria', label: 'KPIs', icon: Crosshair, roles: ['Administrador', 'C-Level', 'Gerente', 'Coordenador', 'Marketing'] },
     { id: 'topdown', label: 'Demanda Marketing', icon: BarChart3, roles: ['Administrador', 'Marketing'] },
     { id: 'gerenciamento', label: 'Demanda Comercial', icon: ShieldAlert, roles: ['Administrador', 'Gerente'] },
     { id: 'irrestrita', label: 'Demanda Irrestrita', icon: Zap, roles: ['Administrador'] },

@@ -171,11 +171,18 @@ def exportar_visao_geral(
 def tabela(responsavel: str = None, nivel_responsavel: str = None,
            db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     """
-    Retorna a árvore hierárquica (gerente→coordenador→vendedor→cliente→produto)
-    no formato esperado pelo MetasComercial.tsx:
-      • cada produto tem campo 'meses' como dict {ISO: {meta, ia, pmv}}
-      • campo 'sku' e 'descricao' (não 'produto'/'nome')
-      • campo 'tipo' = 'produto' nas folhas
+    Árvore SKU-first: SKU -> Coordenador -> Executivo -> Razão Social.
+    O frontend decide, com base em 'funcao' + 'fase_atual', até que nível
+    a edição é permitida:
+      Gerente,     fase SKU:         edita o total do SKU (raiz).
+      Gerente,     fase COORDENADOR: edita % de cada Coordenador dentro do SKU.
+      Coordenador, fase EXECUTIVO:   edita % de cada Executivo dentro do SKU
+                                      (teto = valor do SKU, vindo do Gerente).
+      Coordenador, fase RAZAO_SOCIAL: edita % de cada Razão Social dentro do
+                                      Executivo, NAQUELE SKU (teto = valor do
+                                      executivo só naquele SKU).
+    Cada nível carrega 'meta' (R$/caixas atual) e 'bottomup' (valor original
+    da Demanda Comercial) para exibir a variação.
     """
     try:
         ciclo   = get_current_cycle(db)
@@ -188,6 +195,7 @@ def tabela(responsavel: str = None, nivel_responsavel: str = None,
 
         # RLS canônico — escopo derivado do BANCO a cada request (rls_metas)
         from app.api.routers.rls_metas import escopo_usuario, clausula_rls
+        from app.api.routers.fase_meta import fase_atual_do_responsavel, garantir_tabela_fase_meta
         escopo = escopo_usuario(u)
         rls    = clausula_rls(escopo, alias_cli="c")
         nome_resp = None if escopo["ve_tudo"] else escopo["nome_responsavel"]
@@ -208,32 +216,28 @@ def tabela(responsavel: str = None, nivel_responsavel: str = None,
 
         rows = db.execute(text(f"""
             SELECT
-                COALESCE(NULLIF(TRIM(c.gerente_nome),''),'SEM GERENTE')       AS gerente,
-                COALESCE(NULLIF(TRIM(c.supervisor_nome),''),'SEM COORDENADOR') AS coordenador,
-                COALESCE(NULLIF(TRIM(f.vendedor_nome),''),'SEM VENDEDOR')      AS vendedor,
-                COALESCE(NULLIF(TRIM(c.razaosocial),''),'SEM RAZAO SOCIAL')   AS razao_social,
                 TRIM(f.sku)                                                    AS sku,
                 COALESCE(NULLIF(TRIM(p.descricao),''),'SEM DESCRICAO')        AS descricao,
+                COALESCE(NULLIF(TRIM(c.supervisor_nome),''),'SEM COORDENADOR') AS coordenador,
+                COALESCE(NULLIF(TRIM(f.vendedor_nome),''),'SEM VENDEDOR')      AS executivo,
+                COALESCE(NULLIF(TRIM(c.razaosocial),''),'SEM RAZAO SOCIAL')   AS razao_social,
                 TO_CHAR(f.mes_projetado,'YYYY-MM')                             AS mes,
                 COALESCE(SUM(f.vol_meta),0)                                   AS meta,
                 COALESCE(SUM(f.vol_bottomup),0)                               AS bottomup,
                 COALESCE(SUM(f.vol_ia),0)                                     AS ia,
-                COALESCE(SUM(f.pmv_aplicado * f.vol_bottomup)
-                         / NULLIF(SUM(f.vol_bottomup),0), 0)                  AS pmv
+                COALESCE(SUM(f.pmv_aplicado * f.vol_meta),0)                  AS pmv_num,
+                COALESCE(SUM(f.vol_meta),0)                                   AS pmv_den
             FROM fato_ibp_granular f
             JOIN dim_clientes c  ON f.cgc  = c.cgc
             JOIN dim_produtos p  ON f.sku  = p.sku
             WHERE f.ciclo_sop = :ciclo AND f.mes_projetado = ANY(:meses)
               AND f.sku IS NOT NULL AND f.sku != ''
               {filtro_resp}
-            GROUP BY gerente, coordenador, vendedor, razao_social, f.sku, p.descricao, f.mes_projetado
-            ORDER BY gerente, coordenador, vendedor, razao_social, p.descricao, f.mes_projetado
+            GROUP BY f.sku, p.descricao, coordenador, executivo, razao_social, f.mes_projetado
+            ORDER BY p.descricao, coordenador, executivo, razao_social, f.mes_projetado
         """), params).fetchall()
 
-
         # Peso historico por (razao_social, sku) — ultimos 4 meses de vendas reais.
-        # Agrupa por razao_social (via dim_clientes) para casar exatamente com a
-        # chave da arvore, evitando subquery correlacionada invalida no PostgreSQL.
         pesos_raw = db.execute(text(f"""
             SELECT COALESCE(NULLIF(TRIM(c.razaosocial),''),'SEM RAZAO SOCIAL') AS razao_social,
                    TRIM(f.sku) AS sku,
@@ -248,67 +252,76 @@ def tabela(responsavel: str = None, nivel_responsavel: str = None,
               {filtro_resp}
             GROUP BY c.razaosocial, f.sku
         """), params).fetchall()
-        # (razao_social, sku) -> peso
         peso_map: dict = {(r.razao_social, r.sku): float(r.peso or 0) for r in pesos_raw}
 
-        # Monta arvore em Python
+        def _no_vazio(tipo: str, **extra) -> dict:
+            n = {"tipo": tipo, "meses": {}}
+            n.update(extra)
+            return n
+
+        def _acumula(node: dict, mes: str, meta, bottomup, ia, pmv_num, pmv_den) -> None:
+            m = node["meses"].setdefault(mes, {"meta": 0, "bottomup": 0, "ia": 0, "_pmv_num": 0.0, "_pmv_den": 0.0})
+            m["meta"] += int(meta or 0)
+            m["bottomup"] += int(bottomup or 0)
+            m["ia"] += int(ia or 0)
+            m["_pmv_num"] += float(pmv_num or 0)
+            m["_pmv_den"] += float(pmv_den or 0)
+
+        # Árvore: SKU -> Coordenador -> Executivo -> Razão Social
         tree: dict = {}
         for r in rows:
-            g  = r.gerente; co = r.coordenador; v = r.vendedor
-            rz = r.razao_social; sk = r.sku
+            sk, co, ex, rz = r.sku, r.coordenador, r.executivo, r.razao_social
 
-            ger   = tree.setdefault(g, {"nome": g, "tipo": "gerente", "subRows": {}})
-            coord = ger["subRows"].setdefault(co, {"nome": co, "tipo": "coordenador", "subRows": {}})
-            vend  = coord["subRows"].setdefault(v, {"nome": v, "tipo": "vendedor", "subRows": {}})
-            cli   = vend["subRows"].setdefault(rz, {"nome": rz, "tipo": "cliente", "subRows": {}})
-            prod  = cli["subRows"].setdefault(sk, {
-                "sku": sk, "descricao": r.descricao, "tipo": "produto", "meses": {}
-            })
-            prod["meses"][r.mes] = {
-                "meta":           int(r.meta or 0),
-                "bottomup":       int(r.bottomup or 0),
-                "ia":             int(r.ia or 0),
-                "pmv":            round(float(r.pmv or 0), 2),
-                "peso_historico": peso_map.get((rz, sk), 0.0),
-            }
+            sku_node   = tree.setdefault(sk, _no_vazio("sku", sku=sk, descricao=r.descricao, subRows={}))
+            coord_node = sku_node["subRows"].setdefault(co, _no_vazio("coordenador", nome=co, subRows={}))
+            exec_node  = coord_node["subRows"].setdefault(ex, _no_vazio("executivo", nome=ex, subRows={}))
+            razao_node = exec_node["subRows"].setdefault(rz, _no_vazio("razao_social", nome=rz))
+
+            for node in (sku_node, coord_node, exec_node, razao_node):
+                _acumula(node, r.mes, r.meta, r.bottomup, r.ia, r.pmv_num, r.pmv_den)
+
+            razao_node["meses"][r.mes]["peso_historico"] = peso_map.get((rz, sk), 0.0)
+
+        def _fechar_meses(node: dict) -> None:
+            for m in node["meses"].values():
+                pmv_den = m.pop("_pmv_den", 0)
+                pmv_num = m.pop("_pmv_num", 0)
+                m["pmv"] = round(pmv_num / pmv_den, 2) if pmv_den else 0.0
+                bu = m.get("bottomup", 0)
+                m["variacao_pct"] = round((m["meta"] - bu) / bu, 4) if bu else (None if m["meta"] == 0 else 1.0)
 
         def _serializar_arvore(node_dict: dict) -> list:
             out = []
             for v in node_dict.values():
+                _fechar_meses(v)
                 n = {k: val for k, val in v.items() if k != "subRows"}
                 if "subRows" in v:
-                    if v.get("tipo") == "cliente":
-                        n["subRows"] = list(v["subRows"].values())
-                    else:
-                        n["subRows"] = _serializar_arvore(v["subRows"])
+                    n["subRows"] = _serializar_arvore(v["subRows"])
                 out.append(n)
             return out
 
         arvore = _serializar_arvore(tree)
 
-        # Cadeado individual: carteira do usuário bloqueada?
+        # Cadeado individual (cadeado FINAL — trancamento definitivo do Coordenador)
         minha_congelada = False
         if nome_resp:
             from app.api.routers.rls_metas import esta_congelado_para_usuario
             minha_congelada = esta_congelado_para_usuario(db, escopo, ciclo)
 
-        # Fase corrente da carteira (SKU/EXECUTIVO/RAZAO_SOCIAL) — usada pelo
-        # frontend para montar o stepper da cascata. Admin não tem fase própria.
-        minha_fase = None
-        if nome_resp:
-            from app.api.routers.rls_metas import fase_atual_do_responsavel
-            minha_fase = fase_atual_do_responsavel(db, ciclo, nome_resp)
+        # Coordenador só edita depois que o Gerente travar a fase COORDENADOR
+        # (dispara _registrar_metas_coordenadores automaticamente).
+        aguardando_gerente = False
+        if nome_resp and escopo.get("funcao") == "Coordenador":
+            aguardando_gerente = not _coordenador_recebeu_meta(db, ciclo, nome_resp)
 
-        # Fase de cada Coordenador visivel na arvore — permite ao Gerente ver o
-        # badge de progresso (SKU/EXECUTIVO/RAZAO_SOCIAL) de cada Coordenador
-        # sem precisar de uma chamada por linha.
-        fases_coordenadores = {}
-        if u.get("funcao") in ("Administrador", "Gerente"):
-            from app.api.routers.rls_metas import fase_atual_do_responsavel
-            nomes_coord = {co for g in tree.values() for co in g["subRows"].keys()
-                           if co and co != "SEM COORDENADOR"}
-            for co in nomes_coord:
-                fases_coordenadores[co] = fase_atual_do_responsavel(db, ciclo, co)
+        # Fase corrente do responsável logado (ou do alvo, se Admin operando
+        # em nome de alguém) — usada pelo frontend para montar o stepper.
+        minha_fase = None
+        fase_resp = nome_resp or (alvo if alvo else None)
+        fase_nivel = escopo.get("funcao") if nome_resp else nivel_alvo
+        if fase_resp and fase_nivel in ("Gerente", "Coordenador"):
+            garantir_tabela_fase_meta(db)
+            minha_fase = fase_atual_do_responsavel(db, ciclo, fase_resp, fase_nivel)
 
         responsaveis = db.execute(text("""
             SELECT DISTINCT 'Gerente' AS nivel, TRIM(gerente_nome) AS nome
@@ -329,34 +342,27 @@ def tabela(responsavel: str = None, nivel_responsavel: str = None,
             ORDER BY 1, 2
         """), {"ciclo": ciclo}).fetchall() if escopo["ve_tudo"] else []
 
-        if nome_resp:
-            fase_resp = nome_resp
-        elif alvo:
-            fase_resp = alvo
-        else:
-            fase_resp = None
-        fase_alvo = None
-        if fase_resp:
-            from app.api.routers.rls_metas import fase_atual_do_responsavel
-            fase_alvo = fase_atual_do_responsavel(db, ciclo, fase_resp)
-
         return {
             "ciclo": ciclo,
             "meses": meses_iso,
             "etapa_congelada": congelada,
             "congelada_propria": propria_congelada,
             "aguardando_upstream": aguardando,
+            "aguardando_gerente": aguardando_gerente,
             "motivo_bloqueio": ("Demanda Comercial ainda nao congelou o plano." if aguardando
-                                 else "Etapa congelada pelo Administrador." if propria_congelada else None),
+                                 else "Etapa congelada pelo Administrador." if propria_congelada
+                                 else "Aguardando o Gerente passar a meta financeira para sua coordenação." if aguardando_gerente
+                                 else None),
             "minha_carteira_congelada": minha_congelada,
-            "minha_fase": fase_alvo or minha_fase,
-            "fases_coordenadores": fases_coordenadores,
+            "minha_fase": minha_fase,
             "responsaveis": [{"nivel": r.nivel, "nome": r.nome} for r in responsaveis],
             "responsavel_selecionado": {"nivel": nivel_alvo, "nome": alvo} if alvo else None,
             "sou_admin": u.get("funcao") == "Administrador",
             "funcao": u.get("funcao", ""),
             "arvore": arvore,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, repr(e))
 
@@ -533,7 +539,34 @@ def _registrar_metas_coordenadores(db: Session, ciclo: str, escopo: dict, defini
         })
 
 
+TOLERANCIA_TRANCAMENTO_COORDENADOR = 0.01  # ±1% por mês, medido contra a meta que o gerente passou
+
+
+def _coordenador_recebeu_meta(db: Session, ciclo: str, coordenador: str) -> bool:
+    """
+    Diz se o Gerente já passou a meta financeira para este coordenador neste
+    ciclo (existe linha em metas_financeiras_responsavel). Sem essa meta, o
+    coordenador não tem contra o que se comparar e não deve poder editar/
+    trancar — precisa aguardar o gerente clicar em "Passar para coordenadores".
+    """
+    garantir_tabela_metas_financeiras(db)
+    existe = db.execute(text("""
+        SELECT 1 FROM metas_financeiras_responsavel
+        WHERE ciclo_sop = :ciclo AND nivel = 'Coordenador'
+          AND TRIM(nome_responsavel) = :coordenador
+        LIMIT 1
+    """), {"ciclo": ciclo, "coordenador": coordenador.strip()}).fetchone()
+    return existe is not None
+
+
 def _validar_tolerancia_coordenador(db: Session, ciclo: str, coordenador: str) -> list[dict]:
+    """
+    Compara o total editado pelo coordenador (vol_meta) contra a meta
+    financeira que o Gerente passou (metas_financeiras_responsavel). SEM
+    fallback para vol_bottomup: se o Gerente não passou a meta ainda, não há
+    base de comparação válida — quem chama esta função já deve ter garantido
+    com _coordenador_recebeu_meta() que a meta existe.
+    """
     garantir_tabela_metas_financeiras(db)
     rows = db.execute(text("""
         WITH atual AS (
@@ -551,32 +584,21 @@ def _validar_tolerancia_coordenador(db: Session, ciclo: str, coordenador: str) -
             WHERE ciclo_sop = :ciclo
               AND nivel = 'Coordenador'
               AND TRIM(nome_responsavel) = :coordenador
-        ),
-        base AS (
-            SELECT f.mes_projetado,
-                   COALESCE(SUM(f.vol_bottomup * f.pmv_aplicado), 0) AS valor_alvo
-            FROM fato_ibp_granular f
-            JOIN dim_clientes c ON c.cgc = f.cgc
-            WHERE f.ciclo_sop = :ciclo
-              AND TRIM(c.supervisor_nome) = :coordenador
-            GROUP BY f.mes_projetado
         )
         SELECT TO_CHAR(a.mes_projetado, 'YYYY-MM') AS mes,
                a.valor_atual,
-               COALESCE(al.valor_alvo, b.valor_alvo, 0) AS valor_alvo,
-               CASE WHEN COALESCE(al.valor_alvo, b.valor_alvo, 0) > 0
-                    THEN (a.valor_atual - COALESCE(al.valor_alvo, b.valor_alvo, 0))
-                         / COALESCE(al.valor_alvo, b.valor_alvo, 0)
+               COALESCE(al.valor_alvo, 0) AS valor_alvo,
+               CASE WHEN COALESCE(al.valor_alvo, 0) > 0
+                    THEN (a.valor_atual - al.valor_alvo) / al.valor_alvo
                     ELSE 0 END AS variacao
         FROM atual a
         LEFT JOIN alvo al ON al.mes_projetado = a.mes_projetado
-        LEFT JOIN base b ON b.mes_projetado = a.mes_projetado
         ORDER BY a.mes_projetado
     """), {"ciclo": ciclo, "coordenador": coordenador.strip()}).fetchall()
     fora = []
     for r in rows:
         variacao = float(r.variacao or 0)
-        if abs(variacao) > 0.05:
+        if abs(variacao) > TOLERANCIA_TRANCAMENTO_COORDENADOR:
             fora.append({
                 "mes": r.mes,
                 "valor_atual": round(float(r.valor_atual or 0), 2),
@@ -613,6 +635,322 @@ def _coordenadores_pendentes(db: Session, ciclo: str, escopo: dict) -> list[str]
     """), {"ciclo": ciclo}).fetchall()
     travados_set = {r.nome for r in travados if r.nome in todos}
     return [n for n in todos if n not in travados_set]
+
+
+# ---------------------------------------------------------------------------
+# POST /distribuir  — ajuste percentual/valor por nível (Coordenador dentro
+# do SKU para o Gerente; Executivo dentro do SKU e Razão Social dentro do
+# Executivo+SKU para o Coordenador), rateando até o CNPJ.
+# ---------------------------------------------------------------------------
+NIVEL_COORDENADOR_DIST = "COORDENADOR"
+NIVEL_EXECUTIVO_DIST = "EXECUTIVO"
+NIVEL_RAZAO_SOCIAL_DIST = "RAZAO_SOCIAL"
+
+CAMPO_SQL_POR_NIVEL = {
+    NIVEL_COORDENADOR_DIST: ("c.supervisor_nome", "SEM COORDENADOR"),
+    NIVEL_EXECUTIVO_DIST:   ("f.vendedor_nome",    "SEM VENDEDOR"),
+    NIVEL_RAZAO_SOCIAL_DIST:("c.razaosocial",      "SEM RAZAO SOCIAL"),
+}
+
+
+class ItemDistribuicao(BaseModel):
+    chave: str                                   # nome do coordenador/executivo/razão social
+    percentual_valor: Optional[float] = None      # 0.0 a 1.0+
+    percentual_volume: Optional[float] = None
+    novo_valor: Optional[float] = None            # R$ direto
+    novo_volume: Optional[int] = None             # caixas direto
+
+
+class PayloadDistribuir(BaseModel):
+    sku: str
+    mes_projetado: str
+    nivel: str                                    # COORDENADOR | EXECUTIVO | RAZAO_SOCIAL
+    executivo_pai: Optional[str] = None           # obrigatório quando nivel=RAZAO_SOCIAL (teto = executivo NAQUELE sku)
+    itens: List[ItemDistribuicao]
+    responsavel_nome: Optional[str] = None        # somente Administrador
+    responsavel_nivel: Optional[str] = None
+
+
+def _teto_do_no_pai(db: Session, ciclo: str, sku: str, mes: str, escopo: dict,
+                     nivel: str, executivo_pai: Optional[str]) -> int:
+    """
+    Volume (caixas) atual do nó pai que serve de teto (100%) para a
+    distribuição percentual do nível corrente:
+      COORDENADOR   -> teto = SKU inteiro, dentro do escopo do Gerente.
+      EXECUTIVO     -> teto = SKU inteiro, dentro do escopo do Coordenador.
+      RAZAO_SOCIAL  -> teto = Executivo NAQUELE SKU (não o total do executivo).
+    """
+    filtro_escopo, params_escopo = _filtro_escopo_sql(escopo, alias_cli="c")
+    filtro_exec = ""
+    params_exec: dict = {}
+    if nivel == NIVEL_RAZAO_SOCIAL_DIST:
+        if not executivo_pai:
+            raise HTTPException(422, "executivo_pai é obrigatório para distribuir Razão Social.")
+        filtro_exec = "AND COALESCE(NULLIF(TRIM(f.vendedor_nome),''), 'SEM VENDEDOR') = :executivo_pai"
+        params_exec["executivo_pai"] = executivo_pai.strip()
+
+    total = db.execute(text(f"""
+        SELECT COALESCE(SUM(f.vol_meta), 0) AS total
+        FROM fato_ibp_granular f
+        JOIN dim_clientes c ON f.cgc = c.cgc
+        WHERE f.ciclo_sop = :ciclo
+          AND TO_CHAR(f.mes_projetado,'YYYY-MM') = :mes
+          AND f.sku = :sku
+          {filtro_exec}
+          {filtro_escopo}
+    """), {"ciclo": ciclo, "mes": mes, "sku": sku, **params_exec, **params_escopo}).scalar()
+    return int(total or 0)
+
+
+def _pmv_vigente(db: Session, ciclo: str, sku: str, mes: str) -> float:
+    pmv = db.execute(text("""
+        SELECT COALESCE(SUM(pmv_aplicado * vol_meta) / NULLIF(SUM(vol_meta), 0), 0)
+        FROM fato_ibp_granular
+        WHERE ciclo_sop = :c AND sku = :s AND TO_CHAR(mes_projetado,'YYYY-MM') = :m
+    """), {"c": ciclo, "s": sku, "m": mes}).scalar() or 0
+    return float(pmv)
+
+
+def _aplicar_distribuicao(db: Session, ciclo: str, payload: PayloadDistribuir, escopo: dict) -> dict:
+    """
+    Aplica os itens da distribuição (percentual ou valor direto) para o
+    nível pedido, ratear até o CNPJ com peso histórico (4 meses), sem
+    alterar os irmãos não mencionados no payload.
+    Retorna o resumo de cada item aplicado (para o frontend atualizar a UI
+    sem precisar recarregar a árvore inteira).
+    """
+    nivel = payload.nivel
+    if nivel not in CAMPO_SQL_POR_NIVEL:
+        raise HTTPException(422, "nivel deve ser COORDENADOR, EXECUTIVO ou RAZAO_SOCIAL.")
+
+    check_imutabilidade_mes(payload.mes_projetado, payload.sku, contexto="Meta")
+
+    teto = _teto_do_no_pai(db, ciclo, payload.sku, payload.mes_projetado, escopo,
+                            nivel, payload.executivo_pai)
+    pmv = _pmv_vigente(db, ciclo, payload.sku, payload.mes_projetado)
+
+    campo_sql, rotulo_vazio = CAMPO_SQL_POR_NIVEL[nivel]
+    filtro_escopo, params_escopo = _filtro_escopo_sql(escopo, alias_cli="c")
+    filtro_exec = ""
+    params_exec: dict = {}
+    if nivel == NIVEL_RAZAO_SOCIAL_DIST:
+        filtro_exec = "AND COALESCE(NULLIF(TRIM(f.vendedor_nome),''), 'SEM VENDEDOR') = :executivo_pai"
+        params_exec["executivo_pai"] = payload.executivo_pai.strip()
+
+    resultado = []
+    for item in payload.itens:
+        # 1. Determina o novo total (caixas) do item, a partir de % ou valor direto.
+        if item.novo_volume is not None:
+            novo_total = int(item.novo_volume)
+        elif item.novo_valor is not None:
+            if pmv <= 0:
+                raise HTTPException(422, f"SKU {payload.sku} sem PMV no mês {payload.mes_projetado}; edição em R$ bloqueada.")
+            novo_total = int(round(item.novo_valor / pmv))
+        elif item.percentual_volume is not None:
+            novo_total = int(round(item.percentual_volume * teto))
+        elif item.percentual_valor is not None:
+            novo_total = int(round(item.percentual_valor * teto))
+        else:
+            raise HTTPException(422, f"Item '{item.chave}' precisa de percentual_valor, percentual_volume, novo_valor ou novo_volume.")
+
+        # 2. Busca as linhas de CNPJ do item (coordenador/executivo/razão social),
+        #    restritas ao escopo do responsável logado, com peso histórico.
+        rows = db.execute(text(f"""
+            SELECT f.id AS fato_id, f.cgc,
+                   COALESCE(SUM(v.qt_pedido),0) AS peso_historico
+            FROM fato_ibp_granular f
+            JOIN dim_clientes c ON f.cgc = c.cgc
+            LEFT JOIN fato_vendas v
+                ON v.cgc = f.cgc AND v.sku = f.sku
+               AND v.data_pedido >= CURRENT_DATE - INTERVAL '4 months'
+            WHERE f.ciclo_sop = :ciclo
+              AND TO_CHAR(f.mes_projetado,'YYYY-MM') = :mes
+              AND f.sku = :sku
+              AND COALESCE(NULLIF(TRIM({campo_sql}),''), '{rotulo_vazio}') = :chave
+              {filtro_exec}
+              {filtro_escopo}
+            GROUP BY f.id, f.cgc ORDER BY f.id
+        """), {
+            "ciclo": ciclo, "mes": payload.mes_projetado, "sku": payload.sku,
+            "chave": item.chave.strip(), **params_exec, **params_escopo,
+        }).fetchall()
+
+        if not rows:
+            raise HTTPException(404, f"Nenhuma linha encontrada para {nivel} '{item.chave}' no SKU {payload.sku}.")
+
+        pesos = [max(0.0, float(r.peso_historico or 0)) for r in rows]
+        partes = ratear_maior_resto(novo_total, pesos)
+        for r, parte in zip(rows, partes):
+            db.execute(text("UPDATE fato_ibp_granular SET vol_meta=:v WHERE id=:id"),
+                       {"v": int(parte), "id": r.fato_id})
+
+        propagar_linha_jusante(db, ciclo, payload.sku, payload.mes_projetado, ETAPA_METAS)
+
+        resultado.append({
+            "chave": item.chave,
+            "novo_volume": novo_total,
+            "novo_valor": round(novo_total * pmv, 2),
+            "percentual_valor": round(novo_total / teto, 4) if teto else None,
+            "percentual_volume": round(novo_total / teto, 4) if teto else None,
+        })
+
+    return {"teto": teto, "pmv": pmv, "itens": resultado}
+
+
+@router.post("/distribuir")
+def distribuir(payload: PayloadDistribuir, db: Session = Depends(get_db), u: dict = Depends(require_metas)):
+    """
+    Ajusta percentual/valor/volume de um Coordenador (dentro de um SKU, na
+    visão do Gerente), de um Executivo (dentro de um SKU, na visão do
+    Coordenador) ou de uma Razão Social (dentro de um Executivo+SKU, na
+    visão do Coordenador). Edita SÓ o item informado — os irmãos não
+    mencionados no payload permanecem intocados.
+    """
+    try:
+        from app.api.routers.rls_metas import escopo_usuario, NIVEL_GERENTE, NIVEL_COORDENADOR
+        ciclo = get_current_cycle(db)
+        if not etapa_congelada(db, ciclo, ETAPA_BOTTOMUP) and u.get("funcao") != "Administrador":
+            raise HTTPException(423, "Demanda Comercial ainda nao congelou. Aguarde o bastao.")
+        if etapa_congelada(db, ciclo, ETAPA_METAS) and u.get("funcao") != "Administrador":
+            raise HTTPException(423, "Etapa congelada — não é possível distribuir.")
+
+        escopo = escopo_usuario(u)
+        if escopo["ve_tudo"]:
+            nome = (payload.responsavel_nome or "").strip()
+            funcao = (payload.responsavel_nivel or "").strip()
+            if not nome or funcao not in (NIVEL_GERENTE, NIVEL_COORDENADOR):
+                raise HTTPException(422, "Administrador deve informar responsavel_nome e responsavel_nivel.")
+            escopo = {
+                **escopo, "ve_tudo": False, "nivel_ok": True, "funcao": funcao,
+                "campo_rls": "gerente_nome" if funcao == NIVEL_GERENTE else "supervisor_nome",
+                "valor_rls": nome, "nome_responsavel": nome,
+            }
+        funcao = escopo["funcao"]
+
+        if funcao == NIVEL_COORDENADOR and u.get("funcao") != "Administrador":
+            if not _coordenador_recebeu_meta(db, ciclo, escopo["nome_responsavel"]):
+                raise HTTPException(
+                    423,
+                    "O Gerente ainda não passou a meta financeira para a sua coordenação neste ciclo."
+                )
+
+        if funcao == NIVEL_GERENTE and payload.nivel != NIVEL_COORDENADOR_DIST:
+            raise HTTPException(400, "Gerente só distribui no nível COORDENADOR.")
+        if funcao == NIVEL_COORDENADOR and payload.nivel not in (NIVEL_EXECUTIVO_DIST, NIVEL_RAZAO_SOCIAL_DIST):
+            raise HTTPException(400, "Coordenador só distribui nos níveis EXECUTIVO ou RAZAO_SOCIAL.")
+
+        resultado = _aplicar_distribuicao(db, ciclo, payload, escopo)
+        db.commit()
+        return {"status": "ok", **resultado}
+    except HTTPException:
+        db.rollback(); raise
+    except Exception as e:
+        db.rollback(); raise HTTPException(500, repr(e))
+
+
+class PayloadTravarFase(BaseModel):
+    responsavel_nome: Optional[str] = None    # somente Administrador
+    responsavel_nivel: Optional[str] = None
+
+
+class PayloadReabrirFaseMeta(BaseModel):
+    nome_alvo: str
+    nivel_alvo: Optional[str] = None          # 'Gerente' | 'Coordenador'
+
+
+@router.post("/travar-fase")
+def travar_fase(payload: PayloadTravarFase, db: Session = Depends(get_db), u: dict = Depends(require_metas)):
+    """
+    Trava a fase corrente do responsável logado (ou de quem o Admin
+    indicar) e avança para a próxima. Valida a tolerância de ±1% entre o
+    total distribuído e o teto oficial antes de travar. Na última fase de
+    cada perfil (COORDENADOR p/ Gerente, RAZAO_SOCIAL p/ Coordenador), não
+    avança — apenas marca como travada (fim da cascata daquele perfil).
+      - Gerente travando COORDENADOR: dispara o registro automático da
+        meta financeira de cada coordenador (metas_financeiras_responsavel).
+      - Coordenador travando RAZAO_SOCIAL: dispara o cadeado final
+        (controle_metas_responsavel), igual ao fluxo antigo de trancamento.
+    """
+    try:
+        from app.api.routers.rls_metas import escopo_usuario, NIVEL_GERENTE, NIVEL_COORDENADOR
+        from app.api.routers.fase_meta import (
+            fase_atual_do_responsavel, avancar_fase_meta, travar_fase_final,
+            validar_tolerancia_antes_de_travar, FASE_SKU, FASE_COORDENADOR,
+            FASE_EXECUTIVO, FASE_RAZAO_SOCIAL,
+        )
+        ciclo = get_current_cycle(db)
+        if etapa_congelada(db, ciclo, ETAPA_METAS) and u.get("funcao") != "Administrador":
+            raise HTTPException(423, "Etapa congelada — não é possível travar fase.")
+
+        escopo = escopo_usuario(u)
+        if escopo["ve_tudo"]:
+            nome = (payload.responsavel_nome or "").strip()
+            funcao = (payload.responsavel_nivel or "").strip()
+            if not nome or funcao not in (NIVEL_GERENTE, NIVEL_COORDENADOR):
+                raise HTTPException(422, "Administrador deve informar responsavel_nome e responsavel_nivel.")
+            escopo = {
+                **escopo, "ve_tudo": False, "nivel_ok": True, "funcao": funcao,
+                "campo_rls": "gerente_nome" if funcao == NIVEL_GERENTE else "supervisor_nome",
+                "valor_rls": nome, "nome_responsavel": nome,
+            }
+        funcao = escopo["funcao"]
+        nome = escopo["nome_responsavel"]
+
+        estado = fase_atual_do_responsavel(db, ciclo, nome, funcao)
+        fase = estado["fase_atual"]
+        eh_ultima_fase = (
+            (funcao == NIVEL_GERENTE and fase == FASE_COORDENADOR) or
+            (funcao == NIVEL_COORDENADOR and fase == FASE_RAZAO_SOCIAL)
+        )
+        fase_a_validar = fase if eh_ultima_fase else fase
+
+        # SKU (Gerente) e EXECUTIVO (Coordenador) não têm % a validar contra
+        # tolerância — são a origem do teto, não uma distribuição percentual.
+        if fase not in (FASE_SKU, FASE_EXECUTIVO):
+            fora = validar_tolerancia_antes_de_travar(db, ciclo, escopo, funcao, fase_a_validar)
+            if fora:
+                raise HTTPException(
+                    422,
+                    {
+                        "mensagem": "Distribuição fora da tolerância de ±1% em relação ao teto definido.",
+                        "detalhes": fora,
+                    },
+                )
+
+        if eh_ultima_fase:
+            novo_estado = travar_fase_final(db, ciclo, nome, funcao)
+            if funcao == NIVEL_GERENTE:
+                _registrar_metas_coordenadores(db, ciclo, escopo, definido_por=nome)
+            else:
+                from app.api.routers.rls_metas import travar_cadeado
+                travar_cadeado(db, escopo, ciclo)
+        else:
+            novo_estado = avancar_fase_meta(db, escopo, ciclo)
+
+        db.commit()
+        return {"status": "ok", "fase": novo_estado["fase_atual"],
+                "travado_definitivamente": eh_ultima_fase}
+    except HTTPException:
+        db.rollback(); raise
+    except Exception as e:
+        db.rollback(); raise HTTPException(500, repr(e))
+
+
+@router.post("/reabrir-fase-meta")
+def reabrir_fase_meta_endpoint(payload: PayloadReabrirFaseMeta, db: Session = Depends(get_db),
+                                u: dict = Depends(require_metas)):
+    """Reabre (Admin) a carteira de um responsável de volta à fase inicial."""
+    try:
+        from app.api.routers.rls_metas import escopo_usuario
+        from app.api.routers.fase_meta import reabrir_fase_meta as _reabrir
+        ciclo = get_current_cycle(db)
+        escopo = escopo_usuario(u)
+        _reabrir(db, escopo, ciclo, payload.nome_alvo, payload.nivel_alvo)
+        return {"status": "ok"}
+    except HTTPException:
+        db.rollback(); raise
+    except Exception as e:
+        db.rollback(); raise HTTPException(500, repr(e))
 
 
 def _gerar_evidencia_metas(db: Session, ciclo: str, escopo: dict, nome_arquivo: str) -> StreamingResponse:
@@ -676,7 +1014,7 @@ def _gerar_evidencia_metas(db: Session, ciclo: str, escopo: dict, nome_arquivo: 
     return _stream_xlsx(buf, nome_arquivo)
 
 @router.post("/salvar")
-def salvar(payload: PayloadSalvar, db: Session = Depends(get_db), u: dict = Depends(require_metas)):
+def salvar(payload: PayloadAcaoMetas, db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     try:
         ciclo = get_current_cycle(db)
         if not etapa_congelada(db, ciclo, ETAPA_BOTTOMUP) and u.get("funcao") != "Administrador":
@@ -684,8 +1022,16 @@ def salvar(payload: PayloadSalvar, db: Session = Depends(get_db), u: dict = Depe
         if etapa_congelada(db, ciclo, ETAPA_METAS) and u.get("funcao") != "Administrador":
             raise HTTPException(423, "Etapa congelada — não é possível salvar.")
 
-        from app.api.routers.rls_metas import escopo_usuario
-        _aplicar_ajustes_meta(db, ciclo, payload.ajustes, escopo_usuario(u))
+        from app.api.routers.rls_metas import NIVEL_COORDENADOR
+        escopo, _escopo_exec = _escopo_efetivo_para_acao(u, payload.nome_alvo, payload.nivel_alvo)
+        if escopo.get("funcao") == NIVEL_COORDENADOR and u.get("funcao") != "Administrador":
+            if not _coordenador_recebeu_meta(db, ciclo, escopo["nome_responsavel"]):
+                raise HTTPException(
+                    423,
+                    "O Gerente ainda não passou a meta financeira para a sua coordenação neste ciclo. "
+                    "Aguarde o botão 'Passar para coordenadores'."
+                )
+        _aplicar_ajustes_meta(db, ciclo, payload.ajustes, escopo)
         db.commit()
         return {"status": "ok"}
     except HTTPException:
@@ -698,12 +1044,20 @@ def salvar(payload: PayloadSalvar, db: Session = Depends(get_db), u: dict = Depe
 def salvar_evidencia(payload: PayloadAcaoMetas, db: Session = Depends(get_db),
                      u: dict = Depends(require_metas)):
     try:
+        from app.api.routers.rls_metas import NIVEL_COORDENADOR
         ciclo = get_current_cycle(db)
         if not etapa_congelada(db, ciclo, ETAPA_BOTTOMUP) and u.get("funcao") != "Administrador":
             raise HTTPException(423, "Demanda Comercial ainda nao congelou. Aguarde o bastao.")
         if etapa_congelada(db, ciclo, ETAPA_METAS) and u.get("funcao") != "Administrador":
             raise HTTPException(423, "Etapa congelada — não é possível salvar.")
         escopo_acao, escopo_executor = _escopo_efetivo_para_acao(u, payload.nome_alvo, payload.nivel_alvo)
+        if escopo_acao.get("funcao") == NIVEL_COORDENADOR and u.get("funcao") != "Administrador":
+            if not _coordenador_recebeu_meta(db, ciclo, escopo_acao["nome_responsavel"]):
+                raise HTTPException(
+                    423,
+                    "O Gerente ainda não passou a meta financeira para a sua coordenação neste ciclo. "
+                    "Aguarde o botão 'Passar para coordenadores'."
+                )
         _aplicar_ajustes_meta(db, ciclo, payload.ajustes, escopo_acao)
         db.commit()
         nome = f"metas_salvar_{ciclo.replace('/','_')}_{(escopo_acao.get('nome_responsavel') or 'admin').replace(' ','_')}.xlsx"
@@ -749,10 +1103,16 @@ def trancar_evidencia(payload: PayloadAcaoMetas, db: Session = Depends(get_db),
         escopo_acao, escopo_executor = _escopo_efetivo_para_acao(u, payload.nome_alvo, payload.nivel_alvo)
         if escopo_acao.get("funcao") != NIVEL_COORDENADOR:
             raise HTTPException(403, "Somente carteiras de Coordenador usam Salvar e trancar.")
+        if u.get("funcao") != "Administrador" and not _coordenador_recebeu_meta(db, ciclo, escopo_acao["nome_responsavel"]):
+            raise HTTPException(
+                423,
+                "O Gerente ainda não passou a meta financeira para a sua coordenação neste ciclo. "
+                "Aguarde o botão 'Passar para coordenadores'."
+            )
         _aplicar_ajustes_meta(db, ciclo, payload.ajustes, escopo_acao)
         fora = _validar_tolerancia_coordenador(db, ciclo, escopo_acao["nome_responsavel"])
         if fora and u.get("funcao") != "Administrador":
-            raise HTTPException(422, {"mensagem": "Coordenador fora da tolerância de ±5%.", "itens": fora})
+            raise HTTPException(422, {"mensagem": "Coordenador fora da tolerância de ±1%.", "itens": fora})
         if escopo_executor["ve_tudo"]:
             travar_cadeado(db, escopo_executor, ciclo, nome_alvo=escopo_acao["nome_responsavel"], nivel_alvo=NIVEL_COORDENADOR)
         else:
@@ -921,16 +1281,23 @@ def exportar(responsavel: str = None, nivel_responsavel: str = None,
 # ---------------------------------------------------------------------------
 @router.get("/dossie")
 def dossie(sku: str, razao_social: str = None, vendedor_nome: str = None,
+           coordenador_nome: str = None,
            db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     """
-    Dossie do SKU para Metas Comercial.
-    - razao_social: filtra por aquela razao social (nivel cliente).
-    - vendedor_nome: nivel executivo — agrega todos os CGCs dos clientes daquele executivo.
-    - Se nenhum for passado (nivel SKU, fase agregada de Gerente/Coordenador):
-      restringe automaticamente ao escopo RLS de quem pediu — NUNCA mostra a
-      empresa inteira para um Coordenador ou Gerente. Dossie por SKU só existe
-      até o nivel Coordenador (Executivo/Razao Social nao tem botao de dossie
-      na tela — ver design-consenso-arena-fases.md, secao 6).
+    Dossie do SKU para Metas Comercial, com escopo conforme o nivel de
+    drill-down de onde o botao foi acionado:
+    - nenhum filtro: nivel SKU agregado (Gerente na fase SKU, ou Coordenador
+      antes de abrir um executivo) — restringe automaticamente ao escopo RLS
+      de quem pediu (gerente_nome/supervisor_nome), nunca mostra a empresa
+      inteira.
+    - coordenador_nome: nivel Coordenador dentro do SKU (Gerente na fase
+      COORDENADOR) — restringe aos CGCs daquele coordenador especifico.
+    - vendedor_nome: nivel Executivo dentro do SKU (Coordenador na fase
+      EXECUTIVO) — agrega todos os CGCs dos clientes daquele executivo.
+    - razao_social + vendedor_nome: nivel Razao Social dentro do Executivo
+      (Coordenador na fase RAZAO_SOCIAL) — filtra pelos CGCs daquela razao
+      social atendidos por aquele executivo especifico.
+    - razao_social sozinho: todos os CGCs daquela razao social (uso legado).
     """
     try:
         from app.api.routers.perfil_sku import montar_dossie
@@ -972,6 +1339,24 @@ def dossie(sku: str, razao_social: str = None, vendedor_nome: str = None,
                   AND f.sku = :sku
                   AND COALESCE(NULLIF(TRIM(f.vendedor_nome),''), 'SEM VENDEDOR') = :vend
             """), {"ciclo": ciclo, "sku": sku, "vend": vendedor_nome}).fetchall()
+            cgcs_override = [r[0] for r in cgcs_rows] or ["__SEM_CLIENTE__"]
+
+        elif coordenador_nome:
+            # Nivel coordenador dentro do SKU (drill-down do Gerente na fase
+            # COORDENADOR): restringe aos CGCs daquele coordenador especifico,
+            # nao a carteira inteira do gerente.
+            cgcs_rows = db.execute(text("""
+                SELECT DISTINCT cgc FROM dim_clientes
+                WHERE TRIM(COALESCE(supervisor_nome,'')) = :coord
+                  AND UPPER(TRIM(COALESCE(bloqueado,'ATIVO'))) != 'INATIVO'
+                UNION
+                SELECT DISTINCT f.cgc
+                FROM fato_ibp_granular f
+                JOIN dim_clientes c2 ON c2.cgc = f.cgc
+                WHERE f.ciclo_sop = :ciclo
+                  AND f.sku = :sku
+                  AND COALESCE(NULLIF(TRIM(c2.supervisor_nome),''), 'SEM COORDENADOR') = :coord
+            """), {"ciclo": ciclo, "sku": sku, "coord": coordenador_nome.strip()}).fetchall()
             cgcs_override = [r[0] for r in cgcs_rows] or ["__SEM_CLIENTE__"]
 
         else:
@@ -1266,162 +1651,3 @@ def reabrir_cadeado_ep(payload: PayloadBloquear, db: Session = Depends(get_db),
     except Exception as e:
         db.rollback(); raise HTTPException(500, repr(e))
 
-
-# ---------------------------------------------------------------------------
-# FASES DA CARTEIRA (cascata SKU -> Executivo -> Razão Social)
-# Ver design-consenso-arena-fases.md para o desenho completo.
-# ---------------------------------------------------------------------------
-@router.get("/fase")
-def obter_fase(db: Session = Depends(get_db), u: dict = Depends(require_metas)):
-    """Estado de fase da carteira do usuário logado (para montar o stepper)."""
-    try:
-        from app.api.routers.rls_metas import escopo_usuario, fase_atual_do_responsavel
-        ciclo  = get_current_cycle(db)
-        escopo = escopo_usuario(u)
-        if escopo["ve_tudo"]:
-            return {"fase_atual": None, "sku_travado": False, "executivo_travado": False}
-        nome = escopo["nome_responsavel"]
-        estado = fase_atual_do_responsavel(db, ciclo, nome)
-        estado["funcao"] = escopo["funcao"]
-        estado["nome_responsavel"] = nome
-        return estado
-    except HTTPException: raise
-    except Exception as e:
-        raise HTTPException(500, repr(e))
-
-
-class AjusteFase(BaseModel):
-    sku: str
-    mes_projetado: str
-    novo_volume: Optional[int] = None
-    novo_valor_financeiro: Optional[float] = None
-
-
-class PayloadRatearFase(BaseModel):
-    ajustes: List[AjusteFase]
-    executivo_nome: Optional[str] = None  # obrigatório quando a fase corrente é EXECUTIVO
-    responsavel_nome: Optional[str] = None  # somente Administrador
-    responsavel_nivel: Optional[str] = None  # Gerente ou Coordenador
-
-
-@router.post("/ratear-fase")
-def ratear_fase(payload: PayloadRatearFase, db: Session = Depends(get_db),
-                 u: dict = Depends(require_metas)):
-    """
-    Grava os ajustes da fase CORRENTE do responsável logado (SKU ou
-    EXECUTIVO), rateando em cascata até o CNPJ (vol_meta), e avança a
-    máquina de fase para o próximo passo. Razão Social continua usando
-    POST /salvar (já existente, não muda).
-    """
-    try:
-        from app.api.routers.rls_metas import (
-            escopo_usuario, fase_atual_do_responsavel, avancar_fase,
-            garantir_tabela_fase_carteira, FASE_SKU, FASE_EXECUTIVO,
-            NIVEL_GERENTE, NIVEL_COORDENADOR,
-        )
-        from app.api.routers.rateio_cascata import (
-            ratear_gerente_para_coordenadores,
-            ratear_coordenador_sku_para_executivos,
-            ratear_executivo_para_razao_social,
-        )
-
-        ciclo = get_current_cycle(db)
-        if not etapa_congelada(db, ciclo, ETAPA_BOTTOMUP) and u.get("funcao") != "Administrador":
-            raise HTTPException(423, "Demanda Comercial ainda nao congelou. Aguarde o bastao.")
-        if etapa_congelada(db, ciclo, ETAPA_METAS) and u.get("funcao") != "Administrador":
-            raise HTTPException(423, "Etapa congelada — não é possível ratear.")
-
-        escopo = escopo_usuario(u)
-        if escopo["ve_tudo"]:
-            nome = (payload.responsavel_nome or "").strip()
-            funcao = (payload.responsavel_nivel or "").strip()
-            if not nome or funcao not in (NIVEL_GERENTE, NIVEL_COORDENADOR):
-                raise HTTPException(422, "Administrador deve informar responsável e nível.")
-            escopo = {
-                **escopo,
-                "ve_tudo": False,
-                "nivel_ok": True,
-                "funcao": funcao,
-                "campo_rls": "gerente_nome" if funcao == NIVEL_GERENTE else "supervisor_nome",
-                "valor_rls": nome,
-                "nome_responsavel": nome,
-            }
-        nome = escopo["nome_responsavel"]
-        funcao = escopo["funcao"]
-        garantir_tabela_fase_carteira(db)
-        estado = fase_atual_do_responsavel(db, ciclo, nome)
-        fase = estado["fase_atual"]
-
-        if funcao == NIVEL_GERENTE and fase != FASE_SKU:
-            raise HTTPException(400, "Gerente só possui a fase SKU.")
-        if funcao == NIVEL_COORDENADOR and fase == "RAZAO_SOCIAL":
-            raise HTTPException(400, "Fase Razão Social usa POST /salvar, não /ratear-fase.")
-        if funcao == NIVEL_COORDENADOR and fase == FASE_EXECUTIVO and not payload.executivo_nome:
-            raise HTTPException(422, "executivo_nome é obrigatório na fase Executivo.")
-
-        for aj in payload.ajustes:
-            check_imutabilidade_mes(aj.mes_projetado, aj.sku, contexto="Meta")
-
-            # R$ e caixas são sempre sincronizados via PMV vigente do SKU no ciclo.
-            if aj.novo_volume is not None:
-                novo_total = aj.novo_volume
-            elif aj.novo_valor_financeiro is not None:
-                pmv = db.execute(text("""
-                    SELECT COALESCE(SUM(pmv_aplicado * vol_meta) / NULLIF(SUM(vol_meta), 0), 0)
-                    FROM fato_ibp_granular
-                    WHERE ciclo_sop = :c AND sku = :s AND TO_CHAR(mes_projetado,'YYYY-MM') = :m
-                """), {"c": ciclo, "s": aj.sku, "m": aj.mes_projetado}).scalar() or 0
-                if pmv <= 0:
-                    raise HTTPException(
-                        422,
-                        f"SKU {aj.sku} sem PMV no mês {aj.mes_projetado}; edição em R$ bloqueada."
-                    )
-                novo_total = int(round(aj.novo_valor_financeiro / pmv))
-            else:
-                raise HTTPException(422, "Informe novo_volume ou novo_valor_financeiro.")
-
-            if funcao == NIVEL_GERENTE:
-                ratear_gerente_para_coordenadores(db, ciclo, aj.sku, aj.mes_projetado, novo_total, nome)
-            elif fase == FASE_SKU:
-                ratear_coordenador_sku_para_executivos(db, ciclo, aj.sku, aj.mes_projetado, novo_total, nome)
-            else:  # fase == FASE_EXECUTIVO
-                ratear_executivo_para_razao_social(
-                    db, ciclo, aj.sku, aj.mes_projetado, novo_total, nome, payload.executivo_nome
-                )
-
-        db.commit()
-        novo_estado = avancar_fase(db, escopo, ciclo)
-        return {"status": "ok", "fase": novo_estado}
-    except HTTPException:
-        db.rollback(); raise
-    except Exception as e:
-        db.rollback(); raise HTTPException(500, repr(e))
-
-
-class PayloadReabrirFase(BaseModel):
-    nome_alvo: str
-    nivel_alvo: Optional[str] = None
-
-
-@router.post("/reabrir-fase")
-def reabrir_fase_ep(payload: PayloadReabrirFase, db: Session = Depends(get_db),
-                     u: dict = Depends(require_metas)):
-    """
-    Reabre a carteira de um responsável de volta para a fase SKU. Mesma
-    precedência hierárquica de /reabrir-cadeado (dono, ou superior).
-    """
-    try:
-        from app.api.routers.rls_metas import escopo_usuario, reabrir_fase
-        ciclo  = get_current_cycle(db)
-        escopo = escopo_usuario(u)
-        pertence = False
-        if not escopo["ve_tudo"] and escopo["funcao"] == "Gerente":
-            pertence = bool(db.execute(text("""
-                SELECT 1 FROM dim_clientes
-                WHERE TRIM(gerente_nome) = :g AND TRIM(supervisor_nome) = :a LIMIT 1
-            """), {"g": escopo["valor_rls"], "a": payload.nome_alvo.strip()}).scalar())
-        reabrir_fase(db, escopo, ciclo, payload.nome_alvo, pertence, payload.nivel_alvo)
-        return {"status": "reaberto", "responsavel": payload.nome_alvo}
-    except HTTPException: raise
-    except Exception as e:
-        db.rollback(); raise HTTPException(500, repr(e))

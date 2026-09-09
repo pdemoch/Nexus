@@ -3,6 +3,7 @@ import axios from 'axios';
 import {
   ChevronRight, ChevronDown, Save, X, Lock, Unlock,
   Loader2, LineChart as LineIcon, LayoutGrid, ClipboardList, Search, BarChart2,
+  ArrowLeft, AlertTriangle,
 } from 'lucide-react';
 import VisaoGeralMarketing from './VisaoGeralMarketing';
 import DossieInferior from './Dossieinferior';
@@ -27,6 +28,7 @@ function CampoNumeroEditavel({
   value,
   format,
   onChange,
+  onBlur,
   disabled,
   className,
   title,
@@ -34,6 +36,7 @@ function CampoNumeroEditavel({
   value: number;
   format: (value: number) => string;
   onChange: (value: number) => void;
+  onBlur?: () => void;
   disabled?: boolean;
   className?: string;
   title?: string;
@@ -65,6 +68,7 @@ function CampoNumeroEditavel({
       onBlur={() => {
         setFocused(false);
         setDraft('');
+        onBlur?.();
       }}
       className={className}
     />
@@ -205,19 +209,31 @@ export default function MetasComercial() {
 }
 
 /* ── ABA PREENCHIMENTO ───────────────────────────────────────────── */
+/* Árvore SKU-first: SKU → Coordenador → Executivo → Razão Social.
+   Fluxo do Gerente (2 fases, nesta ordem):
+     1) SKU          — edita o total (R$/caixas) de cada SKU da empresa.
+     2) COORDENADOR  — drill-down por SKU, distribui % entre coordenadores.
+   Fluxo do Coordenador (2 fases, nesta ordem, após o Gerente travar COORDENADOR):
+     1) EXECUTIVO    — drill-down por SKU, distribui % entre executivos.
+     2) RAZAO_SOCIAL — drill-down SKU+Executivo, distribui % entre clientes.
+   Edição de %/R$/volume nunca redistribui os irmãos; a soma só é validada
+   contra a tolerância de ±1% no momento de travar a fase (POST /travar-fase).
+   ------------------------------------------------------------------- */
+
+type Detalhe422 = { chave: string; volume_atual: number; volume_alvo: number; variacao_pct: number };
+
 function PreenchimentoMetas() {
   const [dados,          setDados]          = useState<any>(null);
   const [loading,        setLoading]        = useState(true);
-  const [salvando,       setSalvando]       = useState(false);
-  const [abertas,        setAbertas]        = useState<Set<string>>(new Set());
-  // edits: chave gerente||coordenador||vendedor||razao||sku||mes → volume (nível cliente, sempre)
-  const [edits,          setEdits]          = useState<Record<string, number>>({});
-  const [dossieAlvo,     setDossieAlvo]     = useState<{
-    sku: string; descricao: string; razao?: string; vendedor?: string;
-  } | null>(null);
+  const [abertoSku,      setAbertoSku]      = useState<string | null>(null);
+  const [abertoExecutivo,setAbertoExecutivo]= useState<string | null>(null);
   const [busca,          setBusca]          = useState('');
-  const [avancando,      setAvancando]      = useState(false);
+  const [travando,       setTravando]       = useState(false);
   const [adminAlvo,      setAdminAlvo]      = useState<{ nome: string; nivel: string } | null>(null);
+  const [dossieAlvo,     setDossieAlvo]     = useState<{
+    sku: string; descricao: string; coordenador?: string; vendedor?: string; razao?: string;
+  } | null>(null);
+  const [erroTravamento, setErroTravamento] = useState<{ mensagem: string; detalhes: Detalhe422[] } | null>(null);
 
   const carregar = useCallback(async () => {
     setLoading(true);
@@ -226,264 +242,91 @@ function PreenchimentoMetas() {
         ? { responsavel: adminAlvo.nome, nivel_responsavel: adminAlvo.nivel }
         : {};
       const r = await axios.get('/api/v1/carteira/tabela', { params });
-      setDados(r.data); setEdits({});
+      setDados(r.data);
+      setErroTravamento(null);
     } finally { setLoading(false); }
   }, [adminAlvo]);
   useEffect(() => { carregar(); }, [carregar]);
 
-  const meses: string[]    = dados?.meses || [];
-  const congeladaEtapa     = Boolean(dados?.etapa_congelada);
-  const minhaCongelada     = Boolean(dados?.minha_carteira_congelada);
-  const aguardandoUpstream = Boolean(dados?.aguardando_upstream);
-  const souAdmin           = dados?.sou_admin === true;
-  const adminOperando      = souAdmin && adminAlvo !== null;
-  // funcao vem como campo extra — precisamos dela para controle de cadeado
-  const funcao: string     = dados?.funcao || '';
-  // O Administrador pode operar como supervisor mesmo antes do congelamento
-  // upstream; os demais perfis continuam respeitando o bastão da etapa.
-  const bloqueado          = congeladaEtapa || minhaCongelada ||
-    (aguardandoUpstream && !souAdmin);
+  const meses: string[]     = dados?.meses || [];
+  const congeladaEtapa      = Boolean(dados?.etapa_congelada);
+  const minhaCongelada      = Boolean(dados?.minha_carteira_congelada);
+  const aguardandoUpstream  = Boolean(dados?.aguardando_upstream);
+  const souAdmin            = dados?.sou_admin === true;
+  const adminOperando       = souAdmin && adminAlvo !== null;
+  // Quando Admin opera em nome de alguém, a UI deve refletir a fase/papel da
+  // pessoa impersonada (Gerente/Coordenador), não "Administrador".
+  const funcao: string      = (souAdmin && adminAlvo) ? adminAlvo.nivel : (dados?.funcao || '');
+  const aguardandoGerente   = Boolean(dados?.aguardando_gerente) && funcao === 'Coordenador';
+  const bloqueado           = congeladaEtapa || minhaCongelada ||
+    (aguardandoUpstream && !souAdmin) || (aguardandoGerente && !souAdmin);
+  // Admin operando em nome de alguém não deve ser barrado pelo "aguardando" —
+  // ele está justamente destravando/depurando aquela alçada.
+  const bloqueadoEdicao     = bloqueado && !(souAdmin && adminOperando);
 
   const responsaveis = (dados?.responsaveis || []) as Array<{ nome: string; nivel: string }>;
 
-  /* Chave de edição: sempre no nível razão social */
-  const valorCliente = (gerente: string, coordenador: string, vendedor: string, razao: string, sku: string, mes: string, original: number) => {
-    const k = editKeyOf(gerente, coordenador, vendedor, razao, sku, mes);
-    return k in edits ? edits[k] : (original || 0);
-  };
+  const minhaFase: { fase_atual: string; sku_travado: boolean; coordenador_travado: boolean; executivo_travado: boolean } | null =
+    dados?.minha_fase || null;
+  const faseAtual = minhaFase?.fase_atual || (funcao === 'Gerente' ? 'SKU' : funcao === 'Coordenador' ? 'EXECUTIVO' : '');
 
-  const baixarBlob = (blob: Blob, nome: string) => {
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = nome;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    window.URL.revokeObjectURL(url);
-  };
+  // Última fase de cada perfil = "travado definitivamente" quando true.
+  // Gerente: coordenador_travado só é setado True por travar_fase_final (trava
+  // da fase COORDENADOR) — sinal inequívoco de fim de cascata do Gerente.
+  // Coordenador: executivo_travado é setado True tanto ao avançar de EXECUTIVO
+  // para RAZAO_SOCIAL quanto ao travar definitivamente RAZAO_SOCIAL — não serve
+  // sozinho como sinal de "definitivo". O cadeado real (minha_carteira_congelada,
+  // via esta_congelado_para_usuario) é o sinal correto de trancamento final.
+  const travadoDefinitivo =
+    (funcao === 'Gerente' && Boolean(minhaFase?.coordenador_travado)) ||
+    (funcao === 'Coordenador' && minhaCongelada);
 
-  const payloadAjustes = () => ({
-    ajustes: Object.entries(edits).map(([k, v]) => {
-      const [gerente_nome, coordenador_nome, vendedor_nome, razao_social, sku, mes] = k.split('||');
-      return { gerente_nome, coordenador_nome, vendedor_nome, razao_social, sku, mes_projetado: mes, novo_volume: v };
-    }),
-    ...(adminAlvo ? { nome_alvo: adminAlvo.nome, nivel_alvo: adminAlvo.nivel } : {}),
-  });
+  const responsavelBody = adminAlvo ? { responsavel_nome: adminAlvo.nome, responsavel_nivel: adminAlvo.nivel } : {};
 
-  const evidenciaNome = (prefixo: string) =>
-    `${prefixo}_${dados?.ciclo?.replace('/', '_') || 'ciclo'}.xlsx`;
-
-  const executarComEvidencia = async (endpoint: string, prefixoArquivo: string) => {
-    const r = await axios.post(endpoint, payloadAjustes(), { responseType: 'blob' });
-    baixarBlob(new Blob([r.data]), evidenciaNome(prefixoArquivo));
-    setEdits({});
-    await carregar();
-  };
-
-  /* Edição no nível SKU do executivo: rateia pelos clientes proporcionalmente */
-  const setSkuExecutivo = (
-    clientesDoSku: Array<{ gerente: string; coordenador: string; vendedor: string; razao: string; mes: string; pesoBase: number; original: number; pmv: number }>,
-    sku: string, mes: string, novoTotal: number
-  ) => {
-    const pesos = clientesDoSku.map(c => c.pesoBase);
-    const partes = ratearMaiorResto(Math.max(0, Math.round(novoTotal)), pesos);
-    setEdits(prev => {
-      const next = { ...prev };
-      clientesDoSku.forEach((c, i) => {
-        next[editKeyOf(c.gerente, c.coordenador, c.vendedor, c.razao, sku, mes)] = partes[i];
-      });
-      return next;
-    });
-  };
-
-  const setSkuExecutivoValor = (
-    clientesDoSku: Array<{ gerente: string; coordenador: string; vendedor: string; razao: string; mes: string; pesoBase: number; original: number; pmv: number }>,
-    sku: string, mes: string, novoValor: number
-  ) => {
-    const editaveis = clientesDoSku.filter(c => c.pmv > 0);
-    if (!editaveis.length) return;
-    const volumes = ratearVolumesPorValor(novoValor, editaveis);
-    setEdits(prev => {
-      const next = { ...prev };
-      editaveis.forEach((c, i) => {
-        next[editKeyOf(c.gerente, c.coordenador, c.vendedor, c.razao, sku, mes)] = volumes[i];
-      });
-      return next;
-    });
-  };
-
-  /* Edição direta no nível cliente (override manual) */
-  const setCliente = (gerente: string, coordenador: string, vendedor: string, razao: string, sku: string, mes: string, v: number) =>
-    setEdits(prev => ({ ...prev, [editKeyOf(gerente, coordenador, vendedor, razao, sku, mes)]: Math.max(0, Math.round(v || 0)) }));
-
-  const setClienteValor = (gerente: string, coordenador: string, vendedor: string, razao: string, sku: string, mes: string, valor: number, pmv: number) => {
-    if (pmv <= 0) return;
-    setCliente(gerente, coordenador, vendedor, razao, sku, mes, Math.round(Math.max(0, valor || 0) / pmv));
-  };
-
-  const setNodeValor = (node: any, mes: string, valorAlvo: number, contexto?: { gerente?: string; coordenador?: string; vendedor?: string }) => {
-    const folhas: Array<{ gerente: string; coordenador: string; vendedor: string; razao: string; sku: string; pmv: number; pesoBase: number }> = [];
-    const walk = (n: any, gerenteCtx: string | null, coordenadorCtx: string | null, vendedorCtx: string | null, razaoCtx: string | null) => {
-      if (n.tipo === 'produto') {
-        const cel = n.meses?.[mes];
-        if (!cel) return;
-        folhas.push({
-          gerente: gerenteCtx || 'SEM GERENTE',
-          coordenador: coordenadorCtx || 'SEM COORDENADOR',
-          vendedor: vendedorCtx || 'SEM VENDEDOR',
-          razao: razaoCtx || '',
-          sku: n.sku,
-          pmv: cel.pmv || 0,
-          pesoBase: pesoRateioBottomUp(cel),
-        });
-        return;
-      }
-      const novoGerente = n.tipo === 'gerente' ? n.nome : gerenteCtx;
-      const novoCoordenador = n.tipo === 'coordenador' ? n.nome : coordenadorCtx;
-      const novoVendedor = n.tipo === 'vendedor' ? n.nome : vendedorCtx;
-      const novoCtx = n.tipo === 'cliente' ? n.nome : razaoCtx;
-      (n.subRows || []).forEach((f: any) => walk(f, novoGerente, novoCoordenador, novoVendedor, novoCtx));
-    };
-    walk(
-      node,
-      contexto?.gerente || null,
-      contexto?.coordenador || null,
-      contexto?.vendedor || null,
-      null
+  const arvoreFiltrada = useMemo(() => {
+    const q = busca.trim().toLowerCase();
+    const arvore = (dados?.arvore || []) as any[];
+    if (!q) return arvore;
+    return arvore.filter((sku: any) =>
+      sku.sku.toLowerCase().includes(q) || (sku.descricao || '').toLowerCase().includes(q)
     );
-    const editaveis = folhas.filter(f => f.pmv > 0);
-    if (!editaveis.length) return;
-    const volumes = ratearVolumesPorValor(valorAlvo, editaveis);
-    setEdits(prev => {
-      const next = { ...prev };
-      editaveis.forEach((f, i) => {
-        next[editKeyOf(f.gerente, f.coordenador, f.vendedor, f.razao, f.sku, mes)] = volumes[i];
-      });
-      return next;
-    });
-  };
+  }, [dados, busca]);
 
-  const setNodeVolume = (node: any, mes: string, volumeAlvo: number, contexto?: { gerente?: string; coordenador?: string; vendedor?: string }) => {
-    const folhas: Array<{ gerente: string; coordenador: string; vendedor: string; razao: string; sku: string; pesoBase: number }> = [];
-    const walk = (n: any, gerenteCtx: string | null, coordenadorCtx: string | null, vendedorCtx: string | null, razaoCtx: string | null) => {
-      if (n.tipo === 'produto') {
-        const cel = n.meses?.[mes];
-        if (!cel) return;
-        folhas.push({
-          gerente: gerenteCtx || 'SEM GERENTE',
-          coordenador: coordenadorCtx || 'SEM COORDENADOR',
-          vendedor: vendedorCtx || 'SEM VENDEDOR',
-          razao: razaoCtx || '',
-          sku: n.sku,
-          pesoBase: pesoRateioBottomUp(cel),
-        });
-        return;
-      }
-      const novoGerente = n.tipo === 'gerente' ? n.nome : gerenteCtx;
-      const novoCoordenador = n.tipo === 'coordenador' ? n.nome : coordenadorCtx;
-      const novoVendedor = n.tipo === 'vendedor' ? n.nome : vendedorCtx;
-      const novoCtx = n.tipo === 'cliente' ? n.nome : razaoCtx;
-      (n.subRows || []).forEach((f: any) => walk(f, novoGerente, novoCoordenador, novoVendedor, novoCtx));
-    };
-    walk(
-      node,
-      contexto?.gerente || null,
-      contexto?.coordenador || null,
-      contexto?.vendedor || null,
-      null
-    );
-    if (!folhas.length) return;
-    const pesos = folhas.map(f => f.pesoBase);
-    const volumesRateados = ratearMaiorResto(Math.max(0, Math.round(volumeAlvo || 0)), pesos);
-    setEdits(prev => {
-      const next = { ...prev };
-      folhas.forEach((f, i) => {
-        next[editKeyOf(f.gerente, f.coordenador, f.vendedor, f.razao, f.sku, mes)] = Math.max(0, Math.round(volumesRateados[i]));
-      });
-      return next;
-    });
-  };
-
-  /* Soma de um SKU de um executivo num mês (para exibir no input do SKU) */
-  const somaSkuExecutivo = (gerente: string, coordenador: string, vendedor: string, clientes: any[], sku: string, mes: string): number => {
-    return clientes.reduce((s, cli) => {
-      const prods = cli.subRows || [];
-      const prod  = prods.find((p: any) => p.sku === sku);
-      if (!prod || !prod.meses[mes]) return s;
-      return s + valorCliente(gerente, coordenador, vendedor, cli.nome, sku, mes, prod.meses[mes].meta);
-    }, 0);
-  };
-
-  /* Totalizadores globais */
-  const totaisVivos = useMemo(() => {
-    const vol: Record<string, number> = {};
-    const fat: Record<string, number> = {};
-    meses.forEach(m => { vol[m] = 0; fat[m] = 0; });
-    const walkProd = (prod: any, gerente: string, coordenador: string, vendedor: string, razao: string) => {
-      meses.forEach(m => {
-        const cel = prod.meses[m]; if (!cel) return;
-        const v = valorCliente(gerente, coordenador, vendedor, razao, prod.sku, m, cel.meta);
-        vol[m] += v;
-        fat[m] += v * (cel.pmv || 0);
-      });
-    };
-    const walk = (node: any, gerenteCtx: string | null, coordenadorCtx: string | null, vendedorCtx: string | null, razaoCtx: string | null) => {
-      if (node.tipo === 'produto') { walkProd(node, gerenteCtx || 'SEM GERENTE', coordenadorCtx || 'SEM COORDENADOR', vendedorCtx || 'SEM VENDEDOR', razaoCtx || ''); return; }
-      const novoGerente = node.tipo === 'gerente' ? node.nome : gerenteCtx;
-      const novoCoordenador = node.tipo === 'coordenador' ? node.nome : coordenadorCtx;
-      const novoVendedor = node.tipo === 'vendedor' ? node.nome : vendedorCtx;
-      const novoCtx = node.tipo === 'cliente' ? node.nome : razaoCtx;
-      (node.subRows || []).forEach((f: any) => walk(f, novoGerente, novoCoordenador, novoVendedor, novoCtx));
-    };
-    (dados?.arvore || []).forEach((g: any) => walk(g, null, null, null, null));
-    return { vol, fat };
-  }, [dados, edits, meses]);
-
-  const temEdicoes = Object.keys(edits).length > 0;
-
-  /* Salvar: envia ajustes por razão social, contrato granular esperado pelo backend. */
-  const salvar = async () => {
-    if (!temEdicoes) return;
-    setSalvando(true);
+  /* ── Ação: travar a fase corrente ─────────────────────────────── */
+  const travarFase = async () => {
+    if (!confirm('Travar esta fase? A soma dos itens será validada contra a tolerância de ±1%.')) return;
+    setTravando(true);
+    setErroTravamento(null);
     try {
-      await executarComEvidencia('/api/v1/carteira/salvar-evidencia', 'metas_salvar');
-    } catch (e: any) {
-      alert(e?.response?.data?.detail || 'Falha ao salvar.');
-    } finally { setSalvando(false); }
-  };
-
-  const passarCoordenadores = async () => {
-    if (!confirm('Passar metas financeiras para os coordenadores? Será baixado um XLSX de evidência.')) return;
-    setAvancando(true);
-    try {
-      await executarComEvidencia('/api/v1/carteira/passar-coordenadores-evidencia', 'metas_para_coordenadores');
-    } catch (e: any) {
-      alert(e?.response?.data?.detail || 'Falha ao passar para coordenadores.');
-    } finally { setAvancando(false); }
-  };
-
-  const salvarETrancar = async () => {
-    if (!confirm('Salvar e trancar sua distribuição? A variação precisa ficar dentro de ±5% da meta recebida.')) return;
-    setSalvando(true);
-    try {
-      await executarComEvidencia('/api/v1/carteira/trancar-evidencia', 'metas_trancadas');
+      await axios.post('/api/v1/carteira/travar-fase', responsavelBody);
+      setAbertoSku(null); setAbertoExecutivo(null);
+      await carregar();
     } catch (e: any) {
       const detail = e?.response?.data?.detail;
-      if (detail?.itens?.length) {
-        alert(`${detail.mensagem}\n${detail.itens.map((i: any) => `${i.mes}: ${i.variacao_pct}%`).join('\n')}`);
+      if (detail?.detalhes) {
+        setErroTravamento({ mensagem: detail.mensagem, detalhes: detail.detalhes });
       } else {
-        alert(detail || 'Falha ao trancar.');
+        alert(detail || 'Falha ao travar a fase.');
       }
-    } finally { setSalvando(false); }
+    } finally { setTravando(false); }
+  };
+
+  const reabrirFaseAdmin = async () => {
+    if (!adminAlvo || !confirm(`Reabrir a carteira de ${adminAlvo.nome} para a fase inicial?`)) return;
+    try {
+      await axios.post('/api/v1/carteira/reabrir-fase-meta', {
+        nome_alvo: adminAlvo.nome, nivel_alvo: adminAlvo.nivel,
+      });
+      await carregar();
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || 'Falha ao reabrir a fase.');
+    }
   };
 
   const congelarEtapa = async () => {
     if (!confirm('Aprovar Metas Comercial? A etapa Irrestrita será liberada.')) return;
     try {
-      const r = await axios.post('/api/v1/carteira/aprovar-evidencia', payloadAjustes(), { responseType: 'blob' });
-      baixarBlob(new Blob([r.data]), evidenciaNome('metas_aprovadas'));
-      setEdits({});
+      await axios.post('/api/v1/carteira/aprovar-evidencia', { ajustes: [] });
       await carregar();
     } catch (e: any) {
       const detail = e?.response?.data?.detail;
@@ -503,44 +346,41 @@ function PreenchimentoMetas() {
     } catch (e: any) { alert(e?.response?.data?.detail || 'Falha ao reabrir.'); }
   };
 
-  const reabrirFaseAdmin = async () => {
-    if (!adminAlvo || !confirm(`Reabrir a fase de ${adminAlvo.nome}?`)) return;
-    try {
-      await axios.post('/api/v1/carteira/reabrir-fase', {
-        nome_alvo: adminAlvo.nome, nivel_alvo: adminAlvo.nivel,
-      });
-      await carregar();
-    } catch (e: any) {
-      alert(e?.response?.data?.detail || 'Falha ao reabrir a fase.');
-    }
+  /* ── Gerente, fase SKU: edita o total do SKU direto via /salvar
+     (rateio por razão social feito no backend, sem % — não há teto). ── */
+  const salvarTotalSku = async (skuNode: any, mes: string, novoVolume: number) => {
+    const ajustes: any[] = [];
+    const walk = (coord: any) => (coord.subRows || []).forEach((exec: any) =>
+      (exec.subRows || []).forEach((raz: any) => {
+        ajustes.push({ sku: skuNode.sku, mes_projetado: mes, razao_social: raz.nome, novo_volume: raz.meses?.[mes]?.meta ?? 0 });
+      }));
+    (skuNode.subRows || []).forEach(walk);
+    if (!ajustes.length) return;
+    // Rateia o novo total entre as razões sociais existentes, por peso bottomup/histórico.
+    const pesos = ajustes.map(a => {
+      let peso = 0;
+      (skuNode.subRows || []).forEach((coord: any) => (coord.subRows || []).forEach((exec: any) =>
+        (exec.subRows || []).forEach((raz: any) => {
+          if (raz.nome === a.razao_social) peso = pesoRateioBottomUp(raz.meses?.[mes]);
+        })));
+      return peso;
+    });
+    const partes = ratearMaiorResto(Math.max(0, Math.round(novoVolume)), pesos);
+    ajustes.forEach((a, i) => { a.novo_volume = partes[i]; });
+    await axios.post('/api/v1/carteira/salvar', { ajustes, ...(adminAlvo ? { nome_alvo: adminAlvo.nome, nivel_alvo: adminAlvo.nivel } : {}) });
+    await carregar();
   };
-
-  const toggle = (id: string) =>
-    setAbertas(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
-
-  /* Filtro de busca */
-  const arvoreVisivelOuCompleta = useMemo(() => {
-    const q = busca.trim().toLowerCase();
-    if (!q) return dados?.arvore || [];
-    const filtra = (nodes: any[]): any[] =>
-      nodes.map(node => {
-        if (node.tipo === 'produto') {
-          return (node.sku.toLowerCase().includes(q) || node.descricao.toLowerCase().includes(q))
-            ? node : null;
-        }
-        const match = node.nome.toLowerCase().includes(q);
-        const sub   = filtra(node.subRows || []);
-        if (match || sub.length > 0) return { ...node, subRows: match ? (node.subRows || []) : sub };
-        return null;
-      }).filter(Boolean);
-    return filtra(dados?.arvore || []);
-  }, [dados, busca]);
 
   if (loading) {
     return <div className="min-h-screen flex items-center justify-center text-slate-400">
       <Loader2 className="w-6 h-6 animate-spin mr-2" /> Carregando sua carteira…
     </div>;
   }
+
+  const labelFase: Record<string, string> = {
+    SKU: 'SKU — total por produto', COORDENADOR: 'Coordenador — distribuição por SKU',
+    EXECUTIVO: 'Executivo — distribuição por SKU', RAZAO_SOCIAL: 'Razão Social — distribuição por Executivo+SKU',
+  };
 
   return (
     <div className="h-full flex flex-col bg-slate-50" style={{ fontVariantNumeric: 'tabular-nums' }}>
@@ -556,9 +396,18 @@ function PreenchimentoMetas() {
               {!aguardandoUpstream && minhaCongelada && <span className="ml-2 text-emerald-600 font-bold">· sua carteira bloqueada</span>}
               {!aguardandoUpstream && congeladaEtapa && <span className="ml-2 text-amber-600 font-bold">· etapa congelada</span>}
             </p>
-            <div className="mt-2 text-[10px] font-bold text-indigo-500">
-              Edição financeira reativa: Coordenador → Executivo → SKU → Razão Social
-            </div>
+            {faseAtual && (
+              <div className="mt-2 flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-600 text-[10px] font-black uppercase tracking-wider">
+                  Fase atual: {labelFase[faseAtual] || faseAtual}
+                </span>
+                {travadoDefinitivo && (
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-600 text-[10px] font-black uppercase tracking-wider flex items-center gap-1">
+                    <Lock className="w-3 h-3" /> travado definitivamente
+                  </span>
+                )}
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
             {souAdmin && (
@@ -567,6 +416,7 @@ function PreenchimentoMetas() {
                 onChange={e => {
                   const [nivel, ...nome] = e.target.value.split('||');
                   setAdminAlvo(e.target.value ? { nivel, nome: nome.join('||') } : null);
+                  setAbertoSku(null); setAbertoExecutivo(null);
                 }}
                 className="max-w-xs px-3 py-2 rounded-xl border border-violet-200 bg-violet-50 text-xs font-bold text-violet-700 focus:outline-none"
               >
@@ -578,11 +428,10 @@ function PreenchimentoMetas() {
                 ))}
               </select>
             )}
-            {/* Busca */}
             <div className="relative">
               <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
               <input type="text" value={busca} onChange={e => setBusca(e.target.value)}
-                placeholder="Buscar executivo, SKU ou cliente…"
+                placeholder="Buscar SKU…"
                 className="pl-8 pr-7 py-2 text-xs rounded-xl border border-slate-200 bg-white text-slate-700 placeholder:text-slate-300 focus:outline-none focus:border-indigo-400 w-56" />
               {busca && (
                 <button onClick={() => setBusca('')}
@@ -591,24 +440,12 @@ function PreenchimentoMetas() {
                 </button>
               )}
             </div>
-            <button onClick={salvar} disabled={!temEdicoes || salvando || bloqueado}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all
-                ${temEdicoes && !bloqueado ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}>
-              {salvando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-              Salvar + XLSX{temEdicoes ? ` (${Object.keys(edits).length})` : ''}
-            </button>
-            {(funcao === 'Gerente' || (souAdmin && (!adminAlvo || adminAlvo.nivel === 'Gerente'))) && (
-              <button onClick={passarCoordenadores} disabled={avancando || bloqueado}
-                className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-60">
-                {avancando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />}
-                Passar para coordenadores
-              </button>
-            )}
-            {(funcao === 'Coordenador' || adminAlvo?.nivel === 'Coordenador') && (
-              <button onClick={salvarETrancar} disabled={salvando || (bloqueado && !(souAdmin && adminOperando))}
-                className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60">
-                {salvando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />}
-                Salvar e trancar
+            {!travadoDefinitivo && faseAtual && (
+              <button onClick={travarFase} disabled={travando || bloqueadoEdicao}
+                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all
+                  ${!bloqueadoEdicao ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}>
+                {travando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />}
+                Travar fase {labelFase[faseAtual]?.split(' —')[0] || faseAtual}
               </button>
             )}
             {souAdmin && adminOperando && (
@@ -617,7 +454,6 @@ function PreenchimentoMetas() {
                 <Unlock className="w-4 h-4" /> Reabrir fase
               </button>
             )}
-            {/* Congelar/Reabrir etapa — só Gerente e Admin */}
             {(souAdmin || funcao === 'Gerente') && (
               congeladaEtapa ? (
                 <button onClick={reabrirEtapa}
@@ -634,18 +470,6 @@ function PreenchimentoMetas() {
           </div>
         </div>
 
-        {/* Totalizadores por mês */}
-        <div className="px-6 pb-3 grid gap-2" style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(120px, 1fr))` }}>
-          <div className="text-[10px] font-black uppercase tracking-widest text-slate-300 flex items-end pb-1">Total da carteira</div>
-          {meses.map(m => (
-            <div key={m} className="bg-slate-50 rounded-lg px-3 py-2">
-              <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">{mesLabel(m)}</div>
-              <div className="text-[10px] font-bold text-indigo-500">{fmtRs(totaisVivos.fat[m])}</div>
-              <div className="text-sm font-black text-slate-900">{fmtCx(totaisVivos.vol[m])} <span className="text-[10px] font-bold text-slate-400">cx</span></div>
-            </div>
-          ))}
-        </div>
-
         {aguardandoUpstream && (
           <div className="mx-6 mb-3 flex items-center gap-3 rounded-xl bg-orange-50 border border-orange-200 px-4 py-3">
             <div className="w-2 h-2 rounded-full bg-orange-400 shrink-0 animate-pulse" />
@@ -656,429 +480,430 @@ function PreenchimentoMetas() {
           </div>
         )}
 
-        {/* Cabeçalho da tabela */}
-        <div className="px-6 pb-1">
-          <div className="grid gap-2 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400"
-            style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(130px, 1fr)) 40px` }}>
-            <div>Hierarquia / Executivo / SKU / Cliente</div>
-            {meses.map(m => <div key={m} className="text-right">{mesLabel(m)}</div>)}
-            <div />
-          </div>
-        </div>
-      </div>
-
-      <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-8">
-        {arvoreVisivelOuCompleta.length === 0 && busca.trim()
-          ? (
-            <div className="flex flex-col items-center justify-center py-16 text-slate-400">
-              <Search className="w-8 h-8 mb-2 opacity-30" />
-              <div className="text-sm font-bold">Nenhum resultado para "{busca}"</div>
-              <button onClick={() => setBusca('')} className="mt-3 text-xs font-black text-indigo-500 hover:underline">Limpar busca</button>
+        {!aguardandoUpstream && aguardandoGerente && !souAdmin && (
+          <div className="mx-6 mb-3 flex items-center gap-3 rounded-xl bg-orange-50 border border-orange-200 px-4 py-3">
+            <div className="w-2 h-2 rounded-full bg-orange-400 shrink-0 animate-pulse" />
+            <div>
+              <div className="text-xs font-black text-orange-700">Aguardando o Gerente</div>
+              <div className="text-[11px] font-medium text-orange-600">O Gerente ainda não travou a fase Coordenador neste ciclo. A edição libera automaticamente assim que ele travar.</div>
             </div>
-          )
-          : arvoreVisivelOuCompleta.map((g: any) => (
-            <NoArvore key={g.nome} node={g} nivel={0}
-              meses={meses} abertas={abertas} toggle={toggle}
-              valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setSkuExecutivoValor={setSkuExecutivoValor} setCliente={setCliente}
-              somaSkuExecutivo={somaSkuExecutivo}
-              bloqueado={bloqueado && !(souAdmin && adminOperando)} edits={edits}
-              setClienteValor={setClienteValor}
-              setNodeValor={setNodeValor}
-              setNodeVolume={setNodeVolume}
-              setDossieAlvo={setDossieAlvo}
-              dossieAlvo={dossieAlvo}
-              idPath={g.nome}
-              hierarquia={{ gerente: g.nome, coordenador: 'SEM COORDENADOR', vendedor: 'SEM VENDEDOR' }}
-              buscaAtiva={!!busca.trim()} />
-          ))}
+          </div>
+        )}
+
+        {erroTravamento && (
+          <div className="mx-6 mb-3 rounded-xl bg-rose-50 border border-rose-200 px-4 py-3">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-black text-rose-700">{erroTravamento.mensagem}</div>
+                <div className="mt-2 grid gap-1">
+                  {erroTravamento.detalhes.map((d, i) => (
+                    <div key={i} className="grid grid-cols-4 gap-2 text-[11px] font-bold text-rose-600 bg-white/60 rounded-lg px-2 py-1">
+                      <span className="truncate">{d.chave}</span>
+                      <span className="text-right">atual: {fmtCx(d.volume_atual)}</span>
+                      <span className="text-right">alvo: {fmtCx(d.volume_alvo)}</span>
+                      <span className="text-right">{(d.variacao_pct * 100).toFixed(1)}%</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <button onClick={() => setErroTravamento(null)} className="text-rose-300 hover:text-rose-600 shrink-0">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
-      {/* GAVETA DOSSIÊ */}
 
-
-      {/* PAINEL DE CADEADOS */}
+      <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4">
+        {arvoreFiltrada.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+            <Search className="w-8 h-8 mb-2 opacity-30" />
+            <div className="text-sm font-bold">Nenhum SKU encontrado{busca.trim() ? ` para "${busca}"` : ''}</div>
+            {busca && <button onClick={() => setBusca('')} className="mt-3 text-xs font-black text-indigo-500 hover:underline">Limpar busca</button>}
+          </div>
+        ) : (
+          <div className="grid gap-2">
+            {arvoreFiltrada.map((sku: any) => (
+              <CardSku
+                key={sku.sku}
+                sku={sku}
+                meses={meses}
+                funcao={funcao}
+                faseAtual={faseAtual}
+                bloqueado={bloqueadoEdicao}
+                aberto={abertoSku === sku.sku}
+                onToggle={() => setAbertoSku(prev => prev === sku.sku ? null : sku.sku)}
+                abertoExecutivo={abertoSku === sku.sku ? abertoExecutivo : null}
+                setAbertoExecutivo={setAbertoExecutivo}
+                salvarTotalSku={salvarTotalSku}
+                responsavelBody={responsavelBody}
+                dossieAlvo={dossieAlvo}
+                setDossieAlvo={setDossieAlvo}
+                recarregar={carregar}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
-/* ── NÓ RECURSIVO DA ÁRVORE ──────────────────────────────────────── */
-function NoArvore({ node, nivel, meses, abertas, toggle,
-  valorCliente, setSkuExecutivo, setSkuExecutivoValor, setCliente, somaSkuExecutivo,
-  bloqueado, edits, setDossieAlvo, dossieAlvo, idPath, buscaAtiva,
-  setClienteValor, setNodeValor, setNodeVolume, hierarquia }: any) {
+/* ── CARD DE UM SKU (raiz da árvore) ─────────────────────────────── */
+function CardSku({
+  sku, meses, funcao, faseAtual, bloqueado, aberto, onToggle,
+  abertoExecutivo, setAbertoExecutivo, salvarTotalSku, responsavelBody,
+  dossieAlvo, setDossieAlvo, recarregar,
+}: any) {
+  const mesFoco = meses[0];
+  const cel = sku.meses?.[mesFoco] || {};
+  // Gerente na fase SKU edita o total direto (sem %, sem teto).
+  const editaTotalSku = funcao === 'Gerente' && faseAtual === 'SKU';
+  // Gerente na fase COORDENADOR faz drill-down por coordenador dentro do SKU.
+  const drillCoordenador = funcao === 'Gerente' && faseAtual === 'COORDENADOR';
+  // Coordenador nas fases EXECUTIVO/RAZAO_SOCIAL faz drill-down por SKU também.
+  const drillExecutivo = funcao === 'Coordenador' && (faseAtual === 'EXECUTIVO' || faseAtual === 'RAZAO_SOCIAL');
 
-  const buscaAtv = buscaAtiva;
-  const aberta   = buscaAtv || abertas.has(idPath);
-  const ctx = {
-    gerente: node.tipo === 'gerente' ? node.nome : (hierarquia?.gerente || 'SEM GERENTE'),
-    coordenador: node.tipo === 'coordenador' ? node.nome : (hierarquia?.coordenador || 'SEM COORDENADOR'),
-    vendedor: node.tipo === 'vendedor' ? node.nome : (hierarquia?.vendedor || 'SEM VENDEDOR'),
-  };
+  const dossieAberto = dossieAlvo?.sku === sku.sku && !dossieAlvo?.coordenador && !dossieAlvo?.vendedor;
 
-  /* ── NÓ PRODUTO — renderizado dentro do nível EXECUTIVO (vendedor) ── */
-  /* Este nó representa um SKU agregado dos clientes do executivo.       */
-  /* O input edita o total do SKU e rateia para os clientes abaixo.      */
-  if (node.tipo === 'produto_executivo') {
-    const { sku, descricao, clientes } = node;
-    const clientesAbertos = buscaAtv || abertas.has(idPath);
-    return (
-      <div className="mb-0.5">
-        {/* Linha do SKU — input editável, dispara rateio */}
-        <div className="grid gap-2 px-3 py-1.5 items-center hover:bg-indigo-50/40 rounded-lg group"
-          style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(130px, 1fr)) 40px` }}>
-          <div className={`min-w-0 ${INDENT.produto}`}>
-            {/* Botão expandir clientes */}
-            <button
-              onClick={() => toggle(idPath)}
-              className="flex items-center gap-1 w-full text-left"
-            >
-              {clientesAbertos
-                ? <ChevronDown className="w-3 h-3 text-slate-300 shrink-0" />
-                : <ChevronRight className="w-3 h-3 text-slate-300 shrink-0" />}
-              <div className="min-w-0">
-                <div className="text-xs font-bold text-slate-700 truncate">{descricao}</div>
-                <div className="text-[10px] font-bold text-slate-300">{sku} · {clientes.length} cliente{clientes.length !== 1 ? 's' : ''}</div>
-              </div>
-            </button>
+  return (
+    <div className="bg-white rounded-xl border border-slate-100 hover:border-slate-200 transition-colors">
+      <div className="grid gap-2 px-4 py-3 items-center"
+        style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(150px, 1fr)) 40px` }}>
+        <button onClick={onToggle} className="flex items-center gap-2 min-w-0 text-left">
+          {aberto ? <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" /> : <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />}
+          <div className="min-w-0">
+            <div className="text-sm font-black text-slate-800 truncate">{sku.descricao}</div>
+            <div className="text-[10px] font-bold text-slate-300">{sku.sku}</div>
           </div>
-          {meses.map((m: string) => {
-            const totalSku  = somaSkuExecutivo(ctx.gerente, ctx.coordenador, node.executivoNome || ctx.vendedor, clientes, sku, m);
-            const pmvSoma = clientes.reduce((s: number, cli: any) => {
-              const p = (cli.subRows || []).find((pr: any) => pr.sku === sku);
-              const cel = p?.meses?.[m];
-              const volume = cel ? valorCliente(ctx.gerente, ctx.coordenador, node.executivoNome || ctx.vendedor, cli.nome, sku, m, cel.meta) : 0;
-              return s + volume * (cel?.pmv || 0);
-            }, 0);
-            const pmvComVolume = clientes.reduce((s: number, cli: any) => {
-              const p = (cli.subRows || []).find((pr: any) => pr.sku === sku);
-              return s + (p?.meses?.[m]?.pmv || 0);
-            }, 0);
-            const pmv       = totalSku > 0
-              ? pmvSoma / totalSku
-              : (clientes.length ? pmvComVolume / clientes.length : 0);
-            const valorAtual = totalSku * pmv;
-            const ia        = clientes.reduce((s: number, cli: any) => {
-              const p = (cli.subRows || []).find((pr: any) => pr.sku === sku);
-              return s + (p?.meses[m]?.ia || 0);
-            }, 0);
-            const temEdit   = clientes.some((cli: any) =>
-              editKeyOf(ctx.gerente, ctx.coordenador, node.executivoNome || ctx.vendedor, cli.nome, sku, m) in edits
-            );
-            const clientesInfo = clientes.map((cli: any) => {
-              const prod = (cli.subRows || []).find((p: any) => p.sku === sku);
-              return {
-                gerente: ctx.gerente,
-                coordenador: ctx.coordenador,
-                vendedor: node.executivoNome || 'SEM VENDEDOR',
-                razao: cli.nome,
-                mes: m,
-                pesoBase: pesoRateioBottomUp(prod?.meses[m]),
-                original: prod?.meses[m]?.meta ?? 0,
-                pmv: prod?.meses[m]?.pmv ?? 0,
-              };
-            });
-            const podeEditarValor = clientesInfo.some(c => c.pmv > 0);
-            return (
-              <div key={m} className="text-right">
-                <CampoNumeroEditavel
-                  value={valorAtual}
-                  format={fmtRs}
-                  disabled={bloqueado || !podeEditarValor}
-                  onChange={valor => setSkuExecutivoValor(clientesInfo, sku, m, valor)}
-                  title={!podeEditarValor ? 'Sem PMV: edição monetária bloqueada' : undefined}
-                  className={`w-full text-right text-sm font-bold rounded-md px-2 py-1 border transition-colors
-                    ${temEdit ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-transparent bg-transparent text-indigo-600'}
-                    ${bloqueado || !podeEditarValor ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
-                />
-                <CampoNumeroEditavel
-                  value={totalSku}
-                  format={fmtCx}
-                  disabled={bloqueado}
-                  onChange={valor => setSkuExecutivo(clientesInfo, sku, m, valor)}
-                  className={`w-full text-right text-xs font-bold rounded-md px-2 py-0.5 border transition-colors mt-0.5
-                    ${temEdit ? 'border-indigo-200 bg-white text-slate-700' : 'border-transparent bg-transparent text-slate-500'}
-                    ${bloqueado ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
-                />
-                <div className="text-[9px] font-bold text-slate-300 pr-2">IA {fmtCx(ia)} cx</div>
-              </div>
-            );
-          })}
-          {/* Botão dossiê — nível executivo */}
-          <button
-            onClick={() => setDossieAlvo(prev =>
-              prev?.sku === sku && !prev?.razao ? null : { sku, descricao, vendedor: node.executivoNome }
-            )}
-            className={`justify-self-center p-1.5 rounded-lg transition-colors
-              ${dossieAlvo?.sku === sku && !dossieAlvo?.razao ? 'bg-indigo-100 text-indigo-600' : 'text-slate-300 hover:bg-indigo-50 hover:text-indigo-600'}`}
-            title="Ver dossiê do SKU">
-            <LineIcon className="w-4 h-4" />
-          </button>
-        </div>
-
-        {/* Linhas dos clientes — somente leitura com rateio calculado + override manual */}
-        {clientesAbertos && clientes.map((cli: any) => {
-          const prod = (cli.subRows || []).find((p: any) => p.sku === sku);
-          if (!prod) return null;
+        </button>
+        {meses.map((m: string) => {
+          const c = sku.meses?.[m] || {};
           return (
-            <div key={cli.nome}
-              className="grid gap-2 px-3 py-1 items-center hover:bg-slate-50 rounded-lg"
-              style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(130px, 1fr)) 40px` }}>
-              <div className={`min-w-0 ${INDENT.cliente}`}>
-                <div className="text-[11px] font-bold text-slate-500 truncate">{cli.nome}</div>
-                <div className="text-[9px] font-bold text-slate-300">razão social</div>
+            <div key={m} className="text-right">
+              {editaTotalSku ? (
+                <>
+                  <CampoNumeroEditavel
+                    value={(c.meta || 0) * (c.pmv || 0)}
+                    format={fmtRs}
+                    disabled={bloqueado || (c.pmv || 0) <= 0}
+                    onChange={valor => salvarTotalSku(sku, m, (c.pmv || 0) > 0 ? valor / c.pmv : 0)}
+                    title={(c.pmv || 0) <= 0 ? 'Sem PMV: edição monetária bloqueada' : undefined}
+                    className={`w-full text-right text-sm font-bold rounded-md px-2 py-1 border transition-colors
+                      border-transparent bg-transparent text-indigo-600
+                      ${bloqueado || (c.pmv || 0) <= 0 ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
+                  />
+                  <CampoNumeroEditavel
+                    value={c.meta || 0}
+                    format={fmtCx}
+                    disabled={bloqueado}
+                    onChange={valor => salvarTotalSku(sku, m, valor)}
+                    className={`w-full text-right text-xs font-bold rounded-md px-2 py-0.5 border transition-colors mt-0.5
+                      border-transparent bg-transparent text-slate-500
+                      ${bloqueado ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
+                  />
+                </>
+              ) : (
+                <>
+                  <div className="text-sm font-black text-slate-800">{fmtRs((c.meta || 0) * (c.pmv || 0))}</div>
+                  <div className="text-xs font-bold text-slate-400">{fmtCx(c.meta || 0)} cx</div>
+                </>
+              )}
+              <div className="text-[9px] font-bold text-slate-300">
+                bottomup {fmtCx(c.bottomup || 0)} · {c.variacao_pct == null ? '—' : `${(c.variacao_pct * 100).toFixed(1)}%`}
               </div>
-              {meses.map((m: string) => {
-                const cel     = prod.meses[m];
-                if (!cel) return <div key={m} />;
-                const vendedor = node.executivoNome || ctx.vendedor;
-                const val     = valorCliente(ctx.gerente, ctx.coordenador, vendedor, cli.nome, sku, m, cel.meta);
-                const editado = editKeyOf(ctx.gerente, ctx.coordenador, vendedor, cli.nome, sku, m) in edits;
-                return (
-                  <div key={m} className="text-right">
-                    <CampoNumeroEditavel
-                      value={val * (cel.pmv || 0)}
-                      format={fmtRs}
-                      disabled={bloqueado || (cel.pmv || 0) <= 0}
-                      onChange={valor => setClienteValor(ctx.gerente, ctx.coordenador, vendedor, cli.nome, sku, m, valor, cel.pmv || 0)}
-                      title={(cel.pmv || 0) <= 0 ? 'Sem PMV: edição monetária bloqueada' : undefined}
-                      className={`w-full text-right text-xs font-bold rounded-md px-2 py-1 border transition-colors
-                        ${editado ? 'border-violet-300 bg-violet-50 text-violet-700' : 'border-transparent bg-transparent text-indigo-600'}
-                        ${bloqueado || (cel.pmv || 0) <= 0 ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-100 focus:border-violet-400 focus:bg-white focus:outline-none'}`}
-                    />
-                    <CampoNumeroEditavel
-                      value={val}
-                      format={fmtCx}
-                      disabled={bloqueado}
-                      onChange={valor => setCliente(ctx.gerente, ctx.coordenador, vendedor, cli.nome, sku, m, valor)}
-                      className={`w-full text-right text-[11px] font-bold rounded-md px-2 py-0.5 border transition-colors mt-0.5
-                        ${editado ? 'border-violet-200 bg-white text-slate-700' : 'border-transparent bg-transparent text-slate-500'}
-                        ${bloqueado ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-100 focus:border-violet-400 focus:bg-white focus:outline-none'}`}
-                    />
-                  </div>
-                );
-              })}
-              {/* Botão dossiê nível cliente */}
-              <button
-                onClick={() => setDossieAlvo(prev =>
-                  prev?.sku === sku && prev?.razao === cli.nome ? null : { sku, descricao: prod.descricao, razao: cli.nome }
-                )}
-                className={`justify-self-center p-1.5 rounded-lg transition-colors
-                  ${dossieAlvo?.sku === sku && dossieAlvo?.razao === cli.nome ? 'bg-violet-100 text-violet-600' : 'text-slate-200 hover:bg-violet-50 hover:text-violet-600'}`}
-                title="Ver dossiê por cliente">
-                <LineIcon className="w-3.5 h-3.5" />
-              </button>
             </div>
           );
         })}
-
-        {/* Dossiê inline — nível cliente (abre abaixo da linha do cliente selecionado) */}
-        {dossieAlvo?.sku === sku && dossieAlvo?.razao && (() => {
-          const cliAlvo = clientes.find((c: any) => c.nome === dossieAlvo.razao);
-          if (!cliAlvo) return null;
-          const prod = (cliAlvo.subRows || []).find((p: any) => p.sku === sku);
-          return (
-            <div className="ml-12 mr-2 mb-2">
-              <DossieInferior
-                prefixoApi="/api/v1/carteira"
-                tipo="sku"
-                id={sku}
-                titulo={prod?.descricao || descricao}
-                subtitulo={`${sku} · ${dossieAlvo.razao}`}
-                paramsExtra={{ razao_social: dossieAlvo.razao, vendedor_nome: node.executivoNome }}
-                onFechar={() => setDossieAlvo(null)}
-              />
-            </div>
-          );
-        })()}
-
-        {/* Dossiê inline — nível executivo */}
-        {dossieAlvo?.sku === sku && !dossieAlvo?.razao && (
-          <div className="ml-4 mr-2 mb-2">
-            <DossieInferior
-              prefixoApi="/api/v1/carteira"
-              tipo="sku"
-              id={sku}
-              titulo={descricao}
-              subtitulo={`${sku} · executivo: ${node.executivoNome}`}
-              paramsExtra={{ vendedor_nome: node.executivoNome }}
-              onFechar={() => setDossieAlvo(null)}
-            />
-          </div>
-        )}
+        <button
+          onClick={() => setDossieAlvo((prev: any) => dossieAberto ? null : { sku: sku.sku, descricao: sku.descricao })}
+          className={`justify-self-center p-1.5 rounded-lg transition-colors
+            ${dossieAberto ? 'bg-indigo-100 text-indigo-600' : 'text-slate-300 hover:bg-indigo-50 hover:text-indigo-600'}`}
+          title="Ver dossiê do SKU">
+          <LineIcon className="w-4 h-4" />
+        </button>
       </div>
-    );
-  }
 
-  /* ── NÓ EXECUTIVO (vendedor) — agrupa SKUs e expande clientes abaixo ── */
-  if (node.tipo === 'vendedor') {
-    // Agrupa os SKUs de todos os clientes deste executivo
-    const skuMap: Record<string, { sku: string; descricao: string; clientes: any[] }> = {};
-    (node.subRows || []).forEach((cli: any) => {
-      (cli.subRows || []).forEach((prod: any) => {
-        if (!skuMap[prod.sku]) {
-          skuMap[prod.sku] = { sku: prod.sku, descricao: prod.descricao, clientes: [] };
-        }
-        if (!skuMap[prod.sku].clientes.find((c: any) => c.nome === cli.nome)) {
-          skuMap[prod.sku].clientes.push(cli);
-        }
-      });
-    });
-    const skusAgrupados = Object.values(skuMap);
-
-    const somaMes = (m: string) =>
-      (node.subRows || []).reduce((s: number, cli: any) =>
-        s + (cli.subRows || []).reduce((ss: number, p: any) =>
-          ss + valorCliente(ctx.gerente, ctx.coordenador, node.nome || 'SEM VENDEDOR', cli.nome, p.sku, m, p.meses[m]?.meta || 0), 0), 0);
-    const fatMes = (m: string) =>
-      (node.subRows || []).reduce((s: number, cli: any) =>
-        s + (cli.subRows || []).reduce((ss: number, p: any) => {
-          const cel = p.meses[m]; if (!cel) return ss;
-          return ss + valorCliente(ctx.gerente, ctx.coordenador, node.nome || 'SEM VENDEDOR', cli.nome, p.sku, m, cel.meta) * (cel.pmv || 0);
-        }, 0), 0);
-
-    return (
-      <div className="mb-0.5">
-        <div
-          className="w-full grid gap-2 px-3 py-2 items-center rounded-lg hover:bg-white transition-colors"
-          style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(130px, 1fr)) 40px` }}>
-          <button onClick={() => !buscaAtv && toggle(idPath)}
-            className={`flex items-center gap-1.5 min-w-0 text-left ${INDENT.executivo}`}>
-            {aberta ? <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                    : <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
-            <span className="truncate font-bold text-slate-600 text-xs">{node.nome}</span>
-            <span className="text-[9px] font-black uppercase tracking-wider text-slate-300 ml-1 shrink-0">executivo</span>
-          </button>
-          {meses.map((m: string) => (
-            <div key={m} className="text-right">
-              <CampoNumeroEditavel
-                value={fatMes(m)}
-                format={fmtRs}
-                disabled={bloqueado}
-                onChange={valor => setNodeValor(node, m, valor, ctx)}
-                className={`w-full text-right text-xs font-black rounded-md px-2 py-1 border transition-colors
-                  ${bloqueado ? 'cursor-not-allowed opacity-60 border-transparent bg-transparent text-slate-500' : 'border-transparent bg-transparent text-indigo-600 hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
-              />
-              <CampoNumeroEditavel
-                value={somaMes(m)}
-                format={fmtCx}
-                disabled={bloqueado}
-                onChange={valor => setNodeVolume(node, m, valor, ctx)}
-                className={`w-full text-right text-[11px] font-bold rounded-md px-2 py-0.5 border transition-colors mt-0.5
-                  ${bloqueado ? 'cursor-not-allowed opacity-60 border-transparent bg-transparent text-slate-500' : 'border-transparent bg-transparent text-slate-500 hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
-              />
-            </div>
-          ))}
-          <div />
-        </div>
-        {aberta && skusAgrupados.map(skuNode => (
-          <NoArvore
-            key={skuNode.sku}
-            node={{ ...skuNode, tipo: 'produto_executivo', executivoNome: node.nome }}
-            nivel={nivel + 1}
-            meses={meses} abertas={abertas} toggle={toggle}
-            valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setSkuExecutivoValor={setSkuExecutivoValor} setCliente={setCliente}
-            somaSkuExecutivo={somaSkuExecutivo}
-            bloqueado={bloqueado} edits={edits}
-            setClienteValor={setClienteValor}
-            setNodeValor={setNodeValor}
-            setNodeVolume={setNodeVolume}
-            setDossieAlvo={setDossieAlvo}
-            dossieAlvo={dossieAlvo}
-            hierarquia={{ ...ctx, vendedor: node.nome || 'SEM VENDEDOR' }}
-            idPath={`${idPath}>${skuNode.sku}`}
-            buscaAtiva={buscaAtv}
+      {dossieAberto && (
+        <div className="mx-4 mb-3">
+          <DossieInferior
+            prefixoApi="/api/v1/carteira"
+            tipo="sku"
+            id={sku.sku}
+            titulo={sku.descricao}
+            subtitulo={sku.sku}
+            paramsExtra={{}}
+            onFechar={() => setDossieAlvo(null)}
           />
-        ))}
-      </div>
-    );
-  }
+        </div>
+      )}
 
-  /* ── NÓ DE AGRUPAMENTO (gerente, coordenador) ── */
-  const tipoLabel: Record<string, string> = { gerente: 'gerente', coordenador: 'coordenador' };
+      {aberto && (drillCoordenador || drillExecutivo) && (
+        <div className="border-t border-slate-100 px-4 py-3">
+          {drillCoordenador && (
+            <ListaDistribuicao
+              nivel="COORDENADOR"
+              itens={(sku.subRows || []).map((c: any) => ({ chave: c.nome, meses: c.meses }))}
+              sku={sku.sku} meses={meses} teto={sku.meses}
+              bloqueado={bloqueado} responsavelBody={responsavelBody}
+              dossieBase={{ sku: sku.sku, descricao: sku.descricao }}
+              dossieAlvo={dossieAlvo} setDossieAlvo={setDossieAlvo}
+              recarregar={recarregar}
+            />
+          )}
+          {drillExecutivo && (
+            <div className="grid gap-2">
+              {(sku.subRows || []).map((coord: any) => (
+                <div key={coord.nome}>
+                  <button
+                    onClick={() => setAbertoExecutivo((prev: string | null) => prev === coord.nome ? null : coord.nome)}
+                    className="w-full flex items-center gap-2 text-left px-2 py-1.5 rounded-lg hover:bg-slate-50">
+                    {abertoExecutivo === coord.nome ? <ChevronDown className="w-3.5 h-3.5 text-slate-400" /> : <ChevronRight className="w-3.5 h-3.5 text-slate-400" />}
+                    <span className="text-xs font-black text-slate-600">{coord.nome}</span>
+                    <span className="text-[9px] font-black uppercase tracking-wider text-slate-300">coordenador</span>
+                  </button>
+                  {abertoExecutivo === coord.nome && (
+                    <div className="ml-4 mt-1">
+                      {faseAtual === 'EXECUTIVO' && (
+                        <ListaDistribuicao
+                          nivel="EXECUTIVO"
+                          itens={(coord.subRows || []).map((e: any) => ({ chave: e.nome, meses: e.meses }))}
+                          sku={sku.sku} meses={meses} teto={coord.meses}
+                          bloqueado={bloqueado} responsavelBody={responsavelBody}
+                          dossieBase={{ sku: sku.sku, descricao: sku.descricao, coordenador: coord.nome }}
+                          dossieAlvo={dossieAlvo} setDossieAlvo={setDossieAlvo}
+                          recarregar={recarregar}
+                        />
+                      )}
+                      {faseAtual === 'RAZAO_SOCIAL' && (
+                        <div className="grid gap-2">
+                          {(coord.subRows || []).map((exec: any) => (
+                            <ExecutivoRazaoSocial
+                              key={exec.nome}
+                              sku={sku} coordenador={coord} executivo={exec}
+                              meses={meses} bloqueado={bloqueado} responsavelBody={responsavelBody}
+                              dossieAlvo={dossieAlvo} setDossieAlvo={setDossieAlvo}
+                              recarregar={recarregar}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
-  const somaMes = (m: string): number => {
-    let s = 0;
-    const walk = (n: any, gerente: string | null, coordenador: string | null, vendedor: string | null, rz: string | null) => {
-      if (n.tipo === 'produto') { s += valorCliente(gerente || 'SEM GERENTE', coordenador || 'SEM COORDENADOR', vendedor || 'SEM VENDEDOR', rz || '', n.sku, m, n.meses[m]?.meta || 0); return; }
-      const g = n.tipo === 'gerente' ? n.nome : gerente;
-      const co = n.tipo === 'coordenador' ? n.nome : coordenador;
-      const v = n.tipo === 'vendedor' ? n.nome : vendedor;
-      const c = n.tipo === 'cliente' ? n.nome : rz;
-      (n.subRows || []).forEach((f: any) => walk(f, g, co, v, c));
-    };
-    walk(node, ctx.gerente, ctx.coordenador, ctx.vendedor, null);
-    return s;
+/* ── EXECUTIVO (dentro de Coordenador+SKU), expande razões sociais ──── */
+function ExecutivoRazaoSocial({ sku, coordenador, executivo, meses, bloqueado, responsavelBody, dossieAlvo, setDossieAlvo, recarregar }: any) {
+  const [aberto, setAberto] = useState(false);
+  return (
+    <div>
+      <button onClick={() => setAberto(p => !p)} className="w-full flex items-center gap-2 text-left px-2 py-1.5 rounded-lg hover:bg-slate-50">
+        {aberto ? <ChevronDown className="w-3.5 h-3.5 text-slate-400" /> : <ChevronRight className="w-3.5 h-3.5 text-slate-400" />}
+        <span className="text-xs font-black text-slate-600">{executivo.nome}</span>
+        <span className="text-[9px] font-black uppercase tracking-wider text-slate-300">executivo</span>
+      </button>
+      {aberto && (
+        <div className="ml-4 mt-1">
+          <ListaDistribuicao
+            nivel="RAZAO_SOCIAL"
+            itens={(executivo.subRows || []).map((r: any) => ({ chave: r.nome, meses: r.meses }))}
+            sku={sku.sku} meses={meses} teto={executivo.meses}
+            executivoPai={executivo.nome}
+            bloqueado={bloqueado} responsavelBody={responsavelBody}
+            dossieBase={{ sku: sku.sku, descricao: sku.descricao, vendedor: executivo.nome }}
+            dossieAlvo={dossieAlvo} setDossieAlvo={setDossieAlvo}
+            recarregar={recarregar}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── LISTA GENÉRICA DE DISTRIBUIÇÃO (Coordenador|Executivo|RazãoSocial) ──
+   Cada linha mostra 3 campos sincronizados (%, R$, volume). Editar
+   qualquer um recalcula os outros dois localmente; ao sair do campo
+   (onBlur) dispara POST /distribuir só daquele item. ------------------- */
+function ListaDistribuicao({
+  nivel, itens, sku, meses, teto, executivoPai, bloqueado, responsavelBody,
+  dossieBase, dossieAlvo, setDossieAlvo, recarregar,
+}: {
+  nivel: 'COORDENADOR' | 'EXECUTIVO' | 'RAZAO_SOCIAL';
+  itens: Array<{ chave: string; meses: Record<string, any> }>;
+  sku: string; meses: string[]; teto: Record<string, any>; executivoPai?: string;
+  bloqueado: boolean; responsavelBody: any; dossieBase: any;
+  dossieAlvo: any; setDossieAlvo: (v: any) => void; recarregar: () => void;
+}) {
+  const mesFoco = meses[0];
+  // draft local: chave -> {percentual, valor, volume} — só para o mês em foco (1 coluna por vez evita explosão de estado)
+  const [enviando, setEnviando] = useState<Record<string, boolean>>({});
+  const [draft, setDraft] = useState<Record<string, { percentual?: number; valor?: number; volume?: number }>>({});
+
+  const tetoVolume = (m: string) => Math.max(0, Number(teto?.[m]?.meta || 0));
+  const pmvMes = (m: string) => Number(teto?.[m]?.pmv || 0);
+
+  const valoresAtuais = (chave: string, m: string) => {
+    const item = itens.find(i => i.chave === chave);
+    const cel = item?.meses?.[m] || {};
+    const d = draft[`${chave}|${m}`] || {};
+    const volume = d.volume ?? Math.max(0, Number(cel.meta || 0));
+    const pmv = pmvMes(m);
+    const valor = d.valor ?? volume * pmv;
+    const t = tetoVolume(m);
+    const percentual = d.percentual ?? (t > 0 ? volume / t : 0);
+    return { volume, valor, percentual, pmv, cel };
   };
-  const fatMes = (m: string): number => {
-    let f = 0;
-    const walk = (n: any, gerente: string | null, coordenador: string | null, vendedor: string | null, rz: string | null) => {
-      if (n.tipo === 'produto') {
-        const cel = n.meses[m]; if (!cel) return;
-        f += valorCliente(gerente || 'SEM GERENTE', coordenador || 'SEM COORDENADOR', vendedor || 'SEM VENDEDOR', rz || '', n.sku, m, cel.meta || 0) * (cel.pmv || 0); return;
-      }
-      const g = n.tipo === 'gerente' ? n.nome : gerente;
-      const co = n.tipo === 'coordenador' ? n.nome : coordenador;
-      const v = n.tipo === 'vendedor' ? n.nome : vendedor;
-      const c = n.tipo === 'cliente' ? n.nome : rz;
-      (n.subRows || []).forEach((sub: any) => walk(sub, g, co, v, c));
-    };
-    walk(node, ctx.gerente, ctx.coordenador, ctx.vendedor, null);
-    return f;
+
+  const atualizarDraft = (chave: string, m: string, patch: { percentual?: number; valor?: number; volume?: number }) => {
+    setDraft(prev => ({ ...prev, [`${chave}|${m}`]: { ...prev[`${chave}|${m}`], ...patch } }));
+  };
+
+  const onEditarPercentual = (chave: string, m: string, pct: number) => {
+    const t = tetoVolume(m);
+    const pmv = pmvMes(m);
+    const novoVolume = Math.max(0, Math.round((pct / 100) * t));
+    atualizarDraft(chave, m, { percentual: pct / 100, volume: novoVolume, valor: novoVolume * pmv });
+  };
+  const onEditarValor = (chave: string, m: string, valor: number) => {
+    const pmv = pmvMes(m);
+    const t = tetoVolume(m);
+    const novoVolume = pmv > 0 ? Math.round(valor / pmv) : 0;
+    atualizarDraft(chave, m, { valor, volume: novoVolume, percentual: t > 0 ? novoVolume / t : 0 });
+  };
+  const onEditarVolume = (chave: string, m: string, volume: number) => {
+    const pmv = pmvMes(m);
+    const t = tetoVolume(m);
+    atualizarDraft(chave, m, { volume, valor: volume * pmv, percentual: t > 0 ? volume / t : 0 });
+  };
+
+  const confirmarLinha = async (chave: string, m: string) => {
+    const key = `${chave}|${m}`;
+    const d = draft[key];
+    if (!d) return;
+    setEnviando(prev => ({ ...prev, [key]: true }));
+    try {
+      const item: any = { chave };
+      if (d.volume !== undefined) item.novo_volume = Math.round(d.volume);
+      else if (d.valor !== undefined) item.novo_valor = d.valor;
+      else if (d.percentual !== undefined) item.percentual_volume = d.percentual;
+      await axios.post('/api/v1/carteira/distribuir', {
+        sku, mes_projetado: m, nivel, itens: [item],
+        ...(nivel === 'RAZAO_SOCIAL' ? { executivo_pai: executivoPai } : {}),
+        ...responsavelBody,
+      });
+      setDraft(prev => { const n = { ...prev }; delete n[key]; return n; });
+      await recarregar();
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || 'Falha ao distribuir.');
+    } finally {
+      setEnviando(prev => { const n = { ...prev }; delete n[key]; return n; });
+    }
   };
 
   return (
-    <div className="mb-0.5">
-      <div
-        className={`w-full grid gap-2 px-3 py-2 items-center rounded-lg transition-colors
-          ${nivel === 0 ? 'bg-white border border-slate-100 hover:border-slate-200' : 'hover:bg-white'}`}
-        style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(130px, 1fr)) 40px` }}>
-        <button onClick={() => !buscaAtv && toggle(idPath)}
-          className={`flex items-center gap-1.5 min-w-0 text-left ${INDENT[node.tipo] || ''}`}>
-          {aberta ? <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                   : <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
-          <span className={`truncate ${nivel === 0 ? 'font-black text-slate-800 text-sm' : 'font-bold text-slate-600 text-xs'}`}>
-            {node.nome}
-          </span>
-          <span className="text-[9px] font-black uppercase tracking-wider text-slate-300 ml-1 shrink-0">
-            {tipoLabel[node.tipo] || node.tipo}
-          </span>
-        </button>
-        {meses.map((m: string) => (
-          <div key={m} className="text-right">
-            <CampoNumeroEditavel
-              value={fatMes(m)}
-              format={fmtRs}
-              disabled={bloqueado}
-              onChange={valor => setNodeValor(node, m, valor, ctx)}
-              className={`w-full text-right text-xs font-black rounded-md px-2 py-1 border transition-colors
-                ${bloqueado ? 'cursor-not-allowed opacity-60 border-transparent bg-transparent text-slate-500' : 'border-transparent bg-transparent text-indigo-600 hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
-            />
-            <CampoNumeroEditavel
-              value={somaMes(m)}
-              format={fmtCx}
-              disabled={bloqueado}
-              onChange={valor => setNodeVolume(node, m, valor, ctx)}
-              className={`w-full text-right text-[11px] font-bold rounded-md px-2 py-0.5 border transition-colors mt-0.5
-                ${bloqueado ? 'cursor-not-allowed opacity-60 border-transparent bg-transparent text-slate-500' : 'border-transparent bg-transparent text-slate-500 hover:border-slate-200 focus:border-indigo-400 focus:bg-white focus:outline-none'}`}
-            />
-          </div>
-        ))}
+    <div className="grid gap-1">
+      <div className="grid gap-2 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-slate-300"
+        style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(220px, 1fr)) 32px` }}>
+        <div>{nivel === 'COORDENADOR' ? 'Coordenador' : nivel === 'EXECUTIVO' ? 'Executivo' : 'Razão Social'}</div>
+        {meses.map(m => <div key={m} className="text-right">{mesLabel(m)} · % / R$ / cx</div>)}
         <div />
       </div>
-      {aberta && (node.subRows || []).map((f: any, i: number) => (
-        <NoArvore key={(f.nome || f.sku) + i} node={f} nivel={nivel + 1}
-          meses={meses} abertas={abertas} toggle={toggle}
-          valorCliente={valorCliente} setSkuExecutivo={setSkuExecutivo} setSkuExecutivoValor={setSkuExecutivoValor} setCliente={setCliente}
-          somaSkuExecutivo={somaSkuExecutivo}
-          bloqueado={bloqueado} edits={edits}
-          setNodeValor={setNodeValor}
-          setNodeVolume={setNodeVolume}
-          setDossieAlvo={setDossieAlvo}
-          dossieAlvo={dossieAlvo}
-          hierarquia={ctx}
-          idPath={`${idPath}>${f.nome || f.sku}`}
-          buscaAtiva={buscaAtv}
-          setClienteValor={setClienteValor} />
-      ))}
+      {itens.map(item => {
+        const dossieAberto =
+          (nivel === 'COORDENADOR' && dossieAlvo?.sku === dossieBase.sku && dossieAlvo?.coordenador === item.chave && !dossieAlvo?.vendedor) ||
+          (nivel === 'EXECUTIVO' && dossieAlvo?.sku === dossieBase.sku && dossieAlvo?.vendedor === item.chave && !dossieAlvo?.razao) ||
+          (nivel === 'RAZAO_SOCIAL' && dossieAlvo?.sku === dossieBase.sku && dossieAlvo?.vendedor === dossieBase.vendedor && dossieAlvo?.razao === item.chave);
+        return (
+          <div key={item.chave}>
+            <div className="grid gap-2 px-2 py-1.5 items-center rounded-lg hover:bg-slate-50"
+              style={{ gridTemplateColumns: `1fr repeat(${meses.length}, minmax(220px, 1fr)) 32px` }}>
+              <div className="text-xs font-bold text-slate-600 truncate">{item.chave}</div>
+              {meses.map(m => {
+                const key = `${item.chave}|${m}`;
+                const { volume, valor, percentual, pmv, cel } = valoresAtuais(item.chave, m);
+                const carregando = !!enviando[key];
+                return (
+                  <div key={m} className="flex items-center gap-1 justify-end">
+                    <CampoNumeroEditavel
+                      value={Math.round(percentual * 100)}
+                      format={(n: number) => `${n}%`}
+                      disabled={bloqueado || carregando}
+                      onChange={v => onEditarPercentual(item.chave, m, v)}
+                      onBlur={() => confirmarLinha(item.chave, m)}
+                      className={`w-14 text-right text-[11px] font-bold rounded-md px-1.5 py-1 border transition-colors
+                        ${key in draft ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-600'}
+                        ${bloqueado ? 'cursor-not-allowed opacity-60' : 'focus:border-indigo-400 focus:outline-none'}`}
+                    />
+                    <CampoNumeroEditavel
+                      value={valor}
+                      format={fmtRs}
+                      disabled={bloqueado || carregando || pmv <= 0}
+                      onChange={v => onEditarValor(item.chave, m, v)}
+                      onBlur={() => confirmarLinha(item.chave, m)}
+                      title={pmv <= 0 ? 'Sem PMV: edição monetária bloqueada' : undefined}
+                      className={`w-24 text-right text-[11px] font-bold rounded-md px-1.5 py-1 border transition-colors
+                        ${key in draft ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-600'}
+                        ${bloqueado || pmv <= 0 ? 'cursor-not-allowed opacity-60' : 'focus:border-indigo-400 focus:outline-none'}`}
+                    />
+                    <CampoNumeroEditavel
+                      value={volume}
+                      format={fmtCx}
+                      disabled={bloqueado || carregando}
+                      onChange={v => onEditarVolume(item.chave, m, v)}
+                      onBlur={() => confirmarLinha(item.chave, m)}
+                      className={`w-16 text-right text-[11px] font-bold rounded-md px-1.5 py-1 border transition-colors
+                        ${key in draft ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-600'}
+                        ${bloqueado ? 'cursor-not-allowed opacity-60' : 'focus:border-indigo-400 focus:outline-none'}`}
+                    />
+                    {carregando && <Loader2 className="w-3 h-3 animate-spin text-indigo-400" />}
+                    <span className="text-[9px] font-bold text-slate-300 w-14 text-right shrink-0">
+                      bu {fmtCx(cel.bottomup || 0)}{cel.variacao_pct != null ? ` · ${(cel.variacao_pct * 100).toFixed(0)}%` : ''}
+                    </span>
+                  </div>
+                );
+              })}
+              <button
+                onClick={() => setDossieAlvo((prev: any) => dossieAberto ? null : {
+                  ...dossieBase,
+                  ...(nivel === 'COORDENADOR' ? { coordenador: item.chave } : {}),
+                  ...(nivel === 'EXECUTIVO' ? { vendedor: item.chave } : {}),
+                  ...(nivel === 'RAZAO_SOCIAL' ? { razao: item.chave } : {}),
+                })}
+                className={`justify-self-center p-1 rounded-lg transition-colors
+                  ${dossieAberto ? 'bg-violet-100 text-violet-600' : 'text-slate-300 hover:bg-violet-50 hover:text-violet-600'}`}
+                title="Ver dossiê">
+                <LineIcon className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            {dossieAberto && (
+              <div className="ml-4 mr-2 mb-2">
+                <DossieInferior
+                  prefixoApi="/api/v1/carteira"
+                  tipo="sku"
+                  id={dossieBase.sku}
+                  titulo={dossieBase.descricao}
+                  subtitulo={`${dossieBase.sku} · ${item.chave}`}
+                  paramsExtra={
+                    nivel === 'COORDENADOR' ? { coordenador_nome: item.chave } :
+                    nivel === 'EXECUTIVO' ? { vendedor_nome: item.chave } :
+                    { razao_social: item.chave, vendedor_nome: dossieBase.vendedor }
+                  }
+                  onFechar={() => setDossieAlvo(null)}
+                />
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
