@@ -292,6 +292,28 @@ function PreenchimentoMetas() {
     );
   }, [dados, busca]);
 
+  // Cards de totais por mês: soma direto da raiz (SKU já vem com o total
+  // agregado de toda a hierarquia abaixo). "Meta Herdada" = bottomup, o
+  // valor original vindo da Demanda Comercial antes de qualquer ajuste.
+  const totaisPorMes = useMemo(() => {
+    const arvore = (dados?.arvore || []) as any[];
+    const acc: Record<string, { meta: number; herdada: number; fatMeta: number; fatHerdada: number }> = {};
+    meses.forEach(m => { acc[m] = { meta: 0, herdada: 0, fatMeta: 0, fatHerdada: 0 }; });
+    arvore.forEach((sku: any) => {
+      meses.forEach(m => {
+        const cel = sku.meses?.[m]; if (!cel) return;
+        const meta = cel.meta || 0;
+        const herdada = cel.bottomup || 0;
+        const pmv = cel.pmv || 0;
+        acc[m].meta += meta;
+        acc[m].herdada += herdada;
+        acc[m].fatMeta += meta * pmv;
+        acc[m].fatHerdada += herdada * pmv;
+      });
+    });
+    return acc;
+  }, [dados, meses]);
+
   /* ── Ação: travar a fase corrente ─────────────────────────────── */
   const travarFase = async () => {
     if (!confirm('Travar esta fase? A soma dos itens será validada contra a tolerância de ±1%.')) return;
@@ -470,6 +492,42 @@ function PreenchimentoMetas() {
           </div>
         </div>
 
+        {/* Cards de totais por mês: Meta atual vs Meta Herdada (BU original) */}
+        {meses.length > 0 && (
+          <div className="px-6 pb-3 grid gap-2" style={{ gridTemplateColumns: `repeat(${meses.length}, minmax(180px, 1fr))` }}>
+            {meses.map(m => {
+              const t = totaisPorMes[m] || { meta: 0, herdada: 0, fatMeta: 0, fatHerdada: 0 };
+              const dPct = t.herdada > 0 ? ((t.meta - t.herdada) / t.herdada * 100) : null;
+              const dCor = dPct == null ? '#94a3b8' : Math.abs(dPct) >= 15 ? '#e11d48' : Math.abs(dPct) >= 5 ? '#d97706' : '#059669';
+              return (
+                <div key={m} className="bg-slate-50 rounded-xl px-3 py-2 space-y-1.5">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">{mesLabel(m)}</div>
+                  <div>
+                    <div className="text-[9px] font-black uppercase text-indigo-500 mb-0.5">Meta (atual)</div>
+                    <div className="text-sm font-black text-slate-900">{fmtCx(t.meta)} cx</div>
+                    <div className="text-[10px] font-bold text-indigo-600">{fmtRs(t.fatMeta)}</div>
+                  </div>
+                  <div className="h-px bg-slate-200" />
+                  <div>
+                    <div className="text-[9px] font-black uppercase text-slate-400 mb-0.5">Meta Herdada</div>
+                    <div className="text-sm font-black text-slate-700">{fmtCx(t.herdada)} cx</div>
+                    <div className="text-[10px] font-bold text-slate-500">{fmtRs(t.fatHerdada)}</div>
+                  </div>
+                  {dPct != null && (
+                    <div className="flex items-center justify-between rounded-lg px-2 py-1"
+                      style={{ background: Math.abs(dPct) >= 5 ? '#fff7ed' : '#f0fdf4' }}>
+                      <span className="text-[9px] font-black text-slate-400">Δ vs herdada</span>
+                      <span className="text-[11px] font-black" style={{ color: dCor }}>
+                        {dPct >= 0 ? '+' : ''}{dPct.toFixed(1)}%
+                      </span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         {aguardandoUpstream && (
           <div className="mx-6 mb-3 flex items-center gap-3 rounded-xl bg-orange-50 border border-orange-200 px-4 py-3">
             <div className="w-2 h-2 rounded-full bg-orange-400 shrink-0 animate-pulse" />
@@ -611,7 +669,7 @@ function CardSku({
                 </>
               )}
               <div className="text-[9px] font-bold text-slate-300">
-                bottomup {fmtCx(c.bottomup || 0)} · {c.variacao_pct == null ? '—' : `${(c.variacao_pct * 100).toFixed(1)}%`}
+                Meta Herdada {fmtCx(c.bottomup || 0)} · {c.variacao_pct == null ? '—' : `${(c.variacao_pct * 100).toFixed(1)}%`}
               </div>
             </div>
           );
@@ -866,7 +924,7 @@ function ListaDistribuicao({
                     />
                     {carregando && <Loader2 className="w-3 h-3 animate-spin text-indigo-400" />}
                     <span className="text-[9px] font-bold text-slate-300 w-14 text-right shrink-0">
-                      bu {fmtCx(cel.bottomup || 0)}{cel.variacao_pct != null ? ` · ${(cel.variacao_pct * 100).toFixed(0)}%` : ''}
+                      herdada {fmtCx(cel.bottomup || 0)}{cel.variacao_pct != null ? ` · ${(cel.variacao_pct * 100).toFixed(0)}%` : ''}
                     </span>
                   </div>
                 );
@@ -1166,7 +1224,7 @@ function ConsolidadoMetas() {
                   <div className="h-px bg-slate-200" />
                   {/* Comercial */}
                   <div>
-                    <div className="text-[9px] font-black uppercase text-indigo-500 mb-0.5">Comercial (bu)</div>
+                    <div className="text-[9px] font-black uppercase text-indigo-500 mb-0.5">Comercial (Meta Herdada)</div>
                     <div className="text-sm font-black text-slate-700">{fmtCx(t.bu)} cx</div>
                     <div className="text-[10px] font-bold text-indigo-600">{fmtRs(t.fatBu)}</div>
                   </div>
@@ -1174,7 +1232,7 @@ function ConsolidadoMetas() {
                   {dPct != null && (
                     <div className="flex items-center justify-between rounded-lg px-2 py-1"
                       style={{ background: Math.abs(dPct) >= 5 ? '#fff7ed' : '#f0fdf4' }}>
-                      <span className="text-[9px] font-black text-slate-400">Δ meta vs bu</span>
+                      <span className="text-[9px] font-black text-slate-400">Δ meta vs herdada</span>
                       <span className="text-[11px] font-black" style={{ color: dCor }}>
                         {dPct >= 0 ? '+' : ''}{dPct.toFixed(1)}%
                       </span>
@@ -1193,7 +1251,7 @@ function ConsolidadoMetas() {
               {meses.map(m => (
                 <div key={m} className="grid grid-cols-3 gap-1 text-center">
                   <span className="text-violet-400">Meta</span>
-                  <span className="text-indigo-400">BU</span>
+                  <span className="text-indigo-400">Herdada</span>
                   <span className="text-slate-400">Δ%</span>
                 </div>
               ))}
