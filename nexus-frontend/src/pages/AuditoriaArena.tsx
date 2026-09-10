@@ -131,6 +131,18 @@ const pct   = (v: any, d = 1) => v == null ? '—' : `${Number(v).toFixed(d).rep
 const sinal  = (v: any) => { if (v==null) return '—'; const n=Number(v); return `${n>0?'+':''}${n.toFixed(1).replace('.',',')}%`; };
 const num   = (v: any)  => v == null ? '—' : Math.round(Number(v)).toLocaleString('pt-BR');
 const corWmape = (v: number|null) => v==null?COR.neutro:v<=20?'#059669':v<=35?'#d97706':'#e11d48';
+const corMape  = (v: number|null) => v==null?COR.neutro:v<=20?'#059669':v<=35?'#d97706':'#e11d48';
+const corClasse = (c?: string) => {
+  switch (c) {
+    case 'Sob controle':            return '#059669';
+    case 'Superestimando':          return '#e11d48';
+    case 'Subestimando':            return '#2563eb';
+    case 'Errático':                return '#d97706';
+    case 'Sem cobertura de plano':  return '#7c3aed';
+    case 'Sem Meta':                return '#94a3b8';
+    default:                        return '#64748b'; // Atenção e demais
+  }
+};
 const corBias  = (v: number|null) => {
   if (v==null) return COR.neutro;
   if (v >  10) return COR.over;
@@ -378,7 +390,10 @@ function TabelaBias({ itens, modo }: { itens: any[], modo: 'super'|'sub' }) {
             <Th right>Previsto (cx)</Th>
             <Th right>{label}</Th>
             <Th right>BIAS</Th>
+            <Th right>WMAPE</Th>
+            <Th right>MAPE</Th>
             <Th right>Frequência</Th>
+            <Th>Classificação</Th>
           </tr>
         </thead>
         <tbody>
@@ -387,6 +402,7 @@ function TabelaBias({ itens, modo }: { itens: any[], modo: 'super'|'sub' }) {
             const abs   = Math.abs(delta);
             const freqMeses = Math.round(((it.persistencia||0) / 100) * (it.meses||1));
             const freq  = `${freqMeses}/${it.meses||'—'} meses`;
+            const corCl = corClasse(it.classe);
             return (
               <tr key={it.sku} style={{ background: idx%2?'#f9fafb':'#fff', borderBottom:'1px solid #f1f5f9' }}>
                 <Td><code style={{ fontSize:11, color:'#64748b' }}>{it.sku}</code></Td>
@@ -396,11 +412,18 @@ function TabelaBias({ itens, modo }: { itens: any[], modo: 'super'|'sub' }) {
                 <Td right>{num(it.vol_previsto)}</Td>
                 <Td right bold cor={corD}>{ícone} {num(abs)}</Td>
                 <Td right bold cor={corD}>{sinal(it.bias_h)}</Td>
+                <Td right bold cor={corWmape(it.wmape_h)}>{pct(it.wmape_h)}</Td>
+                <Td right bold cor={corMape(it.mape_h)}>{pct(it.mape_h)}</Td>
                 <Td right>
                   <span style={{ fontSize:12, background:(it.persistencia||0)>=70?'#fef2f2':'#f0f9ff',
                     color:(it.persistencia||0)>=70?'#e11d48':'#0284c7',
                     borderRadius:5, padding:'2px 6px', fontWeight:700 }}>
                     {freq}
+                  </span>
+                </Td>
+                <Td>
+                  <span style={{ fontSize:10, fontWeight:800, padding:'2px 8px', borderRadius:6, background:corCl+'18', color:corCl, whiteSpace:'nowrap' }}>
+                    {it.classe || '—'}
                   </span>
                 </Td>
               </tr>
@@ -430,6 +453,7 @@ function TabelaWmape({ itens }: { itens: any[] }) {
             <Th right>WMAPE</Th>
             <Th right>BIAS</Th>
             <Th right>Meses</Th>
+            <Th>Classificação</Th>
           </tr>
         </thead>
         <tbody>
@@ -437,6 +461,7 @@ function TabelaWmape({ itens }: { itens: any[] }) {
             const delta = Math.round(it.vol_previsto - it.vol_real);
             const wc = corWmape(it.wmape_h);
             const bc = corBias(it.bias_h);
+            const corCl = corClasse(it.classe);
             return (
               <tr key={it.sku} style={{ background:idx%2?'#f9fafb':'#fff', borderBottom:'1px solid #f1f5f9' }}>
                 <Td><code style={{ fontSize:11, color:'#64748b' }}>{it.sku}</code></Td>
@@ -450,6 +475,100 @@ function TabelaWmape({ itens }: { itens: any[] }) {
                 <Td right bold cor={wc}>{pct(it.wmape_h)}</Td>
                 <Td right bold cor={bc}>{sinal(it.bias_h)}</Td>
                 <Td right><span style={{ color:'#94a3b8' }}>{it.meses}</span></Td>
+                <Td>
+                  <span style={{ fontSize:10, fontWeight:800, padding:'2px 8px', borderRadius:6, background:corCl+'18', color:corCl, whiteSpace:'nowrap' }}>
+                    {it.classe || '—'}
+                  </span>
+                </Td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function TabelaMape({ itens }: { itens: any[] }) {
+  const sorted = [...itens].filter(i=>i.mape_h!=null).sort((a,b) => (b.mape_h||0)-(a.mape_h||0));
+  if (!sorted.length) return <div style={{ padding:32, textAlign:'center', color:'#94a3b8', fontSize:13 }}>Sem dados.</div>;
+
+  return (
+    <div style={{ overflowX:'auto' }}>
+      <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13 }}>
+        <thead>
+          <tr>
+            <Th>SKU</Th>
+            <Th>Descrição</Th>
+            <Th>Categoria</Th>
+            <Th right>Real (cx)</Th>
+            <Th right>Previsto (cx)</Th>
+            <Th right>MAPE</Th>
+            <Th right>WMAPE</Th>
+            <Th right>BIAS</Th>
+            <Th right>Meses</Th>
+            <Th>Classificação</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((it, idx) => {
+            const mc = corMape(it.mape_h);
+            const wc = corWmape(it.wmape_h);
+            const bc = corBias(it.bias_h);
+            const corCl = corClasse(it.classe);
+            return (
+              <tr key={it.sku} style={{ background:idx%2?'#f9fafb':'#fff', borderBottom:'1px solid #f1f5f9' }}>
+                <Td><code style={{ fontSize:11, color:'#64748b' }}>{it.sku}</code></Td>
+                <Td><span title={it.descricao} style={{ display:'block', maxWidth:220, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{it.descricao}</span></Td>
+                <Td><span style={{ fontSize:11, color:'#64748b' }}>{it.categoria}</span></Td>
+                <Td right>{num(it.vol_real)}</Td>
+                <Td right>{num(it.vol_previsto)}</Td>
+                <Td right bold cor={mc}>{pct(it.mape_h)}</Td>
+                <Td right bold cor={wc}>{pct(it.wmape_h)}</Td>
+                <Td right bold cor={bc}>{sinal(it.bias_h)}</Td>
+                <Td right><span style={{ color:'#94a3b8' }}>{it.meses}</span></Td>
+                <Td>
+                  <span style={{ fontSize:10, fontWeight:800, padding:'2px 8px', borderRadius:6, background:corCl+'18', color:corCl, whiteSpace:'nowrap' }}>
+                    {it.classe || '—'}
+                  </span>
+                </Td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function TabelaWmapeMapeCategoria({ itens }: { itens: any[] }) {
+  const sorted = [...itens].sort((a,b) => (b.wmape_h||0)-(a.wmape_h||0));
+  if (!sorted.length) return <div style={{ padding:32, textAlign:'center', color:'#94a3b8', fontSize:13 }}>Sem dados.</div>;
+  return (
+    <div style={{ overflowX:'auto' }}>
+      <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+        <thead>
+          <tr style={{ background:'#f8fafc' }}>
+            {['Categoria','Real (cx)','Previsto (cx)','WMAPE','MAPE','BIAS','Classificação'].map(h => (
+              <th key={h} style={{ padding:'8px 14px', textAlign: h==='Categoria' ? 'left' : 'right',
+                fontSize:10, fontWeight:800, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8' }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((r, i) => {
+            const corCl = corClasse(r.classe);
+            return (
+              <tr key={r.categoria} style={{ background: i%2 ? '#f9fafb' : '#fff', borderBottom:'1px solid #f1f5f9' }}>
+                <td style={{ padding:'8px 14px', fontWeight:700, color:'#334155' }}>{r.categoria}</td>
+                <td style={{ padding:'8px 14px', textAlign:'right', color:'#475569' }}>{num(r.vol_real)}</td>
+                <td style={{ padding:'8px 14px', textAlign:'right', color:'#475569' }}>{num(r.vol_previsto)}</td>
+                <td style={{ padding:'8px 14px', textAlign:'right', fontWeight:900, color:corWmape(r.wmape_h) }}>{pct(r.wmape_h)}</td>
+                <td style={{ padding:'8px 14px', textAlign:'right', fontWeight:900, color:corMape(r.mape_h) }}>{pct(r.mape_h)}</td>
+                <td style={{ padding:'8px 14px', textAlign:'right', fontWeight:700, color:corBias(r.bias_h) }}>{sinal(r.bias_h)}</td>
+                <td style={{ padding:'8px 14px', textAlign:'right' }}>
+                  <span style={{ fontSize:10, fontWeight:800, padding:'2px 8px', borderRadius:6, background:corCl+'18', color:corCl, whiteSpace:'nowrap' }}>{r.classe || '—'}</span>
+                </td>
               </tr>
             );
           })}
@@ -469,9 +588,10 @@ export default function AuditoriaArena() {
   const [sku, setSku]             = useState('');
   const [evolucao, setEvolucao]   = useState<any>(null);
   const [diag, setDiag]           = useState<any[]>([]);
+  const [diagCat, setDiagCat]     = useState<any[]>([]);
   const [loading, setLoading]     = useState(false);
   const [erro, setErro]           = useState('');
-  const [abaTabela, setAbaTabela] = useState<'wmape'|'super'|'sub'>('wmape');
+  const [abaTabela, setAbaTabela] = useState<'wmape'|'mape'|'super'|'sub'>('wmape');
   const [abaKpi, setAbaKpi]       = useState<'acuracia'|'fillrate'|'agente'>('acuracia');
   const [unidade, setUnidade]     = useState<'cx'|'rs'>('cx');
   // Agente
@@ -510,20 +630,22 @@ export default function AuditoriaArena() {
     if (!mesesSel.length) { setEvolucao(null); setDiag([]); return; }
     setLoading(true); setErro('');
     try {
-      const [ev, dg, fr, frCat, frSku] = await Promise.all([
+      const [ev, dg, dgCat, fr, frCat, frSku] = await Promise.all([
         axios.get(`/api/v1/kpis/evolucao?${qs}`),
         axios.get(`/api/v1/kpis/diagnostico?${qs}&nivel=sku`),
+        axios.get(`/api/v1/kpis/diagnostico?${qs}&nivel=categoria`),
         axios.get(`/api/v1/kpis/fill-rate?${qs}&nivel=evolucao`),
         axios.get(`/api/v1/kpis/fill-rate?${qs}&nivel=categoria`),
         axios.get(`/api/v1/kpis/fill-rate?${qs}&nivel=sku`),
       ]);
       setEvolucao(ev.data);
       setDiag(dg.data?.itens || []);
+      setDiagCat(dgCat.data?.itens || []);
       setFillRate(fr.data);
       setFillDiag({ cat: frCat.data?.itens || [], sku: frSku.data?.itens || [] });
     } catch(e: any) {
       setErro(e?.response?.data?.detail || 'Erro ao carregar.');
-      setEvolucao(null); setDiag([]);
+      setEvolucao(null); setDiag([]); setDiagCat([]);
     } finally { setLoading(false); }
   }, [qs]);
 
@@ -693,11 +815,15 @@ export default function AuditoriaArena() {
           <div style={{ display:'flex', gap:12, marginBottom:16, flexWrap:'wrap' }}>
             <Card label="WMAPE Humano" valor={resumo.wmape_h} cor={corWmape(resumo.wmape_h)}
               sub={`Acurácia ${pct(100-resumo.wmape_h)}`} />
+            <Card label="MAPE Humano" valor={resumo.mape_h} cor={corMape(resumo.mape_h)}
+              sub="Média simples do erro por SKU (não ponderada por volume)" />
             <Card label="Bias Humano" valor={resumo.bias_h} cor={corBias(resumo.bias_h)}
               sub={(resumo.bias_h||0)>5?'▲ Superestimando':(resumo.bias_h||0)<-5?'▼ Subestimando':'✓ Equilibrado'} />
             {temIA && (
               <>
                 <Card label="WMAPE IA" valor={resumo.wmape_ia} cor={corWmape(resumo.wmape_ia)}
+                  sub={`${resumo.meses_com_ia||0} meses`} />
+                <Card label="MAPE IA" valor={resumo.mape_ia} cor={corMape(resumo.mape_ia)}
                   sub={`${resumo.meses_com_ia||0} meses`} />
                 <Card label="FVA" valor={resumo.fva}
                   cor={(resumo.fva||0)<0?'#059669':(resumo.fva||0)>0?'#e11d48':'#94a3b8'}
@@ -750,12 +876,25 @@ export default function AuditoriaArena() {
           </div>
         )}
 
+        {/* Tabela por categoria — WMAPE e MAPE lado a lado (colunas) */}
+        {diagCat.length > 0 && (
+          <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden', marginBottom:16 }}>
+            <div style={{ padding:'14px 18px', fontWeight:800, fontSize:13, borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
+              WMAPE e MAPE por categoria — ordenado pelo maior WMAPE
+            </div>
+            <TabelaWmapeMapeCategoria itens={diagCat} />
+          </div>
+        )}
+
         {/* TABELAS */}
         {diag.length > 0 && (
           <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
             <div style={{ display:'flex', borderBottom:'1px solid #f1f5f9', padding:'0 18px', background:'#fafafa' }}>
               <button style={styleTab(abaTabela==='wmape')} onClick={()=>setAbaTabela('wmape')}>
                 Ranking WMAPE ({diag.length})
+              </button>
+              <button style={styleTab(abaTabela==='mape')} onClick={()=>setAbaTabela('mape')}>
+                Ranking MAPE ({diag.filter(i=>i.mape_h!=null).length})
               </button>
               <button style={styleTab(abaTabela==='super')} onClick={()=>setAbaTabela('super')}>
                 <TrendingUp style={{ width:13, display:'inline', marginRight:4, color:abaTabela==='super'?'#e11d48':'#94a3b8' }}/>
@@ -769,13 +908,15 @@ export default function AuditoriaArena() {
 
             {/* Legenda da aba */}
             <div style={{ padding:'10px 18px', background:'#fafafa', borderBottom:'1px solid #f1f5f9', fontSize:11, color:'#64748b' }}>
-              {abaTabela==='wmape' && '↑ Ordenado do maior erro para o menor. Δ = Previsto − Real: ▲ excesso de caixas planejadas, ▼ falta de caixas planejadas.'}
+              {abaTabela==='wmape' && '↑ Ordenado do maior erro para o menor (ponderado por volume). Δ = Previsto − Real: ▲ excesso de caixas planejadas, ▼ falta de caixas planejadas.'}
+              {abaTabela==='mape'  && '↑ Ordenado do maior erro médio para o menor (média simples por SKU, sem ponderar por volume) — expõe SKUs de baixo volume que o WMAPE dilui.'}
               {abaTabela==='super' && '↑ Ordenado por excesso absoluto em caixas. Frequência em vermelho quando o erro ocorre em ≥ 70% dos meses — indica padrão sistemático, não acaso.'}
               {abaTabela==='sub'   && '↑ Ordenado por falta absoluta em caixas. Frequência em vermelho quando o erro ocorre em ≥ 70% dos meses — risco de ruptura recorrente.'}
             </div>
 
             <div style={{ padding:'0 0 4px' }}>
               {abaTabela==='wmape' && <TabelaWmape itens={diag} />}
+              {abaTabela==='mape'  && <TabelaMape   itens={diag} />}
               {abaTabela==='super' && <TabelaBias  itens={diag} modo="super" />}
               {abaTabela==='sub'   && <TabelaBias  itens={diag} modo="sub" />}
             </div>
