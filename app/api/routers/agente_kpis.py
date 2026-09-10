@@ -212,7 +212,7 @@ def _chave(*partes) -> str:
     return hashlib.sha256(bruto.encode("utf-8")).hexdigest()[:40]
 
 
-def janela_do_ciclo(ciclo: str) -> Dict[str, Any]:
+def janela_do_ciclo(ciclo: str, data_ini=None, data_fim=None) -> Dict[str, Any]:
     """
     Deriva a janela de analise do ciclo ativo.
 
@@ -231,6 +231,33 @@ def janela_do_ciclo(ciclo: str) -> Dict[str, Any]:
     seguinte, uma inconsistencia visivel para quem lia com atencao.
     Unificar em YTD elimina a divergencia: e sempre o mesmo periodo.
     """
+    if (data_ini is None) != (data_fim is None):
+        raise ValueError("O período da análise exige data inicial e final.")
+    if data_ini is not None:
+        if data_ini > data_fim:
+            raise ValueError("A data inicial deve ser anterior à data final.")
+        ini = data_ini.replace(day=1)
+        fim = data_fim.replace(day=1)
+        meses_detalhe = []
+        d = ini
+        while d <= fim:
+            meses_detalhe.append(d.strftime("%Y-%m"))
+            d += relativedelta(months=1)
+        ini_6m = max(ini, fim - relativedelta(months=5))
+        ini_3m = max(ini, fim - relativedelta(months=2))
+        return {
+            "ciclo": ciclo,
+            "mes_referencia": fim.strftime("%Y-%m"),
+            "mes_num_fim": fim.month,
+            "anos_yoy": [fim.year],
+            "meses_detalhe": meses_detalhe,
+            "ini_detalhe": ini.isoformat(),
+            "fim_detalhe": data_fim.isoformat(),
+            "ini_6m": ini_6m.isoformat(),
+            "ini_3m": ini_3m.isoformat(),
+            "rotulo_yoy": f"{ini.strftime('%b')}-{fim.strftime('%b')}/{{ano}}",
+        }
+
     mes, ano = int(ciclo[:2]), int(ciclo[3:])
     ref = datetime.date(ano, mes, 1) - relativedelta(months=1)   # ultimo fechado
 
@@ -289,6 +316,28 @@ FROM mart_acuracia_sku_mes a
 WHERE a.qt_pedido > 0
   AND EXTRACT(MONTH FROM a.mes) <= :mes_fim
   AND EXTRACT(YEAR  FROM a.mes) = ANY(:anos)
+GROUP BY 1 ORDER BY 1
+"""
+
+_SQL_PERIODO_RESUMO = """
+SELECT EXTRACT(YEAR FROM a.mes)::int              AS ano,
+       SUM(a.qt_pedido)                           AS qt_pedido,
+       SUM(a.vl_pedido)                           AS vl_pedido,
+       SUM(a.qt_entregue)                         AS qt_entregue,
+       SUM(a.vl_entregue)                         AS vl_entregue,
+       SUM(a.qt_corte)                            AS qt_corte,
+       SUM(a.vl_corte)                            AS vl_corte,
+       SUM(a.qt_corte_transferencia)               AS qt_corte_transf,
+       SUM(a.vl_corte_transferencia)               AS vl_corte_transf,
+       SUM(a.qt_plano)                            AS qt_plano,
+       SUM(a.erro_abs_cx)                         AS erro_abs,
+       SUM(a.qt_pedido) FILTER (WHERE a.tem_plano) AS qt_com_plano,
+       SUM(a.vl_excesso_plano)                    AS vl_excesso,
+       SUM(a.vl_perda_subplano)                   AS vl_subplano,
+       COUNT(DISTINCT a.sku)                      AS n_skus
+FROM mart_acuracia_sku_mes a
+WHERE a.qt_pedido > 0
+  AND a.mes >= CAST(:ini AS date) AND a.mes <= CAST(:fim AS date)
 GROUP BY 1 ORDER BY 1
 """
 
@@ -484,16 +533,16 @@ def montar_dataset_escopo(db: Session, escopo: Dict[str, Any],
 
 def montar_dataset(db: Session, meses: List[str] = None,
                    base: str = "pedido", unidade: str = "cx",
-                   ciclo: str = None) -> Dict[str, Any]:
+                   ciclo: str = None, data_ini=None, data_fim=None) -> Dict[str, Any]:
     """
     Monta o dataset do ciclo ativo.
 
-    `meses`, `base` e `unidade` sao aceitos por compatibilidade com o
-    frontend e IGNORADOS: o relatorio nao depende de filtro. A janela vem
-    do ciclo ativo no painel admin.
+    `meses`, `base` e `unidade` sao aceitos por compatibilidade. Quando
+    data_ini/data_fim sao informados, o dataset inteiro usa exatamente esse
+    intervalo, inclusive o resumo anual e o cache do chat.
     """
     ciclo = ciclo or _ciclo_atual(db)
-    jan   = janela_do_ciclo(ciclo)
+    jan   = janela_do_ciclo(ciclo, data_ini=data_ini, data_fim=data_fim)
 
     p_det = {"ini": jan["ini_detalhe"], "fim": jan["fim_detalhe"]}
 
@@ -509,8 +558,13 @@ def montar_dataset(db: Session, meses: List[str] = None,
 
     # ---- YoY: mesmo recorte de meses em cada ano ----
     yoy = []
-    for r in db.execute(text(_SQL_YOY),
-                        {"mes_fim": jan["mes_num_fim"], "anos": jan["anos_yoy"]}).fetchall():
+    resumo_sql = _SQL_PERIODO_RESUMO if data_ini is not None else _SQL_YOY
+    resumo_params = (
+        {"ini": jan["ini_detalhe"], "fim": jan["fim_detalhe"]}
+        if data_ini is not None
+        else {"mes_fim": jan["mes_num_fim"], "anos": jan["anos_yoy"]}
+    )
+    for r in db.execute(text(resumo_sql), resumo_params).fetchall():
         qp = float(r.qt_pedido or 0)
         yoy.append({
             "ano":        int(r.ano),
@@ -1228,7 +1282,8 @@ FORMATO DA RESPOSTA:
 def responder_pergunta(db: Session, pergunta: str,
                        meses: List[str] = None, base: str = "pedido",
                        unidade: str = "cx", historico: List[dict] = None,
-                       ciclo: str = None) -> Dict[str, Any]:
+                       ciclo: str = None, data_ini=None,
+                       data_fim=None) -> Dict[str, Any]:
     """
     Responde uma pergunta sobre o ciclo.
 
@@ -1240,7 +1295,7 @@ def responder_pergunta(db: Session, pergunta: str,
 
     # Versiona a chave para que respostas antigas, eventualmente truncadas por
     # um limite menor de tokens, não sejam devolvidas indefinidamente.
-    ch = _chave("chat-v2", ciclo, _normalizar(pergunta))
+    ch = _chave("chat-v3", ciclo, data_ini, data_fim, _normalizar(pergunta))
     r = db.execute(text("""
         SELECT resposta FROM agente_chat_cache
         WHERE ciclo_sop = :c AND chave = :k
@@ -1248,7 +1303,9 @@ def responder_pergunta(db: Session, pergunta: str,
     if r:
         return {"resposta": r.resposta, "do_cache": True}
 
-    ds = _dataset_salvo(db, ciclo) or montar_dataset(db, ciclo=ciclo)
+    ds = montar_dataset(
+        db, ciclo=ciclo, data_ini=data_ini, data_fim=data_fim,
+    )
 
     msgs = []
     for h in (historico or [])[-4:]:

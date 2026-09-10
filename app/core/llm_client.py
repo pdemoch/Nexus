@@ -6,7 +6,7 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 logger = logging.getLogger(__name__)
-DEFAULT_MAX_OUTPUT_TOKENS = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "8192"))
+DEFAULT_MAX_OUTPUT_TOKENS = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "100000"))
 
 
 def _provider_order() -> List[str]:
