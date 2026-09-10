@@ -320,6 +320,7 @@ def montar_contexto_categoria(db: Session, categoria: str,
     skus = []
     for r in db.execute(text(_SQL_SKUS_DA_CATEGORIA), p).fetchall():
         qps = float(r.qt_pedido or 0)
+        serie_sku = mensal_por_sku.get(r.sku, [])
         skus.append({
             "sku": r.sku, "descricao": r.descricao, "maturidade": r.maturidade,
             "qt_pedido": round(qps), "qt_plano": round(float(r.qt_plano or 0)),
@@ -334,7 +335,7 @@ def montar_contexto_categoria(db: Session, categoria: str,
             "vl_subplano": round(float(r.vl_subplano or 0)),
             "pmv": _r(r.pmv, 4),
             "sem_plano": not bool(r.sempre_com_plano),
-            "mensal": mensal_por_sku.get(r.sku, []),
+            "mensal": serie_sku,
         })
 
     return {"janela": jan, "categoria": categoria_dict, "mensal": mensal, "skus": skus}
@@ -364,9 +365,10 @@ def montar_contexto_sku(db: Session, sku: str,
     mensal_sku = []
     for r in db.execute(text(_SQL_SKU_MENSAL),
                         {"sku": sku, "ini": jan["ini"], "fim": jan["fim"]}).fetchall():
+        qpm = float(r.qt_pedido or 0)
         mensal_sku.append({
             "mes": r.mes,
-            "qt_pedido":   round(float(r.qt_pedido or 0)),
+            "qt_pedido":   round(qpm),
             "qt_plano":    round(float(r.qt_plano or 0)),
             "qt_entregue": round(float(r.qt_entregue or 0)),
             "qt_corte":    round(float(r.qt_corte or 0)),
@@ -408,6 +410,7 @@ REGRAS INEGOCIAVEIS
   ruptura de suprimento.
 - NUNCA atribua a avaliacao a uma area, departamento ou responsavel especifico.
 - Todo numero citado deve existir no JSON de entrada. Nao estime nem invente.
+- WMAPE = soma dos erros absolutos / soma do vendido, ponderado por volume.
 """
 
 _SYSTEM_PLANEJADOR_BATCH = f"""Voce e o Planejador de Demanda desta categoria. Sua funcao e

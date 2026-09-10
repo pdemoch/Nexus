@@ -170,7 +170,7 @@ export default function AssistenteChat({ isCollapsed }: { isCollapsed: boolean }
                 <Sparkles className="mb-3 h-10 w-10 text-violet-300" />
                 <div className="max-w-md text-sm font-bold text-slate-500">Faça a pergunta. O Nexus Bot identifica se deve consultar Demanda, Indicadores ou Financeiro.</div>
                 <div className="mt-3 flex flex-wrap justify-center gap-2 text-[11px] text-slate-500">
-                  <span className="rounded-full bg-indigo-50 px-2.5 py-1"><BarChart3 className="mr-1 inline w-3 h-3" /> WMAPE, MAPE e BIAS</span>
+                  <span className="rounded-full bg-indigo-50 px-2.5 py-1"><BarChart3 className="mr-1 inline w-3 h-3" /> WMAPE e BIAS</span>
                   <span className="rounded-full bg-violet-50 px-2.5 py-1"><Compass className="mr-1 inline w-3 h-3" /> Plano e demanda por SKU</span>
                   <span className="rounded-full bg-emerald-50 px-2.5 py-1"><Coins className="mr-1 inline w-3 h-3" /> PMR, PMP e carteira</span>
                 </div>

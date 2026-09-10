@@ -131,7 +131,6 @@ const pct   = (v: any, d = 1) => v == null ? '—' : `${Number(v).toFixed(d).rep
 const sinal  = (v: any) => { if (v==null) return '—'; const n=Number(v); return `${n>0?'+':''}${n.toFixed(1).replace('.',',')}%`; };
 const num   = (v: any)  => v == null ? '—' : Math.round(Number(v)).toLocaleString('pt-BR');
 const corWmape = (v: number|null) => v==null?COR.neutro:v<=20?'#059669':v<=35?'#d97706':'#e11d48';
-const corMape  = (v: number|null) => v==null?COR.neutro:v<=20?'#059669':v<=35?'#d97706':'#e11d48';
 const corClasse = (c?: string) => {
   switch (c) {
     case 'Sob controle':            return '#059669';
@@ -391,7 +390,6 @@ function TabelaBias({ itens, modo }: { itens: any[], modo: 'super'|'sub' }) {
             <Th right>{label}</Th>
             <Th right>BIAS</Th>
             <Th right>WMAPE</Th>
-            <Th right>MAPE</Th>
             <Th right>Frequência</Th>
             <Th>Classificação</Th>
           </tr>
@@ -413,7 +411,6 @@ function TabelaBias({ itens, modo }: { itens: any[], modo: 'super'|'sub' }) {
                 <Td right bold cor={corD}>{ícone} {num(abs)}</Td>
                 <Td right bold cor={corD}>{sinal(it.bias_h)}</Td>
                 <Td right bold cor={corWmape(it.wmape_h)}>{pct(it.wmape_h)}</Td>
-                <Td right bold cor={corMape(it.mape_h)}>{pct(it.mape_h)}</Td>
                 <Td right>
                   <span style={{ fontSize:12, background:(it.persistencia||0)>=70?'#fef2f2':'#f0f9ff',
                     color:(it.persistencia||0)>=70?'#e11d48':'#0284c7',
@@ -489,62 +486,10 @@ function TabelaWmape({ itens }: { itens: any[] }) {
   );
 }
 
-function TabelaMape({ itens }: { itens: any[] }) {
-  const sorted = [...itens].filter(i=>i.mape_h!=null).sort((a,b) => (b.mape_h||0)-(a.mape_h||0));
-  if (!sorted.length) return <div style={{ padding:32, textAlign:'center', color:'#94a3b8', fontSize:13 }}>Sem dados.</div>;
-
-  return (
-    <div style={{ overflowX:'auto' }}>
-      <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13 }}>
-        <thead>
-          <tr>
-            <Th>SKU</Th>
-            <Th>Descrição</Th>
-            <Th>Categoria</Th>
-            <Th right>Real (cx)</Th>
-            <Th right>Previsto (cx)</Th>
-            <Th right>MAPE</Th>
-            <Th right>WMAPE</Th>
-            <Th right>BIAS</Th>
-            <Th right>Meses</Th>
-            <Th>Classificação</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {sorted.map((it, idx) => {
-            const mc = corMape(it.mape_h);
-            const wc = corWmape(it.wmape_h);
-            const bc = corBias(it.bias_h);
-            const corCl = corClasse(it.classe);
-            return (
-              <tr key={it.sku} style={{ background:idx%2?'#f9fafb':'#fff', borderBottom:'1px solid #f1f5f9' }}>
-                <Td><code style={{ fontSize:11, color:'#64748b' }}>{it.sku}</code></Td>
-                <Td><span title={it.descricao} style={{ display:'block', maxWidth:220, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{it.descricao}</span></Td>
-                <Td><span style={{ fontSize:11, color:'#64748b' }}>{it.categoria}</span></Td>
-                <Td right>{num(it.vol_real)}</Td>
-                <Td right>{num(it.vol_previsto)}</Td>
-                <Td right bold cor={mc}>{pct(it.mape_h)}</Td>
-                <Td right bold cor={wc}>{pct(it.wmape_h)}</Td>
-                <Td right bold cor={bc}>{sinal(it.bias_h)}</Td>
-                <Td right><span style={{ color:'#94a3b8' }}>{it.meses}</span></Td>
-                <Td>
-                  <span style={{ fontSize:10, fontWeight:800, padding:'2px 8px', borderRadius:6, background:corCl+'18', color:corCl, whiteSpace:'nowrap' }}>
-                    {it.classe || '—'}
-                  </span>
-                </Td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function MatrizCategoriaMes({ matriz, metrica }: { matriz: any, metrica: 'wmape'|'mape' }) {
+function MatrizCategoriaMes({ matriz }: { matriz: any }) {
   const categorias: string[] = matriz?.categorias || [];
   const meses: string[]      = matriz?.meses || [];
-  const dados: Record<string, Record<string, number|null>> = matriz?.[metrica] || {};
+  const dados: Record<string, Record<string, number|null>> = matriz?.wmape || {};
 
   if (!categorias.length || !meses.length)
     return <div style={{ padding:32, textAlign:'center', color:'#94a3b8', fontSize:13 }}>Sem dados.</div>;
@@ -611,7 +556,7 @@ export default function AuditoriaArena() {
   const [matrizCat, setMatrizCat] = useState<any>(null);
   const [loading, setLoading]     = useState(false);
   const [erro, setErro]           = useState('');
-  const [abaTabela, setAbaTabela] = useState<'wmape'|'mape'|'super'|'sub'>('wmape');
+  const [abaTabela, setAbaTabela] = useState<'wmape'|'super'|'sub'>('wmape');
   const [abaKpi, setAbaKpi]       = useState<'acuracia'|'fillrate'|'agente'>('acuracia');
   const [unidade, setUnidade]     = useState<'cx'|'rs'>('cx');
   // Agente
@@ -835,15 +780,11 @@ export default function AuditoriaArena() {
           <div style={{ display:'flex', gap:12, marginBottom:16, flexWrap:'wrap' }}>
             <Card label="WMAPE Humano" valor={resumo.wmape_h} cor={corWmape(resumo.wmape_h)}
               sub={`Acurácia ${pct(100-resumo.wmape_h)}`} />
-            <Card label="MAPE Humano" valor={resumo.mape_h} cor={corMape(resumo.mape_h)}
-              sub="Média simples do erro por SKU (não ponderada por volume)" />
             <Card label="Bias Humano" valor={resumo.bias_h} cor={corBias(resumo.bias_h)}
               sub={(resumo.bias_h||0)>5?'▲ Superestimando':(resumo.bias_h||0)<-5?'▼ Subestimando':'✓ Equilibrado'} />
             {temIA && (
               <>
                 <Card label="WMAPE IA" valor={resumo.wmape_ia} cor={corWmape(resumo.wmape_ia)}
-                  sub={`${resumo.meses_com_ia||0} meses`} />
-                <Card label="MAPE IA" valor={resumo.mape_ia} cor={corMape(resumo.mape_ia)}
                   sub={`${resumo.meses_com_ia||0} meses`} />
                 <Card label="FVA" valor={resumo.fva}
                   cor={(resumo.fva||0)<0?'#059669':(resumo.fva||0)>0?'#e11d48':'#94a3b8'}
@@ -874,12 +815,6 @@ export default function AuditoriaArena() {
                 { y:35, cor:'#e11d48', label:'Crítico — acima de 35% o plano não tem base confiável de previsão' },
               ]} />
 
-            <Grafico dados={serie} chaveH="mape_h" chaveIA="mape_ia" titulo="MAPE (%)"
-              legendaRefs={[
-                { y:20, cor:'#059669', label:'Meta — abaixo de 20% a acurácia é adequada para o plano tático' },
-                { y:35, cor:'#e11d48', label:'Crítico — acima de 35% o plano não tem base confiável de previsão' },
-              ]} />
-
             <Grafico dados={serie} chaveH="bias_h" chaveIA="bias_ia" titulo="BIAS (%)"
               refZero
               legendaRefs={[
@@ -902,20 +837,14 @@ export default function AuditoriaArena() {
           </div>
         )}
 
-        {/* Matriz Categoria x Mês — WMAPE em cima, MAPE embaixo (estilo Power BI) */}
+        {/* Matriz Categoria x Mês */}
         {matrizCat && matrizCat.categorias?.length > 0 && (
           <div style={{ display:'flex', flexDirection:'column', gap:16, marginBottom:16 }}>
             <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
               <div style={{ padding:'14px 18px', fontWeight:800, fontSize:13, borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
                 WMAPE por categoria — mês a mês
               </div>
-              <MatrizCategoriaMes matriz={matrizCat} metrica="wmape" />
-            </div>
-            <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
-              <div style={{ padding:'14px 18px', fontWeight:800, fontSize:13, borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
-                MAPE por categoria — mês a mês
-              </div>
-              <MatrizCategoriaMes matriz={matrizCat} metrica="mape" />
+              <MatrizCategoriaMes matriz={matrizCat} />
             </div>
             <div style={{ fontSize:10, color:'#94a3b8', padding:'0 4px' }}>
               Verde ≤ 20% (adequado) · Amarelo ≤ 35% (atenção) · Laranja ≤ 60% · Vermelho &gt; 60% (crítico).
@@ -930,9 +859,6 @@ export default function AuditoriaArena() {
               <button style={styleTab(abaTabela==='wmape')} onClick={()=>setAbaTabela('wmape')}>
                 Ranking WMAPE ({diag.length})
               </button>
-              <button style={styleTab(abaTabela==='mape')} onClick={()=>setAbaTabela('mape')}>
-                Ranking MAPE ({diag.filter(i=>i.mape_h!=null).length})
-              </button>
               <button style={styleTab(abaTabela==='super')} onClick={()=>setAbaTabela('super')}>
                 <TrendingUp style={{ width:13, display:'inline', marginRight:4, color:abaTabela==='super'?'#e11d48':'#94a3b8' }}/>
                 Superestimando ({nSuper})
@@ -946,14 +872,12 @@ export default function AuditoriaArena() {
             {/* Legenda da aba */}
             <div style={{ padding:'10px 18px', background:'#fafafa', borderBottom:'1px solid #f1f5f9', fontSize:11, color:'#64748b' }}>
               {abaTabela==='wmape' && '↑ Ordenado do maior erro para o menor (ponderado por volume). Δ = Previsto − Real: ▲ excesso de caixas planejadas, ▼ falta de caixas planejadas.'}
-              {abaTabela==='mape'  && '↑ Ordenado do maior erro médio para o menor (média simples por SKU, sem ponderar por volume) — expõe SKUs de baixo volume que o WMAPE dilui.'}
               {abaTabela==='super' && '↑ Ordenado por excesso absoluto em caixas. Frequência em vermelho quando o erro ocorre em ≥ 70% dos meses — indica padrão sistemático, não acaso.'}
               {abaTabela==='sub'   && '↑ Ordenado por falta absoluta em caixas. Frequência em vermelho quando o erro ocorre em ≥ 70% dos meses — risco de ruptura recorrente.'}
             </div>
 
             <div style={{ padding:'0 0 4px' }}>
               {abaTabela==='wmape' && <TabelaWmape itens={diag} />}
-              {abaTabela==='mape'  && <TabelaMape   itens={diag} />}
               {abaTabela==='super' && <TabelaBias  itens={diag} modo="super" />}
               {abaTabela==='sub'   && <TabelaBias  itens={diag} modo="sub" />}
             </div>
@@ -1208,69 +1132,20 @@ export default function AuditoriaArena() {
               </div>
             )}
 
-            {/* Chat */}
-            <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
-                <div style={{ padding:'14px 20px', borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
-                  <div style={{ fontSize:12, fontWeight:900, color:'#0f172a' }}>Perguntas sobre os indicadores</div>
-                  <div style={{ fontSize:10.5, color:'#94a3b8', marginTop:2 }}>
-                    O agente responde apenas com base nos dados do recorte selecionado.
-                  </div>
+            {/* Chat consolidado no Nexus Bot — o widget flutuante global (canto
+                inferior direito) responde no modo "Indicadores" com o mesmo
+                contexto de WMAPE/BIAS/fill rate/YoY. */}
+            <div style={{ background:'#faf5ff', borderRadius:14, border:'1px dashed #d8b4fe',
+              padding:'20px 24px', display:'flex', alignItems:'center', gap:14 }}>
+              <Sparkles style={{ width:22, color:'#7c3aed', flexShrink:0 }} />
+              <div>
+                <div style={{ fontSize:12.5, fontWeight:900, color:'#334155' }}>
+                  Perguntas sobre os indicadores agora são no Nexus Bot
                 </div>
-
-                <div style={{ maxHeight:560, overflowY:'auto', padding: chat.length ? '16px 20px' : 0 }}>
-                  {chat.map((m, i) => (
-                    <div key={i} style={{ marginBottom:14, display:'flex',
-                      justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
-                      <div style={{ maxWidth: m.role === 'user' ? '82%' : '96%',
-                        padding:'10px 14px', borderRadius:12, fontSize:12.5, lineHeight:1.6,
-                        background: m.role === 'user' ? '#eef2ff' : '#f8fafc',
-                        color: m.role === 'user' ? '#3730a3' : '#334155',
-                        border: `1px solid ${m.role === 'user' ? '#e0e7ff' : '#f1f5f9'}`,
-                        whiteSpace: m.role === 'user' ? 'pre-wrap' : 'normal' }}>
-                        {m.role === 'assistant' ? renderChatMarkdown(m.content) : m.content}
-                      </div>
-                    </div>
-                  ))}
-                  {respondendo && (
-                    <div style={{ display:'flex', gap:7, alignItems:'center', color:'#94a3b8', fontSize:12, padding:'4px 2px' }}>
-                      <Loader2 style={{ width:13 }} className="spin" /> Consultando os dados…
-                    </div>
-                  )}
+                <div style={{ fontSize:11.5, color:'#7c3aed', marginTop:3 }}>
+                  Abra o Nexus Bot no canto inferior direito e selecione o modo "Indicadores".
                 </div>
-
-                {/* Sugestões rápidas */}
-                {!chat.length && (
-                  <div style={{ padding:'14px 20px', display:'flex', gap:7, flexWrap:'wrap' }}>
-                    {[
-                      'Qual categoria mais piorou vs ano passado?',
-                      'Onde o corte é falha de planejamento e não de operação?',
-                      'A IA está melhor que o humano? Em quais categorias?',
-                      'Quais SKUs têm viés sistemático?',
-                    ].map(s => (
-                      <button key={s} onClick={() => setPergunta(s)}
-                        style={{ fontSize:11, padding:'6px 12px', borderRadius:16, cursor:'pointer',
-                          border:'1px solid #e2e8f0', background:'#fff', color:'#64748b', fontWeight:600 }}>
-                        {s}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                <div style={{ display:'flex', gap:8, padding:'14px 20px', borderTop:'1px solid #f1f5f9' }}>
-                  <input value={pergunta} onChange={e => setPergunta(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter') enviarPergunta(); }}
-                    placeholder="Pergunte sobre WMAPE, BIAS, fill rate, categorias, SKUs…"
-                    style={{ flex:1, border:'1px solid #e2e8f0', borderRadius:10, padding:'10px 14px',
-                      fontSize:12.5, outline:'none' }} />
-                  <button onClick={enviarPergunta} disabled={!pergunta.trim() || respondendo}
-                    style={{ display:'flex', alignItems:'center', gap:6, padding:'10px 18px', borderRadius:10,
-                      border:'none', fontSize:12, fontWeight:800,
-                      cursor: (!pergunta.trim() || respondendo) ? 'not-allowed' : 'pointer',
-                      background: (!pergunta.trim() || respondendo) ? '#e2e8f0' : '#2563eb',
-                      color: (!pergunta.trim() || respondendo) ? '#94a3b8' : '#fff' }}>
-                    <Send style={{ width:13 }} /> Enviar
-                  </button>
-                </div>
+              </div>
             </div>
 
             {!relatorio && !gerandoRel && (

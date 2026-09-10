@@ -99,6 +99,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from dateutil.relativedelta import relativedelta
 
+from app.core.llm_client import chamar_llm
+
 logger = logging.getLogger(__name__)
 
 ANOS_YOY      = 4      # ano corrente + 3 anteriores
@@ -373,8 +375,9 @@ def _categorias_por_janela(db: Session, ini: str, fim: str) -> Dict[str, Dict[st
     """
     out = {}
     for r in db.execute(text(_SQL_CATEGORIA), {"ini": ini, "fim": fim}).fetchall():
+        cat = r.categoria or "SEM CATEGORIA"
         qp = float(r.qt_pedido or 0)
-        out[r.categoria or "SEM CATEGORIA"] = {
+        out[cat] = {
             "qt_pedido":  round(qp),
             "wmape":      _r(_sdiv(r.erro_abs, qp, 100)),
             "bias":       _r(_sdiv(float(r.qt_plano or 0) - qp, qp, 100)),
@@ -560,9 +563,10 @@ def montar_dataset(db: Session, meses: List[str] = None,
     # ---- Categoria ----
     categorias = []
     for r in db.execute(text(_SQL_CATEGORIA), p_det).fetchall():
+        cat = r.categoria or "SEM CATEGORIA"
         qp = float(r.qt_pedido or 0)
         categorias.append({
-            "categoria":  r.categoria or "SEM CATEGORIA",
+            "categoria":  cat,
             "qt_pedido":  round(qp),
             "vl_pedido":  round(float(r.vl_pedido or 0)),
             "qt_corte":   round(float(r.qt_corte or 0)),
@@ -578,11 +582,11 @@ def montar_dataset(db: Session, meses: List[str] = None,
         })
 
     # ---- Categoria: evolucao consolidada YTD / 6m / 3m ----
-    # Uma tabela que cruza WMAPE, BIAS e Fill Rate por categoria em tres
-    # janelas terminando no mesmo ultimo mes fechado: o YTD (jan a mes_fim,
-    # 8 meses no ciclo atual) dilui uma piora ou melhora recente; 6m e 3m
-    # (trailing, terminando no mesmo mes) mostram se a categoria esta
-    # melhorando ou piorando AGORA, nao so' na media do ano.
+    # Uma tabela que cruza WMAPE, BIAS e Fill Rate por categoria em
+    # tres janelas terminando no mesmo ultimo mes fechado: o YTD (jan a
+    # mes_fim, 8 meses no ciclo atual) dilui uma piora ou melhora recente;
+    # 6m e 3m (trailing, terminando no mesmo mes) mostram se a categoria
+    # esta melhorando ou piorando AGORA, nao so' na media do ano.
     cat_ytd = {c["categoria"]: {"qt_pedido": c["qt_pedido"], "wmape": c["wmape"],
                                  "bias": c["bias"], "fill_rate": c["fill_rate"]}
                for c in categorias}
@@ -1038,64 +1042,13 @@ def _contexto_modelo(ds: Dict[str, Any]) -> str:
 def _chamar_claude(system: str, mensagens: List[Dict[str, str]],
                    max_tokens: int = 8000) -> str:
     """
-    Chama a API Anthropic. Haiku por padrao: o relatorio e prosa sobre um
-    JSON ja preparado — o modelo descreve e cita, nao calcula.
-
-    Se a resposta for cortada por estourar max_tokens (stop_reason
-    "max_tokens"), refaz a chamada UMA vez com o dobro do limite antes de
-    desistir — categorias com mais SKUs geram texto proporcionalmente maior
-    e um max_tokens fixo cortava a resposta no meio do JSON (visto em
-    categorias com 16+ SKUs: a resposta parava a meio de um valor de
-    string, gerando "JSON invalido" quando o problema real era truncamento).
+    Nome mantido por compatibilidade (planejador_demanda.py e
+    agente_financeiro.py importam este simbolo direto). A chamada real
+    agora passa pelo cliente unico do Nexus Bot (app/core/llm_client.py),
+    que tenta Gemini Flash (gratuito) primeiro e cai para Claude Haiku
+    (Anthropic) se o Gemini nao estiver configurado ou falhar.
     """
-    chave = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-    if not chave:
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY ausente. Verifique o .env: chave sem espacos "
-            "em volta do '=' e sem quebra de linha no fim."
-        )
-
-    try:
-        import anthropic
-    except ImportError:
-        raise RuntimeError("Pacote 'anthropic' nao instalado no container.")
-
-    cliente = anthropic.Anthropic(api_key=chave)
-    modelos = [m for m in [
-        (os.environ.get("ANTHROPIC_MODEL") or "").strip(),
-        "claude-haiku-4-5-20251001",
-        "claude-haiku-4-5",
-    ] if m]
-
-    ultimo_erro = None
-    for modelo in modelos:
-        tentativa_tokens = max_tokens
-        for tentativa in range(2):   # 1a tentativa + 1 retry com o dobro se truncar
-            try:
-                resp = cliente.messages.create(
-                    model=modelo,
-                    max_tokens=tentativa_tokens,
-                    temperature=0,      # relatorio e reproduzivel, nao criativo
-                    system=system,
-                    messages=mensagens,
-                )
-                texto = "".join(
-                    b.text for b in resp.content if getattr(b, "type", "") == "text"
-                ).strip()
-                if resp.stop_reason == "max_tokens" and tentativa == 0:
-                    logger.warning(
-                        "Resposta truncada por max_tokens=%s no modelo %s — "
-                        "repetindo com %s.", tentativa_tokens, modelo, tentativa_tokens * 2
-                    )
-                    tentativa_tokens *= 2
-                    continue
-                return texto
-            except Exception as e:
-                ultimo_erro = e
-                logger.warning("Modelo %s falhou: %s", modelo, e)
-                break   # erro de API (nao truncamento): tenta o proximo modelo
-
-    raise RuntimeError(f"Nenhum modelo respondeu. Ultimo erro: {ultimo_erro}")
+    return chamar_llm(system, mensagens, max_tokens)
 
 
 # =====================================================================

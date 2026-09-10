@@ -53,7 +53,7 @@ _TERMOS_FINANCEIRO = (
     "nota fiscal", "faturamento", "cliente", "cnpj", "cgc",
 )
 _TERMOS_INDICADORES = (
-    "wmape", "mape", "bias", "fill rate", "acur", "fva", "corte",
+    "wmape", "bias", "fill rate", "acur", "fva", "corte",
     "portf", "indicador", "meta humana", "previsao ia", "forecast",
 )
 _TERMOS_DEMANDA = (

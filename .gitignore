@@ -77,3 +77,4 @@ nexus_pgdata/
 .DS_Store
 Thumbs.db
 *.swp
+.env
