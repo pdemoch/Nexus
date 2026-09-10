@@ -110,14 +110,12 @@ def _carregar(db: Session, inicio: str, fim: str,
     `base` é aceito por compatibilidade e ignorado: o WMAPE é sempre contra
     a demanda (qt_pedido).
 
-    SEM filtro de "ativo": WMAPE precisa cobrir TUDO que foi vendido
-    no período, inclusive SKU descontinuado/fora do portfólio atual — do
-    contrário o erro de previsão desse volume some do numerador e do
-    denominador, e a acurácia reportada fica melhor do que a realidade do
-    negócio (mesmo raciocínio já aplicado ao Fill Rate). Item vendido sem
-    plano entra com previsão 0 (ver COALESCE abaixo), nunca é excluído.
+    O WMAPE considera somente o portfólio ativo (`ativo = TRUE`), que é a
+    população atualmente planejável. Itens fora do portfólio permanecem na
+    dimensão e no histórico, mas não devem compor o indicador operacional.
+    Item ativo vendido sem plano entra com previsão 0 (ver COALESCE abaixo).
     """
-    filtros, params = ["1=1"], {}
+    filtros, params = ["a.ativo = TRUE"], {}
     if categoria:
         # "SEM CATEGORIA" é rótulo de exibição via COALESCE, mas também
         # existe gravado como valor literal em dim_produtos.categoria para
@@ -162,9 +160,7 @@ def _carregar(db: Session, inicio: str, fim: str,
         return df
 
     df["vol_real"]    = pd.to_numeric(df["vol_real"],    errors="coerce").fillna(0)
-    # 0-fill deliberado: plano ausente = plano zero. Vender algo que não
-    # estava no plano (ou que nem está mais ativo no portfólio) é erro de
-    # previsão do tamanho do volume vendido — nunca é descartado da conta.
+    # 0-fill deliberado: plano ausente para um item ativo = plano zero.
     df["vol_humano"]  = pd.to_numeric(df["vol_humano"],  errors="coerce").fillna(0)
     df["vol_ia"]      = pd.to_numeric(df["vol_ia"],      errors="coerce")
     df["qt_corte"]    = pd.to_numeric(df["qt_corte"],    errors="coerce").fillna(0)
@@ -267,13 +263,13 @@ async def filtros(db: Session = Depends(get_db), _: dict = Depends(get_current_u
         # lista de opções (dropna), mas continuam aparecendo agrupados como
         # "SEM CATEGORIA" no gráfico/tabela — o filtro nunca conseguia
         # selecionar esse grupo, mesmo ele existindo nos dados.
-        # Sem filtro de "ativo": Fill Rate mede execução do que foi pedido/
-        # entregue/cortado no histórico, então itens descontinuados também
-        # entram (ex.: categoria HUMMM, com SKUs todos inativos).
+        # O filtro lista somente SKUs do portfólio ativo, alinhado à população
+        # usada pelos indicadores carregados em _carregar.
         df = pd.read_sql(text("""
             SELECT DISTINCT COALESCE(categoria, 'SEM CATEGORIA') AS categoria,
                    sku, descricao
             FROM dim_produtos
+            WHERE ativo = TRUE
             ORDER BY categoria, sku
         """), db.bind)
 
@@ -1253,9 +1249,9 @@ async def kpis_exportar(
             ("  oficial do periodo; as linhas acima dela sao o detalhamento mes a mes para auditoria.", False),
             ("- 'Cobertura Plano' e' o % do volume vendido que tinha plano; abaixo de 90% dispensa", False),
             ("  discussao de acuracia (ninguem planejou aquele volume).", False),
-            ("- Fill Rate, WMAPE e BIAS consideram TODOS os itens vendidos no periodo,", False),
-            ("  ativos ou inativos/descontinuados em dim_produtos: item vendido fora do", False),
-            ("  portfolio atual tambem e' erro de previsao (plano = 0 nesse caso).", False),
+            ("- Fill Rate, WMAPE e BIAS consideram somente itens ativos no portfolio", False),
+            ("  atual (dim_produtos.ativo = TRUE). Itens inativos/descontinuados ficam", False),
+            ("  no historico para auditoria, mas nao entram no indicador operacional.", False),
         ]
         for i, (txt, bold) in enumerate(texto, 1):
             c = ws7.cell(row=i, column=1, value=txt)
