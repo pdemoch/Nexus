@@ -6,6 +6,7 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 logger = logging.getLogger(__name__)
+DEFAULT_MAX_OUTPUT_TOKENS = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "8192"))
 
 
 def _provider_order() -> List[str]:
@@ -118,17 +119,22 @@ def _anthropic_call(system: str, mensagens: Sequence[Dict[str, Any]], max_tokens
     return "\n".join(text_blocks) or json.dumps(body)
 
 
-def chamar_llm(system: str, mensagens: Sequence[Dict[str, Any]], max_tokens: int = 8000) -> str:
-    """Tenta os provedores configurados e devolve texto legível mesmo sem credenciais."""
+def chamar_llm(
+    system: str,
+    mensagens: Sequence[Dict[str, Any]],
+    max_tokens: int | None = None,
+) -> str:
+    """Tenta os provedores com uma janela ampla e configurável de saída."""
     if not mensagens:
         return ""
 
+    output_tokens = max(DEFAULT_MAX_OUTPUT_TOKENS, max_tokens or 0)
     for provider in _provider_order():
         try:
             if provider == "gemini":
-                return _gemini_call(system, mensagens, max_tokens)
+                return _gemini_call(system, mensagens, output_tokens)
             if provider == "claude":
-                return _anthropic_call(system, mensagens, max_tokens)
+                return _anthropic_call(system, mensagens, output_tokens)
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM provider %s falhou: %s", provider, exc)
 

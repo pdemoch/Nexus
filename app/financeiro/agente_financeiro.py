@@ -278,4 +278,4 @@ def responder_pergunta(
     mensagens = (historico or [])[-6:] + [
         {"role": "user", "content": f"CONTEXTO FINANCEIRO:\n{dados}\n\nPERGUNTA:\n{pergunta}"}
     ]
-    return _chamar_claude(_SYSTEM, mensagens, max_tokens=2200)
+    return _chamar_claude(_SYSTEM, mensagens)

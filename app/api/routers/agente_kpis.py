@@ -1040,7 +1040,7 @@ def _contexto_modelo(ds: Dict[str, Any]) -> str:
 
 
 def _chamar_claude(system: str, mensagens: List[Dict[str, str]],
-                   max_tokens: int = 8000) -> str:
+                   max_tokens: int = None) -> str:
     """
     Nome mantido por compatibilidade (planejador_demanda.py e
     agente_financeiro.py importam este simbolo direto). A chamada real
@@ -1259,7 +1259,7 @@ def responder_pergunta(db: Session, pergunta: str,
         "content": f"{_contexto_modelo(ds)}\n\nDETALHE POR MES:\n{json.dumps(ds.get('detalhe_mensal', {}), ensure_ascii=False, separators=(',', ':'))}\n\nPERGUNTA: {pergunta}",
     })
 
-    resposta = _chamar_claude(_SYSTEM_CHAT, msgs, max_tokens=6000)
+    resposta = _chamar_claude(_SYSTEM_CHAT, msgs)
     resposta = _corrigir_nome_empresa(resposta)
 
     db.execute(text("""

@@ -133,6 +133,31 @@ def janela_planejador(ciclo: str) -> Dict[str, Any]:
     }
 
 
+def janela_chat(ciclo: str, data_ini=None, data_fim=None) -> Dict[str, Any]:
+    """Usa o periodo escolhido no chat; sem datas, preserva a janela do ciclo."""
+    if data_ini is None and data_fim is None:
+        return janela_planejador(ciclo)
+    if data_ini is None or data_fim is None or data_ini > data_fim:
+        raise ValueError("O período da análise é inválido.")
+
+    ini = data_ini.replace(day=1)
+    fim = data_fim.replace(day=1)
+    if ini < PISO_HISTORICO:
+        ini = PISO_HISTORICO
+    meses = []
+    d = ini
+    while d <= fim:
+        meses.append(d.strftime("%Y-%m"))
+        d += relativedelta(months=1)
+    return {
+        "ciclo": ciclo,
+        "mes_referencia": fim.strftime("%Y-%m"),
+        "ini": ini.isoformat(),
+        "fim": fim.isoformat(),
+        "meses": meses,
+    }
+
+
 def listar_categorias_ativas(db: Session) -> List[str]:
     rows = db.execute(text("""
         SELECT DISTINCT categoria FROM dim_produtos
@@ -266,13 +291,14 @@ ORDER BY a.mes
 # CONTEXTO — categoria (batch) e sku (chat)
 # =====================================================================
 def montar_contexto_categoria(db: Session, categoria: str,
-                              ciclo: str = None) -> Optional[Dict[str, Any]]:
+                              ciclo: str = None, data_ini=None,
+                              data_fim=None) -> Optional[Dict[str, Any]]:
     """
     Contexto completo de UMA categoria: agregado, série mensal, e todos
     os SKUs dela com agregado + série mensal compacta cada um.
     """
     ciclo = ciclo or _ciclo_atual(db)
-    jan = janela_planejador(ciclo)
+    jan = janela_chat(ciclo, data_ini, data_fim)
     p = {"categoria": categoria, "ini": jan["ini"], "fim": jan["fim"]}
 
     agg = db.execute(text(_SQL_CATEGORIA_AGREGADO), p).fetchone()
@@ -342,14 +368,15 @@ def montar_contexto_categoria(db: Session, categoria: str,
 
 
 def montar_contexto_sku(db: Session, sku: str,
-                        ciclo: str = None) -> Optional[Dict[str, Any]]:
+                        ciclo: str = None, data_ini=None,
+                        data_fim=None) -> Optional[Dict[str, Any]]:
     """
     Contexto de UM SKU para o chat: série mensal própria + agregado da
     categoria (peer context leve — não a lista inteira de SKUs vizinhos,
     para não diluir o foco da pergunta).
     """
     ciclo = ciclo or _ciclo_atual(db)
-    jan = janela_planejador(ciclo)
+    jan = janela_chat(ciclo, data_ini, data_fim)
 
     meta = db.execute(text("""
         SELECT COALESCE(MAX(p.descricao), :sku) AS descricao,
@@ -376,7 +403,7 @@ def montar_contexto_sku(db: Session, sku: str,
             "tem_plano":   bool(r.tem_plano),
         })
 
-    ctx_cat = montar_contexto_categoria(db, meta.categoria, ciclo)
+    ctx_cat = montar_contexto_categoria(db, meta.categoria, ciclo, data_ini, data_fim)
 
     return {
         "janela": jan, "foco": "sku",
@@ -600,7 +627,8 @@ def avaliar_todas_categorias(db: Session, ciclo: str = None,
 # =====================================================================
 def responder_pergunta(db: Session, modo: str, pergunta: str,
                        escopo_tipo: str = None, escopo_id: str = None,
-                       historico: List[dict] = None) -> Dict[str, Any]:
+                       historico: List[dict] = None, data_ini=None,
+                       data_fim=None) -> Dict[str, Any]:
     """
     Ponto de entrada unico do chat da Sidebar. O router NAO sabe qual
     modulo resolve cada modo — so passa o payload adiante e recebe
@@ -621,7 +649,10 @@ def responder_pergunta(db: Session, modo: str, pergunta: str,
             raise RuntimeError(
                 "Selecione um SKU ou categoria antes de perguntar no modo Demanda."
             )
-        return responder_pergunta_planejador(db, escopo_tipo, escopo_id, pergunta, historico)
+        return responder_pergunta_planejador(
+            db, escopo_tipo, escopo_id, pergunta, historico,
+            data_ini=data_ini, data_fim=data_fim,
+        )
 
     raise RuntimeError(f"Modo '{modo}' invalido — use 'indicadores' ou 'demanda'.")
 
@@ -631,14 +662,18 @@ def responder_pergunta(db: Session, modo: str, pergunta: str,
 # =====================================================================
 def responder_pergunta_planejador(db: Session, tipo: str, ref_id: str, pergunta: str,
                                   historico: List[dict] = None,
-                                  ciclo: str = None) -> Dict[str, Any]:
+                                  ciclo: str = None, data_ini=None,
+                                  data_fim=None) -> Dict[str, Any]:
     """tipo: 'sku' | 'categoria'. ref_id: o código do SKU ou o nome da categoria."""
     _garantir_tabelas_planejador(db)
     ciclo = ciclo or _ciclo_atual(db)
 
     # Versiona o cache para invalidar respostas curtas geradas pelo limite
     # anterior de tokens.
-    ch = _chave("chat-v2", tipo, ref_id, ciclo, _normalizar(pergunta))
+    ch = _chave(
+        "chat-v3", tipo, ref_id, ciclo, data_ini, data_fim,
+        _normalizar(pergunta),
+    )
     r = db.execute(text("""
         SELECT resposta FROM planejador_chat_cache
         WHERE tipo = :t AND ref_id = :r AND ciclo_sop = :c AND chave = :k
@@ -646,8 +681,11 @@ def responder_pergunta_planejador(db: Session, tipo: str, ref_id: str, pergunta:
     if r:
         return {"resposta": r.resposta, "do_cache": True}
 
-    ctx = (montar_contexto_sku(db, ref_id, ciclo) if tipo == "sku"
-           else montar_contexto_categoria(db, ref_id, ciclo))
+    ctx = (
+        montar_contexto_sku(db, ref_id, ciclo, data_ini, data_fim)
+        if tipo == "sku"
+        else montar_contexto_categoria(db, ref_id, ciclo, data_ini, data_fim)
+    )
     if not ctx:
         return {"resposta": f"Nao encontrei dados para {ref_id} no periodo analisado.",
                 "do_cache": False}
@@ -663,7 +701,7 @@ def responder_pergunta_planejador(db: Session, tipo: str, ref_id: str, pergunta:
                     f"PERGUNTA: {pergunta}"),
     })
 
-    resposta = _chamar_claude(_SYSTEM_PLANEJADOR_CHAT, msgs, max_tokens=6000)
+    resposta = _chamar_claude(_SYSTEM_PLANEJADOR_CHAT, msgs)
     resposta = _corrigir_nome_empresa(resposta)
 
     db.execute(text("""
