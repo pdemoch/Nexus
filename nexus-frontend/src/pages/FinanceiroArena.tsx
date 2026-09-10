@@ -179,10 +179,6 @@ export default function FinanceiroArena() {
   const [sortClientes, setSortClientes] = useState<{ key: string; dir: 1 | -1 }>({ key: 'valor_total', dir: -1 });
   const [sortPmpFornecedores, setSortPmpFornecedores] = useState<{ key: string; dir: 1 | -1 }>({ key: 'valor_total', dir: -1 });
   const [sortNotas, setSortNotas] = useState<{ key: string; dir: 1 | -1 }>({ key: 'emissao', dir: 1 });
-  const [agenteAberto, setAgenteAberto] = useState(false);
-  const [perguntaAgente, setPerguntaAgente] = useState('');
-  const [chatAgente, setChatAgente] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
-  const [respondendoAgente, setRespondendoAgente] = useState(false);
 
   const dataIni = mesAno2Date(mesIni, anoIni);
   const dataFim = mesAno2Date(mesFim, anoFim, true);
@@ -438,32 +434,6 @@ export default function FinanceiroArena() {
     const bv = b[sortNotas.key] ?? '';
     return (typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv), 'pt-BR')) * sortNotas.dir;
   });
-  const perguntarAgente = async () => {
-    const p = perguntaAgente.trim();
-    if (!p || respondendoAgente) return;
-    const historico = [...chatAgente, { role: 'user' as const, content: p }];
-    setChatAgente(historico);
-    setPerguntaAgente('');
-    setRespondendoAgente(true);
-    try {
-      const r = await axios.post('/api/v1/financeiro/agente/chat', {
-        pergunta: p,
-        historico: chatAgente.slice(-6),
-        data_ini: paramsBase.data_ini,
-        data_fim: paramsBase.data_fim,
-        segmentos: paramsBase.segmentos,
-        regionais: paramsBase.regionais,
-        status: paramsBase.status,
-        motivos: paramsBase.motivos,
-        cgc: clienteSel?.cgc,
-      });
-      setChatAgente([...historico, { role: 'assistant', content: r.data.resposta }]);
-    } catch (e: any) {
-      setChatAgente([...historico, { role: 'assistant', content: e?.response?.data?.detail || 'Erro ao consultar o agente financeiro.' }]);
-    } finally {
-      setRespondendoAgente(false);
-    }
-  };
   const SortHeader = ({ label, onSort, align = 'right' }: { label: string; onSort: () => void; align?: 'left' | 'right' }) => (
     <button onClick={onSort} className="inline-flex items-center gap-1 font-inherit" style={{ textAlign: align }}>
       {label}<ArrowUpDown className="w-2.5 h-2.5" />
@@ -493,32 +463,8 @@ export default function FinanceiroArena() {
 
   return (
     <div className="min-h-screen bg-slate-50 p-4 md:p-6">
-      <button onClick={() => setAgenteAberto(v => !v)}
-        className="fixed bottom-6 right-6 z-40 flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-600 to-indigo-600 px-4 py-3 text-xs font-black text-white shadow-xl hover:from-violet-500 hover:to-indigo-500">
-        <Sparkles className="w-4 h-4" /> Analista Financeiro
-      </button>
-      {agenteAberto && (
-        <div className="fixed bottom-20 right-6 z-50 flex h-[min(760px,calc(100vh-110px))] w-[min(760px,calc(100vw-48px))] max-w-[calc(100vw-32px)] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
-          <div className="flex items-center justify-between bg-gradient-to-r from-violet-600 to-indigo-600 px-4 py-3 text-white">
-            <span className="flex items-center gap-2 text-sm font-black"><Sparkles className="w-4 h-4" /> Analista Financeiro</span>
-            <button onClick={() => setAgenteAberto(false)}><X className="w-4 h-4" /></button>
-          </div>
-          <div className="flex-1 overflow-y-auto p-3">
-            {!chatAgente.length && <p className="mt-20 text-center text-xs font-bold text-slate-400">Pergunte sobre PMR, recebimentos, PMP, PME ou CCC.</p>}
-            {chatAgente.map((m, i) => <div key={i} className={`mb-3 rounded-xl px-3 py-2 text-xs ${m.role === 'user' ? 'ml-8 bg-indigo-50 text-indigo-800' : 'mr-4 bg-slate-50 text-slate-700'}`}>
-              {m.role === 'assistant' ? renderChatMarkdown(m.content) : m.content}
-            </div>)}
-            {respondendoAgente && <div className="text-xs text-slate-400">Analisando...</div>}
-          </div>
-          <div className="flex gap-2 border-t border-slate-100 p-3">
-            <input value={perguntaAgente} onChange={e => setPerguntaAgente(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') perguntarAgente(); }} placeholder="Pergunte ao agente..."
-              className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-violet-300" />
-            <button onClick={perguntarAgente} disabled={!perguntaAgente.trim() || respondendoAgente}
-              className="rounded-xl bg-violet-600 p-2 text-white disabled:bg-slate-200"><Send className="w-4 h-4" /></button>
-          </div>
-        </div>
-      )}
+      {/* Chat consolidado no Nexus Bot global (canto inferior direito),
+          modo "Financeiro" — substitui o antigo widget "Analista Financeiro". */}
 
       {/* CABECALHO */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5">

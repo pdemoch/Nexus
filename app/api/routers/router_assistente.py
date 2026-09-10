@@ -1,18 +1,20 @@
 """
 =====================================================================
-ROUTER ASSISTENTE — chat unico (Indicadores + Demanda)
+ROUTER ASSISTENTE — Nexus Bot (chat unico: Indicadores + Demanda + Financeiro)
 =====================================================================
 Destino: app/api/routers/router_assistente.py
 
-Substitui o chat que existia em router_kpis.py. Um unico endpoint,
-dois modos de contexto:
+Um unico endpoint, tres modos de contexto:
   'indicadores' -> agente_kpis (portfolio, ciclo ativo)
   'demanda'     -> planejador_demanda (1 sku ou 1 categoria)
+  'financeiro'  -> agente_financeiro (PMR / carteira / pipeline financeiro)
 
-Consumido pelo painel de chat flutuante na Sidebar, nao mais por
-nenhuma tela especifica.
+Consumido pelo painel de chat flutuante global "Nexus Bot" na Sidebar —
+unico ponto de entrada de IA do sistema. Os chats embutidos que existiam
+nas telas de KPIs e Financeiro foram descontinuados em favor deste.
 """
 
+from datetime import date, timedelta
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -27,10 +29,51 @@ router = APIRouter(prefix="/api/v1/assistente", tags=["Assistente"])
 
 class PerguntaAssistente(BaseModel):
     pergunta:    str
-    modo:        str                    # 'indicadores' | 'demanda'
+    modo:        Optional[str] = "auto" # 'auto' | 'indicadores' | 'demanda' | 'financeiro'
     escopo_tipo: Optional[str] = None   # 'sku' | 'categoria' (so modo=demanda)
     escopo_id:   Optional[str] = None   # codigo do sku ou nome da categoria
     historico:   Optional[List[dict]] = None
+    # modo=financeiro: filtros opcionais equivalentes aos da tela Financeiro
+    data_ini:    Optional[date] = None
+    data_fim:    Optional[date] = None
+    segmentos:   Optional[str] = None
+    regionais:   Optional[str] = None
+    status:      Optional[str] = None
+    motivos:     Optional[str] = None
+    cgc:         Optional[str] = None
+
+
+def _split(valor: Optional[str]):
+    return [v.strip() for v in valor.split(",") if v.strip()] if valor else None
+
+
+_TERMOS_FINANCEIRO = (
+    "pmr", "pmp", "pme", "ccc", "recebimento", "recebimentos", "carteira",
+    "inadimpl", "vencimento", "condi", "pagamento", "banco", "e5", "e1",
+    "nota fiscal", "faturamento", "cliente", "cnpj", "cgc",
+)
+_TERMOS_INDICADORES = (
+    "wmape", "mape", "bias", "fill rate", "acur", "fva", "corte",
+    "portf", "indicador", "meta humana", "previsao ia", "forecast",
+)
+_TERMOS_DEMANDA = (
+    "planejamento", "planejar", "demanda", "plano", "sku", "categoria",
+    "sazonal", "proximo ciclo", "proximo mes", "previsao de venda",
+)
+
+
+def _classificar_area(pergunta: str, escopo_tipo: Optional[str]) -> str:
+    """Roteia sem LLM para não desperdiçar uma chamada nem expor dados ao classificador."""
+    if escopo_tipo:
+        return "demanda"
+    texto = pergunta.casefold()
+    if any(termo in texto for termo in _TERMOS_INDICADORES):
+        return "indicadores"
+    if any(termo in texto for termo in _TERMOS_FINANCEIRO):
+        return "financeiro"
+    if any(termo in texto for termo in _TERMOS_DEMANDA):
+        return "demanda"
+    return "indicadores"
 
 
 @router.post("/chat")
@@ -39,21 +82,58 @@ async def chat(
     db: Session = Depends(get_db),
     _: dict = Depends(get_current_user),
 ):
-    if payload.modo not in ("indicadores", "demanda"):
-        raise HTTPException(400, "Campo 'modo' precisa ser 'indicadores' ou 'demanda'.")
-    if payload.modo == "demanda" and payload.escopo_tipo not in ("sku", "categoria"):
-        raise HTTPException(
-            400,
-            "Modo 'demanda' exige escopo_tipo='sku' ou 'categoria' e escopo_id "
-            "preenchido — selecione um item na busca antes de perguntar."
-        )
+    if payload.modo not in ("auto", "indicadores", "demanda", "financeiro"):
+        raise HTTPException(400, "Campo 'modo' precisa ser 'auto', 'indicadores', 'demanda' ou 'financeiro'.")
+    if payload.escopo_tipo and payload.escopo_tipo not in ("sku", "categoria"):
+        raise HTTPException(400, "escopo_tipo precisa ser 'sku' ou 'categoria'.")
+    if payload.escopo_tipo and not payload.escopo_id:
+        raise HTTPException(400, "Informe o item selecionado em escopo_id.")
+    pergunta = payload.pergunta.strip()
+    if not pergunta:
+        raise HTTPException(422, "A pergunta não pode ser vazia.")
+    area = (
+        _classificar_area(pergunta, payload.escopo_tipo)
+        if payload.modo == "auto"
+        else payload.modo
+    )
     try:
-        return pd.responder_pergunta(
-            db, payload.modo, payload.pergunta,
+        if area == "financeiro":
+            import asyncio
+            from app.financeiro.agente_financeiro import construir_contexto, responder_pergunta
+
+            data_fim = payload.data_fim or date.today()
+            data_ini = payload.data_ini or (data_fim - timedelta(days=90))
+            if data_ini > data_fim:
+                raise HTTPException(422, "A data inicial deve ser anterior à data final.")
+            contexto = await asyncio.to_thread(
+                construir_contexto, data_ini, data_fim,
+                pergunta=pergunta, segmento=_split(payload.segmentos),
+                regional=_split(payload.regionais), cgc=payload.cgc,
+                status=_split(payload.status), motivo=_split(payload.motivos),
+            )
+            resposta = await asyncio.to_thread(
+                responder_pergunta, pergunta, contexto, payload.historico
+            )
+            return {"resposta": resposta, "area": area}
+
+        if area == "demanda" and not payload.escopo_tipo:
+            return {
+                "area": area,
+                "resposta": (
+                    "Identifiquei uma pergunta de **Demanda**. Selecione o SKU ou a "
+                    "categoria no campo **Escopo da análise** para eu consultar a base correta."
+                ),
+            }
+
+        resposta = pd.responder_pergunta(
+            db, area, pergunta,
             payload.escopo_tipo, payload.escopo_id, payload.historico,
         )
+        return {**resposta, "area": area}
     except RuntimeError as e:
         raise HTTPException(503, str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Erro no assistente: {e}")
 

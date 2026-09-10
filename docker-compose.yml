@@ -32,6 +32,9 @@ services:
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-claude-sonnet-4-5}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
+      - LLM_PROVIDER_ORDER=${LLM_PROVIDER_ORDER:-gemini,claude}
       - NEXUS_S3_BUCKET=${NEXUS_S3_BUCKET}
     dns:
       - 8.8.8.8

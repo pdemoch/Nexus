@@ -1088,7 +1088,8 @@ async def kpis_exportar(
 
         ws2 = wb.create_sheet("WMAPE SKU")
         _cabecalho(ws2, ["SKU", "Descrição", "Categoria", "Mês", "Real (cx)",
-                         "Previsto (cx)", "Erro Absoluto (cx)", "Delta (cx)"])
+                         "Previsto (cx)", "Erro Absoluto (cx)", "Delta (cx)",
+                         "WMAPE do Mês (%)", "WMAPE SKU / Período (%)"])
         row_i = 2
         if not df_base.empty:
             for sku, g in df_base.groupby("sku", sort=False):
@@ -1097,8 +1098,13 @@ async def kpis_exportar(
                 for _, r in g.iterrows():
                     erro_abs = abs(r.vol_humano - r.vol_real)
                     delta = r.vol_humano - r.vol_real
+                    # Em uma única linha SKU x mês, WMAPE e APE são a mesma
+                    # razão; a diferença só surge ao consolidar várias linhas.
+                    wmape_mes = _sdiv(erro_abs, r.vol_real, 100) if r.vol_real > 0 else None
                     for j, v in enumerate([sku, desc, cat_sku, r.mes, round(r.vol_real),
-                                            round(r.vol_humano), round(erro_abs), round(delta)], 1):
+                                            round(r.vol_humano), round(erro_abs), round(delta),
+                                            round(wmape_mes, 2) if wmape_mes is not None else None,
+                                            None], 1):
                         ws2.cell(row=row_i, column=j, value=v)
                     row_i += 1
                 # linha TOTAL do SKU: mesma conta oficial (soma erro/soma real)
@@ -1108,10 +1114,8 @@ async def kpis_exportar(
                             round((g.vol_humano - g.vol_real).abs().sum()), round(prev_t - real_t)]
                 for j, v in enumerate(tot_vals, 1):
                     c = ws2.cell(row=row_i, column=j, value=v); c.fill, c.font = tot_fill, tot_font
-                ws2.cell(row=row_i, column=9, value=round(wmape_sku, 2) if wmape_sku is not None else None).font = tot_font
+                ws2.cell(row=row_i, column=10, value=round(wmape_sku, 2) if wmape_sku is not None else None).font = tot_font
                 row_i += 1
-        ws2.cell(row=1, column=9, value="WMAPE SKU (%)").fill = hdr_fill
-        ws2.cell(row=1, column=9).font = hdr_font
 
         # ── ABAS 3-4: MAPE Categoria / MAPE SKU ───────────────────────────
         # MAPE = média simples do erro percentual por SKU (não ponderada por
@@ -1129,7 +1133,8 @@ async def kpis_exportar(
 
         ws_ms = wb.create_sheet("MAPE SKU")
         _cabecalho(ws_ms, ["SKU", "Descrição", "Categoria", "Mês", "Real (cx)",
-                           "Previsto (cx)", "Erro % Absoluto (APE %)"])
+                           "Previsto (cx)", "APE / MAPE do Mês (%)",
+                           "MAPE SKU / Período (%)"])
         row_i = 2
         if not df_base.empty:
             for sku, g in df_base.groupby("sku", sort=False):
@@ -1147,13 +1152,10 @@ async def kpis_exportar(
                 # linha TOTAL do SKU: MAPE = média simples dos APE mensais (não a
                 # razão de totais — essa é a distinção conceitual com o WMAPE).
                 mape_sku = round(sum(apes) / len(apes), 2) if apes else None
-                tot_vals = [sku, desc, cat_sku, "TOTAL", round(g.vol_real.sum()), round(g.vol_humano.sum()), None]
+                tot_vals = [sku, desc, cat_sku, "TOTAL", round(g.vol_real.sum()), round(g.vol_humano.sum()), None, mape_sku]
                 for j, v in enumerate(tot_vals, 1):
                     c = ws_ms.cell(row=row_i, column=j, value=v); c.fill, c.font = tot_fill, tot_font
-                ws_ms.cell(row=row_i, column=8, value=mape_sku).font = tot_font
                 row_i += 1
-        ws_ms.cell(row=1, column=8, value="MAPE SKU (%)").fill = hdr_fill
-        ws_ms.cell(row=1, column=8).font = hdr_font
 
         # ── ABAS 5-6: BIAS Categoria / BIAS SKU ───────────────────────────
         ws3 = wb.create_sheet("BIAS Categoria")
@@ -1309,14 +1311,15 @@ async def kpis_exportar(
             ("(nunca ficam ocultos): tanto no filtro quanto nos graficos e tabelas.", False),
             ("", False),
             ("CALCULO POR SKU x POR CATEGORIA — QUAL A DIFERENCA:", True),
-            ("Por SKU: cada linha das abas 'WMAPE SKU'/'BIAS SKU'/'Fill Rate SKU' e' um mes", False),
-            ("daquele SKU. A linha 'TOTAL' (destacada) soma real e previsto de TODOS os meses", False),
-            ("do SKU no periodo filtrado e SO' ENTAO calcula o indicador — nunca e' a media", False),
-            ("simples dos indicadores mensais (isso distorceria o resultado).", False),
+            ("Nas abas por SKU, cada linha mensal mostra o APE: |previsto-real| / real.", False),
+            ("Em uma unica linha SKU x mes, APE e WMAPE mensal tem exatamente o mesmo valor.", False),
+            ("A linha TOTAL de WMAPE soma todos os erros absolutos e divide pelo real total.", False),
+            ("A linha TOTAL de MAPE calcula a MEDIA dos APEs mensais do SKU.", False),
+            ("Portanto, o MAPE TOTAL nunca e' calculado pela divisao dos totais.", False),
             ("", False),
-            ("Por Categoria: as abas 'WMAPE Categoria'/'BIAS Categoria'/'Fill Rate Categoria'", False),
-            ("somam real e previsto de TODOS os SKUs da categoria, em TODOS os meses do", False),
-            ("periodo, numa unica conta. E' a MESMA formula, so' que o grupo somado e' maior.", False),
+            ("Por Categoria, WMAPE e BIAS somam real/previsto de todos os SKUs e meses e", False),
+            ("depois aplicam suas formulas. Ja o MAPE da categoria e a MEDIA de todos os", False),
+            ("APEs SKU x mes com real maior que zero; nao e' uma razao de totais.", False),
             ("", False),
             ("POR QUE O WMAPE DA CATEGORIA PODE SER BEM MENOR QUE O DE UM SKU DENTRO DELA:", True),
             ("O WMAPE soma erro em MODULO por linha (sku x mes) ou por SKU, mas ao agregar", False),
