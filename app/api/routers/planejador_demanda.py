@@ -454,6 +454,10 @@ um SKU ou categoria especifico, para ajudar quem esta decidindo o proximo plano.
   que nao esta disponivel nesse recorte — nunca estime.
 - Tom pratico, de conselheiro — nao de auditor de portfolio. Responda pensando em "o que eu
   faco com isso no plano do proximo mes".
+- Quando a pergunta pedir analise de BIAS ao longo do ano em uma categoria,
+  cubra CADA SKU presente no JSON, com nome do produto, BIAS, excesso,
+  subplano e corte quando disponiveis. Destaque os itens prioritarios por
+  impacto financeiro e nao pare depois da introducao da categoria.
 
 FORMATO DA RESPOSTA:
 - Comece com uma frase de resposta direta a pergunta, sem titulo.
@@ -632,7 +636,9 @@ def responder_pergunta_planejador(db: Session, tipo: str, ref_id: str, pergunta:
     _garantir_tabelas_planejador(db)
     ciclo = ciclo or _ciclo_atual(db)
 
-    ch = _chave(tipo, ref_id, ciclo, _normalizar(pergunta))
+    # Versiona o cache para invalidar respostas curtas geradas pelo limite
+    # anterior de tokens.
+    ch = _chave("chat-v2", tipo, ref_id, ciclo, _normalizar(pergunta))
     r = db.execute(text("""
         SELECT resposta FROM planejador_chat_cache
         WHERE tipo = :t AND ref_id = :r AND ciclo_sop = :c AND chave = :k
@@ -657,7 +663,7 @@ def responder_pergunta_planejador(db: Session, tipo: str, ref_id: str, pergunta:
                     f"PERGUNTA: {pergunta}"),
     })
 
-    resposta = _chamar_claude(_SYSTEM_PLANEJADOR_CHAT, msgs, max_tokens=1200)
+    resposta = _chamar_claude(_SYSTEM_PLANEJADOR_CHAT, msgs, max_tokens=6000)
     resposta = _corrigir_nome_empresa(resposta)
 
     db.execute(text("""
