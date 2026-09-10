@@ -35,11 +35,8 @@ embarque. Medir contra o faturado cria demanda censurada: se o plano
 subestima, a producao subestima e a entrega subestima junto — o erro se
 apaga e quanto pior o suprimento, melhor a acuracia aparente.
 
-Todas as consultas somam TODOS os SKUs (ativos e inativos/historicos),
-sem filtro `ativo`. E a mesma regra do endpoint /kpis/fill-rate: um SKU
-descontinuado ainda tinha pedido/entrega reais no mes em que vendeu, e
-excluir esse volume derruba o denominador e infla o indicador — foi essa
-divergencia que fazia o relatorio do agente nao bater com o dashboard.
+Todas as consultas somam somente SKUs ativos no portfolio, com filtro
+`a.ativo = TRUE`, mantendo a mesma populacao operacional do dashboard.
 
 Valor monetario NAO entra em WMAPE, BIAS nem FVA. Fica na secao de
 impacto financeiro, que monetiza os gaps de volume.
@@ -313,7 +310,7 @@ SELECT EXTRACT(YEAR FROM a.mes)::int              AS ano,
        SUM(a.vl_perda_subplano)                   AS vl_subplano,
        COUNT(DISTINCT a.sku)                      AS n_skus
 FROM mart_acuracia_sku_mes a
-WHERE a.qt_pedido > 0
+WHERE a.ativo = TRUE AND a.qt_pedido > 0
   AND EXTRACT(MONTH FROM a.mes) <= :mes_fim
   AND EXTRACT(YEAR  FROM a.mes) = ANY(:anos)
 GROUP BY 1 ORDER BY 1
@@ -336,7 +333,7 @@ SELECT EXTRACT(YEAR FROM a.mes)::int              AS ano,
        SUM(a.vl_perda_subplano)                   AS vl_subplano,
        COUNT(DISTINCT a.sku)                      AS n_skus
 FROM mart_acuracia_sku_mes a
-WHERE a.qt_pedido > 0
+WHERE a.ativo = TRUE AND a.qt_pedido > 0
   AND a.mes >= CAST(:ini AS date) AND a.mes <= CAST(:fim AS date)
 GROUP BY 1 ORDER BY 1
 """
@@ -362,7 +359,7 @@ SELECT TO_CHAR(a.mes, 'YYYY-MM')                  AS mes,
            FILTER (WHERE a.qt_ia IS NOT NULL)     AS erro_ia,
        SUM(a.qt_pedido)    FILTER (WHERE a.qt_ia IS NOT NULL) AS qt_base_ia
 FROM mart_acuracia_sku_mes a
-WHERE a.qt_pedido > 0
+WHERE a.ativo = TRUE AND a.qt_pedido > 0
   AND a.mes >= CAST(:ini AS date) AND a.mes <= CAST(:fim AS date)
 GROUP BY 1 ORDER BY 1
 """
@@ -382,7 +379,7 @@ SELECT a.categoria,
        SUM(a.vl_perda_subplano) AS vl_subplano,
        SUM(a.qt_pedido) FILTER (WHERE a.tem_plano) AS qt_com_plano
 FROM mart_acuracia_sku_mes a
-WHERE a.qt_pedido > 0
+WHERE a.ativo = TRUE AND a.qt_pedido > 0
   AND a.mes >= CAST(:ini AS date) AND a.mes <= CAST(:fim AS date)
 GROUP BY 1 ORDER BY SUM(a.erro_abs_cx) DESC
 """
@@ -406,7 +403,7 @@ SELECT a.sku,
        BOOL_AND(a.tem_plano) AS sempre_com_plano
 FROM mart_acuracia_sku_mes a
 LEFT JOIN dim_produtos p ON p.sku = a.sku
-WHERE a.qt_pedido > 0
+WHERE a.ativo = TRUE AND a.qt_pedido > 0
   AND a.mes >= CAST(:ini AS date) AND a.mes <= CAST(:fim AS date)
 GROUP BY a.sku
 """
@@ -443,7 +440,7 @@ SELECT a.categoria,
        SUM(a.erro_abs_cx) AS erro_abs,
        SUM(a.qt_pedido) FILTER (WHERE a.tem_plano) AS qt_com_plano
 FROM mart_acuracia_coordenador_mes a
-WHERE a.qt_pedido > 0
+WHERE a.ativo = TRUE AND a.qt_pedido > 0
   AND a.mes >= CAST(:ini AS date) AND a.mes <= CAST(:fim AS date)
   AND (:campo_rls IS NULL OR
        (:campo_rls = 'gerente_nome'     AND a.gerente_nome = :valor_rls) OR
@@ -462,7 +459,7 @@ SELECT TO_CHAR(a.mes, 'YYYY-MM') AS mes,
        SUM(a.erro_abs_cx) AS erro_abs,
        SUM(a.qt_pedido) FILTER (WHERE a.tem_plano) AS qt_com_plano
 FROM mart_acuracia_coordenador_mes a
-WHERE a.qt_pedido > 0
+WHERE a.ativo = TRUE AND a.qt_pedido > 0
   AND a.mes >= CAST(:ini AS date) AND a.mes <= CAST(:fim AS date)
   AND (:campo_rls IS NULL OR
        (:campo_rls = 'gerente_nome'     AND a.gerente_nome = :valor_rls) OR
@@ -740,7 +737,8 @@ def montar_dataset(db: Session, meses: List[str] = None,
                    SUM(a.vl_excesso_plano)  AS vl_excesso,
                    SUM(a.vl_perda_subplano) AS vl_subplano
             FROM mart_acuracia_sku_mes a
-            WHERE a.qt_pedido > 0 AND a.mes = CAST(:mes AS date)
+            WHERE a.ativo = TRUE
+              AND a.qt_pedido > 0 AND a.mes = CAST(:mes AS date)
             GROUP BY 1 ORDER BY SUM(a.erro_abs_cx) DESC
         """), {"mes": mes_d.isoformat()}).fetchall()
 
@@ -1295,7 +1293,7 @@ def responder_pergunta(db: Session, pergunta: str,
 
     # Versiona a chave para que respostas antigas, eventualmente truncadas por
     # um limite menor de tokens, não sejam devolvidas indefinidamente.
-    ch = _chave("chat-v3", ciclo, data_ini, data_fim, _normalizar(pergunta))
+    ch = _chave("chat-v4-active-portfolio", ciclo, data_ini, data_fim, _normalizar(pergunta))
     r = db.execute(text("""
         SELECT resposta FROM agente_chat_cache
         WHERE ciclo_sop = :c AND chave = :k

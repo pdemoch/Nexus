@@ -384,7 +384,7 @@ def montar_contexto_sku(db: Session, sku: str,
                MAX(a.maturidade)  AS maturidade
         FROM mart_acuracia_sku_mes a
         LEFT JOIN dim_produtos p ON p.sku = a.sku
-        WHERE a.sku = :sku
+        WHERE a.ativo = TRUE AND p.ativo = TRUE AND a.sku = :sku
     """), {"sku": sku}).fetchone()
     if not meta or not meta.categoria:
         return None
