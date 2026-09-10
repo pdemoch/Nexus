@@ -490,7 +490,8 @@ function MatrizCategoriaMes({ matriz, metrica = 'wmape' }: { matriz: any; metric
   const categorias: string[] = matriz?.categorias || [];
   const meses: string[]      = matriz?.meses || [];
   const dados: Record<string, Record<string, number|null>> = matriz?.[metrica] || {};
-  const rotulo = matriz?.dimensao === 'sku' ? 'SKU' : 'Categoria';
+  const nomes: Record<string, string> = matriz?.nomes || {};
+  const rotulo = matriz?.dimensao === 'sku' ? 'Produto' : 'Categoria';
 
   if (!categorias.length || !meses.length)
     return <div style={{ padding:32, textAlign:'center', color:'#94a3b8', fontSize:13 }}>Sem dados.</div>;
@@ -533,7 +534,7 @@ function MatrizCategoriaMes({ matriz, metrica = 'wmape' }: { matriz: any; metric
             <tr key={cat} style={{ background: i%2 ? '#f8fafc' : '#fff' }}>
               <td style={{ padding:'7px 14px', fontWeight:700, color:'#334155', whiteSpace:'nowrap',
                 position:'sticky', left:0, background: i%2 ? '#f8fafc' : '#fff', borderRight:'1px solid #e2e8f0' }}>
-                {cat}
+                <span title={nomes[cat] || cat}>{nomes[cat] || cat}</span>
               </td>
               {meses.map(m => {
                 const v = dados[cat]?.[m];
@@ -852,13 +853,13 @@ export default function AuditoriaArena() {
           <div style={{ display:'flex', flexDirection:'column', gap:16, marginBottom:16 }}>
             <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
               <div style={{ padding:'14px 18px', fontWeight:800, fontSize:13, borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
-                WMAPE por {matrizCat.dimensao === 'sku' ? 'SKU' : 'categoria'} — mês a mês
+                WMAPE por {matrizCat.dimensao === 'sku' ? 'produto' : 'categoria'} — mês a mês
               </div>
               <MatrizCategoriaMes matriz={matrizCat} />
             </div>
             <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
               <div style={{ padding:'14px 18px', fontWeight:800, fontSize:13, borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
-                BIAS por {matrizCat.dimensao === 'sku' ? 'SKU' : 'categoria'} — mês a mês
+                BIAS por {matrizCat.dimensao === 'sku' ? 'produto' : 'categoria'} — mês a mês
               </div>
               <MatrizCategoriaMes matriz={matrizCat} metrica="bias" />
             </div>

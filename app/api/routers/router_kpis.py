@@ -509,21 +509,29 @@ async def matriz_categoria(
         meses_validos = sorted({m for m in meses if m <= teto})
         if not meses_validos:
             return {"dimensao": "sku" if categoria else "categoria",
-                    "categorias": [], "meses": [], "wmape": {}, "bias": {}}
+                    "categorias": [], "meses": [], "wmape": {}, "bias": {}, "nomes": {}}
 
         ini_sql = meses_validos[0] + "-01"
         fim_sql = meses_validos[-1] + "-01"
         df = _carregar(db, ini_sql, fim_sql, categoria, None, base=base)
         if df.empty:
             return {"dimensao": "sku" if categoria else "categoria",
-                    "categorias": [], "meses": meses_validos, "wmape": {}, "bias": {}}
+                    "categorias": [], "meses": meses_validos, "wmape": {}, "bias": {}, "nomes": {}}
         df = df[df.mes.isin(meses_validos)]
         if df.empty:
             return {"dimensao": "sku" if categoria else "categoria",
-                    "categorias": [], "meses": meses_validos, "wmape": {}, "bias": {}}
+                    "categorias": [], "meses": meses_validos, "wmape": {}, "bias": {}, "nomes": {}}
 
         dimensao = "sku" if categoria else "categoria"
         coluna_grupo = "sku" if categoria else "categoria"
+        nomes = {}
+        if dimensao == "sku":
+            nomes = {
+                str(sku): str(descricao)
+                for sku, descricao in (
+                    df[["sku", "descricao"]].drop_duplicates("sku").itertuples(index=False, name=None)
+                )
+            }
         wmape_mat: dict = {}
         bias_mat: dict = {}
         for (grupo, mes), g in df.groupby([coluna_grupo, "mes"]):
@@ -549,6 +557,7 @@ async def matriz_categoria(
             "meses": meses_validos,
             "wmape": wmape_mat,
             "bias": bias_mat,
+            "nomes": nomes,
         }
     except Exception as e:
         raise HTTPException(500, f"Erro na matriz por categoria: {e}")
