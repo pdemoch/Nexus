@@ -496,49 +496,59 @@ async def diagnostico(
 async def matriz_categoria(
     meses:     List[str] = Query(...),
     base:      str = Query("pedido"),  # pedido | faturado
+    categoria: Optional[str] = None,
     db: Session = Depends(get_db),
     _: dict = Depends(get_current_user),
 ):
     """
-    Matriz Categoria x Mês (estilo Power BI): uma célula = WMAPE do grupo
-    (categoria, mês).
+    Matriz Categoria/SKU x Mês (estilo Power BI): uma célula = WMAPE e
+    BIAS do grupo. Com categoria selecionada, o grupo passa a ser o SKU.
     """
     try:
         teto = _ultimo_mes_fechado()
         meses_validos = sorted({m for m in meses if m <= teto})
         if not meses_validos:
-            return {"categorias": [], "meses": [], "wmape": {}}
+            return {"dimensao": "sku" if categoria else "categoria",
+                    "categorias": [], "meses": [], "wmape": {}, "bias": {}}
 
         ini_sql = meses_validos[0] + "-01"
         fim_sql = meses_validos[-1] + "-01"
-        df = _carregar(db, ini_sql, fim_sql, None, None, base=base)
+        df = _carregar(db, ini_sql, fim_sql, categoria, None, base=base)
         if df.empty:
-            return {"categorias": [], "meses": meses_validos, "wmape": {}}
+            return {"dimensao": "sku" if categoria else "categoria",
+                    "categorias": [], "meses": meses_validos, "wmape": {}, "bias": {}}
         df = df[df.mes.isin(meses_validos)]
         if df.empty:
-            return {"categorias": [], "meses": meses_validos, "wmape": {}}
+            return {"dimensao": "sku" if categoria else "categoria",
+                    "categorias": [], "meses": meses_validos, "wmape": {}, "bias": {}}
 
+        dimensao = "sku" if categoria else "categoria"
+        coluna_grupo = "sku" if categoria else "categoria"
         wmape_mat: dict = {}
-        for (cat, mes), g in df.groupby(["categoria", "mes"]):
+        bias_mat: dict = {}
+        for (grupo, mes), g in df.groupby([coluna_grupo, "mes"]):
             real_t = float(g.vol_real.sum())
             if real_t <= 0:
                 continue
             prev_t = float(g.vol_humano.sum())
             wmape = _sdiv((g.vol_humano - g.vol_real).abs().sum(), real_t, 100)
-            wmape_mat.setdefault(cat, {})[mes] = round(wmape, 2) if wmape is not None else None
+            wmape_mat.setdefault(grupo, {})[mes] = round(wmape, 2) if wmape is not None else None
+            bias = _sdiv(prev_t - real_t, real_t, 100)
+            bias_mat.setdefault(grupo, {})[mes] = round(bias, 2) if bias is not None else None
 
-        # Ordena categorias pela média do WMAPE (maior erro primeiro), igual
-        # ao ranking já usado nas outras tabelas da tela.
-        def media_cat(mat, cat):
-            vals = [v for v in mat.get(cat, {}).values() if v is not None]
+        # Ordena os grupos pela média do WMAPE (maior erro primeiro).
+        def media_grupo(mat, grupo):
+            vals = [v for v in mat.get(grupo, {}).values() if v is not None]
             return sum(vals) / len(vals) if vals else -1
 
-        categorias = sorted(wmape_mat.keys(), key=lambda c: media_cat(wmape_mat, c), reverse=True)
+        categorias = sorted(wmape_mat.keys(), key=lambda g: media_grupo(wmape_mat, g), reverse=True)
 
         return {
+            "dimensao": dimensao,
             "categorias": categorias,
             "meses": meses_validos,
             "wmape": wmape_mat,
+            "bias": bias_mat,
         }
     except Exception as e:
         raise HTTPException(500, f"Erro na matriz por categoria: {e}")

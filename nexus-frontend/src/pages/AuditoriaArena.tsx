@@ -486,18 +486,28 @@ function TabelaWmape({ itens }: { itens: any[] }) {
   );
 }
 
-function MatrizCategoriaMes({ matriz }: { matriz: any }) {
+function MatrizCategoriaMes({ matriz, metrica = 'wmape' }: { matriz: any; metrica?: 'wmape'|'bias' }) {
   const categorias: string[] = matriz?.categorias || [];
   const meses: string[]      = matriz?.meses || [];
-  const dados: Record<string, Record<string, number|null>> = matriz?.wmape || {};
+  const dados: Record<string, Record<string, number|null>> = matriz?.[metrica] || {};
+  const rotulo = matriz?.dimensao === 'sku' ? 'SKU' : 'Categoria';
 
   if (!categorias.length || !meses.length)
     return <div style={{ padding:32, textAlign:'center', color:'#94a3b8', fontSize:13 }}>Sem dados.</div>;
 
-  // Heatmap: verde (bom) -> âmbar -> vermelho (ruim), igual ao critério das
-  // outras tabelas da tela (≤20% ok, ≤35% atenção, >35% crítico).
   const corCelula = (v: number|null) => {
     if (v == null) return { bg:'#f8fafc', fg:'#cbd5e1' };
+    if (metrica === 'bias') {
+      const abs = Math.abs(v);
+      if (abs <= 10) return { bg:'#dcfce7', fg:'#065f46' };
+      if (v > 0) return abs <= 35
+        ? { bg:'#ffedd5', fg:'#9a3412' }
+        : { bg:'#fecaca', fg:'#991b1b' };
+      return abs <= 35
+        ? { bg:'#dbeafe', fg:'#1e40af' }
+        : { bg:'#bfdbfe', fg:'#1e3a8a' };
+    }
+    // Heatmap: verde (bom) -> âmbar -> vermelho (ruim).
     if (v <= 20) return { bg:'#dcfce7', fg:'#065f46' };
     if (v <= 35) return { bg:'#fef9c3', fg:'#854d0e' };
     if (v <= 60) return { bg:'#fed7aa', fg:'#9a3412' };
@@ -511,7 +521,7 @@ function MatrizCategoriaMes({ matriz }: { matriz: any }) {
           <tr>
             <th style={{ padding:'10px 14px', textAlign:'left', fontSize:11, fontWeight:800,
               textTransform:'uppercase', letterSpacing:'.04em', background:'#1e3a5f', color:'#fff',
-              position:'sticky', left:0, zIndex:1 }}>Categoria</th>
+              position:'sticky', left:0, zIndex:1 }}>{rotulo}</th>
             {meses.map(m => (
               <th key={m} style={{ padding:'10px 12px', textAlign:'center', fontSize:11, fontWeight:800,
                 background:'#1e3a5f', color:'#fff', whiteSpace:'nowrap' }}>{lMes(m)}</th>
@@ -842,12 +852,18 @@ export default function AuditoriaArena() {
           <div style={{ display:'flex', flexDirection:'column', gap:16, marginBottom:16 }}>
             <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
               <div style={{ padding:'14px 18px', fontWeight:800, fontSize:13, borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
-                WMAPE por categoria — mês a mês
+                WMAPE por {matrizCat.dimensao === 'sku' ? 'SKU' : 'categoria'} — mês a mês
               </div>
               <MatrizCategoriaMes matriz={matrizCat} />
             </div>
+            <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
+              <div style={{ padding:'14px 18px', fontWeight:800, fontSize:13, borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
+                BIAS por {matrizCat.dimensao === 'sku' ? 'SKU' : 'categoria'} — mês a mês
+              </div>
+              <MatrizCategoriaMes matriz={matrizCat} metrica="bias" />
+            </div>
             <div style={{ fontSize:10, color:'#94a3b8', padding:'0 4px' }}>
-              Verde ≤ 20% (adequado) · Amarelo ≤ 35% (atenção) · Laranja ≤ 60% · Vermelho &gt; 60% (crítico).
+              WMAPE: verde ≤ 20% · amarelo ≤ 35% · laranja ≤ 60% · vermelho &gt; 60%. BIAS: verde entre -10% e +10% · azul = subestimativa · laranja/vermelho = superestimativa.
             </div>
           </div>
         )}
