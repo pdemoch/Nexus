@@ -109,8 +109,15 @@ def _carregar(db: Session, inicio: str, fim: str,
 
     `base` é aceito por compatibilidade e ignorado: o WMAPE é sempre contra
     a demanda (qt_pedido).
+
+    SEM filtro de "ativo": WMAPE/MAPE precisam cobrir TUDO que foi vendido
+    no período, inclusive SKU descontinuado/fora do portfólio atual — do
+    contrário o erro de previsão desse volume some do numerador e do
+    denominador, e a acurácia reportada fica melhor do que a realidade do
+    negócio (mesmo raciocínio já aplicado ao Fill Rate). Item vendido sem
+    plano entra com previsão 0 (ver COALESCE abaixo), nunca é excluído.
     """
-    filtros, params = ["a.ativo = TRUE"], {}
+    filtros, params = ["1=1"], {}
     if categoria:
         # "SEM CATEGORIA" é rótulo de exibição via COALESCE, mas também
         # existe gravado como valor literal em dim_produtos.categoria para
@@ -155,7 +162,9 @@ def _carregar(db: Session, inicio: str, fim: str,
         return df
 
     df["vol_real"]    = pd.to_numeric(df["vol_real"],    errors="coerce").fillna(0)
-    # 0-fill deliberado: plano ausente = plano zero (ver bloco acima).
+    # 0-fill deliberado: plano ausente = plano zero. Vender algo que não
+    # estava no plano (ou que nem está mais ativo no portfólio) é erro de
+    # previsão do tamanho do volume vendido — nunca é descartado da conta.
     df["vol_humano"]  = pd.to_numeric(df["vol_humano"],  errors="coerce").fillna(0)
     df["vol_ia"]      = pd.to_numeric(df["vol_ia"],      errors="coerce")
     df["qt_corte"]    = pd.to_numeric(df["qt_corte"],    errors="coerce").fillna(0)
@@ -513,6 +522,69 @@ async def diagnostico(
         return {"itens": itens}
     except Exception as e:
         raise HTTPException(500, f"Erro no diagnóstico: {e}")
+
+
+@router.get("/matriz-categoria")
+async def matriz_categoria(
+    meses:     List[str] = Query(...),
+    base:      str = Query("pedido"),  # pedido | faturado
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_user),
+):
+    """
+    Matriz Categoria x Mês (estilo Power BI): uma célula = WMAPE (ou MAPE) do
+    grupo (categoria, mês). Devolve as duas métricas juntas para o frontend
+    montar duas tabelas empilhadas (WMAPE em cima, MAPE embaixo) com as
+    mesmas colunas de mês.
+    """
+    try:
+        teto = _ultimo_mes_fechado()
+        meses_validos = sorted({m for m in meses if m <= teto})
+        if not meses_validos:
+            return {"categorias": [], "meses": [], "wmape": {}, "mape": {}}
+
+        ini_sql = meses_validos[0] + "-01"
+        fim_sql = meses_validos[-1] + "-01"
+        df = _carregar(db, ini_sql, fim_sql, None, None, base=base)
+        if df.empty:
+            return {"categorias": [], "meses": meses_validos, "wmape": {}, "mape": {}}
+        df = df[df.mes.isin(meses_validos)]
+        if df.empty:
+            return {"categorias": [], "meses": meses_validos, "wmape": {}, "mape": {}}
+
+        wmape_mat: dict = {}
+        mape_mat: dict = {}
+        for (cat, mes), g in df.groupby(["categoria", "mes"]):
+            real_t = float(g.vol_real.sum())
+            if real_t <= 0:
+                continue
+            prev_t = float(g.vol_humano.sum())
+            wmape = _sdiv((g.vol_humano - g.vol_real).abs().sum(), real_t, 100)
+            ok = g[g.vol_real > 0].copy()
+            mape = None
+            if len(ok):
+                ok["ape"] = (ok.vol_humano - ok.vol_real).abs() / ok.vol_real * 100
+                mape = float(ok.ape.mean())
+
+            wmape_mat.setdefault(cat, {})[mes] = round(wmape, 2) if wmape is not None else None
+            mape_mat.setdefault(cat, {})[mes]   = round(mape, 2)  if mape  is not None else None
+
+        # Ordena categorias pela média do WMAPE (maior erro primeiro), igual
+        # ao ranking já usado nas outras tabelas da tela.
+        def media_cat(mat, cat):
+            vals = [v for v in mat.get(cat, {}).values() if v is not None]
+            return sum(vals) / len(vals) if vals else -1
+
+        categorias = sorted(wmape_mat.keys(), key=lambda c: media_cat(wmape_mat, c), reverse=True)
+
+        return {
+            "categorias": categorias,
+            "meses": meses_validos,
+            "wmape": wmape_mat,
+            "mape": mape_mat,
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Erro na matriz por categoria: {e}")
 
 
 @router.get("/fill-rate")
@@ -928,14 +1000,16 @@ async def kpis_exportar(
     _: dict = Depends(get_current_user),
 ):
     """
-    Gera um Excel com 7 abas:
+    Gera um Excel com 9 abas:
       1. WMAPE Categoria    - agregado por categoria (mesma conta da tela)
       2. WMAPE SKU          - detalhamento mês a mês por SKU + linha TOTAL
-      3. BIAS Categoria     - agregado por categoria
-      4. BIAS SKU           - detalhamento mês a mês por SKU + linha TOTAL
-      5. Fill Rate Categoria- atendimento agregado por categoria
-      6. Fill Rate SKU      - detalhamento mês a mês por SKU + linha TOTAL
-      7. Metodologia        - fórmulas + exemplo numérico, por SKU e por categoria
+      3. MAPE Categoria     - agregado por categoria (média simples por SKU)
+      4. MAPE SKU           - detalhamento mês a mês por SKU + linha TOTAL
+      5. BIAS Categoria     - agregado por categoria
+      6. BIAS SKU           - detalhamento mês a mês por SKU + linha TOTAL
+      7. Fill Rate Categoria- atendimento agregado por categoria
+      8. Fill Rate SKU      - detalhamento mês a mês por SKU + linha TOTAL
+      9. Metodologia        - fórmulas + exemplo numérico, por SKU e por categoria
     """
     import asyncio
     import openpyxl
@@ -1004,11 +1078,11 @@ async def kpis_exportar(
         diag_cat = await diagnostico(meses=meses_validos, nivel="categoria", categoria=categoria, base="pedido", db=db, _=_)
         ws1 = wb.create_sheet("WMAPE Categoria")
         _cabecalho(ws1, ["Categoria", "Real (cx)", "Previsto (cx)", "Delta (cx)",
-                         "WMAPE (%)", "Meses", "Cobertura Plano (%)"])
+                         "WMAPE (%)", "MAPE (%)", "Meses", "Cobertura Plano (%)"])
         for i, it in enumerate(diag_cat.get("itens", []), 2):
             delta = round((it.get("vol_previsto") or 0) - (it.get("vol_real") or 0))
             vals = [it.get("categoria"), it.get("vol_real"), it.get("vol_previsto"), delta,
-                    it.get("wmape_h"), it.get("meses"), it.get("cobertura_plano_pct")]
+                    it.get("wmape_h"), it.get("mape_h"), it.get("meses"), it.get("cobertura_plano_pct")]
             for j, v in enumerate(vals, 1):
                 ws1.cell(row=i, column=j, value=v)
 
@@ -1039,7 +1113,49 @@ async def kpis_exportar(
         ws2.cell(row=1, column=9, value="WMAPE SKU (%)").fill = hdr_fill
         ws2.cell(row=1, column=9).font = hdr_font
 
-        # ── ABAS 3-4: BIAS Categoria / BIAS SKU ───────────────────────────
+        # ── ABAS 3-4: MAPE Categoria / MAPE SKU ───────────────────────────
+        # MAPE = média simples do erro percentual por SKU (não ponderada por
+        # volume). Complementa o WMAPE oficial: expõe itens de baixo giro
+        # que o WMAPE dilui na soma ponderada.
+        ws_mc = wb.create_sheet("MAPE Categoria")
+        _cabecalho(ws_mc, ["Categoria", "Real (cx)", "Previsto (cx)", "Delta (cx)",
+                           "MAPE (%)", "WMAPE (%)", "Meses", "Cobertura Plano (%)"])
+        for i, it in enumerate(diag_cat.get("itens", []), 2):
+            delta = round((it.get("vol_previsto") or 0) - (it.get("vol_real") or 0))
+            vals = [it.get("categoria"), it.get("vol_real"), it.get("vol_previsto"), delta,
+                    it.get("mape_h"), it.get("wmape_h"), it.get("meses"), it.get("cobertura_plano_pct")]
+            for j, v in enumerate(vals, 1):
+                ws_mc.cell(row=i, column=j, value=v)
+
+        ws_ms = wb.create_sheet("MAPE SKU")
+        _cabecalho(ws_ms, ["SKU", "Descrição", "Categoria", "Mês", "Real (cx)",
+                           "Previsto (cx)", "Erro % Absoluto (APE %)"])
+        row_i = 2
+        if not df_base.empty:
+            for sku, g in df_base.groupby("sku", sort=False):
+                g = g.sort_values("mes")
+                desc, cat_sku = g.descricao.iloc[0], g.categoria.iloc[0]
+                apes = []
+                for _, r in g.iterrows():
+                    ape = _sdiv(abs(r.vol_humano - r.vol_real), r.vol_real, 100) if r.vol_real > 0 else None
+                    if ape is not None:
+                        apes.append(ape)
+                    for j, v in enumerate([sku, desc, cat_sku, r.mes, round(r.vol_real),
+                                            round(r.vol_humano), round(ape, 2) if ape is not None else None], 1):
+                        ws_ms.cell(row=row_i, column=j, value=v)
+                    row_i += 1
+                # linha TOTAL do SKU: MAPE = média simples dos APE mensais (não a
+                # razão de totais — essa é a distinção conceitual com o WMAPE).
+                mape_sku = round(sum(apes) / len(apes), 2) if apes else None
+                tot_vals = [sku, desc, cat_sku, "TOTAL", round(g.vol_real.sum()), round(g.vol_humano.sum()), None]
+                for j, v in enumerate(tot_vals, 1):
+                    c = ws_ms.cell(row=row_i, column=j, value=v); c.fill, c.font = tot_fill, tot_font
+                ws_ms.cell(row=row_i, column=8, value=mape_sku).font = tot_font
+                row_i += 1
+        ws_ms.cell(row=1, column=8, value="MAPE SKU (%)").fill = hdr_fill
+        ws_ms.cell(row=1, column=8).font = hdr_font
+
+        # ── ABAS 5-6: BIAS Categoria / BIAS SKU ───────────────────────────
         ws3 = wb.create_sheet("BIAS Categoria")
         _cabecalho(ws3, ["Categoria", "Real (cx)", "Previsto (cx)", "Delta (cx)",
                          "BIAS (%)", "Meses", "Cobertura Plano (%)"])
@@ -1111,7 +1227,7 @@ async def kpis_exportar(
                 c = ws6.cell(row=row_i, column=j, value=v); c.fill, c.font = tot_fill, tot_font
             row_i += 1
 
-        for ws in (ws1, ws2, ws3, ws4, ws5, ws6):
+        for ws in (ws1, ws2, ws_mc, ws_ms, ws3, ws4, ws5, ws6):
             for col_cells in ws.columns:
                 largura = max((len(str(c.value)) for c in col_cells if c.value is not None), default=10)
                 ws.column_dimensions[col_cells[0].column_letter].width = min(max(largura + 2, 10), 40)
@@ -1153,9 +1269,9 @@ async def kpis_exportar(
             ("         do PORTFOLIO, porque o item B quase nao tem volume.", False),
             ("Por isso o WMAPE (nao o MAPE) e' o indicador oficial de acuracia: ele mede", False),
             ("o erro que REALMENTE pesa no negocio, em caixas, e nao deixa item de baixo", False),
-            ("giro distorcer o resultado. O MAPE aparece nas abas so' como referencia de", False),
-            ("quantos SKUs, em media percentual simples, estao errando muito (diagnostico", False),
-            ("complementar, nao o KPI oficial).", False),
+            ("giro distorcer o resultado. O MAPE tem abas proprias (MAPE Categoria/MAPE SKU)", False),
+            ("como referencia de quantos SKUs, em media percentual simples, estao errando", False),
+            ("muito (diagnostico complementar, nao substitui o WMAPE como KPI oficial).", False),
             ("", False),
             ("BIAS (viés sistemático):", True),
             ("BIAS = ( SUM(previsto_i) - SUM(real_i) ) / SUM(real_i)", False),
@@ -1233,8 +1349,9 @@ async def kpis_exportar(
             ("  oficial do periodo; as linhas acima dela sao o detalhamento mes a mes para auditoria.", False),
             ("- 'Cobertura Plano' e' o % do volume vendido que tinha plano; abaixo de 90% dispensa", False),
             ("  discussao de acuracia (ninguem planejou aquele volume).", False),
-            ("- Fill Rate considera TODOS os itens (ativos ou inativos em dim_produtos); WMAPE/BIAS", False),
-            ("  continuam restritos ao portfolio ativo.", False),
+            ("- Fill Rate e WMAPE/MAPE/BIAS consideram TODOS os itens vendidos no periodo,", False),
+            ("  ativos ou inativos/descontinuados em dim_produtos: item vendido fora do", False),
+            ("  portfolio atual tambem e' erro de previsao (plano = 0 nesse caso).", False),
         ]
         for i, (txt, bold) in enumerate(texto, 1):
             c = ws7.cell(row=i, column=1, value=txt)

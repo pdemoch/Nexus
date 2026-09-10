@@ -541,37 +541,57 @@ function TabelaMape({ itens }: { itens: any[] }) {
   );
 }
 
-function TabelaWmapeMapeCategoria({ itens }: { itens: any[] }) {
-  const sorted = [...itens].sort((a,b) => (b.wmape_h||0)-(a.wmape_h||0));
-  if (!sorted.length) return <div style={{ padding:32, textAlign:'center', color:'#94a3b8', fontSize:13 }}>Sem dados.</div>;
+function MatrizCategoriaMes({ matriz, metrica }: { matriz: any, metrica: 'wmape'|'mape' }) {
+  const categorias: string[] = matriz?.categorias || [];
+  const meses: string[]      = matriz?.meses || [];
+  const dados: Record<string, Record<string, number|null>> = matriz?.[metrica] || {};
+
+  if (!categorias.length || !meses.length)
+    return <div style={{ padding:32, textAlign:'center', color:'#94a3b8', fontSize:13 }}>Sem dados.</div>;
+
+  // Heatmap: verde (bom) -> âmbar -> vermelho (ruim), igual ao critério das
+  // outras tabelas da tela (≤20% ok, ≤35% atenção, >35% crítico).
+  const corCelula = (v: number|null) => {
+    if (v == null) return { bg:'#f8fafc', fg:'#cbd5e1' };
+    if (v <= 20) return { bg:'#dcfce7', fg:'#065f46' };
+    if (v <= 35) return { bg:'#fef9c3', fg:'#854d0e' };
+    if (v <= 60) return { bg:'#fed7aa', fg:'#9a3412' };
+    return { bg:'#fecaca', fg:'#991b1b' };
+  };
+
   return (
     <div style={{ overflowX:'auto' }}>
       <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
         <thead>
-          <tr style={{ background:'#f8fafc' }}>
-            {['Categoria','Real (cx)','Previsto (cx)','WMAPE','MAPE','BIAS','Classificação'].map(h => (
-              <th key={h} style={{ padding:'8px 14px', textAlign: h==='Categoria' ? 'left' : 'right',
-                fontSize:10, fontWeight:800, textTransform:'uppercase', letterSpacing:'.05em', color:'#94a3b8' }}>{h}</th>
+          <tr>
+            <th style={{ padding:'10px 14px', textAlign:'left', fontSize:11, fontWeight:800,
+              textTransform:'uppercase', letterSpacing:'.04em', background:'#1e3a5f', color:'#fff',
+              position:'sticky', left:0, zIndex:1 }}>Categoria</th>
+            {meses.map(m => (
+              <th key={m} style={{ padding:'10px 12px', textAlign:'center', fontSize:11, fontWeight:800,
+                background:'#1e3a5f', color:'#fff', whiteSpace:'nowrap' }}>{lMes(m)}</th>
             ))}
           </tr>
         </thead>
         <tbody>
-          {sorted.map((r, i) => {
-            const corCl = corClasse(r.classe);
-            return (
-              <tr key={r.categoria} style={{ background: i%2 ? '#f9fafb' : '#fff', borderBottom:'1px solid #f1f5f9' }}>
-                <td style={{ padding:'8px 14px', fontWeight:700, color:'#334155' }}>{r.categoria}</td>
-                <td style={{ padding:'8px 14px', textAlign:'right', color:'#475569' }}>{num(r.vol_real)}</td>
-                <td style={{ padding:'8px 14px', textAlign:'right', color:'#475569' }}>{num(r.vol_previsto)}</td>
-                <td style={{ padding:'8px 14px', textAlign:'right', fontWeight:900, color:corWmape(r.wmape_h) }}>{pct(r.wmape_h)}</td>
-                <td style={{ padding:'8px 14px', textAlign:'right', fontWeight:900, color:corMape(r.mape_h) }}>{pct(r.mape_h)}</td>
-                <td style={{ padding:'8px 14px', textAlign:'right', fontWeight:700, color:corBias(r.bias_h) }}>{sinal(r.bias_h)}</td>
-                <td style={{ padding:'8px 14px', textAlign:'right' }}>
-                  <span style={{ fontSize:10, fontWeight:800, padding:'2px 8px', borderRadius:6, background:corCl+'18', color:corCl, whiteSpace:'nowrap' }}>{r.classe || '—'}</span>
-                </td>
-              </tr>
-            );
-          })}
+          {categorias.map((cat, i) => (
+            <tr key={cat} style={{ background: i%2 ? '#f8fafc' : '#fff' }}>
+              <td style={{ padding:'7px 14px', fontWeight:700, color:'#334155', whiteSpace:'nowrap',
+                position:'sticky', left:0, background: i%2 ? '#f8fafc' : '#fff', borderRight:'1px solid #e2e8f0' }}>
+                {cat}
+              </td>
+              {meses.map(m => {
+                const v = dados[cat]?.[m];
+                const { bg, fg } = corCelula(v ?? null);
+                return (
+                  <td key={m} style={{ padding:'7px 10px', textAlign:'center', fontWeight:700,
+                    background:bg, color:fg }}>
+                    {v == null ? '—' : `${v.toFixed(0)}%`}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
         </tbody>
       </table>
     </div>
@@ -588,7 +608,7 @@ export default function AuditoriaArena() {
   const [sku, setSku]             = useState('');
   const [evolucao, setEvolucao]   = useState<any>(null);
   const [diag, setDiag]           = useState<any[]>([]);
-  const [diagCat, setDiagCat]     = useState<any[]>([]);
+  const [matrizCat, setMatrizCat] = useState<any>(null);
   const [loading, setLoading]     = useState(false);
   const [erro, setErro]           = useState('');
   const [abaTabela, setAbaTabela] = useState<'wmape'|'mape'|'super'|'sub'>('wmape');
@@ -630,22 +650,22 @@ export default function AuditoriaArena() {
     if (!mesesSel.length) { setEvolucao(null); setDiag([]); return; }
     setLoading(true); setErro('');
     try {
-      const [ev, dg, dgCat, fr, frCat, frSku] = await Promise.all([
+      const [ev, dg, mzCat, fr, frCat, frSku] = await Promise.all([
         axios.get(`/api/v1/kpis/evolucao?${qs}`),
         axios.get(`/api/v1/kpis/diagnostico?${qs}&nivel=sku`),
-        axios.get(`/api/v1/kpis/diagnostico?${qs}&nivel=categoria`),
+        axios.get(`/api/v1/kpis/matriz-categoria?${qs}`),
         axios.get(`/api/v1/kpis/fill-rate?${qs}&nivel=evolucao`),
         axios.get(`/api/v1/kpis/fill-rate?${qs}&nivel=categoria`),
         axios.get(`/api/v1/kpis/fill-rate?${qs}&nivel=sku`),
       ]);
       setEvolucao(ev.data);
       setDiag(dg.data?.itens || []);
-      setDiagCat(dgCat.data?.itens || []);
+      setMatrizCat(mzCat.data || null);
       setFillRate(fr.data);
       setFillDiag({ cat: frCat.data?.itens || [], sku: frSku.data?.itens || [] });
     } catch(e: any) {
       setErro(e?.response?.data?.detail || 'Erro ao carregar.');
-      setEvolucao(null); setDiag([]); setDiagCat([]);
+      setEvolucao(null); setDiag([]); setMatrizCat(null);
     } finally { setLoading(false); }
   }, [qs]);
 
@@ -854,6 +874,12 @@ export default function AuditoriaArena() {
                 { y:35, cor:'#e11d48', label:'Crítico — acima de 35% o plano não tem base confiável de previsão' },
               ]} />
 
+            <Grafico dados={serie} chaveH="mape_h" chaveIA="mape_ia" titulo="MAPE (%)"
+              legendaRefs={[
+                { y:20, cor:'#059669', label:'Meta — abaixo de 20% a acurácia é adequada para o plano tático' },
+                { y:35, cor:'#e11d48', label:'Crítico — acima de 35% o plano não tem base confiável de previsão' },
+              ]} />
+
             <Grafico dados={serie} chaveH="bias_h" chaveIA="bias_ia" titulo="BIAS (%)"
               refZero
               legendaRefs={[
@@ -876,13 +902,24 @@ export default function AuditoriaArena() {
           </div>
         )}
 
-        {/* Tabela por categoria — WMAPE e MAPE lado a lado (colunas) */}
-        {diagCat.length > 0 && (
-          <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden', marginBottom:16 }}>
-            <div style={{ padding:'14px 18px', fontWeight:800, fontSize:13, borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
-              WMAPE e MAPE por categoria — ordenado pelo maior WMAPE
+        {/* Matriz Categoria x Mês — WMAPE em cima, MAPE embaixo (estilo Power BI) */}
+        {matrizCat && matrizCat.categorias?.length > 0 && (
+          <div style={{ display:'flex', flexDirection:'column', gap:16, marginBottom:16 }}>
+            <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
+              <div style={{ padding:'14px 18px', fontWeight:800, fontSize:13, borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
+                WMAPE por categoria — mês a mês
+              </div>
+              <MatrizCategoriaMes matriz={matrizCat} metrica="wmape" />
             </div>
-            <TabelaWmapeMapeCategoria itens={diagCat} />
+            <div style={{ background:'#fff', borderRadius:14, border:'1px solid #f1f5f9', overflow:'hidden' }}>
+              <div style={{ padding:'14px 18px', fontWeight:800, fontSize:13, borderBottom:'1px solid #f1f5f9', background:'#fafafa' }}>
+                MAPE por categoria — mês a mês
+              </div>
+              <MatrizCategoriaMes matriz={matrizCat} metrica="mape" />
+            </div>
+            <div style={{ fontSize:10, color:'#94a3b8', padding:'0 4px' }}>
+              Verde ≤ 20% (adequado) · Amarelo ≤ 35% (atenção) · Laranja ≤ 60% · Vermelho &gt; 60% (crítico).
+            </div>
           </div>
         )}
 
