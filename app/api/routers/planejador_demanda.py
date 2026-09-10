@@ -641,7 +641,10 @@ def responder_pergunta(db: Session, modo: str, pergunta: str,
     """
     if modo == "indicadores":
         from app.api.routers import agente_kpis
-        r = agente_kpis.responder_pergunta(db, pergunta, historico=historico)
+        r = agente_kpis.responder_pergunta(
+            db, pergunta, historico=historico,
+            data_ini=data_ini, data_fim=data_fim,
+        )
         return {"resposta": r["resposta"], "do_cache": r.get("do_cache", False)}
 
     if modo == "demanda":

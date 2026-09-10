@@ -6,7 +6,11 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 logger = logging.getLogger(__name__)
-DEFAULT_MAX_OUTPUT_TOKENS = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "100000"))
+MAX_PROVIDER_OUTPUT_TOKENS = 64000
+DEFAULT_MAX_OUTPUT_TOKENS = min(
+    max(int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "8192")), 1),
+    MAX_PROVIDER_OUTPUT_TOKENS,
+)
 
 
 def _provider_order() -> List[str]:
@@ -128,7 +132,10 @@ def chamar_llm(
     if not mensagens:
         return ""
 
-    output_tokens = max(DEFAULT_MAX_OUTPUT_TOKENS, max_tokens or 0)
+    output_tokens = min(
+        max(DEFAULT_MAX_OUTPUT_TOKENS, max_tokens or 0),
+        MAX_PROVIDER_OUTPUT_TOKENS,
+    )
     for provider in _provider_order():
         try:
             if provider == "gemini":
