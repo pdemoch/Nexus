@@ -1209,7 +1209,10 @@ Regras:
   EXCETO vl_corte, que e citado como valor direto do ERP sem formula.
 - NUNCA atribua uma recomendacao a uma area, departamento ou responsavel
   especifico. Descreva a acao e o resultado esperado, nao quem executa.
-- Seja conciso. Cite os numeros que fundamentam a resposta.
+- Seja completo sem ser repetitivo. Para uma pergunta sobre BIAS ao longo
+  do ano, cubra todos os SKUs relevantes do escopo, destaque excesso,
+  subplano e corte, e finalize com prioridades práticas sustentadas pelos
+  numeros do JSON.
 
 FORMATO DA RESPOSTA:
 - Comece com uma frase de resposta direta a pergunta, sem titulo.
@@ -1235,7 +1238,9 @@ def responder_pergunta(db: Session, pergunta: str,
     _garantir_tabelas(db)
     ciclo = ciclo or _ciclo_atual(db)
 
-    ch = _chave(ciclo, _normalizar(pergunta))
+    # Versiona a chave para que respostas antigas, eventualmente truncadas por
+    # um limite menor de tokens, não sejam devolvidas indefinidamente.
+    ch = _chave("chat-v2", ciclo, _normalizar(pergunta))
     r = db.execute(text("""
         SELECT resposta FROM agente_chat_cache
         WHERE ciclo_sop = :c AND chave = :k
@@ -1254,7 +1259,7 @@ def responder_pergunta(db: Session, pergunta: str,
         "content": f"{_contexto_modelo(ds)}\n\nDETALHE POR MES:\n{json.dumps(ds.get('detalhe_mensal', {}), ensure_ascii=False, separators=(',', ':'))}\n\nPERGUNTA: {pergunta}",
     })
 
-    resposta = _chamar_claude(_SYSTEM_CHAT, msgs, max_tokens=1500)
+    resposta = _chamar_claude(_SYSTEM_CHAT, msgs, max_tokens=6000)
     resposta = _corrigir_nome_empresa(resposta)
 
     db.execute(text("""
