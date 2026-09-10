@@ -676,11 +676,11 @@ async def fill_rate(
             pedido, entregue = float(pedido or 0), float(entregue or 0)
             corte, transf    = float(corte or 0), float(transf or 0)
             carteira = max(pedido - entregue - corte, 0.0)
-            at  = round(entregue / pedido * 100, 1) if pedido > 0 else None
+            at  = round(_sdiv(entregue, pedido, 100), 1) if pedido > 0 else None
             # cobertura: quanto do pedido já teve desfecho (faturado ou cortado)
-            cob = round((entregue + corte) / pedido * 100, 1) if pedido > 0 else None
+            cob = round(_sdiv(entregue + corte, pedido, 100), 1) if pedido > 0 else None
             ped_aj = pedido - transf
-            at_aj  = round(entregue / ped_aj * 100, 1) if ped_aj > 0 else None
+            at_aj  = round(_sdiv(entregue, ped_aj, 100), 1) if ped_aj > 0 else None
             return pedido, entregue, corte, at, carteira, cob, transf, at_aj
 
         def _classe(at):
@@ -709,10 +709,10 @@ async def fill_rate(
             resumo = {"pedido": round(tp), "entregue": round(te), "corte": round(tc),
                       "carteira": round(max(tp - td, 0.0)),
                       # Fill Rate = entregue / pedido (ver _mont)
-                      "atendimento": round(te / tp * 100, 1) if tp > 0 else None,
-                      "cobertura": round(td / tp * 100, 1) if tp > 0 else None,
+                      "atendimento": round(_sdiv(te, tp, 100), 1) if tp > 0 else None,
+                      "cobertura": round(_sdiv(td, tp, 100), 1) if tp > 0 else None,
                       "corte_transferencia": round(tt),
-                      "atendimento_ajustado": round(te / (tp - tt) * 100, 1) if (tp - tt) > 0 else None,
+                      "atendimento_ajustado": round(_sdiv(te, tp - tt, 100), 1) if (tp - tt) > 0 else None,
                       "unidade": unidade}
             return {"serie": serie, "resumo": resumo}
 
@@ -961,7 +961,7 @@ async def fill_rate_diagnostico(
             decidido = faturado + corte          # volume com desfecho
             if pedido <= 0:
                 continue
-            fr = round(faturado / pedido * 100, 1)
+            fr = round(_sdiv(faturado, pedido, 100), 1)
             itens.append({
                 "chave":     r.chave,
                 "descricao": r.descricao,
@@ -971,7 +971,7 @@ async def fill_rate_diagnostico(
                 "corte":     round(corte),
                 "carteira":  round(carteira),
                 "fill_rate": fr,
-                "corte_pct": round(corte / pedido * 100, 1),
+                "corte_pct": round(_sdiv(corte, pedido, 100), 1),
                 "cobertura": round(_sdiv(decidido, pedido, 100), 1) if pedido > 0 else None,
                 # Classificação por nível de fill rate
                 "classe": (
