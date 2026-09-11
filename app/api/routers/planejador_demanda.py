@@ -60,7 +60,7 @@ from dateutil.relativedelta import relativedelta
 from app.core.constants import PISO_HISTORICO
 from app.api.routers.agente_kpis import (
     _sdiv, _corrigir_nome_empresa, _chamar_claude,
-    _ciclo_atual, _normalizar, _chave, METODOLOGIA,
+    _ciclo_atual, _normalizar, _chave, METODOLOGIA, _fill_rate_maps,
 )
 
 # _r nao e exportado por todas as versoes do agente_kpis — definido aqui
@@ -299,6 +299,7 @@ def montar_contexto_categoria(db: Session, categoria: str,
     """
     ciclo = ciclo or _ciclo_atual(db)
     jan = janela_chat(ciclo, data_ini, data_fim)
+    fill_maps = _fill_rate_maps(db, jan["ini"], jan["fim"])
     p = {"categoria": categoria, "ini": jan["ini"], "fim": jan["fim"]}
 
     agg = db.execute(text(_SQL_CATEGORIA_AGREGADO), p).fetchone()
@@ -317,7 +318,7 @@ def montar_contexto_categoria(db: Session, categoria: str,
         "vl_corte_transferencia": round(float(agg.vl_corte_transf or 0)),
         "wmape":       _r(_sdiv(agg.erro_abs, qp, 100)),
         "bias":        _r(_sdiv(float(agg.qt_plano or 0) - qp, qp, 100)),
-        "fill_rate":   _r(_sdiv(agg.qt_entregue, qp, 100), 1),
+        "fill_rate": _r(fill_maps["categorias"].get(categoria), 1),
         "cobertura_plano": _r(_sdiv(agg.qt_com_plano, qp, 100), 1),
         "vl_excesso":  round(float(agg.vl_excesso or 0)),
         "vl_subplano": round(float(agg.vl_subplano or 0)),
@@ -331,7 +332,7 @@ def montar_contexto_categoria(db: Session, categoria: str,
             "mes": r.mes, "qt_pedido": round(qpm),
             "wmape": _r(_sdiv(r.erro_abs, qpm, 100)),
             "bias":  _r(_sdiv(float(r.qt_plano or 0) - qpm, qpm, 100)),
-            "fill_rate": _r(_sdiv(r.qt_entregue, qpm, 100), 1),
+            "fill_rate": _r(fill_maps["mensal"].get(r.mes), 1),
         })
 
     # série mensal compacta por SKU (qt_pedido, qt_plano) — sazonalidade
@@ -356,7 +357,7 @@ def montar_contexto_categoria(db: Session, categoria: str,
             "vl_corte_transferencia": round(float(r.vl_corte_transf or 0)),
             "wmape": _r(_sdiv(r.erro_abs, qps, 100)),
             "bias":  _r(_sdiv(float(r.qt_plano or 0) - qps, qps, 100)),
-            "fill_rate": _r(_sdiv(r.qt_entregue, qps, 100), 1),
+            "fill_rate": _r(fill_maps["skus"].get(r.sku), 1),
             "vl_excesso": round(float(r.vl_excesso or 0)),
             "vl_subplano": round(float(r.vl_subplano or 0)),
             "pmv": _r(r.pmv, 4),
@@ -377,6 +378,7 @@ def montar_contexto_sku(db: Session, sku: str,
     """
     ciclo = ciclo or _ciclo_atual(db)
     jan = janela_chat(ciclo, data_ini, data_fim)
+    fill_maps = _fill_rate_maps(db, jan["ini"], jan["fim"])
 
     meta = db.execute(text("""
         SELECT COALESCE(MAX(p.descricao), :sku) AS descricao,
@@ -399,6 +401,7 @@ def montar_contexto_sku(db: Session, sku: str,
             "qt_plano":    round(float(r.qt_plano or 0)),
             "qt_entregue": round(float(r.qt_entregue or 0)),
             "qt_corte":    round(float(r.qt_corte or 0)),
+            "fill_rate":   _r(fill_maps["mensal"].get(r.mes), 1),
             "pmv":         _r(r.pmv, 4),
             "tem_plano":   bool(r.tem_plano),
         })
@@ -674,7 +677,7 @@ def responder_pergunta_planejador(db: Session, tipo: str, ref_id: str, pergunta:
     # Versiona o cache para invalidar respostas curtas geradas pelo limite
     # anterior de tokens.
     ch = _chave(
-        "chat-v3", tipo, ref_id, ciclo, data_ini, data_fim,
+        "chat-v4-fill-population", tipo, ref_id, ciclo, data_ini, data_fim,
         _normalizar(pergunta),
     )
     r = db.execute(text("""

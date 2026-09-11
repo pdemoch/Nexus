@@ -35,8 +35,9 @@ embarque. Medir contra o faturado cria demanda censurada: se o plano
 subestima, a producao subestima e a entrega subestima junto — o erro se
 apaga e quanto pior o suprimento, melhor a acuracia aparente.
 
-Todas as consultas somam somente SKUs ativos no portfolio, com filtro
-`a.ativo = TRUE`, mantendo a mesma populacao operacional do dashboard.
+WMAPE, BIAS e FVA somam somente SKUs ativos no portfolio, com filtro
+`a.ativo = TRUE`. Fill Rate usa `mart_vendas_mes` sem filtro de ativo,
+igual a tela de atendimento, para preservar a populacao completa de pedidos.
 
 Valor monetario NAO entra em WMAPE, BIAS nem FVA. Fica na secao de
 impacto financeiro, que monetiza os gaps de volume.
@@ -408,6 +409,68 @@ WHERE a.ativo = TRUE AND a.qt_pedido > 0
 GROUP BY a.sku
 """
 
+_SQL_FILL_MENSAL = """
+SELECT TO_CHAR(v.mes, 'YYYY-MM') AS mes,
+       SUM(v.qt_pedido) AS pedido,
+       SUM(v.qt_entregue) AS entregue
+FROM mart_vendas_mes v
+WHERE v.mes >= CAST(:ini AS date) AND v.mes <= CAST(:fim AS date)
+GROUP BY 1 ORDER BY 1
+"""
+
+_SQL_FILL_ANUAL = """
+SELECT EXTRACT(YEAR FROM v.mes)::int AS ano,
+       SUM(v.qt_pedido) AS pedido,
+       SUM(v.qt_entregue) AS entregue
+FROM mart_vendas_mes v
+WHERE v.mes >= CAST(:ini AS date) AND v.mes <= CAST(:fim AS date)
+GROUP BY 1 ORDER BY 1
+"""
+
+_SQL_FILL_CATEGORIA = """
+SELECT COALESCE(v.categoria, 'SEM CATEGORIA') AS categoria,
+       SUM(v.qt_pedido) AS pedido,
+       SUM(v.qt_entregue) AS entregue
+FROM mart_vendas_mes v
+WHERE v.mes >= CAST(:ini AS date) AND v.mes <= CAST(:fim AS date)
+GROUP BY 1
+"""
+
+_SQL_FILL_SKU = """
+SELECT v.sku, SUM(v.qt_pedido) AS pedido, SUM(v.qt_entregue) AS entregue
+FROM mart_vendas_mes v
+WHERE v.mes >= CAST(:ini AS date) AND v.mes <= CAST(:fim AS date)
+GROUP BY v.sku
+"""
+
+
+def _fill_rate_maps(db: Session, ini: str, fim: str) -> Dict[str, Any]:
+    params = {"ini": ini, "fim": fim}
+    mensal = {}
+    for r in db.execute(text(_SQL_FILL_MENSAL), params).fetchall():
+        mensal[r.mes] = _sdiv(r.entregue, r.pedido, 100)
+    anual = {}
+    for r in db.execute(text(_SQL_FILL_ANUAL), params).fetchall():
+        anual[int(r.ano)] = _sdiv(r.entregue, r.pedido, 100)
+    categorias = {}
+    for r in db.execute(text(_SQL_FILL_CATEGORIA), params).fetchall():
+        categorias[r.categoria] = _sdiv(r.entregue, r.pedido, 100)
+    skus = {}
+    for r in db.execute(text(_SQL_FILL_SKU), params).fetchall():
+        skus[r.sku] = _sdiv(r.entregue, r.pedido, 100)
+    pedido = db.execute(text("""
+        SELECT SUM(v.qt_pedido) FROM mart_vendas_mes v
+        WHERE v.mes >= CAST(:ini AS date) AND v.mes <= CAST(:fim AS date)
+    """), params).scalar()
+    entregue = db.execute(text("""
+        SELECT SUM(v.qt_entregue) FROM mart_vendas_mes v
+        WHERE v.mes >= CAST(:ini AS date) AND v.mes <= CAST(:fim AS date)
+    """), params).scalar()
+    return {
+        "mensal": mensal, "anual": anual, "categorias": categorias,
+        "skus": skus, "total": _sdiv(entregue, pedido, 100),
+    }
+
 
 def _categorias_por_janela(db: Session, ini: str, fim: str) -> Dict[str, Dict[str, Any]]:
     """
@@ -542,6 +605,14 @@ def montar_dataset(db: Session, meses: List[str] = None,
     jan   = janela_do_ciclo(ciclo, data_ini=data_ini, data_fim=data_fim)
 
     p_det = {"ini": jan["ini_detalhe"], "fim": jan["fim_detalhe"]}
+    fill_maps = _fill_rate_maps(db, jan["ini_detalhe"], jan["fim_detalhe"])
+    fill_yoy = fill_maps
+    if data_ini is None:
+        fill_yoy = _fill_rate_maps(
+            db,
+            f"{jan['anos_yoy'][0]}-01-01",
+            jan["fim_detalhe"],
+        )
 
     # Total de SKUs ativos no portfolio (dim_produtos), independente de terem
     # tido pedido no periodo. Um SKU pode estar ativo e nao ter vendido nada
@@ -582,6 +653,8 @@ def montar_dataset(db: Session, meses: List[str] = None,
             "vl_subplano": round(float(r.vl_subplano or 0)),
             "n_skus":     int(r.n_skus or 0),
         })
+    for item in yoy:
+        item["fill_rate"] = _r(fill_yoy["anual"].get(item["ano"]), 1)
 
     # ---- Mensal: ultimos 6 fechados ----
     mensal = []
@@ -610,6 +683,8 @@ def montar_dataset(db: Session, meses: List[str] = None,
             "wmape_ia":   _r(wm_i),
             "fva":        _r(wm_h - wm_i) if (wm_h is not None and wm_i is not None) else None,
         })
+    for item in mensal:
+        item["fill_rate"] = _r(fill_maps["mensal"].get(item["mes"]), 1)
 
     # ---- Categoria ----
     categorias = []
@@ -631,6 +706,8 @@ def montar_dataset(db: Session, meses: List[str] = None,
             "vl_excesso": round(float(r.vl_excesso or 0)),
             "vl_subplano": round(float(r.vl_subplano or 0)),
         })
+    for item in categorias:
+        item["fill_rate"] = _r(fill_maps["categorias"].get(item["categoria"]), 1)
 
     # ---- Categoria: evolucao consolidada YTD / 6m / 3m ----
     # Uma tabela que cruza WMAPE, BIAS e Fill Rate por categoria em
@@ -643,6 +720,12 @@ def montar_dataset(db: Session, meses: List[str] = None,
                for c in categorias}
     cat_6m = _categorias_por_janela(db, jan["ini_6m"], jan["fim_detalhe"])
     cat_3m = _categorias_por_janela(db, jan["ini_3m"], jan["fim_detalhe"])
+    fill_6m = _fill_rate_maps(db, jan["ini_6m"], jan["fim_detalhe"])["categorias"]
+    fill_3m = _fill_rate_maps(db, jan["ini_3m"], jan["fim_detalhe"])["categorias"]
+    for cat, item in cat_6m.items():
+        item["fill_rate"] = _r(fill_6m.get(cat), 1)
+    for cat, item in cat_3m.items():
+        item["fill_rate"] = _r(fill_3m.get(cat), 1)
 
     todas_categorias = sorted(set(cat_ytd) | set(cat_6m) | set(cat_3m))
     categoria_evolucao = []
@@ -687,6 +770,8 @@ def montar_dataset(db: Session, meses: List[str] = None,
             "fill_rate":  _r(_sdiv(r.qt_entregue, qp, 100), 1),
             "sem_plano":  not bool(r.sempre_com_plano),
         })
+    for item in skus:
+        item["fill_rate"] = _r(fill_maps["skus"].get(item["sku"]), 1)
 
     erro_total = sum(s["erro_abs"] for s in skus) or 1
     for s in skus:
@@ -711,7 +796,7 @@ def montar_dataset(db: Session, meses: List[str] = None,
         "vl_excesso":  sum(m["vl_excesso"] for m in mensal),
         "vl_subplano": sum(m["vl_subplano"] for m in mensal),
     }
-    tot["fill_rate"] = _r(_sdiv(tot["qt_entregue"], tot["qt_pedido"], 100), 1)
+    tot["fill_rate"] = _r(fill_maps["total"], 1)
     tot["pmv_medio"] = _r(_sdiv(tot["vl_pedido"], tot["qt_pedido"]), 4)
     tot["vl_impacto_total"] = tot["vl_corte"] + tot["vl_excesso"] + tot["vl_subplano"]
     # Corte real de ruptura, descontada a transferencia de codigo COPA —
@@ -809,7 +894,9 @@ FILL RATE = volume faturado dividido por volume vendido, em caixas. Mede
   execucao, nao acuracia. Serve para separar erro de previsao de restricao
   de suprimento: fill rate baixo com BIAS negativo indica plano
   subdimensionado; fill rate baixo com BIAS neutro indica restricao
-  operacional.
+  operacional. IMPORTANTE: o Fill Rate usa todos os itens de
+  mart_vendas_mes, sem filtrar portfolio ativo; WMAPE, BIAS e FVA usam
+  somente a populacao a.ativo = TRUE de mart_acuracia_sku_mes.
 
 DIAGNOSTICO WMAPE x BIAS
   WMAPE alto e BIAS proximo de zero: erro disperso. Volatilidade ou sazonalidade
@@ -1293,7 +1380,7 @@ def responder_pergunta(db: Session, pergunta: str,
 
     # Versiona a chave para que respostas antigas, eventualmente truncadas por
     # um limite menor de tokens, não sejam devolvidas indefinidamente.
-    ch = _chave("chat-v4-active-portfolio", ciclo, data_ini, data_fim, _normalizar(pergunta))
+    ch = _chave("chat-v5-fill-population", ciclo, data_ini, data_fim, _normalizar(pergunta))
     r = db.execute(text("""
         SELECT resposta FROM agente_chat_cache
         WHERE ciclo_sop = :c AND chave = :k
