@@ -652,11 +652,24 @@ function TabelaConsolidada3Indicadores({
 // MATRIZ MÊS A MÊS (WMAPE, BIAS, FILL RATE)
 // ═══════════════════════════════════════════════════════════════════════════
 function MatrizCategoriaMes({ matriz, metrica = 'wmape' }: { matriz: any; metrica?: 'wmape'|'bias'|'fill_rate' }) {
-  const categorias: string[] = matriz?.categorias || [];
   const meses: string[]      = matriz?.meses || [];
   const dados: Record<string, Record<string, number|null>> = matriz?.[metrica] || {};
   const nomes: Record<string, string> = matriz?.nomes || {};
   const rotulo = matriz?.dimensao === 'sku' ? 'Produto' : 'Categoria';
+
+  const categorias: string[] = useMemo(() => {
+    if (!matriz) return [];
+    let list: string[] = [];
+    if (metrica === 'fill_rate') {
+      list = matriz.categorias_fill || matriz.categorias || [];
+    } else {
+      list = matriz.categorias_wmape || matriz.categorias || [];
+    }
+    return list.filter((cat) => {
+      const row = dados[cat];
+      return row && Object.values(row).some(v => v !== null && v !== undefined);
+    });
+  }, [matriz, metrica, dados]);
 
   if (!categorias.length || !meses.length)
     return <div style={{ padding:32, textAlign:'center', color:'#94a3b8', fontSize:13 }}>Sem dados.</div>;

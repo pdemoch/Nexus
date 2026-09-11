@@ -582,11 +582,15 @@ async def matriz_categoria(
             vals = [v for v in mat.get(grupo, {}).values() if v is not None]
             return sum(vals) / len(vals) if vals else -1
 
+        grupos_wmape = sorted(list(wmape_mat.keys()), key=lambda g: media_grupo(wmape_mat, g), reverse=True)
+        grupos_fill = sorted(list(fill_rate_mat.keys()), key=lambda g: media_grupo(fill_rate_mat, g), reverse=True)
         todos_grupos = sorted(list(set(wmape_mat.keys()) | set(fill_rate_mat.keys())), key=lambda g: media_grupo(wmape_mat, g), reverse=True)
 
         return {
             "dimensao": dimensao,
             "categorias": todos_grupos,
+            "categorias_wmape": grupos_wmape,
+            "categorias_fill": grupos_fill,
             "meses": meses_validos,
             "wmape": wmape_mat,
             "bias": bias_mat,
