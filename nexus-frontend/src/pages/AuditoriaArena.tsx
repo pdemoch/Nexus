@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import axios from 'axios';
 import {
   LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine, Legend, Label,
+  ResponsiveContainer, ReferenceLine, Legend, Label, LabelList,
 } from 'recharts';
 import { ChevronDown, ChevronRight, Loader2, TrendingUp, TrendingDown,
          Sparkles, FileDown, RefreshCw, Info } from 'lucide-react';
@@ -60,6 +60,30 @@ const RoituloLinha = (cor: string, total: number) => (props: any) => {
   return (
     <text x={x} y={y - 9} fill={cor} fontSize={9} textAnchor="middle" fontWeight={700}>
       {Number(value).toFixed(1).replace('.',',')}
+    </text>
+  );
+};
+
+// ─── Rótulo de dado em barras (YoY) ──────────────────────────────────────────
+const renderCustomBarLabel = (color: string, isBias: boolean = false) => (props: any) => {
+  const { x, y, width, value } = props;
+  if (value == null) return null;
+  const valNum = Number(value);
+  const formatted = isBias
+    ? `${valNum > 0 ? '+' : ''}${Math.round(valNum)}%`
+    : `${Math.round(valNum)}%`;
+
+  const yPos = valNum < 0 ? y + 16 : y - 6;
+  return (
+    <text
+      x={x + width / 2}
+      y={yPos}
+      fill={color}
+      fontSize={11}
+      fontWeight={800}
+      textAnchor="middle"
+    >
+      {formatted}
     </text>
   );
 };
@@ -782,13 +806,45 @@ function AbaComparativoYoY({ qs, ctx }: { qs: string; ctx: string }) {
         ))}
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))', gap: 14 }}>
+      {/* GRÁFICO CONSOLIDADO YOY (3 INDICADORES: WMAPE, BIAS, FILL RATE) - CONFORME MODELO */}
+      <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #f1f5f9', padding: 20 }}>
+        <div style={{ fontWeight: 900, fontSize: 14, color: '#0f172a', marginBottom: 4 }}>
+          Comparativo Consolidado de Indicadores YoY (%)
+        </div>
+        <div style={{ fontSize: 11, color: '#64748b', marginBottom: 16 }}>
+          WMAPE (Acurácia), BIAS (Tendência) e Fill Rate (Atendimento) agrupados por ano ({rotulo})
+        </div>
+        <ResponsiveContainer width="100%" height={300}>
+          <BarChart data={dados} margin={{ top: 25, right: 15, left: -10, bottom: 5 }}>
+            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+            <XAxis dataKey="ano" tick={{ fontSize: 12, fontWeight: 800, fill: '#334155' }} />
+            <YAxis domain={[-10, 100]} tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={v => `${v}%`} />
+            <Tooltip formatter={(v: any, name: any) => [`${Number(v).toFixed(1)}%`, String(name || '')]} />
+            <ReferenceLine y={0} stroke="#cbd5e1" strokeWidth={1.5} />
+            <Legend iconType="rect" wrapperStyle={{ fontSize: 12, fontWeight: 700, paddingTop: 10 }} />
+
+            <Bar dataKey="wmape" name="WMAPE" fill="#2563eb" radius={[4, 4, 0, 0]}>
+              <LabelList dataKey="wmape" content={renderCustomBarLabel('#2563eb', false)} />
+            </Bar>
+            <Bar dataKey="bias" name="BIAS" fill="#f97316" radius={[4, 4, 0, 0]}>
+              <LabelList dataKey="bias" content={renderCustomBarLabel('#f97316', true)} />
+            </Bar>
+            <Bar dataKey="fill_rate" name="Fill Rate" fill="#64748b" radius={[4, 4, 0, 0]}>
+              <LabelList dataKey="fill_rate" content={renderCustomBarLabel('#64748b', false)} />
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* GRÁFICOS INDIVIDUAIS POR INDICADOR */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 14 }}>
+        {/* 1. WMAPE YOY */}
         <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #f1f5f9', padding: 18 }}>
           <div style={{ fontWeight: 800, fontSize: 13, color: '#0f172a', marginBottom: 14 }}>
-            WMAPE YoY (%) — Quanto menor, mais preciso
+            WMAPE YoY (%) — Acurácia
           </div>
           <ResponsiveContainer width="100%" height={210}>
-            <BarChart data={dados} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
+            <BarChart data={dados} margin={{ top: 20, right: 10, left: -10, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
               <XAxis dataKey="ano" tick={{ fontSize: 11, fontWeight: 700 }} />
               <YAxis tick={{ fontSize: 10 }} tickFormatter={v => `${v}%`} />
@@ -797,6 +853,7 @@ function AbaComparativoYoY({ qs, ctx }: { qs: string; ctx: string }) {
                 <Label value="Meta 20%" position="top" fill="#059669" fontSize={9} />
               </ReferenceLine>
               <Bar dataKey="wmape" name="WMAPE (%)" radius={[6, 6, 0, 0]}>
+                <LabelList dataKey="wmape" content={renderCustomBarLabel('#2563eb', false)} />
                 {dados.map((entry: any) => (
                   <Cell key={entry.ano} fill={corWmape(entry.wmape)} />
                 ))}
@@ -805,12 +862,37 @@ function AbaComparativoYoY({ qs, ctx }: { qs: string; ctx: string }) {
           </ResponsiveContainer>
         </div>
 
+        {/* 2. BIAS YOY */}
         <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #f1f5f9', padding: 18 }}>
           <div style={{ fontWeight: 800, fontSize: 13, color: '#0f172a', marginBottom: 14 }}>
-            Fill Rate YoY (%) — Quanto maior, melhor a execução
+            BIAS YoY (%) — Viés
           </div>
           <ResponsiveContainer width="100%" height={210}>
-            <BarChart data={dados} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
+            <BarChart data={dados} margin={{ top: 20, right: 10, left: -10, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+              <XAxis dataKey="ano" tick={{ fontSize: 11, fontWeight: 700 }} />
+              <YAxis tick={{ fontSize: 10 }} tickFormatter={v => `${v}%`} />
+              <Tooltip formatter={(v: any) => [`${sinal(v)}`, 'BIAS']} />
+              <ReferenceLine y={0} stroke="#cbd5e1" strokeWidth={1.5} />
+              <ReferenceLine y={10} stroke="#e11d48" strokeDasharray="4 2" />
+              <ReferenceLine y={-10} stroke="#2563eb" strokeDasharray="4 2" />
+              <Bar dataKey="bias" name="BIAS (%)" radius={[6, 6, 0, 0]}>
+                <LabelList dataKey="bias" content={renderCustomBarLabel('#f97316', true)} />
+                {dados.map((entry: any) => (
+                  <Cell key={entry.ano} fill={corBias(entry.bias)} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* 3. FILL RATE YOY */}
+        <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #f1f5f9', padding: 18 }}>
+          <div style={{ fontWeight: 800, fontSize: 13, color: '#0f172a', marginBottom: 14 }}>
+            Fill Rate YoY (%) — Atendimento
+          </div>
+          <ResponsiveContainer width="100%" height={210}>
+            <BarChart data={dados} margin={{ top: 20, right: 10, left: -10, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
               <XAxis dataKey="ano" tick={{ fontSize: 11, fontWeight: 700 }} />
               <YAxis domain={[70, 100]} tick={{ fontSize: 10 }} tickFormatter={v => `${v}%`} />
@@ -819,6 +901,7 @@ function AbaComparativoYoY({ qs, ctx }: { qs: string; ctx: string }) {
                 <Label value="Meta 95%" position="top" fill="#059669" fontSize={9} />
               </ReferenceLine>
               <Bar dataKey="fill_rate" name="Fill Rate (%)" radius={[6, 6, 0, 0]}>
+                <LabelList dataKey="fill_rate" content={renderCustomBarLabel('#64748b', false)} />
                 {dados.map((entry: any) => (
                   <Cell key={entry.ano} fill={entry.fill_rate >= 95 ? '#059669' : entry.fill_rate >= 85 ? '#d97706' : '#e11d48'} />
                 ))}
