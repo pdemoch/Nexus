@@ -539,10 +539,11 @@ async def matriz_categoria(
             if real_t <= 0:
                 continue
             prev_t = float(g.vol_humano.sum())
+            grp_str = str(grupo)
             wmape = _sdiv((g.vol_humano - g.vol_real).abs().sum(), real_t, 100)
-            wmape_mat.setdefault(grupo, {})[mes] = round(wmape, 2) if wmape is not None else None
+            wmape_mat.setdefault(grp_str, {})[mes] = round(wmape, 2) if wmape is not None else None
             bias = _sdiv(prev_t - real_t, real_t, 100)
-            bias_mat.setdefault(grupo, {})[mes] = round(bias, 2) if bias is not None else None
+            bias_mat.setdefault(grp_str, {})[mes] = round(bias, 2) if bias is not None else None
 
         # Fill Rate mês a mês por grupo (categoria ou sku)
         filtros_fr, params_fr = ["1=1"], {"ini": ini_sql, "fim": fim_sql, "meses": meses_validos}
