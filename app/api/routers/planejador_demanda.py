@@ -677,7 +677,7 @@ def responder_pergunta_planejador(db: Session, tipo: str, ref_id: str, pergunta:
     # Versiona o cache para invalidar respostas curtas geradas pelo limite
     # anterior de tokens.
     ch = _chave(
-        "chat-v4-fill-population", tipo, ref_id, ciclo, data_ini, data_fim,
+        "chat-v5-fill-population-screen-parity", tipo, ref_id, ciclo, data_ini, data_fim,
         _normalizar(pergunta),
     )
     r = db.execute(text("""

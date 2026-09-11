@@ -1380,7 +1380,9 @@ def responder_pergunta(db: Session, pergunta: str,
 
     # Versiona a chave para que respostas antigas, eventualmente truncadas por
     # um limite menor de tokens, não sejam devolvidas indefinidamente.
-    ch = _chave("chat-v5-fill-population", ciclo, data_ini, data_fim, _normalizar(pergunta))
+    # Invalidate answers generated before Fill Rate was aligned with the
+    # screen's full sales population (including inactive historical items).
+    ch = _chave("chat-v6-fill-population-screen-parity", ciclo, data_ini, data_fim, _normalizar(pergunta))
     r = db.execute(text("""
         SELECT resposta FROM agente_chat_cache
         WHERE ciclo_sop = :c AND chave = :k

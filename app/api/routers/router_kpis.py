@@ -509,18 +509,18 @@ async def matriz_categoria(
         meses_validos = sorted({m for m in meses if m <= teto})
         if not meses_validos:
             return {"dimensao": "sku" if categoria else "categoria",
-                    "categorias": [], "meses": [], "wmape": {}, "bias": {}, "nomes": {}}
+                    "categorias": [], "meses": [], "wmape": {}, "bias": {}, "fill_rate": {}, "nomes": {}}
 
         ini_sql = meses_validos[0] + "-01"
         fim_sql = meses_validos[-1] + "-01"
         df = _carregar(db, ini_sql, fim_sql, categoria, None, base=base)
         if df.empty:
             return {"dimensao": "sku" if categoria else "categoria",
-                    "categorias": [], "meses": meses_validos, "wmape": {}, "bias": {}, "nomes": {}}
+                    "categorias": [], "meses": meses_validos, "wmape": {}, "bias": {}, "fill_rate": {}, "nomes": {}}
         df = df[df.mes.isin(meses_validos)]
         if df.empty:
             return {"dimensao": "sku" if categoria else "categoria",
-                    "categorias": [], "meses": meses_validos, "wmape": {}, "bias": {}, "nomes": {}}
+                    "categorias": [], "meses": meses_validos, "wmape": {}, "bias": {}, "fill_rate": {}, "nomes": {}}
 
         dimensao = "sku" if categoria else "categoria"
         coluna_grupo = "sku" if categoria else "categoria"
@@ -544,23 +544,178 @@ async def matriz_categoria(
             bias = _sdiv(prev_t - real_t, real_t, 100)
             bias_mat.setdefault(grupo, {})[mes] = round(bias, 2) if bias is not None else None
 
-        # Ordena os grupos pela média do WMAPE (maior erro primeiro).
+        # Fill Rate mês a mês por grupo (categoria ou sku)
+        filtros_fr, params_fr = ["1=1"], {"ini": ini_sql, "fim": fim_sql, "meses": meses_validos}
+        if categoria:
+            if categoria == "SEM CATEGORIA":
+                filtros_fr.append("(v.categoria IS NULL OR v.categoria = 'SEM CATEGORIA')")
+            else:
+                filtros_fr.append("v.categoria = :cat"); params_fr["cat"] = categoria
+        w_fr = " AND ".join(filtros_fr)
+        
+        col_sel = "v.sku AS grupo, COALESCE(MAX(p.descricao), v.sku) AS desc" if dimensao == "sku" else "COALESCE(v.categoria, 'SEM CATEGORIA') AS grupo"
+        group_sel = "v.sku, TO_CHAR(v.mes,'YYYY-MM')" if dimensao == "sku" else "1, 2"
+        
+        sql_fr = f"""
+            SELECT {col_sel},
+                   TO_CHAR(v.mes, 'YYYY-MM') AS mes,
+                   SUM(v.qt_pedido)   AS pedido,
+                   SUM(v.qt_entregue) AS entregue
+            FROM mart_vendas_mes v
+            LEFT JOIN dim_produtos p ON p.sku = v.sku
+            WHERE v.mes >= CAST(:ini AS date) AND v.mes <= CAST(:fim AS date)
+              AND TO_CHAR(v.mes,'YYYY-MM') = ANY(:meses)
+              AND {w_fr}
+            GROUP BY {group_sel}
+        """
+        rows_fr = db.execute(text(sql_fr), params_fr).fetchall()
+        fill_rate_mat: dict = {}
+        for r in rows_fr:
+            grp_str = str(r.grupo)
+            if dimensao == "sku" and grp_str not in nomes:
+                nomes[grp_str] = str(r.desc)
+            fr = _sdiv(r.entregue, r.pedido, 100)
+            fill_rate_mat.setdefault(grp_str, {})[r.mes] = round(fr, 1) if fr is not None else None
+
+        # Ordena os grupos pela média do WMAPE (maior erro primeiro) ou presença em grupos
         def media_grupo(mat, grupo):
             vals = [v for v in mat.get(grupo, {}).values() if v is not None]
             return sum(vals) / len(vals) if vals else -1
 
-        categorias = sorted(wmape_mat.keys(), key=lambda g: media_grupo(wmape_mat, g), reverse=True)
+        todos_grupos = sorted(list(set(wmape_mat.keys()) | set(fill_rate_mat.keys())), key=lambda g: media_grupo(wmape_mat, g), reverse=True)
 
         return {
             "dimensao": dimensao,
-            "categorias": categorias,
+            "categorias": todos_grupos,
             "meses": meses_validos,
             "wmape": wmape_mat,
             "bias": bias_mat,
+            "fill_rate": fill_rate_mat,
             "nomes": nomes,
         }
     except Exception as e:
         raise HTTPException(500, f"Erro na matriz por categoria: {e}")
+
+
+@router.get("/comparativo-yoy")
+async def comparativo_yoy(
+    meses:     List[str] = Query(...),
+    categoria: Optional[str] = None,
+    sku:       Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_user),
+):
+    """
+    Compara o desempenho YoY (ano a ano) para a mesma janela de meses do ano.
+    Exemplo: se meses = ["2026-01", ..., "2026-08"], extrai os meses [1..8].
+    Calcula WMAPE, BIAS e Fill Rate para [1..8] em 2023, 2024, 2025, 2026.
+    """
+    try:
+        teto = _ultimo_mes_fechado()
+        meses_validos = sorted({m for m in meses if m <= teto})
+        if not meses_validos:
+            return {"anos": [], "dados": []}
+
+        meses_nums = sorted(list({int(m.split("-")[1]) for m in meses_validos}))
+        meses_nums_str = [f"{m:02d}" for m in meses_nums]
+        
+        ano_max = int(teto.split("-")[0])
+        anos = [a for a in [2023, 2024, 2025, 2026] if a <= ano_max]
+
+        # WMAPE e BIAS por ano (mart_acuracia_sku_mes, ativo = TRUE)
+        filtros_acc = ["a.ativo = TRUE", "a.qt_pedido > 0", "TO_CHAR(a.mes, 'MM') = ANY(:meses_nums_str)"]
+        params_acc = {"meses_nums_str": meses_nums_str}
+        if categoria:
+            if categoria == "SEM CATEGORIA":
+                filtros_acc.append("(a.categoria IS NULL OR a.categoria = 'SEM CATEGORIA')")
+            else:
+                filtros_acc.append("a.categoria = :cat")
+                params_acc["cat"] = categoria
+        if sku:
+            filtros_acc.append("a.sku = :sku")
+            params_acc["sku"] = sku
+        w_acc = " AND ".join(filtros_acc)
+
+        sql_acc = f"""
+            SELECT EXTRACT(YEAR FROM a.mes)::int AS ano,
+                   SUM(a.qt_pedido)   AS real_t,
+                   SUM(a.qt_plano)    AS prev_t,
+                   SUM(a.erro_abs_cx) AS erro_abs
+            FROM mart_acuracia_sku_mes a
+            WHERE {w_acc}
+            GROUP BY 1
+            ORDER BY 1
+        """
+        rows_acc = db.execute(text(sql_acc), params_acc).fetchall()
+        dict_acc = {r.ano: r for r in rows_acc}
+
+        # Fill Rate por ano (mart_vendas_mes, todos os produtos)
+        filtros_vendas = ["v.qt_pedido > 0", "TO_CHAR(v.mes, 'MM') = ANY(:meses_nums_str)"]
+        params_vendas = {"meses_nums_str": meses_nums_str}
+        if categoria:
+            if categoria == "SEM CATEGORIA":
+                filtros_vendas.append("(v.categoria IS NULL OR v.categoria = 'SEM CATEGORIA')")
+            else:
+                filtros_vendas.append("v.categoria = :cat")
+                params_vendas["cat"] = categoria
+        if sku:
+            filtros_vendas.append("v.sku = :sku")
+            params_vendas["sku"] = sku
+        w_vendas = " AND ".join(filtros_vendas)
+
+        sql_vendas = f"""
+            SELECT EXTRACT(YEAR FROM v.mes)::int AS ano,
+                   SUM(v.qt_pedido)   AS pedido,
+                   SUM(v.qt_entregue) AS entregue,
+                   SUM(v.qt_corte)    AS corte
+            FROM mart_vendas_mes v
+            WHERE {w_vendas}
+            GROUP BY 1
+            ORDER BY 1
+        """
+        rows_vendas = db.execute(text(sql_vendas), params_vendas).fetchall()
+        dict_vendas = {r.ano: r for r in rows_vendas}
+
+        NOMES_MES_PT = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez']
+        meses_rotulo = " a ".join([NOMES_MES_PT[m-1] for m in [meses_nums[0], meses_nums[-1]]]) if len(meses_nums) > 1 else NOMES_MES_PT[meses_nums[0]-1]
+
+        dados = []
+        for ano in anos:
+            acc = dict_acc.get(ano)
+            vendas = dict_vendas.get(ano)
+
+            real_t = float(acc.real_t) if acc and acc.real_t else 0.0
+            prev_t = float(acc.prev_t) if acc and acc.prev_t else 0.0
+            erro_abs = float(acc.erro_abs) if acc and acc.erro_abs else 0.0
+
+            ped = float(vendas.pedido) if vendas and vendas.pedido else 0.0
+            ent = float(vendas.entregue) if vendas and vendas.entregue else 0.0
+            cor = float(vendas.corte) if vendas and vendas.corte else 0.0
+
+            wmape = _sdiv(erro_abs, real_t, 100) if real_t > 0 else None
+            bias = _sdiv(prev_t - real_t, real_t, 100) if real_t > 0 else None
+            fill_rate = _sdiv(ent, ped, 100) if ped > 0 else None
+
+            dados.append({
+                "ano": str(ano),
+                "wmape": round(wmape, 2) if wmape is not None else None,
+                "bias": round(bias, 2) if bias is not None else None,
+                "fill_rate": round(fill_rate, 1) if fill_rate is not None else None,
+                "vol_real": round(real_t),
+                "vol_previsto": round(prev_t),
+                "pedido": round(ped),
+                "entregue": round(ent),
+                "corte": round(cor),
+            })
+
+        return {
+            "anos": anos,
+            "meses_nums": meses_nums,
+            "periodo_rotulo": meses_rotulo,
+            "dados": dados
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Erro no comparativo YoY: {e}")
 
 
 @router.get("/fill-rate")
