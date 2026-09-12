@@ -677,7 +677,7 @@ def responder_pergunta_planejador(db: Session, tipo: str, ref_id: str, pergunta:
     # Versiona o cache para invalidar respostas curtas geradas pelo limite
     # anterior de tokens.
     ch = _chave(
-        "chat-v5-fill-population-screen-parity", tipo, ref_id, ciclo, data_ini, data_fim,
+        "chat-v6-no-truncation-completo", tipo, ref_id, ciclo, data_ini, data_fim,
         _normalizar(pergunta),
     )
     r = db.execute(text("""
@@ -707,7 +707,7 @@ def responder_pergunta_planejador(db: Session, tipo: str, ref_id: str, pergunta:
                     f"PERGUNTA: {pergunta}"),
     })
 
-    resposta = _chamar_claude(_SYSTEM_PLANEJADOR_CHAT, msgs)
+    resposta = _chamar_claude(_SYSTEM_PLANEJADOR_CHAT, msgs, max_tokens=8192)
     resposta = _corrigir_nome_empresa(resposta)
 
     db.execute(text("""

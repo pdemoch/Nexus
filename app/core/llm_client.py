@@ -85,7 +85,7 @@ def _anthropic_call(system: str, mensagens: Sequence[Dict[str, Any]], max_tokens
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY not configured")
 
-    model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+    model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
     url = "https://api.anthropic.com/v1/messages"
     headers = {
         "x-api-key": api_key,
@@ -132,10 +132,8 @@ def chamar_llm(
     if not mensagens:
         return ""
 
-    output_tokens = min(
-        max(DEFAULT_MAX_OUTPUT_TOKENS, max_tokens or 0),
-        MAX_PROVIDER_OUTPUT_TOKENS,
-    )
+    req_tokens = max_tokens if (max_tokens and max_tokens > 0) else DEFAULT_MAX_OUTPUT_TOKENS
+    output_tokens = min(max(req_tokens, 8192), MAX_PROVIDER_OUTPUT_TOKENS)
     for provider in _provider_order():
         try:
             if provider == "gemini":

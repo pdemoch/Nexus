@@ -1108,7 +1108,7 @@ ESTRUTURA (700 a 900 palavras, prosa densa):
 10. CONSIDERACAO FINAL
    Um paragrafo unico. Responda: o processo esta melhorando ou piorando,
    onde esta o maior ganho no proximo ciclo, e qual o principal risco.
-   Sem repetir numeros ja citados.
+   Sem repetir numeros ja citados
 
 IMPORTANTE: complete todas as 10 secoes (a secao 3B faz parte da 3, nao
 conta como secao extra). Se precisar economizar espaco, encurte as
@@ -1382,7 +1382,7 @@ def responder_pergunta(db: Session, pergunta: str,
     # um limite menor de tokens, não sejam devolvidas indefinidamente.
     # Invalidate answers generated before Fill Rate was aligned with the
     # screen's full sales population (including inactive historical items).
-    ch = _chave("chat-v6-fill-population-screen-parity", ciclo, data_ini, data_fim, _normalizar(pergunta))
+    ch = _chave("chat-v7-no-truncation-completo", ciclo, data_ini, data_fim, _normalizar(pergunta))
     r = db.execute(text("""
         SELECT resposta FROM agente_chat_cache
         WHERE ciclo_sop = :c AND chave = :k
@@ -1403,7 +1403,7 @@ def responder_pergunta(db: Session, pergunta: str,
         "content": f"{_contexto_modelo(ds)}\n\nDETALHE POR MES:\n{json.dumps(ds.get('detalhe_mensal', {}), ensure_ascii=False, separators=(',', ':'))}\n\nPERGUNTA: {pergunta}",
     })
 
-    resposta = _chamar_claude(_SYSTEM_CHAT, msgs)
+    resposta = _chamar_claude(_SYSTEM_CHAT, msgs, max_tokens=8192)
     resposta = _corrigir_nome_empresa(resposta)
 
     db.execute(text("""
