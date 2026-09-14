@@ -20,6 +20,7 @@ Toda a lógica de SQL e rateio é preservada do router_carteira.py original.
 
 import datetime
 import io
+import unicodedata
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
@@ -46,6 +47,210 @@ from app.api.routers.shared_ibp import (
 )
 
 router = APIRouter(prefix="/api/v1/carteira", tags=["Metas Comercial"])
+
+
+SIMONE_NOME = "SIMONE ANDRADE DE PAULA"
+
+
+def _normalizar_nome(valor: Optional[str]) -> str:
+    texto = unicodedata.normalize("NFKD", valor or "")
+    return "".join(c for c in texto if not unicodedata.combining(c)).strip().upper()
+
+
+def _eh_simone(usuario: dict) -> bool:
+    return _normalizar_nome(usuario.get("gerente_nome")) == SIMONE_NOME
+
+
+DDL_METAS_MONETARIAS_SIMONE = """
+CREATE TABLE IF NOT EXISTS metas_monetarias_simone (
+    id               SERIAL PRIMARY KEY,
+    ciclo_sop        VARCHAR(7) NOT NULL,
+    mes_projetado    DATE NOT NULL,
+    regional         VARCHAR(120) NOT NULL,
+    cgc              VARCHAR(50),
+    valor_meta       NUMERIC(18,2) NOT NULL DEFAULT 0,
+    atualizado_por   VARCHAR(120),
+    atualizado_em    TIMESTAMP DEFAULT NOW(),
+    UNIQUE (ciclo_sop, mes_projetado, regional, cgc)
+);
+CREATE INDEX IF NOT EXISTS ix_metas_monetarias_simone_ciclo
+    ON metas_monetarias_simone (ciclo_sop, mes_projetado, regional);
+"""
+
+
+DDL_CONTROLE_METAS_SIMONE = """
+CREATE TABLE IF NOT EXISTS controle_metas_simone (
+    ciclo_sop        VARCHAR(7) PRIMARY KEY,
+    etapa_atual      VARCHAR(20) NOT NULL DEFAULT 'REGIONAL',
+    atualizado_por   VARCHAR(120),
+    atualizado_em    TIMESTAMP DEFAULT NOW()
+);
+"""
+
+DDL_METAS_MONETARIAS_SIMONE_SKU = """
+CREATE TABLE IF NOT EXISTS metas_monetarias_simone_sku (
+    id               SERIAL PRIMARY KEY,
+    ciclo_sop        VARCHAR(7) NOT NULL,
+    mes_projetado    DATE NOT NULL,
+    regional         VARCHAR(120) NOT NULL,
+    cgc              VARCHAR(50) NOT NULL,
+    sku              VARCHAR(80) NOT NULL,
+    valor_meta       NUMERIC(18,2) NOT NULL DEFAULT 0,
+    atualizado_por   VARCHAR(120),
+    atualizado_em    TIMESTAMP DEFAULT NOW(),
+    UNIQUE (ciclo_sop, mes_projetado, regional, cgc, sku)
+);
+"""
+
+DDL_METAS_REGIONAIS_SIMONE = """
+CREATE TABLE IF NOT EXISTS metas_regionais_simone (
+    id               SERIAL PRIMARY KEY,
+    ciclo_sop        VARCHAR(7) NOT NULL,
+    mes_projetado    DATE NOT NULL,
+    regional         VARCHAR(120) NOT NULL,
+    valor_meta       NUMERIC(18,2) NOT NULL DEFAULT 0,
+    atualizado_por   VARCHAR(120),
+    atualizado_em    TIMESTAMP DEFAULT NOW(),
+    UNIQUE (ciclo_sop, mes_projetado, regional)
+);
+"""
+
+
+def _garantir_tabelas_simone(db: Session) -> None:
+    for ddl in (DDL_METAS_MONETARIAS_SIMONE, DDL_CONTROLE_METAS_SIMONE,
+                DDL_METAS_MONETARIAS_SIMONE_SKU, DDL_METAS_REGIONAIS_SIMONE):
+        for stmt in ddl.strip().split(";"):
+            if stmt.strip():
+                db.execute(text(stmt))
+    db.commit()
+
+
+def _exigir_simone(u: dict) -> None:
+    if not _eh_simone(u):
+        raise HTTPException(403, "Fluxo monetário exclusivo da gerente Simone Andrade de Paula.")
+
+
+def _etapa_simone_atual(db: Session, ciclo: str) -> str:
+    return db.execute(text("""
+        SELECT etapa_atual FROM controle_metas_simone WHERE ciclo_sop = :c
+    """), {"c": ciclo}).scalar() or "REGIONAL"
+
+
+def _ratear_centavos(valor: float, pesos: list[float]) -> list[float]:
+    total = max(0, int(round(valor * 100)))
+    pesos_positivos = [max(0.0, p) for p in pesos]
+    soma = sum(pesos_positivos)
+    if not pesos_positivos:
+        return []
+    if soma == 0:
+        pesos_positivos = [1.0] * len(pesos_positivos)
+        soma = float(len(pesos_positivos))
+    exatos = [total * peso / soma for peso in pesos_positivos]
+    partes = [int(v) for v in exatos]
+    sobra = total - sum(partes)
+    ordem = sorted(range(len(partes)), key=lambda i: exatos[i] - partes[i], reverse=True)
+    for i in ordem[:sobra]:
+        partes[i] += 1
+    return [parte / 100 for parte in partes]
+
+
+def _volumes_por_valor(valor: float, folhas: list) -> list[int]:
+    """Converte a meta monetária em caixas inteiras minimizando o erro em R$."""
+    alvo = max(0.0, float(valor or 0))
+    if not folhas:
+        return []
+    pesos = [max(0.0, float(getattr(f, "peso_historico", 0) or 0)) for f in folhas]
+    if not any(pesos):
+        pesos = [max(0.0, float(getattr(f, "valor_atual", 0) or 0)) for f in folhas]
+    if not any(pesos):
+        pesos = [1.0] * len(folhas)
+    soma = sum(pesos)
+    volumes = [
+        max(0, int((alvo * peso / soma) / max(0.0, float(f.pmv or 0))))
+        if float(f.pmv or 0) > 0 else 0
+        for f, peso in zip(folhas, pesos)
+    ]
+    def erro() -> float:
+        return abs(alvo - sum(v * float(f.pmv or 0) for v, f in zip(volumes, folhas)))
+    while True:
+        melhor = None
+        erro_atual = erro()
+        for i, folha in enumerate(folhas):
+            pmv = float(folha.pmv or 0)
+            if pmv <= 0:
+                continue
+            candidato = abs(alvo - (
+                sum(v * float(f.pmv or 0) for v, f in zip(volumes, folhas))
+                + pmv
+            ))
+            if candidato + 0.0001 < erro_atual:
+                melhor = i
+                erro_atual = candidato
+        if melhor is None:
+            break
+        volumes[melhor] += 1
+    return volumes
+
+
+def _materializar_skus_simone(db: Session, ciclo: str, responsavel: str) -> None:
+    """Persiste a abertura por SKU e propaga caixas para fato_ibp_granular."""
+    rows = db.execute(text("""
+        SELECT m.mes_projetado, m.regional, m.cgc, m.valor_meta,
+               f.sku, f.id AS fato_id, f.pmv_aplicado AS pmv,
+               COALESCE(SUM(v.qt_pedido), 0) AS peso_historico,
+               COALESCE(f.vol_meta * f.pmv_aplicado, 0) AS valor_atual,
+               f.vol_meta AS volume_atual
+        FROM metas_monetarias_simone m
+        JOIN fato_ibp_granular f
+          ON f.ciclo_sop = m.ciclo_sop AND f.mes_projetado = m.mes_projetado
+         AND f.cgc = m.cgc
+        LEFT JOIN fato_vendas v
+          ON v.cgc = f.cgc AND v.sku = f.sku
+         AND v.data_pedido >= CURRENT_DATE - INTERVAL '12 months'
+        WHERE m.ciclo_sop = :ciclo AND m.cgc IS NOT NULL
+        GROUP BY m.mes_projetado, m.regional, m.cgc, m.valor_meta,
+                 f.sku, f.id, f.pmv_aplicado, f.vol_meta
+    """), {"ciclo": ciclo}).fetchall()
+    grupos: dict = {}
+    for row in rows:
+        grupos.setdefault((row.mes_projetado, row.regional, row.cgc), []).append(row)
+    for (mes, regional, cgc), folhas in grupos.items():
+        por_sku: dict = {}
+        for row in folhas:
+            por_sku.setdefault(row.sku, []).append(row)
+        sku_folhas = [
+            type("SkuFolha", (), {
+                "sku": sku,
+                "pmv": sum(float(r.pmv or 0) * max(1, len(rows_sku)) for r in rows_sku)
+                       / max(1, len(rows_sku)),
+                "peso_historico": sum(float(r.peso_historico or 0) for r in rows_sku),
+                "valor_atual": sum(float(r.valor_atual or 0) for r in rows_sku),
+            })()
+            for sku, rows_sku in por_sku.items()
+        ]
+        volumes_sku = _volumes_por_valor(float(folhas[0].valor_meta or 0), sku_folhas)
+        for sku_folha, volume_sku in zip(sku_folhas, volumes_sku):
+            linhas_sku = por_sku[sku_folha.sku]
+            partes_linhas = _ratear_centavos(
+                float(volume_sku),
+                [max(0.0, float(r.volume_atual or 0)) for r in linhas_sku],
+            )
+            for row, parte in zip(linhas_sku, [int(round(v)) for v in partes_linhas]):
+                db.execute(text("""
+                    UPDATE fato_ibp_granular
+                    SET vol_meta = :v
+                    WHERE id = :id
+                """), {"v": parte, "id": row.fato_id})
+            db.execute(text("""
+                INSERT INTO metas_monetarias_simone_sku
+                    (ciclo_sop, mes_projetado, regional, cgc, sku, valor_meta, atualizado_por)
+                VALUES (:c, :m, :r, :cgc, :sku, :v, :p)
+                ON CONFLICT (ciclo_sop, mes_projetado, regional, cgc, sku)
+                DO UPDATE SET valor_meta=:v, atualizado_por=:p, atualizado_em=NOW()
+            """), {"c": ciclo, "m": mes, "r": regional, "cgc": cgc,
+                   "sku": sku_folha.sku,
+                   "v": round(volume_sku * float(sku_folha.pmv or 0), 2),
+                   "p": responsavel})
 
 
 def require_metas(usuario: dict = Depends(get_current_user)):
@@ -359,6 +564,7 @@ def tabela(responsavel: str = None, nivel_responsavel: str = None,
             "responsavel_selecionado": {"nivel": nivel_alvo, "nome": alvo} if alvo else None,
             "sou_admin": u.get("funcao") == "Administrador",
             "funcao": u.get("funcao", ""),
+            "simone_monetario": _eh_simone(u),
             "arvore": arvore,
         }
     except HTTPException:
@@ -386,6 +592,282 @@ class PayloadSalvar(BaseModel):
 class PayloadAcaoMetas(PayloadSalvar):
     nome_alvo: Optional[str] = None
     nivel_alvo: Optional[str] = None
+
+
+class MetaMonetariaSimone(BaseModel):
+    regional: str
+    mes_projetado: str
+    valor_meta: float
+
+
+class ClienteMonetarioSimone(BaseModel):
+    regional: str
+    cgc: str
+    mes_projetado: str
+    valor_meta: float
+
+
+def _escopo_simone_sql(escopo: dict) -> tuple[str, dict]:
+    filtro, params = _filtro_escopo_sql(escopo, alias_cli="c")
+    return filtro, params
+
+
+def _linhas_simone(db: Session, ciclo: str, escopo: dict, meses: list) -> list:
+    filtro, params = _escopo_simone_sql(escopo)
+    params.update({"ciclo": ciclo, "meses": meses})
+    return db.execute(text(f"""
+        SELECT
+            COALESCE(NULLIF(TRIM(c.regional), ''), 'SEM REGIONAL') AS regional,
+            COALESCE(NULLIF(TRIM(c.razaosocial), ''), 'SEM RAZAO SOCIAL') AS cliente,
+            COALESCE(NULLIF(TRIM(f.vendedor_nome), ''), 'SEM VENDEDOR') AS executivo,
+            c.cgc,
+            f.mes_projetado AS mes,
+            COALESCE(SUM(f.vol_meta * f.pmv_aplicado), 0) AS valor_atual,
+            COALESCE(SUM(v.qt_pedido), 0) AS peso_historico
+        FROM fato_ibp_granular f
+        JOIN dim_clientes c ON c.cgc = f.cgc
+        LEFT JOIN fato_vendas v
+          ON v.cgc = f.cgc AND v.sku = f.sku
+         AND v.data_pedido >= CURRENT_DATE - INTERVAL '4 months'
+        WHERE f.ciclo_sop = :ciclo
+          AND f.mes_projetado = ANY(:meses)
+          {filtro}
+        GROUP BY regional, cliente, executivo, c.cgc, f.mes_projetado
+        ORDER BY regional, executivo, cliente, f.mes_projetado
+    """), params).fetchall()
+
+
+@router.get("/tabela-monetaria-simone")
+def tabela_monetaria_simone(
+    db: Session = Depends(get_db), u: dict = Depends(require_metas)
+):
+    _exigir_simone(u)
+    try:
+        from app.api.routers.rls_metas import escopo_usuario
+        ciclo = get_current_cycle(db)
+        meses = get_working_window_months(db)
+        _garantir_tabelas_simone(db)
+        escopo = escopo_usuario(u)
+        linhas = _linhas_simone(db, ciclo, escopo, meses)
+        armazenadas = db.execute(text("""
+            SELECT mes_projetado, regional, cgc, valor_meta
+            FROM metas_monetarias_simone
+            WHERE ciclo_sop = :ciclo
+        """), {"ciclo": ciclo}).fetchall()
+        armazenadas_map = {
+            (r.mes_projetado.strftime("%Y-%m"), r.regional, r.cgc): float(r.valor_meta or 0)
+            for r in armazenadas
+        }
+        por_regional: dict = {}
+        for r in linhas:
+            mes = r.mes.strftime("%Y-%m")
+            reg = r.regional
+            cliente = por_regional.setdefault(reg, {
+                "regional": reg, "meses": {}, "clientes": {}
+            })
+            chave = (mes, reg, r.cgc)
+            valor = armazenadas_map.get(chave, float(r.valor_atual or 0))
+            item = cliente["clientes"].setdefault(r.cgc, {
+                "cgc": r.cgc, "cliente": r.cliente, "executivo": r.executivo,
+                "meses": {}, "peso_historico": 0.0,
+            })
+            item["meses"][mes] = valor
+            item["peso_historico"] += float(r.peso_historico or 0)
+            reg["meses"][mes] = reg["meses"].get(mes, 0.0) + valor
+        controle = db.execute(text("""
+            SELECT etapa_atual FROM controle_metas_simone WHERE ciclo_sop = :ciclo
+        """), {"ciclo": ciclo}).scalar()
+        for reg in por_regional.values():
+            reg["clientes"] = list(reg["clientes"].values())
+        return {
+            "simone_monetario": True,
+            "ciclo": ciclo,
+            "meses": [m.strftime("%Y-%m") for m in meses],
+            "etapa_atual": controle or "REGIONAL",
+            "regionais": list(por_regional.values()),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, repr(e))
+
+
+@router.post("/salvar-metas-monetarias-simone")
+def salvar_metas_monetarias_simone(
+    payload: List[MetaMonetariaSimone],
+    db: Session = Depends(get_db),
+    u: dict = Depends(require_metas),
+):
+    _exigir_simone(u)
+    if not payload:
+        raise HTTPException(422, "Informe ao menos uma meta regional.")
+    try:
+        from app.api.routers.rls_metas import escopo_usuario
+        ciclo = get_current_cycle(db)
+        _garantir_tabelas_simone(db)
+        if _etapa_simone_atual(db, ciclo) != "REGIONAL":
+            raise HTTPException(423, "A etapa Regional já foi travada.")
+        escopo = escopo_usuario(u)
+        linhas = _linhas_simone(db, ciclo, escopo, get_working_window_months(db))
+        por_regional_mes: dict = {}
+        for r in linhas:
+            por_regional_mes.setdefault((r.regional, r.mes.strftime("%Y-%m")), []).append(r)
+        for item in payload:
+            valor = round(float(item.valor_meta), 2)
+            if valor < 0:
+                raise HTTPException(422, "A meta monetária não pode ser negativa.")
+            folhas = por_regional_mes.get((item.regional.strip(), item.mes_projetado), [])
+            if not folhas:
+                raise HTTPException(404, f"Regional/mês não encontrado: {item.regional} / {item.mes_projetado}.")
+            pesos = [max(0.0, float(r.peso_historico or 0)) for r in folhas]
+            soma = sum(pesos) or sum(max(0.0, float(r.valor_atual or 0)) for r in folhas)
+            if soma == 0:
+                pesos = [1.0] * len(folhas)
+                soma = float(len(folhas))
+            partes = _ratear_centavos(valor, pesos)
+            for r, parte in zip(folhas, partes):
+                db.execute(text("""
+                    INSERT INTO metas_monetarias_simone
+                        (ciclo_sop, mes_projetado, regional, cgc, valor_meta, atualizado_por)
+                    VALUES (:c, TO_DATE(:m, 'YYYY-MM'), :r, :cgc, :v, :p)
+                    ON CONFLICT (ciclo_sop, mes_projetado, regional, cgc)
+                    DO UPDATE SET valor_meta=:v, atualizado_por=:p, atualizado_em=NOW()
+                """), {"c": ciclo, "m": item.mes_projetado, "r": item.regional.strip(),
+                       "cgc": r.cgc, "v": parte, "p": u.get("gerente_nome")})
+            db.execute(text("""
+                INSERT INTO metas_regionais_simone
+                    (ciclo_sop, mes_projetado, regional, valor_meta, atualizado_por)
+                VALUES (:c, TO_DATE(:m, 'YYYY-MM'), :r, :v, :p)
+                ON CONFLICT (ciclo_sop, mes_projetado, regional)
+                DO UPDATE SET valor_meta=:v, atualizado_por=:p, atualizado_em=NOW()
+            """), {"c": ciclo, "m": item.mes_projetado, "r": item.regional.strip(),
+                   "v": valor, "p": u.get("gerente_nome")})
+        db.commit()
+        return {"status": "ok"}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, repr(e))
+
+
+@router.post("/salvar-clientes-monetarios-simone")
+def salvar_clientes_monetarios_simone(
+    payload: List[ClienteMonetarioSimone],
+    db: Session = Depends(get_db),
+    u: dict = Depends(require_metas),
+):
+    _exigir_simone(u)
+    if not payload:
+        raise HTTPException(422, "Informe ao menos uma distribuição por cliente.")
+    try:
+        from app.api.routers.rls_metas import escopo_usuario
+        ciclo = get_current_cycle(db)
+        _garantir_tabelas_simone(db)
+        if _etapa_simone_atual(db, ciclo) != "CLIENTE":
+            raise HTTPException(423, "A etapa Cliente ainda não está aberta.")
+        escopo = escopo_usuario(u)
+        filtro, params = _escopo_simone_sql(escopo)
+        for item in payload:
+            if item.valor_meta < 0:
+                raise HTTPException(422, "A meta monetária não pode ser negativa.")
+            params_linha = {
+                "ciclo": ciclo, "mes": item.mes_projetado, "regional": item.regional.strip(),
+                "cgc": item.cgc.strip(), **params,
+            }
+            existe = db.execute(text(f"""
+                SELECT 1 FROM fato_ibp_granular f
+                JOIN dim_clientes c ON c.cgc = f.cgc
+                WHERE f.ciclo_sop=:ciclo AND TO_CHAR(f.mes_projetado,'YYYY-MM')=:mes
+                  AND c.cgc=:cgc
+                  AND COALESCE(NULLIF(TRIM(c.regional),''),'SEM REGIONAL')=:regional
+                  {filtro} LIMIT 1
+            """), params_linha).fetchone()
+            if not existe:
+                raise HTTPException(404, f"Cliente não encontrado na regional: {item.cgc}.")
+            db.execute(text("""
+                INSERT INTO metas_monetarias_simone
+                    (ciclo_sop, mes_projetado, regional, cgc, valor_meta, atualizado_por)
+                VALUES (:c, TO_DATE(:m, 'YYYY-MM'), :r, :cgc, :v, :p)
+                ON CONFLICT (ciclo_sop, mes_projetado, regional, cgc)
+                DO UPDATE SET valor_meta=:v, atualizado_por=:p, atualizado_em=NOW()
+            """), {"c": ciclo, "m": item.mes_projetado, "r": item.regional.strip(),
+                   "cgc": item.cgc.strip(), "v": round(item.valor_meta, 2),
+                   "p": u.get("gerente_nome")})
+        db.commit()
+        return {"status": "ok"}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, repr(e))
+
+
+class TravarSimone(BaseModel):
+    etapa: str
+
+
+@router.post("/travar-fase-monetaria-simone")
+def travar_fase_monetaria_simone(
+    payload: TravarSimone,
+    db: Session = Depends(get_db),
+    u: dict = Depends(require_metas),
+):
+    _exigir_simone(u)
+    if payload.etapa not in ("REGIONAL", "CLIENTE", "CONFIRMACAO"):
+        raise HTTPException(422, "Etapa monetária inválida.")
+    try:
+        ciclo = get_current_cycle(db)
+        _garantir_tabelas_simone(db)
+        atual = db.execute(text("""
+            SELECT etapa_atual FROM controle_metas_simone WHERE ciclo_sop=:c
+        """), {"c": ciclo}).scalar() or "REGIONAL"
+        ordem = {"REGIONAL": 0, "CLIENTE": 1, "CONFIRMACAO": 2}
+        if payload.etapa != atual or ordem[payload.etapa] != ordem[atual]:
+            raise HTTPException(409, f"A etapa atual é {atual}.")
+        if payload.etapa == "CLIENTE":
+            divergencias = db.execute(text("""
+                SELECT r.regional, TO_CHAR(r.mes_projetado, 'YYYY-MM') AS mes,
+                       r.valor_meta AS valor_regional,
+                       COALESCE(SUM(c.valor_meta), 0) AS valor_clientes
+                FROM metas_regionais_simone r
+                LEFT JOIN metas_monetarias_simone c
+                  ON c.ciclo_sop = r.ciclo_sop
+                 AND c.mes_projetado = r.mes_projetado
+                 AND c.regional = r.regional
+                WHERE r.ciclo_sop = :c
+                GROUP BY r.regional, r.mes_projetado, r.valor_meta
+                HAVING ABS(r.valor_meta - COALESCE(SUM(c.valor_meta), 0)) > 0.005
+            """), {"c": ciclo}).fetchall()
+            if divergencias:
+                raise HTTPException(422, {
+                    "mensagem": "A soma dos clientes precisa ser exatamente igual à meta regional.",
+                    "detalhes": [
+                        {"regional": r.regional, "mes": r.mes,
+                         "valor_regional": float(r.valor_regional),
+                         "valor_clientes": float(r.valor_clientes)}
+                        for r in divergencias
+                    ],
+                })
+        if payload.etapa == "CONFIRMACAO":
+            _materializar_skus_simone(db, ciclo, u.get("gerente_nome") or SIMONE_NOME)
+        proxima = {"REGIONAL": "CLIENTE", "CLIENTE": "CONFIRMACAO", "CONFIRMACAO": "CONFIRMACAO"}[atual]
+        db.execute(text("""
+            INSERT INTO controle_metas_simone (ciclo_sop, etapa_atual, atualizado_por)
+            VALUES (:c, :e, :p)
+            ON CONFLICT (ciclo_sop)
+            DO UPDATE SET etapa_atual=:e, atualizado_por=:p, atualizado_em=NOW()
+        """), {"c": ciclo, "e": proxima, "p": u.get("gerente_nome")})
+        db.commit()
+        return {"status": "ok", "etapa_atual": proxima}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, repr(e))
 
 
 DDL_METAS_FINANCEIRAS = """
@@ -1650,4 +2132,3 @@ def reabrir_cadeado_ep(payload: PayloadBloquear, db: Session = Depends(get_db),
     except HTTPException: raise
     except Exception as e:
         db.rollback(); raise HTTPException(500, repr(e))
-

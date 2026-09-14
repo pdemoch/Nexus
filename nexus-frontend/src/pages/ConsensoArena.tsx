@@ -242,7 +242,12 @@ function PreenchimentoMetas() {
         ? { responsavel: adminAlvo.nome, nivel_responsavel: adminAlvo.nivel }
         : {};
       const r = await axios.get('/api/v1/carteira/tabela', { params });
-      setDados(r.data);
+      if (r.data?.simone_monetario) {
+        const monetaria = await axios.get('/api/v1/carteira/tabela-monetaria-simone');
+        setDados(monetaria.data);
+      } else {
+        setDados(r.data);
+      }
       setErroTravamento(null);
     } finally { setLoading(false); }
   }, [adminAlvo]);
@@ -397,6 +402,10 @@ function PreenchimentoMetas() {
     return <div className="min-h-screen flex items-center justify-center text-slate-400">
       <Loader2 className="w-6 h-6 animate-spin mr-2" /> Carregando sua carteira…
     </div>;
+  }
+
+  if (dados?.simone_monetario) {
+    return <PreenchimentoMonetarioSimone dados={dados} recarregar={carregar} />;
   }
 
   const labelFase: Record<string, string> = {
@@ -603,6 +612,148 @@ function PreenchimentoMetas() {
             ))}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function PreenchimentoMonetarioSimone({ dados, recarregar }: { dados: any; recarregar: () => void }) {
+  const [etapa, setEtapa] = useState<string>(dados.etapa_atual || 'REGIONAL');
+  const [regionais, setRegionais] = useState<any[]>(dados.regionais || []);
+  const [abertos, setAbertos] = useState<Record<string, boolean>>({});
+  const [salvando, setSalvando] = useState(false);
+
+  useEffect(() => {
+    setEtapa(dados.etapa_atual || 'REGIONAL');
+    setRegionais(dados.regionais || []);
+  }, [dados]);
+
+  const alterarRegional = (regional: string, mes: string, valor: number) => {
+    setRegionais(prev => prev.map(r => r.regional !== regional ? r : {
+      ...r, meses: { ...r.meses, [mes]: Math.max(0, Number.isFinite(valor) ? valor : 0) },
+    }));
+  };
+
+  const alterarCliente = (regional: string, cgc: string, mes: string, valor: number) => {
+    setRegionais(prev => prev.map(r => r.regional !== regional ? r : {
+      ...r,
+      clientes: r.clientes.map((c: any) => c.cgc !== cgc ? c : {
+        ...c, meses: { ...c.meses, [mes]: Math.max(0, Number.isFinite(valor) ? valor : 0) },
+      }),
+    }));
+  };
+
+  const salvar = async (cliente: boolean) => {
+    setSalvando(true);
+    try {
+      const payload = cliente
+        ? regionais.flatMap(r => r.clientes.flatMap((c: any) =>
+            dados.meses.map((mes: string) => ({
+              regional: r.regional, cgc: c.cgc, mes_projetado: mes,
+              valor_meta: Number(c.meses?.[mes] || 0),
+            }))))
+        : regionais.flatMap(r => dados.meses.map((mes: string) => ({
+            regional: r.regional, mes_projetado: mes,
+            valor_meta: Number(r.meses?.[mes] || 0),
+          })));
+      await axios.post(cliente
+        ? '/api/v1/carteira/salvar-clientes-monetarios-simone'
+        : '/api/v1/carteira/salvar-metas-monetarias-simone', payload);
+      await recarregar();
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || 'Falha ao salvar a distribuição monetária.');
+    } finally {
+      setSalvando(false);
+    }
+  };
+
+  const travar = async () => {
+    if (!confirm(`Travar a etapa ${etapa.toLowerCase()}? Os valores informados serão mantidos exatamente.`)) return;
+    setSalvando(true);
+    try {
+      if (etapa === 'REGIONAL') await salvar(false);
+      if (etapa === 'CLIENTE') await salvar(true);
+      await axios.post('/api/v1/carteira/travar-fase-monetaria-simone', { etapa });
+      await recarregar();
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || 'Falha ao travar a etapa.');
+    } finally {
+      setSalvando(false);
+    }
+  };
+
+  const somenteLeitura = etapa === 'CONFIRMACAO';
+  return (
+    <div className="h-full overflow-y-auto bg-slate-50 px-6 py-4">
+      <div className="max-w-6xl mx-auto">
+        <div className="bg-white border border-slate-200 rounded-xl px-5 py-4 mb-4">
+          <h2 className="text-base font-black text-slate-900">Distribuição monetária — Simone Andrade de Paula</h2>
+          <p className="text-xs text-slate-500 mt-1">
+            A meta atual é apenas uma sugestão. O valor informado substitui integralmente a meta,
+            inclusive quando for R$ 0,00, sem arredondamento ou compensação automática.
+          </p>
+          <div className="flex items-center justify-between mt-4">
+            <div className="flex gap-2 text-[10px] font-black uppercase tracking-wider">
+              {['REGIONAL', 'CLIENTE', 'CONFIRMACAO'].map((nome, i) => (
+                <span key={nome} className={`px-3 py-1.5 rounded-full ${
+                  i <= ['REGIONAL', 'CLIENTE', 'CONFIRMACAO'].indexOf(etapa)
+                    ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-400'
+                }`}>{nome === 'CONFIRMACAO' ? 'Confirmação' : nome}</span>
+              ))}
+            </div>
+            {!somenteLeitura && (
+              <button onClick={travar} disabled={salvando}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 text-white text-xs font-black hover:bg-indigo-700 disabled:opacity-50">
+                {salvando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />}
+                Salvar e travar etapa
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="grid gap-3">
+          {regionais.map((regional: any) => (
+            <div key={regional.regional} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+              <div className="px-4 py-3 flex items-center justify-between border-b border-slate-100">
+                <button onClick={() => setAbertos(p => ({ ...p, [regional.regional]: !p[regional.regional] }))}
+                  className="flex items-center gap-2 text-left">
+                  {abertos[regional.regional] ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />}
+                  <span className="text-sm font-black text-slate-800">{regional.regional}</span>
+                </button>
+                <div className="flex gap-3">
+                  {dados.meses.map((mes: string) => (
+                    <label key={mes} className="flex flex-col text-[9px] font-black uppercase text-slate-400">
+                      {mesLabel(mes)}
+                      <input type="number" step="0.01" min="0" disabled={etapa !== 'REGIONAL'}
+                        value={Number(regional.meses?.[mes] || 0)}
+                        onChange={e => alterarRegional(regional.regional, mes, Number(e.target.value))}
+                        className="mt-1 w-28 px-2 py-1.5 rounded-lg border border-slate-200 text-right text-xs font-bold text-slate-700 disabled:bg-slate-50" />
+                    </label>
+                  ))}
+                </div>
+              </div>
+              {abertos[regional.regional] && (
+                <div className="px-4 py-3">
+                  {regional.clientes.map((cliente: any) => (
+                    <div key={cliente.cgc} className="grid items-center gap-3 py-2 border-b border-slate-50"
+                      style={{ gridTemplateColumns: `minmax(240px,1fr) repeat(${dados.meses.length},minmax(110px,auto))` }}>
+                      <div>
+                        <div className="text-xs font-black text-slate-700">{cliente.cliente}</div>
+                        <div className="text-[10px] text-slate-400">{cliente.executivo} · {cliente.cgc}</div>
+                      </div>
+                      {dados.meses.map((mes: string) => (
+                        <input key={mes} type="number" step="0.01" min="0" disabled={etapa !== 'CLIENTE'}
+                          value={Number(cliente.meses?.[mes] || 0)}
+                          onChange={e => alterarCliente(regional.regional, cliente.cgc, mes, Number(e.target.value))}
+                          className="w-full px-2 py-1.5 rounded-lg border border-slate-200 text-right text-xs font-bold text-slate-700 disabled:bg-slate-50" />
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
