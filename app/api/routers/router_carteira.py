@@ -671,19 +671,19 @@ def tabela_monetaria_simone(
         por_regional: dict = {}
         for r in linhas:
             mes = str(r.mes)
-            reg = r.regional
-            cliente = por_regional.setdefault(reg, {
-                "regional": reg, "meses": {}, "clientes": {}
+            nome_regional = r.regional
+            regional_node = por_regional.setdefault(nome_regional, {
+                "regional": nome_regional, "meses": {}, "clientes": {}
             })
-            chave = (mes, reg, r.cgc)
+            chave = (mes, nome_regional, r.cgc)
             valor = armazenadas_map.get(chave, float(r.valor_atual or 0))
-            item = cliente["clientes"].setdefault(r.cgc, {
+            item = regional_node["clientes"].setdefault(r.cgc, {
                 "cgc": r.cgc, "cliente": r.cliente, "executivo": r.executivo,
                 "meses": {}, "peso_historico": 0.0,
             })
             item["meses"][mes] = valor
             item["peso_historico"] += float(r.peso_historico or 0)
-            reg["meses"][mes] = reg["meses"].get(mes, 0.0) + valor
+            regional_node["meses"][mes] = regional_node["meses"].get(mes, 0.0) + valor
         controle = db.execute(text("""
             SELECT etapa_atual FROM controle_metas_simone WHERE ciclo_sop = :ciclo
         """), {"ciclo": ciclo}).scalar()
