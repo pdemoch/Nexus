@@ -164,12 +164,20 @@ def _base_cached(data_ini: date, data_fim: date, motivos: Optional[Tuple[str, ..
             base = base.merge(n, on=group_keys, how="left")
     emissao_titulo = pd.to_datetime(_col(base, "e2_emissao"), errors="coerce")
     vencimento_real = pd.to_datetime(_col(base, "e2_vencrea"), errors="coerce")
-    vencimento_condicao = pd.to_datetime(_col(base, "e2_vencto"), errors="coerce")
+    # SE2 possui dois vencimentos distintos:
+    # E2_VENC = vencimento contratual/original da condição de pagamento;
+    # E2_VENCREA = vencimento real negociado. Algumas extrações antigas
+    # nomeavam E2_VENC como E2_VENCTO, por isso mantemos esse fallback.
+    vencimento_condicao = pd.to_datetime(
+        _col(base, "e2_venc") if "e2_venc" in base.columns else _col(base, "e2_vencto"),
+        errors="coerce",
+    )
     # A emissão exigida para o PMP é a do título SE2. A SF1/F1 é apenas
     # enriquecimento; sem emissão do título não existe origem temporal válida.
     base["dias_pagamento"] = (base["e5_data"] - emissao_titulo).dt.days.clip(lower=0)
     base["dias_vencimento"] = (vencimento_real - emissao_titulo).dt.days
     base["dias_cond_pag"] = (vencimento_condicao - emissao_titulo).dt.days
+    base["_vencimento_condicao"] = vencimento_condicao
     base["dias_vencimento"] = base["dias_vencimento"].clip(lower=0)
     base["dias_cond_pag"] = base["dias_cond_pag"].clip(lower=0)
     base = base[emissao_titulo.notna() & base["dias_pagamento"].notna()]
@@ -474,7 +482,7 @@ def obter_pagamentos_fornecedor(data_ini: date, data_fim: date, clifor: str,
             "itens_d1": itens,
             "emissao": _date_text(row.get("e2_emissao")),
             "vencimento_real": _date_text(row.get("e2_vencrea")),
-            "vencimento_condicao": _date_text(row.get("e2_vencto")),
+            "vencimento_condicao": _date_text(row.get("_vencimento_condicao")),
             "data_pagamento": _date_text(row.get("e5_data")),
             "valor_pago": _finite_float(row.get("e5_valor")),
             "valor_bruto_nf": _finite_float(row.get("f1_valbrut")),

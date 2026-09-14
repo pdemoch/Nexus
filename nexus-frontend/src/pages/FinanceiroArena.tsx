@@ -1033,8 +1033,8 @@ export default function FinanceiroArena() {
                 ) : (
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
                     <thead><tr style={{ background: '#f8fafc' }}>
-                      {['Título', 'Parc.', 'NF', 'Tipo D1', 'Emissão', 'Vencto Real', 'Pagamento', 'Valor Pago', 'PMP Pag.', 'PMP Cond.', 'Delta', 'Itens'].map(h =>
-                        <th key={h} style={{ padding: '7px 10px', textAlign: ['Título', 'Parc.', 'NF', 'Tipo D1', 'Emissão', 'Vencto Real', 'Pagamento'].includes(h) ? 'left' : 'right', fontSize: 9, color: '#94a3b8', whiteSpace: 'nowrap' }}>{h}</th>)}
+                      {['Título', 'Parc.', 'NF', 'Tipo D1', 'Emissão', 'Vencto Cond.', 'Vencto Real', 'Pagamento', 'Valor Pago', 'PMP Pag.', 'PMP Cond.', 'Delta', 'Itens'].map(h =>
+                        <th key={h} style={{ padding: '7px 10px', textAlign: ['Título', 'Parc.', 'NF', 'Tipo D1', 'Emissão', 'Vencto Cond.', 'Vencto Real', 'Pagamento'].includes(h) ? 'left' : 'right', fontSize: 9, color: '#94a3b8', whiteSpace: 'nowrap' }}>{h}</th>)}
                     </tr></thead>
                     <tbody>{pmpFornecedorDetalhe.pagamentos.map((p: any, i: number) =>
                       <tr key={`${p.titulo}-${p.parcela}-${p.data_pagamento}-${i}`}
@@ -1047,7 +1047,7 @@ export default function FinanceiroArena() {
                         <td style={{ padding: '6px 10px' }}>{p.titulo}</td><td style={{ padding: '6px 10px' }}>{p.parcela || '—'}</td>
                         <td style={{ padding: '6px 10px' }}>{p.nf}/{p.serie}</td>
                         <td style={{ padding: '6px 10px' }}>{p.tipo_d1}</td>
-                        <td style={{ padding: '6px 10px' }}>{p.emissao}</td><td style={{ padding: '6px 10px' }}>{p.vencimento_real}</td>
+                        <td style={{ padding: '6px 10px' }}>{p.emissao}</td><td style={{ padding: '6px 10px' }}>{p.vencimento_condicao || '—'}</td><td style={{ padding: '6px 10px' }}>{p.vencimento_real}</td>
                         <td style={{ padding: '6px 10px' }}>{p.data_pagamento}</td><td style={{ padding: '6px 10px', textAlign: 'right' }}>{fmtRs(p.valor_pago)}</td>
                         <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 900, color: corDias(p.pmp_pagamento) }}>{p.pmp_pagamento} d</td>
                         <td style={{ padding: '6px 10px', textAlign: 'right' }}>{p.pmp_cond_pag} d</td><td style={{ padding: '6px 10px', textAlign: 'right' }}>{p.delta_atraso} d</td>
