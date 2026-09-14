@@ -229,6 +229,7 @@ function PreenchimentoMetas() {
   const [abertoExecutivo,setAbertoExecutivo]= useState<string | null>(null);
   const [busca,          setBusca]          = useState('');
   const [travando,       setTravando]       = useState(false);
+  const [erroCarregamento, setErroCarregamento] = useState<string | null>(null);
   const [adminAlvo,      setAdminAlvo]      = useState<{ nome: string; nivel: string } | null>(null);
   const [dossieAlvo,     setDossieAlvo]     = useState<{
     sku: string; descricao: string; coordenador?: string; vendedor?: string; razao?: string;
@@ -237,6 +238,7 @@ function PreenchimentoMetas() {
 
   const carregar = useCallback(async () => {
     setLoading(true);
+    setErroCarregamento(null);
     try {
       const params = adminAlvo
         ? { responsavel: adminAlvo.nome, nivel_responsavel: adminAlvo.nivel }
@@ -249,6 +251,8 @@ function PreenchimentoMetas() {
         setDados(r.data);
       }
       setErroTravamento(null);
+    } catch (e: any) {
+      setErroCarregamento(e?.response?.data?.detail || 'Não foi possível carregar a carteira de metas.');
     } finally { setLoading(false); }
   }, [adminAlvo]);
   useEffect(() => { carregar(); }, [carregar]);
@@ -402,6 +406,20 @@ function PreenchimentoMetas() {
     return <div className="min-h-screen flex items-center justify-center text-slate-400">
       <Loader2 className="w-6 h-6 animate-spin mr-2" /> Carregando sua carteira…
     </div>;
+  }
+
+  if (erroCarregamento) {
+    return (
+      <div className="h-full flex items-center justify-center bg-slate-50 px-6">
+        <div className="max-w-xl rounded-xl border border-rose-200 bg-rose-50 px-5 py-4 text-center">
+          <div className="text-sm font-black text-rose-700">Falha ao carregar Metas Comercial</div>
+          <div className="mt-2 text-xs font-medium text-rose-600">{String(erroCarregamento)}</div>
+          <button onClick={carregar} className="mt-4 rounded-lg bg-rose-600 px-4 py-2 text-xs font-black text-white hover:bg-rose-700">
+            Tentar novamente
+          </button>
+        </div>
+      </div>
+    );
   }
 
   if (dados?.simone_monetario) {

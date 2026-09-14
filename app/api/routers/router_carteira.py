@@ -614,14 +614,18 @@ def _escopo_simone_sql(escopo: dict) -> tuple[str, dict]:
 
 def _linhas_simone(db: Session, ciclo: str, escopo: dict, meses: list) -> list:
     filtro, params = _escopo_simone_sql(escopo)
-    params.update({"ciclo": ciclo, "meses": meses})
+    meses_iso = [
+        m.strftime("%Y-%m") if hasattr(m, "strftime") else str(m)[:7]
+        for m in meses
+    ]
+    params.update({"ciclo": ciclo, "meses_iso": meses_iso})
     return db.execute(text(f"""
         SELECT
             COALESCE(NULLIF(TRIM(c.regional), ''), 'SEM REGIONAL') AS regional,
             COALESCE(NULLIF(TRIM(c.razaosocial), ''), 'SEM RAZAO SOCIAL') AS cliente,
             COALESCE(NULLIF(TRIM(f.vendedor_nome), ''), 'SEM VENDEDOR') AS executivo,
             c.cgc,
-            f.mes_projetado AS mes,
+            TO_CHAR(f.mes_projetado, 'YYYY-MM') AS mes,
             COALESCE(SUM(f.vol_meta * f.pmv_aplicado), 0) AS valor_atual,
             COALESCE(SUM(v.qt_pedido), 0) AS peso_historico
         FROM fato_ibp_granular f
@@ -630,7 +634,7 @@ def _linhas_simone(db: Session, ciclo: str, escopo: dict, meses: list) -> list:
           ON v.cgc = f.cgc AND v.sku = f.sku
          AND v.data_pedido >= CURRENT_DATE - INTERVAL '4 months'
         WHERE f.ciclo_sop = :ciclo
-          AND f.mes_projetado = ANY(:meses)
+          AND TO_CHAR(f.mes_projetado, 'YYYY-MM') = ANY(:meses_iso)
           {filtro}
         GROUP BY regional, cliente, executivo, c.cgc, f.mes_projetado
         ORDER BY regional, executivo, cliente, f.mes_projetado
@@ -660,7 +664,7 @@ def tabela_monetaria_simone(
         }
         por_regional: dict = {}
         for r in linhas:
-            mes = r.mes.strftime("%Y-%m")
+            mes = str(r.mes)
             reg = r.regional
             cliente = por_regional.setdefault(reg, {
                 "regional": reg, "meses": {}, "clientes": {}
@@ -711,7 +715,7 @@ def salvar_metas_monetarias_simone(
         linhas = _linhas_simone(db, ciclo, escopo, get_working_window_months(db))
         por_regional_mes: dict = {}
         for r in linhas:
-            por_regional_mes.setdefault((r.regional, r.mes.strftime("%Y-%m")), []).append(r)
+            por_regional_mes.setdefault((r.regional, str(r.mes)), []).append(r)
         for item in payload:
             valor = round(float(item.valor_meta), 2)
             if valor < 0:
