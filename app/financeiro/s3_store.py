@@ -46,6 +46,10 @@ _BUCKET = os.getenv("NEXUS_S3_BUCKET", "")
 _PREFIX = "financeiro"
 
 
+class S3DataAccessError(RuntimeError):
+    """A credencial do servidor não consegue ler o data lake financeiro."""
+
+
 # Coluna de data usada para particionamento por mês de cada fonte
 _DATA_COL: dict[str, str] = {
     "notas_saida":            "f2_emissao",
@@ -181,6 +185,11 @@ def _baixar_parquet(key: str) -> Optional[pd.DataFrame]:
             code = str(e.response.get("Error", {}).get("Code", ""))
             if code in ("NoSuchKey", "404"):
                 return None
+            if code in ("AccessDenied", "AllAccessDisabled", "InvalidAccessKeyId"):
+                raise S3DataAccessError(
+                    "Acesso negado ao S3: a credencial AWS do servidor está bloqueada "
+                    "ou sem permissão para ler o data lake financeiro."
+                ) from e
             if code not in transient_codes or tentativa == 2:
                 logger.error("S3 get_object %s/%s: %s", _BUCKET, key, e)
                 return None
@@ -192,6 +201,17 @@ def _baixar_parquet(key: str) -> Optional[pd.DataFrame]:
                 return None
             logger.warning("Leitura do parquet temporariamente indisponivel, tentativa %d/3: %s",
                            tentativa + 1, key)
+        except ClientError as e:
+            code = str(e.response.get("Error", {}).get("Code", ""))
+            if code in ("AccessDenied", "AllAccessDisabled", "InvalidAccessKeyId"):
+                raise S3DataAccessError(
+                    "Acesso negado ao S3: a credencial AWS do servidor está bloqueada "
+                    "ou sem permissão para listar o data lake financeiro."
+                ) from e
+            logger.error("carregar_todos_mensal %s: %s", fonte, e)
+            return pd.DataFrame()
+        except S3DataAccessError:
+            raise
         except Exception as e:
             logger.error("Erro ao ler parquet %s: %s", key, e)
             return None

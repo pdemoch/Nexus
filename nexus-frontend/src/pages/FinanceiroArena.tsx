@@ -172,6 +172,7 @@ export default function FinanceiroArena() {
   const [loading, setLoading]     = useState(false);
   const [baixando, setBaixando]   = useState(false);
   const [semDados, setSemDados]   = useState(false);
+  const [erroDados, setErroDados] = useState<string | null>(null);
 
   // ── Detalhe do cliente ──
   const [notasCli, setNotasCli]   = useState<any>(null);
@@ -222,6 +223,7 @@ export default function FinanceiroArena() {
   const buscarDados = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     setSemDados(false);
+    setErroDados(null);
     try {
       const [gRes, rRes, cRes, eRes] = await Promise.all([
         axios.get('/api/v1/financeiro/pmr/global-filtrado',   { params: paramsBase, signal }),
@@ -236,6 +238,11 @@ export default function FinanceiroArena() {
       if (!gRes.data.notas_pagas) setSemDados(true);
     } catch (e: any) {
       if (requestCancelado(e)) return;
+      setErroDados(
+        e?.response?.status === 503
+          ? (e.response.data?.detail || 'A fonte de dados financeiros está indisponível.')
+          : 'Não foi possível carregar os dados financeiros.'
+      );
       setSemDados(true);
     } finally {
       if (!signal?.aborted) setLoading(false);
@@ -600,7 +607,7 @@ export default function FinanceiroArena() {
           {semDados && !loading && (
             <div className="flex items-center gap-3 bg-amber-50 border border-amber-200 rounded-2xl px-5 py-4 mb-5 text-sm font-bold text-amber-800">
               <AlertTriangle className="w-5 h-5 shrink-0" />
-              Nenhum dado disponível para este período. Verifique se os parquets foram extraídos no Painel Admin.
+              {erroDados || 'Nenhum dado disponível para este período. Verifique se os parquets foram extraídos no Painel Admin.'}
             </div>
           )}
 
@@ -708,7 +715,7 @@ export default function FinanceiroArena() {
               ) : dadosGrafico.length === 0 ? (
                 <div className="flex items-center justify-center h-64 text-slate-300 text-xs font-bold">Sem dados</div>
               ) : (
-                <ResponsiveContainer width="100%" height={360}>
+                <ResponsiveContainer width="100%" height={360} minWidth={0} minHeight={1}>
                 <ComposedChart data={dadosGrafico} margin={{ top: 10, right: 20, left: 0, bottom: 75 }}
                     onClick={selecionarRegionalNoGrafico}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />

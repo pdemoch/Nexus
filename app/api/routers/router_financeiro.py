@@ -458,6 +458,8 @@ async def get_pmr_filtros(
     try:
         filtros = await asyncio.to_thread(_engine().listar_filtros, data_ini, data_fim)
         return filtros  # {"regionais": [...], "segmentos": [...]}
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
     except Exception as e:
         print("\n" + "="*50)
         print("ERRO DETECTADO NA ROTA DE FILTROS")
@@ -511,6 +513,8 @@ async def get_pmr_global_filtrado(
         return dados
     except Exception as e:
         logger.exception("global-filtrado: %s", e)
+        if "Acesso negado ao S3" in str(e):
+            raise HTTPException(503, str(e))
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim),
                             "dias_periodo": max((data_fim - data_ini).days, 1)},
                 "notas_base": 0, "notas_pagas": 0, "valor_total": 0.0, "valor_por_dia": 0.0,
@@ -540,6 +544,8 @@ async def get_pmr_regional_filtrado(
         return dados  # {"periodo": {...}, "regionais": [...]}
     except Exception as e:
         logger.exception("regional-filtrado: %s", e)
+        if "Acesso negado ao S3" in str(e):
+            raise HTTPException(503, str(e))
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "regionais": []}
 
 
@@ -567,6 +573,8 @@ async def get_pmr_clientes_filtrado(
         return dados  # {"periodo": {...}, "total": N, "clientes": [...]}
     except Exception as e:
         logger.exception("clientes-filtrado: %s", e)
+        if "Acesso negado ao S3" in str(e):
+            raise HTTPException(503, str(e))
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
                 "total": 0, "clientes": []}
 
@@ -595,6 +603,8 @@ async def get_pmr_evolucao(
         return dados  # {"periodo": {...}, "meses": [...]}
     except Exception as e:
         logger.exception("evolucao: %s", e)
+        if "Acesso negado ao S3" in str(e):
+            raise HTTPException(503, str(e))
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)}, "meses": []}
 
 
