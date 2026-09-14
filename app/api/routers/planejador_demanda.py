@@ -427,8 +427,10 @@ REGRAS INEGOCIAVEIS
   Nexus, planilha, plataforma, migracao, transicao em nenhuma hipotese.
 - NOME DO PRODUTO: use SEMPRE a descricao exata do campo "descricao", sem reescrever,
   abreviar, traduzir ou padronizar.
-- vl_corte NAO tem formula: e soma direta do ERP. vl_excesso e vl_subplano SAO calculados
-  por (SKU, mes) — confira o sinal contra o BIAS antes de qualificar como excesso ou falta
+- vl_corte NAO tem formula: e soma direta do ERP. vl_excesso e vl_subplano sao potenciais
+  calculados por (SKU, mes), NAO perdas financeiras realizadas. Subplano e potencial de
+  receita nao capturada ("deixar dinheiro na mesa") e excesso e potencial de capital
+  imobilizado. Confira o sinal contra o BIAS antes de qualificar como excesso ou falta
   (ver METODOLOGIA). Se quiser descrever a conta (gap × PMV), verifique que os tres
   componentes do JSON (qt_plano, qt_pedido, pmv) multiplicados fecham com o campo — se
   nao fecharem ou se os componentes nao estiverem no JSON, cite so o valor final sem
@@ -487,7 +489,7 @@ um SKU ou categoria especifico, para ajudar quem esta decidindo o proximo plano.
 - Quando a pergunta pedir analise de BIAS ao longo do ano em uma categoria,
   cubra CADA SKU presente no JSON, com nome do produto, BIAS, excesso,
   subplano e corte quando disponiveis. Destaque os itens prioritarios por
-  impacto financeiro e nao pare depois da introducao da categoria.
+  impacto potencial estimado e nao pare depois da introducao da categoria.
 
 FORMATO DA RESPOSTA:
 - Comece com uma frase de resposta direta a pergunta, sem titulo.

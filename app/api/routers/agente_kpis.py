@@ -40,7 +40,8 @@ WMAPE, BIAS e FVA somam somente SKUs ativos no portfolio, com filtro
 igual a tela de atendimento, para preservar a populacao completa de pedidos.
 
 Valor monetario NAO entra em WMAPE, BIAS nem FVA. Fica na secao de
-impacto financeiro, que monetiza os gaps de volume.
+impacto potencial, que monetiza os gaps de volume. VL excesso e VL subplano
+sao oportunidades estimadas, nao perdas financeiras realizadas.
 
 NOMENCLATURA (o que o leitor ve, nao os nomes de coluna do banco)
 ---------------------------------------------------------------------
@@ -905,7 +906,7 @@ DIAGNOSTICO WMAPE x BIAS
   WMAPE alto e BIAS negativo: subestimacao. Risco de ruptura e perda de venda.
   WMAPE baixo e BIAS proximo de zero: previsao sob controle.
 
-IMPACTO FINANCEIRO (campos novos)
+IMPACTO POTENCIAL (campos novos)
 
   vl_corte = SOMA DIRETA do campo vlcorte do ERP (fato_vendas), por SKU e mes.
     NAO HA FORMULA. NAO e diferenca entre vendido e faturado. NAO e
@@ -931,8 +932,9 @@ IMPACTO FINANCEIRO (campos novos)
     CATEGORIA especifico, destaque que aquele corte especifico nao deve
     ser lido como ruptura de suprimento.
 
-  vl_excesso e vl_subplano SAO CALCULADOS, ao contrario de vl_corte. A conta
-    roda por (SKU, mes) — nunca por categoria ou pelo PMV medio do periodo:
+  vl_excesso e vl_subplano SAO CALCULADOS, ao contrario de vl_corte. Sao
+    indicadores de potencial, NAO perdas financeiras realizadas. A conta roda
+    por (SKU, mes) — nunca por categoria ou pelo PMV medio do periodo:
       vl_excesso   (naquele SKU, naquele mes) = max(qt_plano - qt_pedido, 0) x PMV do SKU naquele mes
       vl_subplano  (naquele SKU, naquele mes) = max(qt_pedido - qt_plano, 0) x PMV do SKU naquele mes
     O PMV usado e sempre o do SKU no mes especifico (cascata mes -> 3 meses ->
@@ -941,7 +943,10 @@ IMPACTO FINANCEIRO (campos novos)
     uma categoria pode ter excesso e subplano ao mesmo tempo: SKUs diferentes,
     ou o mesmo SKU em meses diferentes, podem errar em direcoes opostas.
     Nenhum dos dois "virou nota fiscal": sao volumes hipoteticos que nunca
-    foram vendidos (excesso) ou nunca foram previstos (subplano).
+    foram vendidos (excesso) ou nunca foram previstos (subplano). VL subplano
+    significa potencial de receita nao capturada — "deixar dinheiro na mesa" —
+    e nao prova que o pedido seria integralmente convertido em venda. VL excesso
+    significa potencial de excesso/capital imobilizado, e nao prejuizo realizado.
 
   REGRA ANTI-RACIONALIZACAO — se voce vai citar vl_excesso ou vl_subplano
     de um SKU especifico, os tres componentes (qt_plano, qt_pedido, pmv) DEVEM
@@ -1016,11 +1021,11 @@ REGRAS DE REDACAO - obrigatorias:
 - NUNCA atribua variacao de resultado a mudanca de sistema, plataforma ou metodologia.
   Quando a causa nao for identificavel pelos dados, declare isso diretamente.
 - vl_corte NAO tem formula: e soma direta do ERP. Nunca descreva um calculo
-  para ele (nada de "diferenca x PMV"). vl_excesso e vl_subplano SAO
-  calculados por (SKU, mes) — veja METODOLOGIA para a formula exata e a
+  para ele (nada de "diferenca x PMV").   vl_excesso e vl_subplano sao potenciais calculados por (SKU, mes), nao
+  perdas financeiras realizadas — veja METODOLOGIA para a formula exata e a
   regra de consistencia com o sinal do BIAS antes de qualificar qualquer um
   dos dois como "conservador", "agressivo" ou similar.
-- Todo valor em R$ vem acompanhado da conta que o gerou na mesma frase,
+- Todo valor em R$ de excesso/subplano vem acompanhado da conta que o gerou na mesma frase,
   EXCETO vl_corte, que e citado como valor direto do ERP sem formula.
 - NUNCA atribua uma recomendacao ou acao a uma area, departamento, cargo ou
   responsavel especifico (nada de "Planejamento de Demanda deve...",
@@ -1108,7 +1113,7 @@ ESTRUTURA (700 a 900 palavras, prosa densa):
 10. CONSIDERACAO FINAL
    Um paragrafo unico. Responda: o processo esta melhorando ou piorando,
    onde esta o maior ganho no proximo ciclo, e qual o principal risco.
-   Sem repetir numeros ja citados
+   Sem repetir numeros ja citados.
 
 IMPORTANTE: complete todas as 10 secoes (a secao 3B faz parte da 3, nao
 conta como secao extra). Se precisar economizar espaco, encurte as

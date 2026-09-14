@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { Component, useState, useEffect } from 'react';
 import axios from 'axios';
 import { Cpu, Lock, Loader2 } from 'lucide-react';
 
@@ -15,6 +15,44 @@ import GlobalDashboard from './pages/GlobalDashboard';       // -> Demanda Final
 import NPDArena from './pages/NPDArena';
 import AuditoriaArena from './pages/AuditoriaArena';         // KPIs
 import FinanceiroArena from './pages/FinanceiroArena'; 
+
+class ContentErrorBoundary extends Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error('Erro ao renderizar a tela:', error, info);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="min-h-full flex items-center justify-center bg-slate-50 p-6">
+          <div className="max-w-lg rounded-2xl border border-rose-200 bg-white p-6 text-center shadow-sm">
+            <h2 className="text-base font-black text-slate-900">Não foi possível carregar esta tela</h2>
+            <p className="mt-2 text-sm text-slate-500">
+              Recarregue a página. Se o problema persistir, saia do sistema e entre novamente.
+            </p>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="mt-4 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-bold text-white"
+            >
+              Recarregar
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
@@ -91,17 +129,17 @@ export default function App() {
 
   const renderContent = () => {
     switch (currentRoute) {
-      case 'dashboard': return <GlobalDashboard />;
-      case 'topdown': return <TopDownArena />;
-      case 'gerenciamento': return <GerenciamentoArena />;
-      case 'irrestrita': return <IrrestritaArena />;
-      case 'consenso': return <ConsensoArena />;
-      case 'supply': return <SupplyReviewArena />;
-      case 'npd': return <NPDArena />;
-      case 'auditoria': return <AuditoriaArena />;
-      case 'financeiro': return <FinanceiroArena />;
-      case 'admin': return <AdminPanel />;
-      default: return <AdminPanel />;
+      case 'dashboard': return <GlobalDashboard key="dashboard" />;
+      case 'topdown': return <TopDownArena key="topdown" />;
+      case 'gerenciamento': return <GerenciamentoArena key="gerenciamento" />;
+      case 'irrestrita': return <IrrestritaArena key="irrestrita" />;
+      case 'consenso': return <ConsensoArena key="consenso" />;
+      case 'supply': return <SupplyReviewArena key="supply" />;
+      case 'npd': return <NPDArena key="npd" />;
+      case 'auditoria': return <AuditoriaArena key="auditoria" />;
+      case 'financeiro': return <FinanceiroArena key="financeiro" />;
+      case 'admin': return <AdminPanel key="admin" />;
+      default: return <GlobalDashboard key="dashboard" />;
     }
   };
 
@@ -149,7 +187,9 @@ export default function App() {
       />
 
       <main className="flex-1 min-w-0 h-full overflow-y-auto relative z-10 bg-[#f8fafc]">
-        {renderContent()}
+        <ContentErrorBoundary key={currentRoute}>
+          {renderContent()}
+        </ContentErrorBoundary>
       </main>
 
     </div>

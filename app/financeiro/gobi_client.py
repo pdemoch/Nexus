@@ -20,6 +20,7 @@ VARIÁVEIS DE AMBIENTE NECESSÁRIAS
 
 import os
 import logging
+import re
 import time
 from datetime import date, timedelta
 from typing import Optional
@@ -33,6 +34,14 @@ _BASE_URL = os.getenv("GOBI_API_URL_FINANCEIRO", "https://gobi-api.lineaalimento
 _API_KEY  = os.getenv("GOBI_TOKEN", "")
 _TIMEOUT  = 30   # segundos por requisição, igual ao Power Query
 _MAX_RETRY = 3   # tentativas por dia (erros transitórios de rede)
+
+
+def _normalizar_numero_documento(value: object) -> str:
+    """Unifica padding numérico das chaves sem alterar a coluna original."""
+    text = "" if value is None else str(value).strip().upper()
+    if re.fullmatch(r"0*\d+(?:\.0+)?", text):
+        text = text.split(".", 1)[0]
+    return text.lstrip("0") or "0" if text else ""
 
 
 def _get(report_id: int, start: Optional[str] = None, end: Optional[str] = None) -> Optional[list]:
@@ -100,13 +109,14 @@ def extrair_notas_saida(data_ini: date, data_fim: date) -> pd.DataFrame:
     df = df.astype(str)   # garante concatenação correta mesmo com tipos mistos
 
     df["Chave_A1"] = df["f2_cliente"] + "-" + df["f2_loja"]
-    df["Chave_F2"] = (df["f2_filial"] + "-" + df["f2_doc"] + "-" + df["f2_serie"]
+    df["_chave_doc"] = df["f2_doc"].map(_normalizar_numero_documento)
+    df["Chave_F2"] = (df["f2_filial"] + "-" + df["_chave_doc"] + "-" + df["f2_serie"]
                       + "-" + df["f2_cliente"] + "-" + df["f2_loja"])
 
     df["f2_emissao"]  = pd.to_datetime(df["f2_emissao"],  errors="coerce")
     df["f2_valbrut"]  = pd.to_numeric(df["f2_valbrut"],   errors="coerce")
 
-    # Deduplicação: cada nota deve aparecer uma única vez
+    # Deduplicação: cada nota deve aparecer uma única vez.
     df = df.drop_duplicates("Chave_F2")
     return df.reset_index(drop=True)
 
@@ -142,9 +152,10 @@ def extrair_contas_receber(data_ini: date, data_fim: date) -> pd.DataFrame:
     df["e1_parcela"] = df["e1_parcela"].replace("nan", "   ")
 
     df["Chave_A1"] = df["e1_cliente"] + "-" + df["e1_loja"]
-    df["Chave_F2"] = (df["e1_filial"] + "-" + df["e1_num"] + "-" + df["e1_prefixo"]
+    df["_chave_doc"] = df["e1_num"].map(_normalizar_numero_documento)
+    df["Chave_F2"] = (df["e1_filial"] + "-" + df["_chave_doc"] + "-" + df["e1_prefixo"]
                       + "-" + df["e1_cliente"] + "-" + df["e1_loja"])
-    df["Chave_E5"] = (df["e1_filial"] + "-" + df["e1_num"] + "-" + df["e1_prefixo"]
+    df["Chave_E5"] = (df["e1_filial"] + "-" + df["_chave_doc"] + "-" + df["e1_prefixo"]
                       + "-" + df["e1_parcela"] + "-" + df["e1_tipo"]
                       + "-" + df["e1_cliente"] + "-" + df["e1_loja"])
 
@@ -155,7 +166,9 @@ def extrair_contas_receber(data_ini: date, data_fim: date) -> pd.DataFrame:
 
     # Filtro: apenas notas fiscais
     df = df[df["e1_tipo"].str.strip() == "NF"]
-    df = df.drop_duplicates("Chave_F2")
+    # A mesma NF pode possuir várias parcelas; Chave_F2 não inclui parcela.
+    # A unidade do título é Chave_E5, que preserva cada recebimento/parcelamento.
+    df = df.drop_duplicates("Chave_E5")
     return df.reset_index(drop=True)
 
 
@@ -193,7 +206,8 @@ def extrair_movimentacao_bancaria(data_ini: date, data_fim: date) -> pd.DataFram
     if "e5_clifor" not in df:
         df["e5_clifor"] = (df["e5_fornece"] if "e5_fornece" in df
                            else df["e5_cliente"])
-    df["Chave_E5"] = (df["e5_filial"] + "-" + df["e5_numero"] + "-" + df["e5_prefixo"]
+    df["_chave_doc"] = df["e5_numero"].map(_normalizar_numero_documento)
+    df["Chave_E5"] = (df["e5_filial"] + "-" + df["_chave_doc"] + "-" + df["e5_prefixo"]
                       + "-" + df["e5_parcela"] + "-" + df["e5_tipo"]
                       + "-" + df["e5_cliente"] + "-" + df["e5_loja"])
 

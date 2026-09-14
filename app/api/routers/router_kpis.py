@@ -143,7 +143,11 @@ def _carregar(db: Session, inicio: str, fim: str,
                a.tem_plano,
                a.maturidade,
                a.qt_corte,
-               a.qt_entregue
+               a.qt_entregue,
+               a.qt_plano,
+               a.pmv,
+               a.vl_excesso_plano AS vl_excesso,
+               a.vl_perda_subplano AS vl_subplano
         FROM mart_acuracia_sku_mes a
         LEFT JOIN dim_produtos p ON p.sku = a.sku
         WHERE {w}
@@ -165,6 +169,10 @@ def _carregar(db: Session, inicio: str, fim: str,
     df["vol_ia"]      = pd.to_numeric(df["vol_ia"],      errors="coerce")
     df["qt_corte"]    = pd.to_numeric(df["qt_corte"],    errors="coerce").fillna(0)
     df["qt_entregue"] = pd.to_numeric(df["qt_entregue"], errors="coerce").fillna(0)
+    df["qt_plano"]    = pd.to_numeric(df["qt_plano"],    errors="coerce").fillna(0)
+    df["pmv"]         = pd.to_numeric(df["pmv"],         errors="coerce").fillna(0)
+    df["vl_excesso"]  = pd.to_numeric(df["vl_excesso"],  errors="coerce").fillna(0)
+    df["vl_subplano"] = pd.to_numeric(df["vl_subplano"], errors="coerce").fillna(0)
     df["tem_plano"]   = df["tem_plano"].fillna(False).astype(bool)
     return df
 
@@ -1124,9 +1132,8 @@ async def fill_rate_diagnostico(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# EXPORTAÇÃO EXCEL — uma aba por indicador x nível (WMAPE, BIAS, Fill Rate ×
-# Categoria/SKU), abas de SKU com detalhamento mês a mês + linha de total,
-# e uma aba de metodologia explicando o cálculo por SKU e por categoria.
+# EXPORTAÇÃO EXCEL — abas por indicador x nível (WMAPE, BIAS, Fill Rate ×
+# Categoria/SKU), impacto potencial por SKU/categoria/mês e metodologia.
 # ═══════════════════════════════════════════════════════════════════════════
 @router.get("/exportar")
 async def kpis_exportar(
@@ -1136,14 +1143,15 @@ async def kpis_exportar(
     _: dict = Depends(get_current_user),
 ):
     """
-    Gera um Excel com 7 abas:
+    Gera um Excel com 8 abas:
       1. WMAPE Categoria    - agregado por categoria (mesma conta da tela)
       2. WMAPE SKU          - detalhamento mês a mês por SKU + linha TOTAL
       3. BIAS Categoria     - agregado por categoria
       4. BIAS SKU           - detalhamento mês a mês por SKU + linha TOTAL
       5. Fill Rate Categoria- atendimento agregado por categoria
       6. Fill Rate SKU      - detalhamento mês a mês por SKU + linha TOTAL
-      7. Metodologia        - fórmulas + exemplo numérico, por SKU e por categoria
+      7. Impacto Potencial  - VL excesso/subplano por SKU, categoria e mês
+      8. Metodologia        - fórmulas + exemplo numérico, por SKU e por categoria
     """
     import asyncio
     import openpyxl
@@ -1321,14 +1329,70 @@ async def kpis_exportar(
                 c = ws6.cell(row=row_i, column=j, value=v); c.fill, c.font = tot_fill, tot_font
             row_i += 1
 
-        for ws in (ws1, ws2, ws3, ws4, ws5, ws6):
+        # ── ABA 7: impacto potencial por SKU, categoria e mês ───────────────
+        ws7 = wb.create_sheet("Impacto Potencial")
+        impacto_headers = [
+            "Nível", "SKU", "Descrição", "Categoria", "Mês",
+            "Plano (cx)", "Pedido (cx)", "PMV (R$/cx)",
+            "VL Excesso (R$)", "VL Subplano (R$)", "Leitura",
+        ]
+        _cabecalho(ws7, impacto_headers)
+        impacto_rows = []
+        if not df_base.empty:
+            def _impacto_row(nivel, sku, desc, categoria_sku, mes, grupo):
+                plano = float(grupo["qt_plano"].sum())
+                pedido = float(grupo["vol_real"].sum())
+                pmv = float(grupo["pmv"].mean()) if len(grupo) else 0.0
+                excesso = float(grupo["vl_excesso"].sum())
+                subplano = float(grupo["vl_subplano"].sum())
+                leitura = (
+                    "Plano acima do pedido: potencial de excesso/capital imobilizado"
+                    if excesso > 0 and subplano == 0
+                    else "Pedido acima do plano: potencial de receita não capturada"
+                    if subplano > 0 and excesso == 0
+                    else "Há excesso e subplano; não representa perda financeira realizada"
+                    if excesso > 0 or subplano > 0
+                    else "Sem desvio de plano no período"
+                )
+                return [
+                    nivel, sku, desc, categoria_sku, mes,
+                    round(plano, 2), round(pedido, 2), round(pmv, 2),
+                    round(excesso, 2), round(subplano, 2), leitura,
+                ]
+
+            for (sku, mes), grupo in df_base.groupby(["sku", "mes"], sort=True):
+                impacto_rows.append(_impacto_row(
+                    "SKU", sku, grupo["descricao"].iloc[0], grupo["categoria"].iloc[0],
+                    mes, grupo,
+                ))
+            for (categoria_sku, mes), grupo in df_base.groupby(["categoria", "mes"], sort=True):
+                impacto_rows.append(_impacto_row("CATEGORIA", "", "", categoria_sku, mes, grupo))
+            for mes, grupo in df_base.groupby("mes", sort=True):
+                impacto_rows.append(_impacto_row("MENSAL", "", "", "TODAS AS CATEGORIAS", mes, grupo))
+
+        for i, values in enumerate(impacto_rows, 2):
+            for j, value in enumerate(values, 1):
+                ws7.cell(row=i, column=j, value=value)
+            if values[0] == "MENSAL":
+                for cell in ws7[i]:
+                    cell.fill, cell.font = tot_fill, tot_font
+        ws7.freeze_panes = "A2"
+        ws7.auto_filter.ref = ws7.dimensions
+        for row in ws7.iter_rows(min_row=2, min_col=6, max_col=10):
+            for cell in row:
+                cell.number_format = '#,##0.00'
+        for row in ws7.iter_rows(min_row=2, min_col=8, max_col=10):
+            for cell in row:
+                cell.number_format = 'R$ #,##0.00'
+
+        for ws in (ws1, ws2, ws3, ws4, ws5, ws6, ws7):
             for col_cells in ws.columns:
                 largura = max((len(str(c.value)) for c in col_cells if c.value is not None), default=10)
                 ws.column_dimensions[col_cells[0].column_letter].width = min(max(largura + 2, 10), 40)
 
-        # ABA 7: Metodologia (exemplo numérico provado com o próprio caso
+        # ABA 8: Metodologia (exemplo numérico provado com o próprio caso
         # que gerou a dúvida: erro líquido pequeno, WMAPE alto)
-        ws7 = wb.create_sheet("Metodologia")
+        ws8 = wb.create_sheet("Metodologia")
         titulo_font = Font(bold=True, size=12, color="1E3A5F")
         texto = [
             ("CALCULO DO WMAPE, BIAS E FILL RATE", True),
@@ -1415,6 +1479,17 @@ async def kpis_exportar(
             ("O SKU B individualmente esta pessimo (80%), mas quase nao move o WMAPE da", False),
             ("categoria (13,3%) porque o volume dele e' pequeno frente ao SKU A.", False),
             ("", False),
+            ("IMPACTO POTENCIAL — VL EXCESSO E VL SUBPLANO:", True),
+            ("A aba 'Impacto Potencial' abre os valores no grao SKU x mes e os agrega", False),
+            ("tambem por categoria x mes e por mes. VL Excesso = max(plano - pedido, 0)", False),
+            ("x PMV: indica potencial de excesso/capital imobilizado quando o plano supera", False),
+            ("a demanda. VL Subplano = max(pedido - plano, 0) x PMV: indica potencial", False),
+            ("de receita nao capturada ('deixar dinheiro na mesa') quando a demanda supera", False),
+            ("o plano. Esses valores sao oportunidades estimadas, nao perdas financeiras", False),
+            ("realizadas: nao significam que o valor foi efetivamente perdido ou que todo", False),
+            ("o pedido teria sido convertido em venda. O PMV e' o preco medio usado para", False),
+            ("monetizar o desvio de volume e deve ser interpretado junto com o Fill Rate.", False),
+            ("", False),
             ("FONTES DE DADOS:", True),
             (f"Periodo analisado: {meses_validos[0]} a {meses_validos[-1]}", False),
             ("mart_acuracia_sku_mes - plano (humano/IA) x realizado, grao sku x mes", False),
@@ -1433,10 +1508,10 @@ async def kpis_exportar(
             ("  no historico para auditoria, mas nao entram no indicador operacional.", False),
         ]
         for i, (txt, bold) in enumerate(texto, 1):
-            c = ws7.cell(row=i, column=1, value=txt)
+            c = ws8.cell(row=i, column=1, value=txt)
             if bold:
                 c.font = titulo_font
-        ws7.column_dimensions["A"].width = 95
+        ws8.column_dimensions["A"].width = 95
 
         buf = io.BytesIO()
         wb.save(buf)

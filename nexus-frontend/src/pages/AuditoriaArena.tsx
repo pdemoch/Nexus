@@ -305,7 +305,7 @@ function TabelaBias({ itens, modo }: { itens: any[], modo: 'super'|'sub' }) {
       <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13 }}>
         <thead>
           <tr>
-            <Th>SKU</Th>
+            <Th>Código SKU</Th>
             <Th>Descrição</Th>
             <Th>Categoria</Th>
             <Th right>Real (cx)</Th>
@@ -364,7 +364,7 @@ function TabelaWmape({ itens }: { itens: any[] }) {
       <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13 }}>
         <thead>
           <tr>
-            <Th>SKU</Th>
+            <Th>Código SKU</Th>
             <Th>Descrição</Th>
             <Th>Categoria</Th>
             <Th right>Real (cx)</Th>
@@ -418,7 +418,7 @@ function TabelaRankingFillRate({ itens, unidade }: { itens: any[]; unidade: 'cx'
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
         <thead>
           <tr>
-            <Th>SKU</Th>
+            <Th>Código SKU</Th>
             <Th>Descrição</Th>
             <Th>Categoria</Th>
             <Th right>{unidade === 'rs' ? 'Pedido (R$)' : 'Pedido (cx)'}</Th>
@@ -458,7 +458,7 @@ function TabelaRankingFillRate({ itens, unidade }: { itens: any[]; unidade: 'cx'
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TABELA CONSOLIDADA 3 INDICADORES (ESTILO EXECUTIVE DARK)
+// TABELA CONSOLIDADA 3 INDICADORES
 // ═══════════════════════════════════════════════════════════════════════════
 function TabelaConsolidada3Indicadores({
   diagCat, fillCat, diagSku, fillSku, categoriaFiltro
@@ -497,13 +497,13 @@ function TabelaConsolidada3Indicadores({
     linhas.sort((a, b) => (b.wmape ?? -1) - (a.wmape ?? -1));
 
     return (
-      <div style={{ background: '#0a0f1d', borderRadius: 12, padding: 18, border: '1px solid #1e293b' }}>
+      <div style={{ background: '#fff', borderRadius: 14, padding: 18, border: '1px solid #f1f5f9' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
           <div>
-            <div style={{ fontSize: 14, fontWeight: 900, color: '#f8fafc' }}>
+            <div style={{ fontSize: 14, fontWeight: 900, color: '#0f172a' }}>
               Consolidado dos 3 Indicadores por SKU {categoriaFiltro ? `— Categoria: ${categoriaFiltro}` : '— Todos os SKUs'}
             </div>
-            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>
+            <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
               Exibindo {linhas.length} produtos · WMAPE e BIAS (portfólio ativo) + Fill Rate (total vendas)
             </div>
           </div>
@@ -511,8 +511,8 @@ function TabelaConsolidada3Indicadores({
             <button
               onClick={() => setVisao('categorias')}
               style={{
-                fontSize: 11, padding: '5px 12px', borderRadius: 6, border: '1px solid #334155', cursor: 'pointer',
-                background: !mostrarSkus ? '#2563eb' : '#1e293b', color: '#fff', fontWeight: 700
+                fontSize: 11, padding: '5px 12px', borderRadius: 6, border: '1px solid #dbe3ee', cursor: 'pointer',
+                background: !mostrarSkus ? '#2563eb' : '#f8fafc', color: !mostrarSkus ? '#fff' : '#475569', fontWeight: 700
               }}
             >
               Ver por Categorias
@@ -520,8 +520,8 @@ function TabelaConsolidada3Indicadores({
             <button
               onClick={() => setVisao('skus')}
               style={{
-                fontSize: 11, padding: '5px 12px', borderRadius: 6, border: '1px solid #334155', cursor: 'pointer',
-                background: mostrarSkus ? '#2563eb' : '#1e293b', color: '#fff', fontWeight: 700
+                fontSize: 11, padding: '5px 12px', borderRadius: 6, border: '1px solid #dbe3ee', cursor: 'pointer',
+                background: mostrarSkus ? '#2563eb' : '#f8fafc', color: mostrarSkus ? '#fff' : '#475569', fontWeight: 700
               }}
             >
               Ver por SKUs
@@ -530,28 +530,32 @@ function TabelaConsolidada3Indicadores({
         </div>
 
         <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, color: '#e2e8f0' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
-              <tr style={{ background: '#0f172a', borderBottom: '2px solid #1e293b' }}>
-                <th style={{ padding: '10px 14px', textAlign: 'left', color: '#a5b4fc', fontWeight: 800, fontSize: 11, letterSpacing: '.03em' }}>Descrição</th>
-                <th style={{ padding: '10px 14px', textAlign: 'right', color: '#a5b4fc', fontWeight: 800, fontSize: 11, letterSpacing: '.03em' }}>WMAPE (%)</th>
-                <th style={{ padding: '10px 14px', textAlign: 'right', color: '#a5b4fc', fontWeight: 800, fontSize: 11, letterSpacing: '.03em' }}>BIAS (%)</th>
-                <th style={{ padding: '10px 14px', textAlign: 'right', color: '#a5b4fc', fontWeight: 800, fontSize: 11, letterSpacing: '.03em' }}>Fill Rate (%)</th>
+              <tr style={{ background: '#f8fafc', borderBottom: '2px solid #e2e8f0' }}>
+                <th style={{ padding: '10px 14px', textAlign: 'left', color: '#64748b', fontWeight: 800, fontSize: 10, letterSpacing: '.05em', textTransform: 'uppercase' }}>Código SKU</th>
+                <th style={{ padding: '10px 14px', textAlign: 'left', color: '#64748b', fontWeight: 800, fontSize: 10, letterSpacing: '.05em', textTransform: 'uppercase' }}>Descrição</th>
+                <th style={{ padding: '10px 14px', textAlign: 'right', color: '#64748b', fontWeight: 800, fontSize: 10, letterSpacing: '.05em', textTransform: 'uppercase' }}>WMAPE (%)</th>
+                <th style={{ padding: '10px 14px', textAlign: 'right', color: '#64748b', fontWeight: 800, fontSize: 10, letterSpacing: '.05em', textTransform: 'uppercase' }}>BIAS (%)</th>
+                <th style={{ padding: '10px 14px', textAlign: 'right', color: '#64748b', fontWeight: 800, fontSize: 10, letterSpacing: '.05em', textTransform: 'uppercase' }}>Fill Rate (%)</th>
               </tr>
             </thead>
             <tbody>
               {linhas.map((row, idx) => (
-                <tr key={row.sku} style={{ background: idx % 2 === 0 ? '#0b1329' : '#030712', borderBottom: '1px solid #1e293b' }}>
-                  <td style={{ padding: '9px 14px', fontWeight: 700, color: '#f1f5f9' }}>
+                <tr key={row.sku} style={{ background: idx % 2 === 0 ? '#fff' : '#f8fafc', borderBottom: '1px solid #f1f5f9' }}>
+                  <td style={{ padding: '9px 14px', fontWeight: 700, color: '#475569' }}>
+                    <code style={{ fontSize: 11, color: '#64748b' }}>{row.sku}</code>
+                  </td>
+                  <td style={{ padding: '9px 14px', fontWeight: 700, color: '#334155' }}>
                     {row.descricao}
                   </td>
-                  <td style={{ padding: '9px 14px', textAlign: 'right', fontWeight: 800, color: row.wmape != null && row.wmape <= 20 ? '#34d399' : row.wmape != null && row.wmape <= 35 ? '#fbbf24' : '#f87171' }}>
+                  <td style={{ padding: '9px 14px', textAlign: 'right', fontWeight: 800, color: row.wmape != null && row.wmape <= 20 ? '#059669' : row.wmape != null && row.wmape <= 35 ? '#d97706' : '#e11d48' }}>
                     {row.wmape != null ? row.wmape.toFixed(2) : '—'}
                   </td>
-                  <td style={{ padding: '9px 14px', textAlign: 'right', fontWeight: 800, color: row.bias != null && Math.abs(row.bias) <= 10 ? '#34d399' : row.bias != null && row.bias > 0 ? '#f87171' : '#60a5fa' }}>
+                  <td style={{ padding: '9px 14px', textAlign: 'right', fontWeight: 800, color: row.bias != null && Math.abs(row.bias) <= 10 ? '#059669' : row.bias != null && row.bias > 0 ? '#e11d48' : '#2563eb' }}>
                     {row.bias != null ? (row.bias > 0 ? `+${row.bias.toFixed(2)}` : row.bias.toFixed(2)) : '—'}
                   </td>
-                  <td style={{ padding: '9px 14px', textAlign: 'right', fontWeight: 800, color: row.fillRate != null && row.fillRate >= 95 ? '#34d399' : row.fillRate != null && row.fillRate >= 85 ? '#fbbf24' : '#f87171' }}>
+                  <td style={{ padding: '9px 14px', textAlign: 'right', fontWeight: 800, color: row.fillRate != null && row.fillRate >= 95 ? '#059669' : row.fillRate != null && row.fillRate >= 85 ? '#d97706' : '#e11d48' }}>
                     {row.fillRate != null ? row.fillRate.toFixed(1) : '—'}
                   </td>
                 </tr>
@@ -582,13 +586,13 @@ function TabelaConsolidada3Indicadores({
   linhasCat.sort((a, b) => (b.wmape ?? -1) - (a.wmape ?? -1));
 
   return (
-    <div style={{ background: '#0a0f1d', borderRadius: 12, padding: 18, border: '1px solid #1e293b' }}>
+    <div style={{ background: '#fff', borderRadius: 14, padding: 18, border: '1px solid #f1f5f9' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
         <div>
-          <div style={{ fontSize: 14, fontWeight: 900, color: '#f8fafc' }}>
+          <div style={{ fontSize: 14, fontWeight: 900, color: '#0f172a' }}>
             Consolidado dos 3 Indicadores por Categoria
           </div>
-          <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>
+          <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
             Exibindo {linhasCat.length} categorias consolidadas · Selecione uma categoria no filtro acima para ver os SKUs
           </div>
         </div>
@@ -596,7 +600,7 @@ function TabelaConsolidada3Indicadores({
           <button
             onClick={() => setVisao('categorias')}
             style={{
-              fontSize: 11, padding: '5px 12px', borderRadius: 6, border: '1px solid #334155', cursor: 'pointer',
+              fontSize: 11, padding: '5px 12px', borderRadius: 6, border: '1px solid #dbe3ee', cursor: 'pointer',
               background: '#2563eb', color: '#fff', fontWeight: 700
             }}
           >
@@ -605,8 +609,8 @@ function TabelaConsolidada3Indicadores({
           <button
             onClick={() => setVisao('skus')}
             style={{
-              fontSize: 11, padding: '5px 12px', borderRadius: 6, border: '1px solid #334155', cursor: 'pointer',
-              background: '#1e293b', color: '#fff', fontWeight: 700
+              fontSize: 11, padding: '5px 12px', borderRadius: 6, border: '1px solid #dbe3ee', cursor: 'pointer',
+              background: '#f8fafc', color: '#475569', fontWeight: 700
             }}
           >
             Ver por SKUs
@@ -615,28 +619,28 @@ function TabelaConsolidada3Indicadores({
       </div>
 
       <div style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, color: '#e2e8f0' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
           <thead>
-            <tr style={{ background: '#0f172a', borderBottom: '2px solid #1e293b' }}>
-              <th style={{ padding: '10px 14px', textAlign: 'left', color: '#a5b4fc', fontWeight: 800, fontSize: 11, letterSpacing: '.03em' }}>Categoria</th>
-              <th style={{ padding: '10px 14px', textAlign: 'right', color: '#a5b4fc', fontWeight: 800, fontSize: 11, letterSpacing: '.03em' }}>WMAPE (%)</th>
-              <th style={{ padding: '10px 14px', textAlign: 'right', color: '#a5b4fc', fontWeight: 800, fontSize: 11, letterSpacing: '.03em' }}>BIAS (%)</th>
-              <th style={{ padding: '10px 14px', textAlign: 'right', color: '#a5b4fc', fontWeight: 800, fontSize: 11, letterSpacing: '.03em' }}>Fill Rate (%)</th>
+            <tr style={{ background: '#f8fafc', borderBottom: '2px solid #e2e8f0' }}>
+              <th style={{ padding: '10px 14px', textAlign: 'left', color: '#64748b', fontWeight: 800, fontSize: 10, letterSpacing: '.05em', textTransform: 'uppercase' }}>Categoria</th>
+              <th style={{ padding: '10px 14px', textAlign: 'right', color: '#64748b', fontWeight: 800, fontSize: 10, letterSpacing: '.05em', textTransform: 'uppercase' }}>WMAPE (%)</th>
+              <th style={{ padding: '10px 14px', textAlign: 'right', color: '#64748b', fontWeight: 800, fontSize: 10, letterSpacing: '.05em', textTransform: 'uppercase' }}>BIAS (%)</th>
+              <th style={{ padding: '10px 14px', textAlign: 'right', color: '#64748b', fontWeight: 800, fontSize: 10, letterSpacing: '.05em', textTransform: 'uppercase' }}>Fill Rate (%)</th>
             </tr>
           </thead>
           <tbody>
             {linhasCat.map((row, idx) => (
-              <tr key={row.categoria} style={{ background: idx % 2 === 0 ? '#0b1329' : '#030712', borderBottom: '1px solid #1e293b' }}>
-                <td style={{ padding: '9px 14px', fontWeight: 700, color: '#f1f5f9' }}>
+              <tr key={row.categoria} style={{ background: idx % 2 === 0 ? '#fff' : '#f8fafc', borderBottom: '1px solid #f1f5f9' }}>
+                <td style={{ padding: '9px 14px', fontWeight: 700, color: '#334155' }}>
                   {row.categoria}
                 </td>
-                <td style={{ padding: '9px 14px', textAlign: 'right', fontWeight: 800, color: row.wmape != null && row.wmape <= 20 ? '#34d399' : row.wmape != null && row.wmape <= 35 ? '#fbbf24' : '#f87171' }}>
+                <td style={{ padding: '9px 14px', textAlign: 'right', fontWeight: 800, color: row.wmape != null && row.wmape <= 20 ? '#059669' : row.wmape != null && row.wmape <= 35 ? '#d97706' : '#e11d48' }}>
                   {row.wmape != null ? row.wmape.toFixed(2) : '—'}
                 </td>
-                <td style={{ padding: '9px 14px', textAlign: 'right', fontWeight: 800, color: row.bias != null && Math.abs(row.bias) <= 10 ? '#34d399' : row.bias != null && row.bias > 0 ? '#f87171' : '#60a5fa' }}>
+                <td style={{ padding: '9px 14px', textAlign: 'right', fontWeight: 800, color: row.bias != null && Math.abs(row.bias) <= 10 ? '#059669' : row.bias != null && row.bias > 0 ? '#e11d48' : '#2563eb' }}>
                   {row.bias != null ? (row.bias > 0 ? `+${row.bias.toFixed(2)}` : row.bias.toFixed(2)) : '—'}
                 </td>
-                <td style={{ padding: '9px 14px', textAlign: 'right', fontWeight: 800, color: row.fillRate != null && row.fillRate >= 95 ? '#34d399' : row.fillRate != null && row.fillRate >= 85 ? '#fbbf24' : '#f87171' }}>
+                <td style={{ padding: '9px 14px', textAlign: 'right', fontWeight: 800, color: row.fillRate != null && row.fillRate >= 95 ? '#059669' : row.fillRate != null && row.fillRate >= 85 ? '#d97706' : '#e11d48' }}>
                   {row.fillRate != null ? row.fillRate.toFixed(1) : '—'}
                 </td>
               </tr>
