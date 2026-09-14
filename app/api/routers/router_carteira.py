@@ -20,6 +20,7 @@ Toda a lógica de SQL e rateio é preservada do router_carteira.py original.
 
 import datetime
 import io
+import logging
 import unicodedata
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Query
@@ -47,6 +48,7 @@ from app.api.routers.shared_ibp import (
 )
 
 router = APIRouter(prefix="/api/v1/carteira", tags=["Metas Comercial"])
+logger = logging.getLogger(__name__)
 
 
 SIMONE_NOME = "SIMONE ANDRADE DE PAULA"
@@ -612,12 +614,16 @@ def _escopo_simone_sql(escopo: dict) -> tuple[str, dict]:
     return filtro, params
 
 
+def _mes_iso(valor) -> str:
+    if hasattr(valor, "strftime"):
+        return valor.strftime("%Y-%m")
+    texto = str(valor or "").strip()
+    return texto[:7] if len(texto) >= 7 else texto
+
+
 def _linhas_simone(db: Session, ciclo: str, escopo: dict, meses: list) -> list:
     filtro, params = _escopo_simone_sql(escopo)
-    meses_iso = [
-        m.strftime("%Y-%m") if hasattr(m, "strftime") else str(m)[:7]
-        for m in meses
-    ]
+    meses_iso = [_mes_iso(m) for m in meses]
     params.update({"ciclo": ciclo, "meses_iso": meses_iso})
     return db.execute(text(f"""
         SELECT
@@ -659,7 +665,7 @@ def tabela_monetaria_simone(
             WHERE ciclo_sop = :ciclo
         """), {"ciclo": ciclo}).fetchall()
         armazenadas_map = {
-            (r.mes_projetado.strftime("%Y-%m"), r.regional, r.cgc): float(r.valor_meta or 0)
+            (_mes_iso(r.mes_projetado), r.regional, r.cgc): float(r.valor_meta or 0)
             for r in armazenadas
         }
         por_regional: dict = {}
@@ -686,13 +692,14 @@ def tabela_monetaria_simone(
         return {
             "simone_monetario": True,
             "ciclo": ciclo,
-            "meses": [m.strftime("%Y-%m") for m in meses],
+            "meses": [_mes_iso(m) for m in meses],
             "etapa_atual": controle or "REGIONAL",
             "regionais": list(por_regional.values()),
         }
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("Falha ao carregar tabela monetária da Simone")
         raise HTTPException(500, repr(e))
 
 
