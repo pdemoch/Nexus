@@ -6,6 +6,7 @@ deduplicados e o peso é sempre o valor efetivamente pago.
 from datetime import date
 import logging
 import math
+import re
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
@@ -44,6 +45,16 @@ def _date_text(value) -> str:
 
 def _norm_key(series: pd.Series) -> pd.Series:
     return series.fillna("").astype(str).str.strip().str.upper()
+
+
+def _norm_doc(value) -> str:
+    """Normaliza documento numérico sem alterar o valor apresentado ao usuário."""
+    text = "" if value is None else str(value).strip().upper()
+    if not text:
+        return ""
+    if re.fullmatch(r"0*\d+(?:\.0+)?", text):
+        text = text.split(".", 1)[0]
+    return text.lstrip("0") or "0"
 
 
 def _filter_key(series: pd.Series) -> pd.Series:
@@ -92,8 +103,12 @@ def _base_cached(data_ini: date, data_fim: date, motivos: Optional[Tuple[str, ..
     for e2_key, e5_key in key_map.items():
         if e2_key in tit.columns and e5_key in mov.columns:
             canonical = "_join_" + e2_key
-            tit[canonical] = _norm_key(tit[e2_key])
-            mov[canonical] = _norm_key(mov[e5_key])
+            if e2_key == "e2_num":
+                tit[canonical] = tit[e2_key].map(_norm_doc)
+                mov[canonical] = mov[e5_key].map(_norm_doc)
+            else:
+                tit[canonical] = _norm_key(tit[e2_key])
+                mov[canonical] = _norm_key(mov[e5_key])
             join_keys.append(canonical)
     if join_keys:
         titulo_keys = ["clifor"] + join_keys
@@ -131,7 +146,7 @@ def _base_cached(data_ini: date, data_fim: date, motivos: Optional[Tuple[str, ..
         nf = nf.copy()
         nf["clifor"] = _norm_key(_col(nf, "f1_fornece"))
         # Align SF1 names with the canonical SE2 title keys.
-        nf["_join_e2_num"] = _norm_key(_col(nf, "f1_doc"))
+        nf["_join_e2_num"] = _norm_key(_col(nf, "f1_doc")).map(_norm_doc)
         nf["_join_e2_prefixo"] = _norm_key(_col(nf, "f1_serie"))
         nf["_join_e2_filial"] = _norm_key(_col(nf, "f1_filial"))
         nf["_join_e2_loja"] = _norm_key(_col(nf, "f1_loja"))
@@ -373,7 +388,7 @@ def _lookup_itens_d1(data_fim: date, clifor: str) -> Dict[Tuple[str, str, str, s
     for row in nf.to_dict("records"):
         key = (
             str(row.get("clifor", "")).strip().upper(),
-            str(row.get("f1_doc", "")).strip().upper(),
+            _norm_doc(row.get("f1_doc", "")),
             str(row.get("f1_serie", "")).strip().upper(),
             str(row.get("f1_filial", "")).strip().upper(),
             str(row.get("f1_loja", "")).strip().upper(),
@@ -465,7 +480,7 @@ def obter_pagamentos_fornecedor(data_ini: date, data_fim: date, clifor: str,
     for row in base.sort_values("e5_data").to_dict("records"):
         chave_nf = (
             str(row.get("clifor", "")).strip().upper(),
-            str(row.get("_join_e2_num", row.get("f1_doc", ""))).strip().upper(),
+            _norm_doc(row.get("_join_e2_num", row.get("f1_doc", ""))),
             str(row.get("_join_e2_prefixo", row.get("f1_serie", ""))).strip().upper(),
             str(row.get("_join_e2_filial", row.get("f1_filial", ""))).strip().upper(),
             str(row.get("_join_e2_loja", row.get("f1_loja", ""))).strip().upper(),
