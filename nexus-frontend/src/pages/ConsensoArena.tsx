@@ -661,7 +661,30 @@ function PreenchimentoMonetarioSimone({ dados, recarregar }: { dados: any; recar
     }));
   };
 
-  const salvar = async (cliente: boolean) => {
+  const formatarErroApi = (erro: any): string => {
+    const detalhe = erro?.response?.data?.detail;
+    if (typeof detalhe === 'string') return detalhe;
+    if (Array.isArray(detalhe)) {
+      return detalhe.map((item: any) => item?.msg || item?.message || String(item)).join('; ');
+    }
+    if (detalhe && typeof detalhe === 'object') {
+      const mensagem = detalhe.mensagem || detalhe.message;
+      const detalhes = Array.isArray(detalhe.detalhes)
+        ? detalhe.detalhes.map((item: any) => {
+            const regional = item.regional || 'Regional não informada';
+            const mes = item.mes || 'mês não informado';
+            const regionalValue = formatarReais(Number(item.valor_regional || 0));
+            const clientValue = formatarReais(Number(item.valor_clientes || 0));
+            const variation = Number(item.variacao_pct || 0) * 100;
+            return `${regional} · ${mes}: regional ${regionalValue}, clientes ${clientValue} (${variation.toFixed(2)}% de diferença)`;
+          }).join('\n')
+        : '';
+      return [mensagem, detalhes].filter(Boolean).join('\n');
+    }
+    return erro?.message || 'Falha inesperada na operação.';
+  };
+
+  const salvar = async (cliente: boolean): Promise<boolean> => {
     setSalvando(true);
     try {
       const payload = cliente
@@ -678,8 +701,10 @@ function PreenchimentoMonetarioSimone({ dados, recarregar }: { dados: any; recar
         ? '/api/v1/carteira/salvar-clientes-monetarios-simone'
         : '/api/v1/carteira/salvar-metas-monetarias-simone', payload);
       await recarregar();
+      return true;
     } catch (e: any) {
-      alert(e?.response?.data?.detail || 'Falha ao salvar a distribuição monetária.');
+      alert(formatarErroApi(e));
+      return false;
     } finally {
       setSalvando(false);
     }
@@ -689,12 +714,12 @@ function PreenchimentoMonetarioSimone({ dados, recarregar }: { dados: any; recar
     if (!confirm(`Travar a etapa ${etapa.toLowerCase()}? Os valores informados serão mantidos exatamente.`)) return;
     setSalvando(true);
     try {
-      if (etapa === 'REGIONAL') await salvar(false);
-      if (etapa === 'CLIENTE') await salvar(true);
+      if (etapa === 'REGIONAL' && !(await salvar(false))) return;
+      if (etapa === 'CLIENTE' && !(await salvar(true))) return;
       await axios.post('/api/v1/carteira/travar-fase-monetaria-simone', { etapa });
       await recarregar();
     } catch (e: any) {
-      alert(e?.response?.data?.detail || 'Falha ao travar a etapa.');
+      alert(formatarErroApi(e));
     } finally {
       setSalvando(false);
     }

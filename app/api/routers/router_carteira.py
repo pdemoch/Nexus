@@ -862,11 +862,17 @@ def travar_fase_monetaria_simone(
             """), {"c": ciclo}).fetchall()
             if divergencias:
                 raise HTTPException(422, {
-                    "mensagem": "A soma dos clientes precisa ser exatamente igual à meta regional.",
+                    "mensagem": "A soma dos clientes precisa ficar dentro de 1% da meta regional.",
                     "detalhes": [
                         {"regional": r.regional, "mes": r.mes,
                          "valor_regional": float(r.valor_regional),
-                         "valor_clientes": float(r.valor_clientes)}
+                         "valor_clientes": float(r.valor_clientes),
+                         "variacao_pct": (
+                             abs(float(r.valor_regional) - float(r.valor_clientes))
+                             / abs(float(r.valor_regional))
+                             if abs(float(r.valor_regional)) > 0.005
+                             else (1.0 if abs(float(r.valor_clientes)) > 0.005 else 0.0)
+                         )}
                         for r in divergencias
                     ],
                 })
