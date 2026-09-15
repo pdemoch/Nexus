@@ -25,6 +25,13 @@ from app.api.routers.router_auth import get_current_user
 from app.api.routers import planejador_demanda as pd
 
 router = APIRouter(prefix="/api/v1/assistente", tags=["Assistente"])
+FUNCOES_NEXUS_BOT = {"Administrador", "C-Level", "Gerente"}
+
+
+def require_nexus_bot(usuario: dict = Depends(get_current_user)):
+    if usuario.get("funcao") not in FUNCOES_NEXUS_BOT:
+        raise HTTPException(403, "Acesso restrito ao Nexus Bot.")
+    return usuario
 
 
 class PerguntaAssistente(BaseModel):
@@ -80,7 +87,7 @@ def _classificar_area(pergunta: str, escopo_tipo: Optional[str]) -> str:
 async def chat(
     payload: PerguntaAssistente,
     db: Session = Depends(get_db),
-    _: dict = Depends(get_current_user),
+    _: dict = Depends(require_nexus_bot),
 ):
     if payload.modo not in ("auto", "indicadores", "demanda", "financeiro"):
         raise HTTPException(400, "Campo 'modo' precisa ser 'auto', 'indicadores', 'demanda' ou 'financeiro'.")
@@ -91,6 +98,10 @@ async def chat(
     pergunta = payload.pergunta.strip()
     if not pergunta:
         raise HTTPException(422, "A pergunta não pode ser vazia.")
+    if (payload.data_ini is None) != (payload.data_fim is None):
+        raise HTTPException(422, "Informe as datas inicial e final da análise.")
+    if payload.data_ini and payload.data_fim and payload.data_ini > payload.data_fim:
+        raise HTTPException(422, "A data inicial deve ser anterior à data final.")
     area = (
         _classificar_area(pergunta, payload.escopo_tipo)
         if payload.modo == "auto"
@@ -128,6 +139,7 @@ async def chat(
         resposta = pd.responder_pergunta(
             db, area, pergunta,
             payload.escopo_tipo, payload.escopo_id, payload.historico,
+            data_ini=payload.data_ini, data_fim=payload.data_fim,
         )
         return {**resposta, "area": area}
     except RuntimeError as e:
@@ -142,7 +154,7 @@ async def chat(
 async def buscar(
     q: str = Query(..., min_length=1, max_length=80),
     db: Session = Depends(get_db),
-    _: dict = Depends(get_current_user),
+    _: dict = Depends(require_nexus_bot),
 ):
     """Autocomplete de SKU/categoria para o modo Demanda do chat."""
     return pd.buscar_itens(db, q)
@@ -153,7 +165,7 @@ async def avaliacao(
     tipo: str = Query(..., regex="^(sku|categoria)$"),
     id:   str = Query(..., min_length=1),
     db: Session = Depends(get_db),
-    _: dict = Depends(get_current_user),
+    _: dict = Depends(require_nexus_bot),
 ):
     """
     Avaliacao gerada em lote no ultimo ciclo novo, para o bloco de texto

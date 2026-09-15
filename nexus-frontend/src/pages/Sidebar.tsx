@@ -77,9 +77,11 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
       </nav>
 
       {/* ASSISTENTE — chat único (Indicadores + Demanda), ícone diferenciado */}
-      <div className="px-3 pb-2 shrink-0">
-        <AssistenteChat isCollapsed={isCollapsed} />
-      </div>
+      {['Administrador', 'C-Level', 'Gerente'].includes(user?.funcao || '') && (
+        <div className="px-3 pb-2 shrink-0">
+          <AssistenteChat isCollapsed={isCollapsed} />
+        </div>
+      )}
 
       {/* LOGOUT */}
       <div className="p-4 border-t border-slate-800 shrink-0">
