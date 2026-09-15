@@ -68,6 +68,7 @@ function PreenchimentoSupply() {
   const [busca, setBusca] = useState(''); // filtro de busca (categoria, SKU, descrição)
   const [justificativaAberta, setJustificativaAberta] = useState(false);
   const [justificativa, setJustificativa] = useState('');
+  const [editsAntesJustificativa, setEditsAntesJustificativa] = useState<Record<string, number> | null>(null);
   const [acaoAposSalvar, setAcaoAposSalvar] = useState<'nenhuma' | 'congelar' | string>('nenhuma');
 
   const carregar = useCallback(async () => {
@@ -95,8 +96,20 @@ function PreenchimentoSupply() {
     return k in edits ? edits[k] : original;
   };
 
+  const abrirJustificativaEdicao = () => {
+    if (!justificativaAberta && !salvando) {
+      setEditsAntesJustificativa({ ...edits });
+      setAcaoAposSalvar('nenhuma');
+      setJustificativa('');
+      setJustificativaAberta(true);
+    }
+  };
+
   const setCelula = (sku: string, mes: string, v: number) => {
-    setEdits((e) => ({ ...e, [`${sku}|${mes}`]: Math.max(0, Math.round(v || 0)) }));
+    const valor = Math.max(0, Math.round(v || 0));
+    const chave = `${sku}|${mes}`;
+    abrirJustificativaEdicao();
+    setEdits((e) => ({ ...e, [chave]: valor }));
   };
 
   // Totalizadores VIVOS — recalculam com as edições locais
@@ -196,6 +209,7 @@ function PreenchimentoSupply() {
     const salvou = await salvar(texto);
     if (!salvou) return;
     setJustificativaAberta(false);
+    setEditsAntesJustificativa(null);
     setAcaoAposSalvar('nenhuma');
     try {
       if (proximaAcao === 'congelar') {
@@ -317,7 +331,7 @@ function PreenchimentoSupply() {
               <div className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-2xl">
                 <div className="text-sm font-black text-slate-900">Justificativa da alteração</div>
                 <div className="mt-1 text-xs text-slate-500">
-                  Explique por que o volume Supply foi alterado antes de salvar.
+                  Explique por que o volume Supply foi alterado.
                 </div>
                 <textarea
                   autoFocus
@@ -328,7 +342,12 @@ function PreenchimentoSupply() {
                   placeholder="Digite a justificativa..."
                 />
                 <div className="mt-4 flex justify-end gap-2">
-                  <button onClick={() => setJustificativaAberta(false)}
+                  <button onClick={() => {
+                    if (editsAntesJustificativa) setEdits(editsAntesJustificativa);
+                    setEditsAntesJustificativa(null);
+                    setJustificativaAberta(false);
+                    setAcaoAposSalvar('nenhuma');
+                  }}
                     className="rounded-xl px-4 py-2 text-xs font-black text-slate-500 hover:bg-slate-100">
                     Cancelar
                   </button>
@@ -461,6 +480,7 @@ function PreenchimentoSupply() {
                                 type="number"
                                 value={val}
                                 disabled={congelada}
+                                onFocus={abrirJustificativaEdicao}
                                 onChange={(e) => setCelula(s.sku, m, parseInt(e.target.value))}
                                 className={`w-full text-right text-sm font-bold rounded-md px-2 py-1 border transition-colors
                                   ${editado ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-transparent bg-transparent text-slate-700'}
