@@ -701,6 +701,7 @@ function PreenchimentoMonetarioSimone({ dados, recarregar }: { dados: any; recar
   };
 
   const somenteLeitura = etapa === 'CONFIRMACAO';
+  const formatarReais = (valor: number) => `R$ ${Math.round(valor || 0).toLocaleString('pt-BR')}`;
   return (
     <div className="h-full overflow-y-auto bg-slate-50 px-6 py-4">
       <div className="max-w-6xl mx-auto">
@@ -742,9 +743,9 @@ function PreenchimentoMonetarioSimone({ dados, recarregar }: { dados: any; recar
                   {dados.meses.map((mes: string) => (
                     <label key={mes} className="flex flex-col text-[9px] font-black uppercase text-slate-400">
                       {mesLabel(mes)}
-                      <input type="number" step="0.01" min="0" disabled={etapa !== 'REGIONAL'}
-                        value={Number(regional.meses?.[mes] || 0)}
-                        onChange={e => alterarRegional(regional.regional, mes, Number(e.target.value))}
+                      <input type="text" inputMode="numeric" disabled={etapa !== 'REGIONAL'}
+                        value={formatarReais(Number(regional.meses?.[mes] || 0))}
+                        onChange={e => alterarRegional(regional.regional, mes, Number(e.target.value.replace(/\D/g, '')))}
                         className="mt-1 w-28 px-2 py-1.5 rounded-lg border border-slate-200 text-right text-xs font-bold text-slate-700 disabled:bg-slate-50" />
                     </label>
                   ))}
@@ -760,9 +761,9 @@ function PreenchimentoMonetarioSimone({ dados, recarregar }: { dados: any; recar
                         <div className="text-[10px] text-slate-400">{cliente.executivo} · {cliente.cgc}</div>
                       </div>
                       {dados.meses.map((mes: string) => (
-                        <input key={mes} type="number" step="0.01" min="0" disabled={etapa !== 'CLIENTE'}
-                          value={Number(cliente.meses?.[mes] || 0)}
-                          onChange={e => alterarCliente(regional.regional, cliente.cgc, mes, Number(e.target.value))}
+                        <input key={mes} type="text" inputMode="numeric" disabled={etapa !== 'CLIENTE'}
+                          value={formatarReais(Number(cliente.meses?.[mes] || 0))}
+                          onChange={e => alterarCliente(regional.regional, cliente.cgc, mes, Number(e.target.value.replace(/\D/g, '')))}
                           className="w-full px-2 py-1.5 rounded-lg border border-slate-200 text-right text-xs font-bold text-slate-700 disabled:bg-slate-50" />
                       ))}
                     </div>

@@ -66,6 +66,9 @@ function PreenchimentoSupply() {
   const [edits, setEdits] = useState<Record<string, number>>({}); // `${sku}|${mes}` -> valor
   const [dossiesAbertos, setDossiesAbertos] = useState<Set<string>>(new Set()); // múltiplos SKUs
   const [busca, setBusca] = useState(''); // filtro de busca (categoria, SKU, descrição)
+  const [justificativaAberta, setJustificativaAberta] = useState(false);
+  const [justificativa, setJustificativa] = useState('');
+  const [acaoAposSalvar, setAcaoAposSalvar] = useState<'nenhuma' | 'congelar' | string>('nenhuma');
 
   const carregar = useCallback(async () => {
     setLoading(true);
@@ -121,6 +124,19 @@ function PreenchimentoSupply() {
 
   const temEdicoes = Object.keys(edits).length > 0;
 
+  const exportarExcel = async () => {
+    try {
+      const resp = await axios.get('/api/v1/supply/exportar', { responseType: 'blob' });
+      const url = window.URL.createObjectURL(new Blob([resp.data]));
+      const a = document.createElement('a');
+      a.href = url; a.download = 'supply_preenchimento.xlsx';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || 'Erro ao gerar o Excel. Tente novamente.');
+    }
+  };
+
   // Filtra categorias/segmentos/SKUs pela busca.
   // Se busca não-vazia: filtra SKUs cujo sku/descricao/categoria bate, e
   // mantém só as categorias/segmentos que têm pelo menos 1 SKU com match.
@@ -144,16 +160,25 @@ function PreenchimentoSupply() {
       .filter(Boolean);
   }, [dados, busca]);
 
-  const salvar = async () => {
+  const abrirJustificativa = (acao: 'nenhuma' | 'congelar' | string = 'nenhuma') => {
+    if (!temEdicoes) return false;
+    setAcaoAposSalvar(acao);
+    setJustificativa('');
+    setJustificativaAberta(true);
+    return true;
+  };
+
+  const salvar = async (textoJustificativa: string) => {
     if (!temEdicoes) return;
     setSalvando(true);
     try {
       const ajustes = Object.entries(edits).map(([k, v]) => {
         const [sku, mes] = k.split('|');
-        return { sku, mes_projetado: mes, novo_volume: v };
+        return { sku, mes_projetado: mes, novo_volume: v, justificativa: textoJustificativa };
       });
       await axios.post('/api/v1/supply/salvar', { ajustes });
       await carregar();
+      return true;
     } catch (e: any) {
       alert(e?.response?.data?.detail || 'Falha ao salvar.');
     } finally {
@@ -161,10 +186,39 @@ function PreenchimentoSupply() {
     }
   };
 
+  const confirmarJustificativa = async () => {
+    const texto = justificativa.trim();
+    if (!texto) {
+      alert('Informe a justificativa da alteração.');
+      return;
+    }
+    const proximaAcao = acaoAposSalvar;
+    const salvou = await salvar(texto);
+    if (!salvou) return;
+    setJustificativaAberta(false);
+    setAcaoAposSalvar('nenhuma');
+    try {
+      if (proximaAcao === 'congelar') {
+        await axios.post('/api/v1/supply/congelar', {});
+        await carregar();
+      } else if (proximaAcao === 'exportar') {
+        await exportarExcel();
+      } else if (proximaAcao.startsWith('dossie:')) {
+        const sku = proximaAcao.slice('dossie:'.length);
+        setDossiesAbertos((prev) => new Set(prev).add(sku));
+      }
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || 'Falha ao concluir a ação.');
+    }
+  };
+
   const congelarEtapa = async () => {
     if (!confirm('Congelar Supply Review? A etapa seguinte será liberada e esta ficará somente leitura.')) return;
     try {
-      if (temEdicoes) await salvar();
+      if (temEdicoes) {
+        abrirJustificativa('congelar');
+        return;
+      }
       await axios.post('/api/v1/supply/congelar', {});
       await carregar();
     } catch (e: any) { alert(e?.response?.data?.detail || 'Falha ao congelar.'); }
@@ -223,7 +277,7 @@ function PreenchimentoSupply() {
               )}
             </div>
             <button
-              onClick={salvar}
+              onClick={() => abrirJustificativa()}
               disabled={!temEdicoes || salvando || congelada}
               className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all
                 ${temEdicoes && !congelada ? 'bg-indigo-600 text-white shadow-sm hover:bg-indigo-700' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}
@@ -247,21 +301,45 @@ function PreenchimentoSupply() {
             )}
             <button
               onClick={async () => {
-                if (temEdicoes) await salvar();
-                try {
-                  const resp = await axios.get('/api/v1/supply/exportar', { responseType: 'blob' });
-                  const url = window.URL.createObjectURL(new Blob([resp.data]));
-                  const a = document.createElement('a');
-                  a.href = url; a.download = 'supply_preenchimento.xlsx';
-                  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-                  window.URL.revokeObjectURL(url);
-                } catch { alert('Erro ao gerar o Excel. Tente novamente.'); }
+                if (temEdicoes) {
+                  abrirJustificativa('exportar');
+                  return;
+                }
+                await exportarExcel();
               }}
               className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black bg-white border border-slate-200 text-slate-600 hover:bg-slate-50"
             >
               <Download className="w-4 h-4" /> Excel
             </button>
           </div>
+          {justificativaAberta && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4">
+              <div className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-2xl">
+                <div className="text-sm font-black text-slate-900">Justificativa da alteração</div>
+                <div className="mt-1 text-xs text-slate-500">
+                  Explique por que o volume Supply foi alterado antes de salvar.
+                </div>
+                <textarea
+                  autoFocus
+                  value={justificativa}
+                  onChange={e => setJustificativa(e.target.value)}
+                  rows={4}
+                  className="mt-4 w-full resize-none rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 outline-none focus:border-indigo-400"
+                  placeholder="Digite a justificativa..."
+                />
+                <div className="mt-4 flex justify-end gap-2">
+                  <button onClick={() => setJustificativaAberta(false)}
+                    className="rounded-xl px-4 py-2 text-xs font-black text-slate-500 hover:bg-slate-100">
+                    Cancelar
+                  </button>
+                  <button onClick={confirmarJustificativa} disabled={salvando}
+                    className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-black text-white hover:bg-indigo-700 disabled:opacity-50">
+                    {salvando ? 'Salvando...' : 'Confirmar e salvar'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* faixa de totalizadores por mês */}
@@ -396,7 +474,10 @@ function PreenchimentoSupply() {
                           onClick={async () => {
                             // Salva edições pendentes antes de abrir o dossiê,
                             // para que a linha "Meta" reflita o vol_topdown atual.
-                            if (temEdicoes) await salvar();
+                            if (temEdicoes) {
+                              abrirJustificativa(`dossie:${s.sku}`);
+                              return;
+                            }
                             setDossiesAbertos((prev) => {
                               const novo = new Set(prev);
                               novo.has(s.sku) ? novo.delete(s.sku) : novo.add(s.sku);

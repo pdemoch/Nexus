@@ -253,6 +253,7 @@ def _materializar_skus_simone(db: Session, ciclo: str, responsavel: str) -> None
                    "sku": sku_folha.sku,
                    "v": round(volume_sku * float(sku_folha.pmv or 0), 2),
                    "p": responsavel})
+            propagar_linha_jusante(db, ciclo, sku_folha.sku, mes, ETAPA_METAS)
 
 
 def require_metas(usuario: dict = Depends(get_current_user)):
@@ -753,6 +754,7 @@ def salvar_metas_monetarias_simone(
                 DO UPDATE SET valor_meta=:v, atualizado_por=:p, atualizado_em=NOW()
             """), {"c": ciclo, "m": item.mes_projetado, "r": item.regional.strip(),
                    "v": valor, "p": u.get("gerente_nome")})
+        _materializar_skus_simone(db, ciclo, u.get("gerente_nome") or SIMONE_NOME)
         db.commit()
         return {"status": "ok"}
     except HTTPException:
@@ -806,6 +808,7 @@ def salvar_clientes_monetarios_simone(
             """), {"c": ciclo, "m": item.mes_projetado, "r": item.regional.strip(),
                    "cgc": item.cgc.strip(), "v": round(item.valor_meta, 2),
                    "p": u.get("gerente_nome")})
+        _materializar_skus_simone(db, ciclo, u.get("gerente_nome") or SIMONE_NOME)
         db.commit()
         return {"status": "ok"}
     except HTTPException:
@@ -850,7 +853,12 @@ def travar_fase_monetaria_simone(
                  AND c.regional = r.regional
                 WHERE r.ciclo_sop = :c
                 GROUP BY r.regional, r.mes_projetado, r.valor_meta
-                HAVING ABS(r.valor_meta - COALESCE(SUM(c.valor_meta), 0)) > 0.005
+                HAVING CASE
+                    WHEN ABS(r.valor_meta) <= 0.005
+                        THEN ABS(COALESCE(SUM(c.valor_meta), 0)) > 0.005
+                    ELSE ABS(r.valor_meta - COALESCE(SUM(c.valor_meta), 0))
+                         / ABS(r.valor_meta) > 0.01
+                END
             """), {"c": ciclo}).fetchall()
             if divergencias:
                 raise HTTPException(422, {

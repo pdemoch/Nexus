@@ -65,6 +65,7 @@ class AjusteSupply(BaseModel):
     sku: str
     mes_projetado: str      # 'YYYY-MM' ou 'YYYY-MM-DD'
     novo_volume: int
+    justificativa: Optional[str] = None
 
 class PayloadSalvar(BaseModel):
     ajustes: List[AjusteSupply]
@@ -387,6 +388,15 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_supply)):
                    TO_CHAR(f.mes_projetado,'MM/YYYY') AS mes,
                    SUM(f.vol_ia)             AS ia,
                    SUM(f.vol_supply)        AS supply,
+                   COALESCE(
+                       SUM(f.vol_supply * f.pmv_aplicado)
+                       / NULLIF(SUM(f.vol_supply), 0),
+                       SUM(f.vol_meta * f.pmv_aplicado)
+                       / NULLIF(SUM(f.vol_meta), 0),
+                       SUM(f.vol_ia * f.pmv_aplicado)
+                       / NULLIF(SUM(f.vol_ia), 0),
+                       0
+                   ) AS pmv,
                    SUM(f.vol_supply * f.pmv_aplicado) AS receita_td,
                    COALESCE(o.receita_orcamento, 0) AS orcamento
             FROM fato_ibp_granular f
@@ -504,6 +514,9 @@ def salvar(payload: PayloadSalvar, db: Session = Depends(get_db),
         nome_user = usuario.get("nome", usuario.get("email", "?"))
         total = 0
         for aj in payload.ajustes:
+            justificativa = (aj.justificativa or "").strip()
+            if not justificativa:
+                raise HTTPException(422, f"Justificativa obrigatória para o SKU {aj.sku}.")
             data_alvo = parse_date_safe(
                 aj.mes_projetado if len(aj.mes_projetado) > 7 else aj.mes_projetado + "-01"
             )
@@ -516,6 +529,18 @@ def salvar(payload: PayloadSalvar, db: Session = Depends(get_db),
                 db=db, ciclo=ciclo, sku=aj.sku, mes=data_alvo,
                 volume_alvo=int(aj.novo_volume), etapa=ETAPA_SUPPLY,
             )
+            db.execute(text("""
+                UPDATE fato_ibp_granular
+                   SET justificativa_supply = :justificativa
+                 WHERE ciclo_sop = :c
+                   AND sku = :sku
+                   AND mes_projetado = :mes
+            """), {
+                "justificativa": justificativa,
+                "c": ciclo,
+                "sku": aj.sku,
+                "mes": data_alvo,
+            })
             # Propaga o novo valor para as etapas de jusante (menos vol_ia),
             # para que a próxima equipe já receba o número atualizado.
             propagar_linha_jusante(db, ciclo, aj.sku, data_alvo, ETAPA_SUPPLY)
