@@ -727,6 +727,9 @@ function PreenchimentoMonetarioSimone({ dados, recarregar }: { dados: any; recar
 
   const somenteLeitura = etapa === 'CONFIRMACAO';
   const formatarReais = (valor: number) => `R$ ${Math.round(valor || 0).toLocaleString('pt-BR')}`;
+  const totalClientes = (regional: any, mes: string) =>
+    (regional.clientes || []).reduce((total: number, cliente: any) =>
+      total + Number(cliente.meses?.[mes] || 0), 0);
   return (
     <div className="h-full overflow-y-auto bg-slate-50 px-6 py-4">
       <div className="max-w-6xl mx-auto">
@@ -768,10 +771,21 @@ function PreenchimentoMonetarioSimone({ dados, recarregar }: { dados: any; recar
                   {dados.meses.map((mes: string) => (
                     <label key={mes} className="flex flex-col text-[9px] font-black uppercase text-slate-400">
                       {mesLabel(mes)}
-                      <input type="text" inputMode="numeric" disabled={etapa !== 'REGIONAL'}
-                        value={formatarReais(Number(regional.meses?.[mes] || 0))}
-                        onChange={e => alterarRegional(regional.regional, mes, Number(e.target.value.replace(/\D/g, '')))}
-                        className="mt-1 w-28 px-2 py-1.5 rounded-lg border border-slate-200 text-right text-xs font-bold text-slate-700 disabled:bg-slate-50" />
+                      {etapa === 'REGIONAL' ? (
+                        <input type="text" inputMode="numeric"
+                          value={formatarReais(Number(regional.meses?.[mes] || 0))}
+                          onChange={e => alterarRegional(regional.regional, mes, Number(e.target.value.replace(/\D/g, '')))}
+                          className="mt-1 w-28 px-2 py-1.5 rounded-lg border border-slate-200 text-right text-xs font-bold text-slate-700" />
+                      ) : (
+                        <span className="mt-1 w-28 px-2 py-1.5 rounded-lg bg-slate-50 text-right text-xs font-bold text-slate-700">
+                          {formatarReais(Number(regional.meses?.[mes] || 0))}
+                        </span>
+                      )}
+                      {etapa === 'CLIENTE' && (
+                        <span className="mt-1 text-[9px] font-bold normal-case text-indigo-600">
+                          Clientes: {formatarReais(totalClientes(regional, mes))}
+                        </span>
+                      )}
                     </label>
                   ))}
                 </div>

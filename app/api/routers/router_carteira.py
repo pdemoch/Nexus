@@ -841,41 +841,6 @@ def travar_fase_monetaria_simone(
         ordem = {"REGIONAL": 0, "CLIENTE": 1, "CONFIRMACAO": 2}
         if payload.etapa != atual or ordem[payload.etapa] != ordem[atual]:
             raise HTTPException(409, f"A etapa atual é {atual}.")
-        if payload.etapa == "CLIENTE":
-            divergencias = db.execute(text("""
-                SELECT r.regional, TO_CHAR(r.mes_projetado, 'YYYY-MM') AS mes,
-                       r.valor_meta AS valor_regional,
-                       COALESCE(SUM(c.valor_meta), 0) AS valor_clientes
-                FROM metas_regionais_simone r
-                LEFT JOIN metas_monetarias_simone c
-                  ON c.ciclo_sop = r.ciclo_sop
-                 AND c.mes_projetado = r.mes_projetado
-                 AND c.regional = r.regional
-                WHERE r.ciclo_sop = :c
-                GROUP BY r.regional, r.mes_projetado, r.valor_meta
-                HAVING CASE
-                    WHEN ABS(r.valor_meta) <= 0.005
-                        THEN ABS(COALESCE(SUM(c.valor_meta), 0)) > 0.005
-                    ELSE ABS(r.valor_meta - COALESCE(SUM(c.valor_meta), 0))
-                         / ABS(r.valor_meta) > 0.01
-                END
-            """), {"c": ciclo}).fetchall()
-            if divergencias:
-                raise HTTPException(422, {
-                    "mensagem": "A soma dos clientes precisa ficar dentro de 1% da meta regional.",
-                    "detalhes": [
-                        {"regional": r.regional, "mes": r.mes,
-                         "valor_regional": float(r.valor_regional),
-                         "valor_clientes": float(r.valor_clientes),
-                         "variacao_pct": (
-                             abs(float(r.valor_regional) - float(r.valor_clientes))
-                             / abs(float(r.valor_regional))
-                             if abs(float(r.valor_regional)) > 0.005
-                             else (1.0 if abs(float(r.valor_clientes)) > 0.005 else 0.0)
-                         )}
-                        for r in divergencias
-                    ],
-                })
         if payload.etapa == "CONFIRMACAO":
             _materializar_skus_simone(db, ciclo, u.get("gerente_nome") or SIMONE_NOME)
         proxima = {"REGIONAL": "CLIENTE", "CLIENTE": "CONFIRMACAO", "CONFIRMACAO": "CONFIRMACAO"}[atual]
