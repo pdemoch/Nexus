@@ -4,7 +4,7 @@ ROUTER ASSISTENTE — Nexus Bot (chat unico: Indicadores + Demanda + Financeiro)
 =====================================================================
 Destino: app/api/routers/router_assistente.py
 
-Um unico endpoint, tres modos de contexto:
+Um unico endpoint, tres modos de contexto.:
   'indicadores' -> agente_kpis (portfolio, ciclo ativo)
   'demanda'     -> planejador_demanda (1 sku ou 1 categoria)
   'financeiro'  -> agente_financeiro (PMR / carteira / pipeline financeiro)

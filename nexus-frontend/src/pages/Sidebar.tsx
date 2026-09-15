@@ -83,7 +83,7 @@ export default function Sidebar({ currentRoute, setCurrentRoute, user, onLogout 
         </div>
       )}
 
-      {/* LOGOUT */}
+      {/* LOGOUT. */}
       <div className="p-4 border-t border-slate-800 shrink-0">
         <button
           onClick={onLogout}
