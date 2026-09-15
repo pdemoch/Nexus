@@ -390,17 +390,19 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_supply)):
                    COALESCE(p.segmento,'')   AS segmento,
                    TO_CHAR(f.mes_projetado,'MM/YYYY') AS mes,
                    SUM(f.vol_ia)             AS ia,
-                   SUM(f.vol_supply)        AS supply,
+                   SUM(CASE WHEN :fonte = 'final' THEN f.vol_final ELSE f.vol_supply END) AS supply,
                    COALESCE(
-                       SUM(f.vol_supply * f.pmv_aplicado)
-                       / NULLIF(SUM(f.vol_supply), 0),
+                       SUM(CASE WHEN :fonte = 'final' THEN f.vol_final ELSE f.vol_supply END
+                           * f.pmv_aplicado)
+                       / NULLIF(SUM(CASE WHEN :fonte = 'final' THEN f.vol_final ELSE f.vol_supply END), 0),
                        SUM(f.vol_meta * f.pmv_aplicado)
                        / NULLIF(SUM(f.vol_meta), 0),
                        SUM(f.vol_ia * f.pmv_aplicado)
                        / NULLIF(SUM(f.vol_ia), 0),
                        0
                    ) AS pmv,
-                   SUM(f.vol_supply * f.pmv_aplicado) AS receita_td,
+                   SUM(CASE WHEN :fonte = 'final' THEN f.vol_final ELSE f.vol_supply END
+                       * f.pmv_aplicado) AS receita_td,
                    COALESCE(o.receita_orcamento, 0) AS orcamento
             FROM fato_ibp_granular f
             LEFT JOIN dim_produtos p ON p.sku = f.sku
@@ -412,10 +414,10 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_supply)):
             ORDER BY p.categoria, p.segmento, p.descricao, f.mes_projetado
         """)
         rows_m1 = db.execute(
-            consulta, {"c": ciclo_m1, "meses": [meses_m1[0]]}
+            consulta, {"c": ciclo_m1, "meses": [meses_m1[0]], "fonte": "final"}
         ).fetchall()
         rows_m2_m4 = db.execute(
-            consulta, {"c": ciclo, "meses": meses_m2_m4}
+            consulta, {"c": ciclo, "meses": meses_m2_m4, "fonte": "supply"}
         ).fetchall()
 
         registros = []
@@ -477,7 +479,7 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_supply)):
                 ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 40)
             notas = pd.DataFrame([
                 [f"Ciclo: {ciclo}"],
-                [f"M1: ciclo {ciclo_m1} (mês travado anteriormente)"],
+                [f"M1: ciclo {ciclo_m1}, vol_final publicado (mês travado anteriormente)"],
                 [f"Meses: {', '.join(meses_labels)}"],
                 ["Gerado pelo Nexus S&OP"],
             ], columns=["Nota"])
