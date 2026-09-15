@@ -33,7 +33,7 @@ import pandas as pd
 from app.core.database import get_db
 from app.api.routers.router_auth import get_current_user
 from app.api.routers.shared_ibp import (
-    get_current_cycle, get_working_window_months, get_projection_window,
+    get_current_cycle, get_previous_cycle, get_working_window_months, get_projection_window,
     escrever_volume_rateado, propagar_para_jusante, propagar_linha_jusante, congelar_etapa,
     reabrir_etapa, etapa_congelada, registrar_log_auditoria, parse_date_safe,
     ETAPA_SUPPLY,
@@ -371,16 +371,19 @@ def tabela(db: Session = Depends(get_db), u: dict = Depends(require_supply)):
 @router.get("/exportar")
 def exportar(db: Session = Depends(get_db), _: dict = Depends(require_supply)):
     """
-    Excel (.xlsx) do plano Top-Down no grão SKU × mês — cópia de segurança
-    para o planejador ao finalizar o preenchimento. Inclui: categoria,
-    segmento, SKU, descrição, mês, IA (cx), vol_supply (cx), PMV e
-    receita prevista (R$) = vol_supply × PMV.
+    Excel (.xlsx) do plano Supply no grão SKU × mês — cópia de segurança
+    para o planejador ao finalizar o preenchimento. Inclui M1 do ciclo
+    anterior e M2-M4 do ciclo atual, além de categoria, segmento, SKU,
+    descrição, volume Supply (cx), PMV e receita prevista (R$).
     """
     try:
         ciclo = get_current_cycle(db)
-        meses = get_working_window_months(db)
+        meses_m2_m4 = get_working_window_months(db)
+        ciclo_m1 = get_previous_cycle(db)
+        meses_m1 = [meses_m2_m4[0] - relativedelta(months=1)]
+        meses_exportacao = [meses_m1[0], *meses_m2_m4]
 
-        rows = db.execute(text("""
+        consulta = text("""
             SELECT f.sku,
                    COALESCE(p.descricao,'')  AS descricao,
                    COALESCE(p.categoria,'')  AS categoria,
@@ -407,25 +410,44 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_supply)):
             GROUP BY f.sku, p.descricao, p.categoria, p.segmento,
                      f.mes_projetado, o.receita_orcamento
             ORDER BY p.categoria, p.segmento, p.descricao, f.mes_projetado
-        """), {"c": ciclo, "meses": meses}).fetchall()
+        """)
+        rows_m1 = db.execute(
+            consulta, {"c": ciclo_m1, "meses": [meses_m1[0]]}
+        ).fetchall()
+        rows_m2_m4 = db.execute(
+            consulta, {"c": ciclo, "meses": meses_m2_m4}
+        ).fetchall()
 
         registros = []
-        for r in rows:
-            td      = int(r.supply or 0)
-            receita = float(r.receita_td or 0)
-            pmv     = round(float(r.pmv or 0), 2)   # ponderado por vol_final
-            registros.append({
-                "categoria": r.categoria,
-                "segmento":  r.segmento,
-                "sku":       r.sku,
-                "descricao": r.descricao,
-                "mes":       r.mes,
-                "supply":    td,
-                "receita":   receita,
-            })
+        mapa_periodos = {
+            meses_exportacao[0].strftime("%m/%Y"): "M1",
+            meses_exportacao[1].strftime("%m/%Y"): "M2",
+            meses_exportacao[2].strftime("%m/%Y"): "M3",
+            meses_exportacao[3].strftime("%m/%Y"): "M4",
+        }
+        for rows in (rows_m1, rows_m2_m4):
+            for r in rows:
+                td = int(r.supply or 0)
+                receita = float(r.receita_td or 0)
+                periodo = mapa_periodos.get(r.mes)
+                if not periodo:
+                    continue
+                registros.append({
+                    "categoria": r.categoria,
+                    "segmento": r.segmento,
+                    "sku": r.sku,
+                    "descricao": r.descricao,
+                    "mes": r.mes,
+                    "periodo": periodo,
+                    "supply": td,
+                    "receita": receita,
+                })
+
+        if not registros:
+            raise HTTPException(404, "Não existem dados Supply para a janela M1-M4.")
 
         df_long = pd.DataFrame(registros)
-        meses_labels = sorted(df_long["mes"].unique())
+        meses_labels = [f'M{i} ({meses_exportacao[i - 1].strftime("%m/%Y")})' for i in range(1, 5)]
 
         # Dimensões fixas por SKU
         dims = df_long.drop_duplicates("sku")[["categoria","segmento","sku","descricao"]].copy()
@@ -433,7 +455,8 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_supply)):
 
         # Uma coluna por mês com volume Supply (cx)
         for m in meses_labels:
-            sub = df_long[df_long["mes"] == m].set_index("sku")
+            periodo = m.split(" ")[0]
+            sub = df_long[df_long["periodo"] == periodo].set_index("sku")
             dims[f"{m}"] = dims["SKU"].map(sub["supply"]).fillna(0).astype(int)
 
         # PMV médio do SKU (receita total / supply total)
@@ -454,7 +477,8 @@ def exportar(db: Session = Depends(get_db), _: dict = Depends(require_supply)):
                 ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 40)
             notas = pd.DataFrame([
                 [f"Ciclo: {ciclo}"],
-                [f"Meses: {', '.join(m.strftime('%m/%Y') for m in meses)}"],
+                [f"M1: ciclo {ciclo_m1} (mês travado anteriormente)"],
+                [f"Meses: {', '.join(meses_labels)}"],
                 ["Gerado pelo Nexus S&OP"],
             ], columns=["Nota"])
             notas.to_excel(writer, index=False, sheet_name="Plano Supply",

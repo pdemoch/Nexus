@@ -1958,7 +1958,7 @@ def consolidado(db: Session = Depends(get_db), u: dict = Depends(require_metas))
             "ciclo":      ciclo,
             "meses":      meses_iso,
             "sou_admin":  u.get("funcao") == "Administrador",
-            "pode_aprovar": u.get("funcao") in ("Administrador", "Gerente"),
+            "pode_aprovar": u.get("funcao") == "Administrador",
             "coordenadores_pendentes": _coordenadores_pendentes(db, ciclo, escopo),
             "categorias": categorias,
         }
@@ -1984,9 +1984,9 @@ def aprovar_evidencia(payload: PayloadAcaoMetas = PayloadAcaoMetas(ajustes=[]),
                       db: Session = Depends(get_db), u: dict = Depends(require_metas)):
     try:
         ciclo = get_current_cycle(db)
-        if u.get("funcao") not in ("Administrador", "Gerente"):
-            raise HTTPException(403, "Somente Gerente ou Administrador aprova metas.")
-        if not etapa_congelada(db, ciclo, ETAPA_BOTTOMUP) and u.get("funcao") != "Administrador":
+        if u.get("funcao") != "Administrador":
+            raise HTTPException(403, "Somente o Administrador aprova e congela metas.")
+        if not etapa_congelada(db, ciclo, ETAPA_BOTTOMUP):
             raise HTTPException(423, "Demanda Comercial ainda nao congelou. Aguarde o bastao.")
         if etapa_congelada(db, ciclo, ETAPA_METAS):
             raise HTTPException(423, "Metas Comercial já está aprovada/congelada.")
