@@ -68,7 +68,9 @@ function PreenchimentoSupply() {
   const [busca, setBusca] = useState(''); // filtro de busca (categoria, SKU, descrição)
   const [justificativaAberta, setJustificativaAberta] = useState(false);
   const [justificativa, setJustificativa] = useState('');
-  const [editsAntesJustificativa, setEditsAntesJustificativa] = useState<Record<string, number> | null>(null);
+  const [justificativas, setJustificativas] = useState<Record<string, string>>({});
+  const [chaveJustificativa, setChaveJustificativa] = useState<string | null>(null);
+  const [valorAnterior, setValorAnterior] = useState<number | undefined>(undefined);
   const [acaoAposSalvar, setAcaoAposSalvar] = useState<'nenhuma' | 'congelar' | string>('nenhuma');
 
   const carregar = useCallback(async () => {
@@ -77,6 +79,7 @@ function PreenchimentoSupply() {
       const r = await axios.get('/api/v1/supply/tabela');
       setDados(r.data);
       setEdits({});
+      setJustificativas({});
     } finally {
       setLoading(false);
     }
@@ -96,20 +99,23 @@ function PreenchimentoSupply() {
     return k in edits ? edits[k] : original;
   };
 
-  const abrirJustificativaEdicao = () => {
-    if (!justificativaAberta && !salvando) {
-      setEditsAntesJustificativa({ ...edits });
-      setAcaoAposSalvar('nenhuma');
-      setJustificativa('');
-      setJustificativaAberta(true);
-    }
+  const abrirJustificativaParaChave = (chave: string, acao: string = 'nenhuma') => {
+    if (salvando) return;
+    setChaveJustificativa(chave);
+    setValorAnterior(edits[chave]);
+    setAcaoAposSalvar(acao);
+    setJustificativa(justificativas[chave] || '');
+    setJustificativaAberta(true);
   };
 
   const setCelula = (sku: string, mes: string, v: number) => {
     const valor = Math.max(0, Math.round(v || 0));
     const chave = `${sku}|${mes}`;
-    abrirJustificativaEdicao();
+    const valorAtual = edits[chave];
     setEdits((e) => ({ ...e, [chave]: valor }));
+    if (!justificativaAberta && valorAtual !== valor) {
+      abrirJustificativaParaChave(chave);
+    }
   };
 
   // Totalizadores VIVOS — recalculam com as edições locais
@@ -175,19 +181,19 @@ function PreenchimentoSupply() {
 
   const abrirJustificativa = (acao: 'nenhuma' | 'congelar' | string = 'nenhuma') => {
     if (!temEdicoes) return false;
-    setAcaoAposSalvar(acao);
-    setJustificativa('');
-    setJustificativaAberta(true);
+    const chavePendente = Object.keys(edits).find(chave => !justificativas[chave]?.trim());
+    if (chavePendente) abrirJustificativaParaChave(chavePendente, acao);
+    else if (acao === 'nenhuma') void salvar(justificativas);
     return true;
   };
 
-  const salvar = async (textoJustificativa: string) => {
+  const salvar = async (justificativasParaSalvar: Record<string, string>) => {
     if (!temEdicoes) return;
     setSalvando(true);
     try {
       const ajustes = Object.entries(edits).map(([k, v]) => {
         const [sku, mes] = k.split('|');
-        return { sku, mes_projetado: mes, novo_volume: v, justificativa: textoJustificativa };
+        return { sku, mes_projetado: mes, novo_volume: v, justificativa: justificativasParaSalvar[k] };
       });
       await axios.post('/api/v1/supply/salvar', { ajustes });
       await carregar();
@@ -205,12 +211,22 @@ function PreenchimentoSupply() {
       alert('Informe a justificativa da alteração.');
       return;
     }
+    if (!chaveJustificativa) return;
+    const justificativasAtualizadas = { ...justificativas, [chaveJustificativa]: texto };
+    setJustificativas(justificativasAtualizadas);
     const proximaAcao = acaoAposSalvar;
-    const salvou = await salvar(texto);
-    if (!salvou) return;
     setJustificativaAberta(false);
-    setEditsAntesJustificativa(null);
+    setChaveJustificativa(null);
+    setValorAnterior(undefined);
     setAcaoAposSalvar('nenhuma');
+    if (proximaAcao === 'nenhuma') return;
+    const proximaChave = Object.keys(edits).find(chave => !justificativasAtualizadas[chave]?.trim());
+    if (proximaChave) {
+      abrirJustificativaParaChave(proximaChave, proximaAcao);
+      return;
+    }
+    const salvou = await salvar(justificativasAtualizadas);
+    if (!salvou) return;
     try {
       if (proximaAcao === 'congelar') {
         await axios.post('/api/v1/supply/congelar', {});
@@ -343,8 +359,19 @@ function PreenchimentoSupply() {
                 />
                 <div className="mt-4 flex justify-end gap-2">
                   <button onClick={() => {
-                    if (editsAntesJustificativa) setEdits(editsAntesJustificativa);
-                    setEditsAntesJustificativa(null);
+                    if (chaveJustificativa) {
+                      if (valorAnterior === undefined) {
+                        setEdits(prev => {
+                          const copia = { ...prev };
+                          delete copia[chaveJustificativa];
+                          return copia;
+                        });
+                      } else {
+                        setEdits(prev => ({ ...prev, [chaveJustificativa]: valorAnterior }));
+                      }
+                    }
+                    setChaveJustificativa(null);
+                    setValorAnterior(undefined);
                     setJustificativaAberta(false);
                     setAcaoAposSalvar('nenhuma');
                   }}
@@ -480,7 +507,6 @@ function PreenchimentoSupply() {
                                 type="number"
                                 value={val}
                                 disabled={congelada}
-                                onFocus={abrirJustificativaEdicao}
                                 onChange={(e) => setCelula(s.sku, m, parseInt(e.target.value))}
                                 className={`w-full text-right text-sm font-bold rounded-md px-2 py-1 border transition-colors
                                   ${editado ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-transparent bg-transparent text-slate-700'}
