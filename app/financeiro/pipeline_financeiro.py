@@ -148,6 +148,24 @@ def executar_pipeline(
             log_callback(f"   ⚠️  {msg}")
             erros.append(msg)
 
+    # Camada analítica derivada: o S3 permanece como fonte bruta/auditável,
+    # enquanto o painel passa a reutilizar os joins já materializados no Postgres.
+    try:
+        from app.financeiro.materialized import materializar_financeiro
+        materializacao_ini = (
+            date(hoje.year, hoje.month, 1) - relativedelta(months=12)
+            if not recarga_total else data_ini
+        )
+        log_callback(
+            f"   → Materializando camada analítica "
+            f"({materializacao_ini} → {hoje})..."
+        )
+        materializar_financeiro(materializacao_ini, hoje, log_callback=log_callback)
+    except Exception as e:
+        msg = f"materialização financeira: {e}"
+        log_callback(f"   ⚠️  {msg}")
+        erros.append(msg)
+
     # ── Resumo final ───────────────────────────────────────────────────
     if erros:
         log_callback(

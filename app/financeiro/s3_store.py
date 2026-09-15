@@ -299,6 +299,8 @@ def carregar_todos_mensal(fonte: str, data_fim: Optional[date] = None) -> pd.Dat
             return pd.DataFrame()
         return pd.concat(frames, ignore_index=True)
 
+    except S3DataAccessError:
+        raise
     except Exception as e:
         logger.error("carregar_todos_mensal %s: %s", fonte, e)
         return pd.DataFrame()

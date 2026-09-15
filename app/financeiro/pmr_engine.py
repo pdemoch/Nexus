@@ -124,11 +124,19 @@ def _aplicar_filtro(base: pd.DataFrame, coluna: str, valor: FiltroValor) -> pd.D
 # CARREGAMENTO DOS DADOS DO S3
 # =====================================================================
 
-def _carregar_base_sem_filtros(data_ini: date, data_fim: date) -> pd.DataFrame:
+def _carregar_base_sem_filtros(
+    data_ini: date, data_fim: date, prefer_materialized: bool = True
+) -> pd.DataFrame:
     """
     Monta a base analítica começando nos recebimentos E5.
     Retorna apenas movimentos E5 ligados a título SE1 e nota SF2.
     """
+    if prefer_materialized:
+        from app.financeiro.materialized import carregar_materializado
+        materializada = carregar_materializado("pmr", data_ini, data_fim)
+        if not materializada.empty:
+            return materializada
+
     se1 = carregar_todos_mensal("contas_receber", data_fim)
     se5 = carregar_mensal("movimentacao_bancaria", data_ini, data_fim)
     sf2 = carregar_todos_mensal("notas_saida", data_fim)

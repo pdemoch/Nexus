@@ -76,7 +76,7 @@ def _as_filter(value) -> Optional[List[str]]:
 
 
 @lru_cache(maxsize=16)
-def _base_cached(data_ini: date, data_fim: date, motivos: Optional[Tuple[str, ...]],
+def _base_cached_s3(data_ini: date, data_fim: date, motivos: Optional[Tuple[str, ...]],
                  tipos: Optional[Tuple[str, ...]], fornecedores: Optional[Tuple[str, ...]],
                  clifor: Optional[Tuple[str, ...]]) -> pd.DataFrame:
     # A leitura começa na E5: só depois voltamos para o título SE2 e para a
@@ -214,13 +214,20 @@ def _base_cached(data_ini: date, data_fim: date, motivos: Optional[Tuple[str, ..
 
 
 def _base(data_ini: date, data_fim: date, motivos=None, tipos=None,
-          fornecedores=None, clifor=None) -> pd.DataFrame:
+          fornecedores=None, clifor=None, prefer_materialized: bool = True) -> pd.DataFrame:
     def _key(value) -> Optional[Tuple[str, ...]]:
         normalized = _as_filter(value)
         return tuple(normalized) if normalized else None
 
-    return _base_cached(data_ini, data_fim, _key(motivos), _key(tipos),
-                        _key(fornecedores), _key(clifor)).copy()
+    if prefer_materialized:
+        from app.financeiro.materialized import carregar_materializado
+        materializada = carregar_materializado("pmp", data_ini, data_fim)
+        if not materializada.empty:
+            return _filtrar_base_df(materializada, motivos, tipos, fornecedores, clifor).copy()
+    return _base_cached_s3(
+        data_ini, data_fim, _key(motivos), _key(tipos),
+        _key(fornecedores), _key(clifor)
+    ).copy()
 
 
 def _filtrar_base_df(base: pd.DataFrame, motivos=None, tipos=None,
