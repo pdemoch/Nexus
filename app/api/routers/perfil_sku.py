@@ -1252,12 +1252,6 @@ def montar_dossie(db: Session, sku: str, ciclo_ativo: str, meses_janela,
 # =====================================================================
 # RESUMO EXECUTIVO DA MARKETING — Aba "Visão Geral"
 # =====================================================================
-def _doy_corte_hoje() -> int:
-    """Dia-do-ano de hoje (UTC-3), para cortar todos os anos no mesmo ponto (YTD)."""
-    hoje = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
-    return hoje.timetuple().tm_yday
-
-
 def _meses_auditaveis_janela() -> list:
     """
     Últimos até-3 meses FECHADOS, cortados no piso do sistema (o primeiro mês
@@ -1287,9 +1281,9 @@ def resumo_marketing(db: Session, ciclo_ativo: str) -> Dict[str, Any]:
 
     Sem corte/threshold — devolve tudo; o front classifica/ordena.
     """
-    doy = _doy_corte_hoje()
     hoje = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).date()
     ano_atual = hoje.year
+    mmdd_corte = hoje.strftime("%m-%d")
 
     # Portfólio do ciclo ativo: sku -> categoria/descricao
     portfolio = db.execute(text("""
@@ -1315,14 +1309,29 @@ def resumo_marketing(db: Session, ciclo_ativo: str) -> Dict[str, Any]:
         SELECT sku, EXTRACT(YEAR FROM data_pedido)::int AS ano,
                SUM(qt_pedido) AS vol_cx, SUM(vl_pedido) AS vol_rs
         FROM fato_vendas
-        WHERE sku = ANY(:skus) AND EXTRACT(DOY FROM data_pedido) <= :doy
+        WHERE sku = ANY(:skus)
+          AND EXTRACT(YEAR FROM data_pedido)::int <= :ano_atual
+          AND TO_CHAR(data_pedido, 'MM-DD') <= :mmdd_corte
+          AND (
+              EXTRACT(YEAR FROM data_pedido)::int < :ano_atual
+              OR data_pedido::date <= :hoje
+          )
         GROUP BY sku, EXTRACT(YEAR FROM data_pedido)
-    """), {"skus": skus_ciclo, "doy": doy}).fetchall()
+    """), {
+        "skus": skus_ciclo,
+        "ano_atual": ano_atual,
+        "mmdd_corte": mmdd_corte,
+        "hoje": hoje,
+    }).fetchall()
 
     # organiza por sku -> {ano: (vol_cx, vol_rs)}
     vol_por_sku: Dict[str, Dict[int, tuple]] = {}
     for r in vol_rows:
         vol_por_sku.setdefault(r.sku, {})[int(r.ano)] = (int(r.vol_cx or 0), float(r.vol_rs or 0))
+    # Mantém todo o portfólio do ciclo visível, inclusive SKUs sem venda no
+    # recorte YTD. Eles aparecem como SEM_DADO, sem desaparecer das tabelas.
+    for sku in skus_ciclo:
+        vol_por_sku.setdefault(sku, {})
 
     # NASCIMENTO REAL — a primeira venda de QUALQUER 1 caixa, em qualquer mês,
     # olhando TODO o histórico (não só a janela YTD usada para a tendência).
@@ -1394,7 +1403,9 @@ def resumo_marketing(db: Session, ciclo_ativo: str) -> Dict[str, Any]:
     # agrega por categoria (soma dos SKUs, ano a ano). Nascimento da categoria
     # = nascimento do SKU mais antigo dela (a categoria "existe" desde que o
     # primeiro item nela vendeu 1 caixa).
-    cat_vol: Dict[str, Dict[int, list]] = {}
+    cat_vol: Dict[str, Dict[int, list]] = {
+        categoria: {} for categoria in set(sku_cat.values())
+    }
     cat_ano_nascimento: Dict[str, int] = {}
     for sku, anos in vol_por_sku.items():
         cat = sku_cat.get(sku, "?")
@@ -1426,14 +1437,17 @@ def resumo_marketing(db: Session, ciclo_ativo: str) -> Dict[str, Any]:
     # 2) TENDÊNCIA DE PMV — SEMPRE por agrupamento (SUM(vl)/SUM(qt) do ano),
     #    nunca média de PMVs. Mesmo corte de nascimento real e piso de volume.
     # -----------------------------------------------------------------
-    pmv_por_sku: Dict[str, Dict[int, float]] = {}
+    pmv_por_sku: Dict[str, Dict[int, float]] = {
+        sku: {} for sku in skus_ciclo
+    }
     for sku, anos in vol_por_sku.items():
         for ano, (cx, rs) in anos.items():
             if cx > 0:
                 pmv_por_sku.setdefault(sku, {})[ano] = rs / cx  # agrupado, não média
 
     tendencia_pmv_sku = []
-    for sku, anos in pmv_por_sku.items():
+    for sku in skus_ciclo:
+        anos = pmv_por_sku[sku]
         vol_serie = {a: vol_por_sku[sku][a][0] for a in anos if a in vol_por_sku.get(sku, {})}
         nasceu = sku_ano_nascimento.get(sku)
         anos_ok = sorted([a for a in anos.keys() if nasceu and a >= nasceu])
@@ -1454,7 +1468,9 @@ def resumo_marketing(db: Session, ciclo_ativo: str) -> Dict[str, Any]:
     # PMV de categoria = SEMPRE agrupado: soma vl_pedido da categoria / soma
     # qt_pedido da categoria, ano a ano. Nunca média dos PMVs dos SKUs (isso
     # daria peso igual a um SKU de 10cx e um de 10.000cx).
-    cat_pmv_base: Dict[str, Dict[int, list]] = {}
+    cat_pmv_base: Dict[str, Dict[int, list]] = {
+        categoria: {} for categoria in set(sku_cat.values())
+    }
     for sku, anos in vol_por_sku.items():
         cat = sku_cat.get(sku, "?")
         for ano, (cx, rs) in anos.items():
