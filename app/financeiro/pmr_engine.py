@@ -49,6 +49,7 @@ _EPOCH = pd.Timestamp("1970-01-01")
 _BASE_CACHE_TTL = max(float(os.getenv("PMR_CACHE_TTL_SECONDS", "300")), 0)
 _BASE_CACHE: dict[tuple[date, date], tuple[float, pd.DataFrame]] = {}
 _BASE_CACHE_LOCK = threading.Lock()
+_BASE_LOAD_LOCK = threading.Lock()
 _STATUS_CACHE: Optional[pd.DataFrame] = None
 
 # Aceita filtro como string unica OU lista de strings
@@ -260,17 +261,31 @@ def _carregar_base(data_ini: date, data_fim: date,
 
     with _BASE_CACHE_LOCK:
         entrada = _BASE_CACHE.get(chave)
-        if entrada and (_BASE_CACHE_TTL == 0 or agora - entrada[0] < _BASE_CACHE_TTL):
-            base = entrada[1].copy()
-            logger.info("PMR: cache reutilizado para %s -> %s", data_ini, data_fim)
-        else:
-            base = _carregar_base_sem_filtros(data_ini, data_fim)
-            if not base.empty:
-                _BASE_CACHE[chave] = (agora, base.copy())
-                logger.info("PMR: base armazenada em cache para %s -> %s", data_ini, data_fim)
+    if entrada and (_BASE_CACHE_TTL == 0 or agora - entrada[0] < _BASE_CACHE_TTL):
+        base = entrada[1].copy()
+        logger.info("PMR: cache reutilizado para %s -> %s", data_ini, data_fim)
+    else:
+        # O download/join do S3 nao pode ocorrer segurando o lock global:
+        # quatro chamadas simultaneas da tela ficavam enfileiradas e o proxy
+        # encerrava a requisicao antes de o endpoint responder.
+        with _BASE_LOAD_LOCK:
+            # Outra requisição pode ter concluído o carregamento enquanto esta
+            # aguardava o lock de carga.
+            with _BASE_CACHE_LOCK:
+                entrada = _BASE_CACHE.get(chave)
+            if entrada and (_BASE_CACHE_TTL == 0 or time.monotonic() - entrada[0] < _BASE_CACHE_TTL):
+                base = entrada[1].copy()
+                logger.info("PMR: cache preenchido por outra requisição para %s -> %s",
+                            data_ini, data_fim)
             else:
-                logger.warning("PMR: base vazia nao foi armazenada em cache para %s -> %s",
-                               data_ini, data_fim)
+                base = _carregar_base_sem_filtros(data_ini, data_fim)
+                if not base.empty:
+                    with _BASE_CACHE_LOCK:
+                        _BASE_CACHE[chave] = (time.monotonic(), base.copy())
+                    logger.info("PMR: base armazenada em cache para %s -> %s", data_ini, data_fim)
+                else:
+                    logger.warning("PMR: base vazia nao foi armazenada em cache para %s -> %s",
+                                   data_ini, data_fim)
 
     base = _aplicar_filtro(base, "segmento", segmento)
     base = _aplicar_filtro(base, "regional", regional)
@@ -362,32 +377,65 @@ def calcular_pmr_clientes(data_ini: date, data_fim: date,
         return {"periodo": {"data_ini": str(data_ini), "data_fim": str(data_fim)},
                 "total": 0, "clientes": []}
 
-    rows = []
     base = base.copy()
     base["_razao_key"] = (
         base["a1_nome"].fillna("SEM_NOME").astype(str).str.strip().str.upper()
     )
-    for _, g in base.groupby("_razao_key", dropna=False):
-        nome = g["a1_nome"].dropna().astype(str).str.strip().iloc[0] if g["a1_nome"].notna().any() else "SEM_NOME"
-        reg  = g["regional"].mode().iloc[0]  if not g["regional"].isna().all() else "—"
-        seg  = g["segmento"].mode().iloc[0]  if not g["segmento"].isna().all() else "—"
-        cgcs = sorted({str(v).strip() for v in g["a1_cgc"].dropna() if str(v).strip()})
-        codigos = sorted({str(v).strip() for v in g["a1_cod"].dropna() if str(v).strip()})
-        statuses = sorted({str(v).strip() for v in g["status_cliente"].dropna() if str(v).strip()})
+    for metric in ("pagamento", "vencimento", "cond_pag"):
+        base[f"_peso_{metric}"] = base[f"dias_{metric}"] * base["e5_valor"]
+        base[f"_valor_{metric}"] = base["e5_valor"].where(
+            np.isfinite(base[f"dias_{metric}"]) & np.isfinite(base["e5_valor"])
+        )
+
+    def _lista_unica(series: pd.Series) -> list[str]:
+        return sorted({str(v).strip() for v in series.dropna() if str(v).strip()})
+
+    def _primeiro_nome(series: pd.Series) -> str:
+        validos = series.dropna().astype(str).str.strip()
+        return validos.iloc[0] if not validos.empty else "SEM_NOME"
+
+    def _modo_ou_traco(series: pd.Series) -> str:
+        validos = series.dropna()
+        return str(validos.mode().iloc[0]) if not validos.empty else "—"
+
+    agrupado = base.groupby("_razao_key", dropna=False).agg(
+        nome=("a1_nome", _primeiro_nome),
+        regional=("regional", _modo_ou_traco),
+        segmento=("segmento", _modo_ou_traco),
+        cnpjs=("a1_cgc", _lista_unica),
+        codigos_cliente=("a1_cod", _lista_unica),
+        status=("status_cliente", _lista_unica),
+        notas_pagas=("e5_valor", "size"),
+        valor_total=("e5_valor", "sum"),
+        peso_pagamento=("_peso_pagamento", "sum"),
+        peso_vencimento=("_peso_vencimento", "sum"),
+        peso_cond_pag=("_peso_cond_pag", "sum"),
+        valor_pagamento=("_valor_pagamento", "sum"),
+        valor_vencimento=("_valor_vencimento", "sum"),
+        valor_cond_pag=("_valor_cond_pag", "sum"),
+    ).reset_index(drop=True)
+
+    rows = []
+    for item in agrupado.to_dict("records"):
+        valor = float(item["valor_total"] or 0)
+        cgcs = item["cnpjs"]
+        pmr_pag = item["peso_pagamento"] / item["valor_pagamento"] if item["valor_pagamento"] else 0
+        pmr_venc = item["peso_vencimento"] / item["valor_vencimento"] if item["valor_vencimento"] else 0
+        pmr_cond = item["peso_cond_pag"] / item["valor_cond_pag"] if item["valor_cond_pag"] else 0
         rows.append({
-            "cgc":            cgcs[0] if len(cgcs) == 1 else "",
-            "cnpjs":          cgcs,
-            "codigos_cliente": codigos,
-            "status": statuses,
-            "nome":           str(nome),
-            "regional":       str(reg),
-            "segmento":       str(seg),
-            "notas_pagas":    int(len(g)),
-            "valor_total":    _round_finite(g["e5_valor"].sum()),
-            "pmr_pagamento":  _round_finite(_pmr(g, "dias_pagamento")),
-            "pmr_vencimento": _round_finite(_pmr(g, "dias_vencimento")),
-            "pmr_cond_pag":   _round_finite(_pmr(g, "dias_cond_pag")),
-            "delta_atraso":   _round_finite(_pmr(g, "dias_pagamento") - _pmr(g, "dias_cond_pag")),
+            "cgc": cgcs[0] if len(cgcs) == 1 else "",
+            "cnpjs": cgcs,
+            "codigos_cliente": item["codigos_cliente"],
+            "status": item["status"],
+            "nome": str(item["nome"]),
+            "regional": str(item["regional"]),
+            "segmento": str(item["segmento"]),
+            "notas_pagas": int(item["notas_pagas"]),
+            "valor_total": _round_finite(valor),
+            "pmr_pagamento": _round_finite(pmr_pag),
+            "pmr_vencimento": _round_finite(pmr_venc),
+            "pmr_cond_pag": _round_finite(pmr_cond),
+            "delta_atraso": _round_finite(pmr_pag - pmr_cond),
         })
 
     rows.sort(key=lambda r: r["valor_total"], reverse=True)
