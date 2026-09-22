@@ -4,3 +4,4 @@ build
 .git
 .env.local
 npm-debug.log
+.env
